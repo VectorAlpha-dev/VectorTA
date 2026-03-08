@@ -51,6 +51,65 @@ __device__ __forceinline__ float ds_diff_to_f32(const float2 A, const float2 B) 
     return s2.x + s2.y;
 }
 
+extern "C" __global__ void mass_build_prefix_one_series_ds_f32(
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    int len,
+    int first_valid,
+    float2* __restrict__ prefix_ratio_ds,
+    int* __restrict__ prefix_nan)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (len <= 0 || first_valid < 0 || first_valid >= len) return;
+
+    prefix_ratio_ds[0] = make_float2(0.0f, 0.0f);
+    prefix_nan[0] = 0;
+
+    const float alpha = 2.0f / 10.0f;
+    const float inv_alpha = 1.0f - alpha;
+    float ema1 = high[first_valid] - low[first_valid];
+    float ema2 = ema1;
+    const int start_ema2 = first_valid + 8;
+    const int start_ratio = first_valid + 16;
+    float acc_hi = 0.0f;
+    float acc_lo = 0.0f;
+
+    for (int i = 0; i < len; ++i) {
+        if (i < first_valid) {
+            prefix_ratio_ds[i + 1] = make_float2(acc_hi, acc_lo);
+            prefix_nan[i + 1] = prefix_nan[i];
+            continue;
+        }
+
+        const float hl = high[i] - low[i];
+        ema1 = fmaf(alpha, hl, inv_alpha * ema1);
+        if (i == start_ema2) {
+            ema2 = ema1;
+        }
+
+        float ratio = mass_nan();
+        if (i >= start_ema2) {
+            ema2 = fmaf(alpha, ema1, inv_alpha * ema2);
+            if (i >= start_ratio) {
+                ratio = ema1 / ema2;
+            }
+        }
+
+        const bool is_nan = !isfinite(ratio);
+        if (!is_nan) {
+            float2 s = two_sum_f32(acc_hi, ratio);
+            float2 s2 = two_sum_f32(s.x, acc_lo);
+            float2 s3 = two_sum_f32(s2.x, s.y + s2.y);
+            acc_hi = s3.x;
+            acc_lo = s3.y;
+            prefix_nan[i + 1] = prefix_nan[i];
+        } else {
+            prefix_nan[i + 1] = prefix_nan[i] + 1;
+        }
+        prefix_ratio_ds[i + 1] = make_float2(acc_hi, acc_lo);
+    }
+}
+
 
 
 extern "C" __global__ void mass_batch_f32(

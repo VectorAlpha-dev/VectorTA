@@ -63,6 +63,58 @@ __device__ __forceinline__ float rcp_nr(float c)
     return r;
 }
 
+extern "C" __global__ void kvo_build_vf_f32(
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    const float* __restrict__ close,
+    const float* __restrict__ volume,
+    int len,
+    int first_valid,
+    float* __restrict__ vf_out)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (len <= 0 || first_valid < 0 || first_valid >= len) return;
+
+    const float nanv = f32_nan();
+    for (int i = 0; i < len; ++i) {
+        vf_out[i] = nanv;
+    }
+    if (len <= first_valid + 1) return;
+
+    double prev_h = static_cast<double>(high[first_valid]);
+    double prev_l = static_cast<double>(low[first_valid]);
+    double prev_c = static_cast<double>(close[first_valid]);
+    double prev_hlc = prev_h + prev_l + prev_c;
+    double prev_dm = prev_h - prev_l;
+    int trend = -1;
+    double cm = 0.0;
+
+    for (int i = first_valid + 1; i < len; ++i) {
+        const double h = static_cast<double>(high[i]);
+        const double l = static_cast<double>(low[i]);
+        const double c = static_cast<double>(close[i]);
+        const double v = static_cast<double>(volume[i]);
+        const double hlc = h + l + c;
+        const double dm = h - l;
+
+        if (hlc > prev_hlc && trend != 1) {
+            trend = 1;
+            cm = prev_dm;
+        } else if (hlc < prev_hlc && trend != 0) {
+            trend = 0;
+            cm = prev_dm;
+        }
+
+        cm += dm;
+        const double temp = fabs(((dm / cm) * 2.0) - 1.0);
+        const double sign = (trend == 1) ? 1.0 : -1.0;
+        vf_out[i] = static_cast<float>(v * temp * 100.0 * sign);
+
+        prev_hlc = hlc;
+        prev_dm = dm;
+    }
+}
+
 
 
 

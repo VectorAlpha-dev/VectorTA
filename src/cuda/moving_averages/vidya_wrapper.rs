@@ -273,6 +273,65 @@ impl CudaVidya {
         })
     }
 
+    pub fn vidya_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &VidyaBatchRange,
+    ) -> Result<DeviceArrayF32, CudaVidyaError> {
+        let prepared = Self::prepare_batch_params(series_len, first_valid, sweep)?;
+        let n_combos = prepared.combos.len();
+
+        let params_bytes = (prepared.short_i32.len() + prepared.long_i32.len())
+            * std::mem::size_of::<i32>()
+            + prepared.alpha_f32.len() * std::mem::size_of::<f32>();
+        let out_elems = n_combos
+            .checked_mul(prepared.series_len)
+            .ok_or_else(|| CudaVidyaError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaVidyaError::InvalidInput("rows*cols*sizeof(f32) overflow".into()))?;
+        let required = params_bytes
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaVidyaError::InvalidInput("VRAM size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            if let Some((free, _total)) = Self::device_mem_info() {
+                return Err(CudaVidyaError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaVidyaError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
+        }
+
+        let d_short = unsafe { DeviceBuffer::from_slice_async(&prepared.short_i32, &self.stream)? };
+        let d_long = unsafe { DeviceBuffer::from_slice_async(&prepared.long_i32, &self.stream)? };
+        let d_alpha = unsafe { DeviceBuffer::from_slice_async(&prepared.alpha_f32, &self.stream)? };
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream)? };
+        self.launch_batch_kernel(
+            d_prices,
+            &d_short,
+            &d_long,
+            &d_alpha,
+            prepared.series_len,
+            prepared.first_valid,
+            n_combos,
+            &mut d_out,
+        )?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: prepared.series_len,
+        })
+    }
+
     pub fn vidya_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -571,17 +630,34 @@ impl CudaVidya {
         if data_f32.is_empty() {
             return Err(CudaVidyaError::InvalidInput("input data is empty".into()));
         }
+        let series_len = data_f32.len();
+        let first_valid = data_f32
+            .iter()
+            .position(|v| v.is_finite())
+            .ok_or_else(|| CudaVidyaError::InvalidInput("all values are NaN".into()))?;
+        Self::prepare_batch_params(series_len, first_valid, sweep)
+    }
+
+    fn prepare_batch_params(
+        series_len: usize,
+        first_valid: usize,
+        sweep: &VidyaBatchRange,
+    ) -> Result<PreparedVidyaBatch, CudaVidyaError> {
+        if series_len == 0 {
+            return Err(CudaVidyaError::InvalidInput("input data is empty".into()));
+        }
+        if first_valid >= series_len {
+            return Err(CudaVidyaError::InvalidInput(format!(
+                "invalid first_valid {} for series length {}",
+                first_valid, series_len
+            )));
+        }
         let combos = expand_grid(sweep);
         if combos.is_empty() {
             return Err(CudaVidyaError::InvalidInput(
                 "no parameter combinations provided".into(),
             ));
         }
-        let series_len = data_f32.len();
-        let first_valid = data_f32
-            .iter()
-            .position(|v| v.is_finite())
-            .ok_or_else(|| CudaVidyaError::InvalidInput("all values are NaN".into()))?;
         let mut short_i32 = Vec::with_capacity(combos.len());
         let mut long_i32 = Vec::with_capacity(combos.len());
         let mut alpha_f32 = Vec::with_capacity(combos.len());

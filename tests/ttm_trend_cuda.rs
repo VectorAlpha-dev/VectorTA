@@ -1,14 +1,13 @@
 use vector_ta::indicators::ttm_trend::{
-    ttm_trend_batch_with_kernel, ttm_trend_with_kernel, TtmTrendBatchBuilder, TtmTrendBatchRange,
-    TtmTrendInput, TtmTrendParams,
+    ttm_trend_batch_with_kernel, ttm_trend_with_kernel, TtmTrendBatchRange, TtmTrendInput,
+    TtmTrendParams,
 };
-use vector_ta::utilities::data_loader::Candles;
 use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::{cuda_available, CudaTtmTrend};
+use vector_ta::cuda::{cuda_available, CudaRuntime, CudaTtmTrend};
 
 fn make_series(len: usize) -> (Vec<f64>, Vec<f64>) {
     let mut src = vec![f64::NAN; len];
@@ -67,6 +66,81 @@ fn ttm_trend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
             i,
             host[i],
             cpu_f32[i]
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn ttm_trend_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[ttm_trend_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 4096usize;
+    let (src, cls) = make_series(len);
+    let high_f32: Vec<f32> = src
+        .iter()
+        .map(|&v| {
+            if v.is_nan() {
+                f32::NAN
+            } else {
+                v as f32 + 0.75
+            }
+        })
+        .collect();
+    let low_f32: Vec<f32> = src
+        .iter()
+        .map(|&v| {
+            if v.is_nan() {
+                f32::NAN
+            } else {
+                v as f32 - 0.75
+            }
+        })
+        .collect();
+    let close_f32: Vec<f32> = cls.iter().map(|&v| v as f32).collect();
+
+    let sweep = TtmTrendBatchRange { period: (5, 64, 7) };
+    let cuda = CudaTtmTrend::new(0).expect("CudaTtmTrend::new");
+    let legacy = cuda
+        .ttm_trend_batch_dev(
+            &src.iter().map(|&v| v as f32).collect::<Vec<_>>(),
+            &close_f32,
+            &sweep,
+        )
+        .expect("legacy batch");
+
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let d_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+    let d_close = runtime.upload_f32(&close_f32).expect("upload close");
+    let device = cuda
+        .ttm_trend_batch_dev_from_device_inputs(
+            d_high.buffer(),
+            d_low.buffer(),
+            d_close.buffer(),
+            len,
+            5,
+            &sweep,
+        )
+        .expect("device inputs");
+
+    assert_eq!(legacy.rows, device.rows);
+    assert_eq!(legacy.cols, device.cols);
+    let mut legacy_host = vec![0f32; legacy.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    let mut device_host = vec![0f32; device.len()];
+    device.buf.copy_to(&mut device_host)?;
+    for (idx, (&lhs, &rhs)) in legacy_host.iter().zip(device_host.iter()).enumerate() {
+        assert!(
+            (lhs - rhs).abs() < 1e-6,
+            "mismatch at {}: legacy={} device={}",
+            idx,
+            lhs,
+            rhs
         );
     }
     Ok(())

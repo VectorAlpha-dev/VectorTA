@@ -419,6 +419,26 @@ impl CudaEmv {
         })
     }
 
+    pub fn emv_batch_device(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_volume: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaEmvError> {
+        if d_high.len() != len || d_low.len() != len || d_volume.len() != len || d_out.len() != len
+        {
+            return Err(CudaEmvError::InvalidInput(
+                "device buffer length mismatch".into(),
+            ));
+        }
+        self.launch_batch_kernel(d_high, d_low, d_volume, len, 1, first_valid, d_out)?;
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
     fn prepare_first_valids_hlv_tm(
         high_tm: &[f32],
         low_tm: &[f32],

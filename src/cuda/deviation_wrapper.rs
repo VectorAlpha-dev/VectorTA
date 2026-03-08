@@ -262,6 +262,84 @@ impl CudaDeviation {
         (ps, ps2, pn, first_valid, len)
     }
 
+    fn prepare_device_batch_inputs(
+        len: usize,
+        first_valid: usize,
+        sweep: &DeviationBatchRange,
+    ) -> Result<Vec<DeviationParams>, CudaDeviationError> {
+        if len == 0 {
+            return Err(CudaDeviationError::InvalidInput("empty data".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaDeviationError::InvalidInput(
+                "first_valid must be within the input length".into(),
+            ));
+        }
+
+        let combos = deviation_expand_grid(sweep)
+            .into_iter()
+            .filter(|p| p.devtype.unwrap_or(0) == 0)
+            .collect::<Vec<_>>();
+        if combos.is_empty() {
+            return Err(CudaDeviationError::InvalidInput(
+                "no supported parameter combinations (devtype must be 0)".into(),
+            ));
+        }
+
+        for prm in &combos {
+            let p = prm.period.unwrap_or(0);
+            if p == 0 || p > len {
+                return Err(CudaDeviationError::InvalidInput("invalid period".into()));
+            }
+            if len - first_valid < p {
+                return Err(CudaDeviationError::InvalidInput(
+                    "not enough valid data after first valid".into(),
+                ));
+            }
+        }
+
+        Ok(combos)
+    }
+
+    fn launch_prefix_builder_device_raw(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_ps: &mut DeviceBuffer<Float2>,
+        d_ps2: &mut DeviceBuffer<Float2>,
+        d_pn: &mut DeviceBuffer<i32>,
+    ) -> Result<(), CudaDeviationError> {
+        let func = self
+            .module
+            .get_function("deviation_build_prefix_f32")
+            .map_err(|_| CudaDeviationError::MissingKernelSymbol {
+                name: "deviation_build_prefix_f32",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+        Self::validate_launch(grid, block)?;
+
+        unsafe {
+            let mut data_ptr = d_data.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut ps_ptr = d_ps.as_device_ptr().as_raw();
+            let mut ps2_ptr = d_ps2.as_device_ptr().as_raw();
+            let mut pn_ptr = d_pn.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut data_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut ps_ptr as *mut _ as *mut c_void,
+                &mut ps2_ptr as *mut _ as *mut c_void,
+                &mut pn_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
     fn build_prefixes_time_major(
         data_tm_f32: &[f32],
         cols: usize,
@@ -306,30 +384,35 @@ impl CudaDeviation {
         if data_f32.is_empty() {
             return Err(CudaDeviationError::InvalidInput("empty data".into()));
         }
-        let (ps, ps2, pn, first_valid, len) = Self::build_prefixes_1d(data_f32);
+        let len = data_f32.len();
+        let first_valid = data_f32
+            .iter()
+            .position(|v| !v.is_nan())
+            .ok_or_else(|| CudaDeviationError::InvalidInput("all values are NaN".into()))?;
+        let d_data = DeviceBuffer::from_slice(data_f32)?;
+        let out = self.deviation_batch_dev_from_device_prices(&d_data, len, first_valid, sweep)?;
+        self.stream
+            .synchronize()
+            .map_err(CudaDeviationError::from)?;
+        Ok(out)
+    }
 
-        let mut combos = deviation_expand_grid(sweep)
-            .into_iter()
-            .filter(|p| p.devtype.unwrap_or(0) == 0)
-            .collect::<Vec<_>>();
-        if combos.is_empty() {
-            return Err(CudaDeviationError::InvalidInput(
-                "no supported parameter combinations (devtype must be 0)".into(),
-            ));
+    pub fn deviation_batch_dev_from_device_prices(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &DeviationBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<DeviationParams>), CudaDeviationError> {
+        if d_data.len() != len {
+            return Err(CudaDeviationError::InvalidInput(format!(
+                "device input length mismatch (buffer={}, len={})",
+                d_data.len(),
+                len
+            )));
         }
 
-        for prm in &combos {
-            let p = prm.period.unwrap_or(0);
-            if p == 0 || p > len {
-                return Err(CudaDeviationError::InvalidInput("invalid period".into()));
-            }
-            if len - first_valid < p {
-                return Err(CudaDeviationError::InvalidInput(
-                    "not enough valid data after first valid".into(),
-                ));
-            }
-        }
-
+        let combos = Self::prepare_device_batch_inputs(len, first_valid, sweep)?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let rows = combos.len();
         let out_elems = rows
@@ -339,11 +422,14 @@ impl CudaDeviation {
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaDeviationError::InvalidInput("output bytes overflow".into()))?;
         let float2 = std::mem::size_of::<Float2>();
-        let in_a = (ps.len() + ps2.len())
-            .checked_mul(float2)
+        let prefix_elems = len
+            .checked_add(1)
+            .ok_or_else(|| CudaDeviationError::InvalidInput("prefix length overflow".into()))?;
+        let in_a = prefix_elems
+            .checked_mul(2)
+            .and_then(|n| n.checked_mul(float2))
             .ok_or_else(|| CudaDeviationError::InvalidInput("prefix bytes overflow".into()))?;
-        let in_b = pn
-            .len()
+        let in_b = prefix_elems
             .checked_mul(std::mem::size_of::<i32>())
             .ok_or_else(|| CudaDeviationError::InvalidInput("pn bytes overflow".into()))?;
         let in_c = periods
@@ -385,13 +471,23 @@ impl CudaDeviation {
             );
             self.debug_logged
                 .store(true, std::sync::atomic::Ordering::Relaxed);
-            self.debug_logged
-                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
-        let d_ps = DeviceBuffer::from_slice(&ps)?;
-        let d_ps2 = DeviceBuffer::from_slice(&ps2)?;
-        let d_pn = DeviceBuffer::from_slice(&pn)?;
+        let mut d_ps = unsafe { DeviceBuffer::<Float2>::uninitialized(prefix_elems) }
+            .map_err(CudaDeviationError::from)?;
+        let mut d_ps2 = unsafe { DeviceBuffer::<Float2>::uninitialized(prefix_elems) }
+            .map_err(CudaDeviationError::from)?;
+        let mut d_pn = unsafe { DeviceBuffer::<i32>::uninitialized(prefix_elems) }
+            .map_err(CudaDeviationError::from)?;
+        self.launch_prefix_builder_device_raw(
+            d_data,
+            len,
+            first_valid,
+            &mut d_ps,
+            &mut d_ps2,
+            &mut d_pn,
+        )?;
+
         let d_periods = DeviceBuffer::from_slice(&periods)?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
 
@@ -429,10 +525,6 @@ impl CudaDeviation {
                 out_ptr,
             )?;
         }
-
-        self.stream
-            .synchronize()
-            .map_err(CudaDeviationError::from)?;
 
         Ok((
             DeviceArrayF32 {

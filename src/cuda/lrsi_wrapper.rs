@@ -206,27 +206,50 @@ impl CudaLrsi {
                 "high/low empty or length mismatch".into(),
             ));
         }
-        let combos = expand_grid(sweep)?;
-        if combos.is_empty() {
-            return Err(CudaLrsiError::InvalidInput("no alpha values".into()));
-        }
-
         let len = high_f32.len();
-        let mut prices = vec![f32::NAN; len];
         let mut first = None;
         for i in 0..len {
             let p = 0.5f32 * (high_f32[i] + low_f32[i]);
-            prices[i] = p;
             if first.is_none() && p.is_finite() {
                 first = Some(i);
             }
         }
         let first = first.ok_or_else(|| CudaLrsiError::InvalidInput("all prices NaN".into()))?;
-        if len - first < 4 {
+        let d_high = DeviceBuffer::from_slice(high_f32)?;
+        let d_low = DeviceBuffer::from_slice(low_f32)?;
+        let out = self.lrsi_batch_dev_from_device_inputs(&d_high, &d_low, len, first, sweep)?;
+        self.synchronize()?;
+        Ok(out)
+    }
+
+    pub fn lrsi_batch_dev_from_device_inputs(
+        &mut self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &LrsiBatchRange,
+    ) -> Result<DeviceArrayF32, CudaLrsiError> {
+        if len == 0 || d_high.len() != len || d_low.len() != len {
+            return Err(CudaLrsiError::InvalidInput(
+                "device input buffers must match non-zero length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaLrsiError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+        if len - first_valid < 4 {
             return Err(CudaLrsiError::InvalidInput(format!(
                 "not enough valid data: needed 4, have {}",
-                len - first
+                len - first_valid
             )));
+        }
+
+        let combos = expand_grid(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaLrsiError::InvalidInput("no alpha values".into()));
         }
 
         let mut alphas = Vec::with_capacity(combos.len());
@@ -238,19 +261,21 @@ impl CudaLrsi {
             alphas.push(a as f32);
         }
 
-        let in_bytes = len
+        let price_bytes = len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaLrsiError::InvalidInput("size overflow".into()))?;
         let param_bytes = combos
             .len()
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaLrsiError::InvalidInput("size overflow".into()))?;
-        let out_bytes = combos
+        let out_elems = combos
             .len()
             .checked_mul(len)
-            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaLrsiError::InvalidInput("output size overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaLrsiError::InvalidInput("size overflow".into()))?;
-        let required = in_bytes
+        let required = price_bytes
             .checked_add(param_bytes)
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaLrsiError::InvalidInput("size overflow".into()))?;
@@ -267,19 +292,20 @@ impl CudaLrsi {
             }
         }
 
-        let d_prices = DeviceBuffer::from_slice(&prices)?;
         let d_alphas = DeviceBuffer::from_slice(&alphas)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(
-                combos
-                    .len()
-                    .checked_mul(len)
-                    .ok_or_else(|| CudaLrsiError::InvalidInput("output size overflow".into()))?,
-            )?
-        };
+        let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len)? };
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems)? };
 
-        self.launch_batch_kernel(&d_prices, &d_alphas, len, first, combos.len(), &mut d_out)?;
-        self.synchronize()?;
+        self.launch_hl2_builder_raw(d_high, d_low, len, &mut d_prices)?;
+        self.launch_batch_kernel(
+            &d_prices,
+            &d_alphas,
+            len,
+            first_valid,
+            combos.len(),
+            &mut d_out,
+        )?;
+
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: combos.len(),
@@ -347,6 +373,42 @@ impl CudaLrsi {
                 &mut first_i as *mut _ as *mut c_void,
                 &mut combos_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
+    fn launch_hl2_builder_raw(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        len: usize,
+        d_prices: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaLrsiError> {
+        if len == 0 {
+            return Ok(());
+        }
+        let block_x = 256u32;
+        let grid_x = ((len as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        let func = self
+            .module
+            .get_function("lrsi_build_hl2_f32")
+            .map_err(|_| CudaLrsiError::MissingKernelSymbol {
+                name: "lrsi_build_hl2_f32",
+            })?;
+        unsafe {
+            let mut high_ptr = d_high.as_device_ptr().as_raw();
+            let mut low_ptr = d_low.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut high_ptr as *mut _ as *mut c_void,
+                &mut low_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut prices_ptr as *mut _ as *mut c_void,
             ];
             self.stream.launch(&func, grid, block, 0, args)?;
         }

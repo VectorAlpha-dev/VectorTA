@@ -8,7 +8,7 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::CudaVwmacd;
+use vector_ta::cuda::{CudaRuntime, CudaVwmacd};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -212,5 +212,88 @@ fn vwmacd_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
             i
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn vwmacd_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[vwmacd_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 4096usize;
+    let first_valid = 10usize;
+    let mut close_f32 = vec![f32::NAN; len];
+    let mut volume_f32 = vec![f32::NAN; len];
+    for i in first_valid..len {
+        let x = i as f32;
+        close_f32[i] = (x * 0.0021).sin() + 0.0003 * x;
+        volume_f32[i] = (x * 0.01).cos().abs() * 120.0 + 10.0;
+    }
+
+    let sweep = VwmacdBatchRange {
+        fast: (8, 16, 4),
+        slow: (20, 28, 4),
+        signal: (9, 9, 0),
+        fast_ma_type: "sma".into(),
+        slow_ma_type: "sma".into(),
+        signal_ma_type: "ema".into(),
+    };
+
+    let cuda = CudaVwmacd::new(0).expect("CudaVwmacd::new");
+    let (legacy, legacy_params) = cuda
+        .vwmacd_batch_dev(&close_f32, &volume_f32, &sweep)
+        .expect("legacy batch");
+
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let device_close = runtime.upload_f32(&close_f32).expect("upload close");
+    let device_volume = runtime.upload_f32(&volume_f32).expect("upload volume");
+    let (device, device_params) = cuda
+        .vwmacd_batch_dev_from_device_inputs(
+            device_close.buffer(),
+            device_volume.buffer(),
+            len,
+            first_valid,
+            &sweep,
+        )
+        .expect("device inputs");
+    cuda.synchronize().expect("sync");
+
+    assert_eq!(legacy.rows(), device.rows());
+    assert_eq!(legacy.cols(), device.cols());
+    assert_eq!(legacy_params.len(), device_params.len());
+    for (lhs, rhs) in legacy_params.iter().zip(device_params.iter()) {
+        assert_eq!(lhs.fast_period, rhs.fast_period);
+        assert_eq!(lhs.slow_period, rhs.slow_period);
+        assert_eq!(lhs.signal_period, rhs.signal_period);
+        assert_eq!(lhs.fast_ma_type, rhs.fast_ma_type);
+        assert_eq!(lhs.slow_ma_type, rhs.slow_ma_type);
+        assert_eq!(lhs.signal_ma_type, rhs.signal_ma_type);
+    }
+
+    for (legacy_buf, device_buf, label) in [
+        (&legacy.macd.buf, &device.macd.buf, "macd"),
+        (&legacy.signal.buf, &device.signal.buf, "signal"),
+        (&legacy.hist.buf, &device.hist.buf, "hist"),
+    ] {
+        let mut legacy_host = vec![0f32; legacy.rows() * legacy.cols()];
+        legacy_buf.copy_to(&mut legacy_host)?;
+        let mut device_host = vec![0f32; device.rows() * device.cols()];
+        device_buf.copy_to(&mut device_host)?;
+
+        for (idx, (&lhs, &rhs)) in legacy_host.iter().zip(device_host.iter()).enumerate() {
+            assert!(
+                approx_eq(lhs as f64, rhs as f64, 1e-5),
+                "{} mismatch at {}: legacy={} device={}",
+                label,
+                idx,
+                lhs,
+                rhs
+            );
+        }
+    }
+
     Ok(())
 }

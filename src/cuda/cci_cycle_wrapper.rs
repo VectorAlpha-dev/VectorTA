@@ -197,6 +197,99 @@ impl CudaCciCycle {
         })
     }
 
+    pub fn cci_cycle_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &CciCycleBatchRange,
+    ) -> Result<DeviceArrayF32, CudaCciCycleError> {
+        if series_len == 0 {
+            return Err(CudaCciCycleError::InvalidInput("empty data".into()));
+        }
+        if first_valid >= series_len {
+            return Err(CudaCciCycleError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = expand_grid(sweep)?;
+        let rows = combos.len();
+        if rows == 0 {
+            return Err(CudaCciCycleError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        for combo in &combos {
+            let length = combo.length.unwrap_or(0);
+            let factor = combo.factor.unwrap_or(0.0);
+            if length == 0 || length > series_len {
+                return Err(CudaCciCycleError::InvalidInput(format!(
+                    "invalid length {} for series_len {}",
+                    length, series_len
+                )));
+            }
+            if !(0.0..=1.0).contains(&factor) || factor == 0.0 {
+                return Err(CudaCciCycleError::InvalidInput(format!(
+                    "invalid factor {}",
+                    factor
+                )));
+            }
+            if series_len - first_valid < length * 5 {
+                return Err(CudaCciCycleError::InvalidInput(format!(
+                    "not enough valid data: need >= {}, have {}",
+                    length * 5,
+                    series_len - first_valid
+                )));
+            }
+        }
+
+        let params_bytes = rows
+            .checked_mul(std::mem::size_of::<i32>() + std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaCciCycleError::InvalidInput("size overflow".into()))?;
+        let out_elems = rows
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaCciCycleError::InvalidInput("rows*series_len overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaCciCycleError::InvalidInput("size overflow".into()))?;
+        let required = params_bytes
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaCciCycleError::InvalidInput("size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
+
+        let lengths: Vec<i32> = combos
+            .iter()
+            .map(|p| p.length.unwrap_or(0) as i32)
+            .collect();
+        let factors: Vec<f32> = combos
+            .iter()
+            .map(|p| p.factor.unwrap_or(0.5) as f32)
+            .collect();
+        let d_lengths = DeviceBuffer::from_slice(&lengths).map_err(CudaCciCycleError::Cuda)?;
+        let d_factors = DeviceBuffer::from_slice(&factors).map_err(CudaCciCycleError::Cuda)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(out_elems, &self.stream)
+                .map_err(CudaCciCycleError::Cuda)?
+        };
+
+        self.launch_batch_kernel(
+            d_prices,
+            series_len,
+            first_valid,
+            rows,
+            &d_lengths,
+            &d_factors,
+            &mut d_out,
+        )?;
+
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols: series_len,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn launch_batch_kernel(
         &self,

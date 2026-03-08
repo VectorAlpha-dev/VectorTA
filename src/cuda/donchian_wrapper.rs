@@ -594,6 +594,284 @@ impl CudaDonchian {
         ))
     }
 
+    pub fn donchian_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &DonchianBatchRange,
+    ) -> Result<(DeviceArrayF32Triplet, Vec<DonchianParams>), CudaDonchianError> {
+        if len == 0 || d_high.len() != len || d_low.len() != len {
+            return Err(CudaDonchianError::InvalidInput(
+                "device input buffers must match non-zero length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaDonchianError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = Self::expand_grid(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaDonchianError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        for c in &combos {
+            let p = c.period.unwrap_or(0);
+            if p == 0 {
+                return Err(CudaDonchianError::InvalidInput("period must be > 0".into()));
+            }
+            if p > len {
+                return Err(CudaDonchianError::InvalidInput(
+                    "period exceeds length".into(),
+                ));
+            }
+            if len - first_valid < p {
+                return Err(CudaDonchianError::InvalidInput(
+                    "not enough valid data".into(),
+                ));
+            }
+        }
+
+        let max_period = combos.iter().map(|c| c.period.unwrap()).max().unwrap_or(1);
+        let levels = rmq_levels_for_max_period(max_period);
+
+        let sz_f32 = std::mem::size_of::<f32>();
+        let bytes_periods = combos
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaDonchianError::InvalidInput("size overflow (periods)".into()))?;
+        let out_elems = combos
+            .len()
+            .checked_mul(len)
+            .and_then(|v| v.checked_mul(3))
+            .ok_or_else(|| CudaDonchianError::InvalidInput("size overflow (outputs)".into()))?;
+        let bytes_out = out_elems.checked_mul(sz_f32).ok_or_else(|| {
+            CudaDonchianError::InvalidInput("size overflow (outputs bytes)".into())
+        })?;
+        let bytes_rmq = bytes_rmq_tables_checked(len, levels)?;
+        let required = bytes_periods
+            .checked_add(bytes_out)
+            .and_then(|v| v.checked_add(bytes_rmq))
+            .ok_or_else(|| CudaDonchianError::InvalidInput("size overflow (total)".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        Self::will_fit(required, headroom)?;
+
+        let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }?;
+
+        let mut d_upper: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }?;
+        let mut d_middle: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }?;
+        let mut d_lower: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }?;
+
+        let stride = len;
+        let mut d_st_high: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(levels * stride, &self.stream) }?;
+        let mut d_st_low: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(levels * stride, &self.stream) }?;
+        let mut d_st_nan: DeviceBuffer<u8> =
+            unsafe { DeviceBuffer::uninitialized_async(levels * stride, &self.stream) }?;
+
+        let init_lvl0_f32 = self
+            .module
+            .get_function("rmq_init_level0_f32")
+            .map_err(|_| CudaDonchianError::MissingKernelSymbol {
+                name: "rmq_init_level0_f32",
+            })?;
+        let init_nan_u8 = self
+            .module
+            .get_function("rmq_init_nan_mask_u8")
+            .map_err(|_| CudaDonchianError::MissingKernelSymbol {
+                name: "rmq_init_nan_mask_u8",
+            })?;
+        let build_max = self
+            .module
+            .get_function("rmq_build_level_max_f32")
+            .map_err(|_| CudaDonchianError::MissingKernelSymbol {
+                name: "rmq_build_level_max_f32",
+            })?;
+        let build_min = self
+            .module
+            .get_function("rmq_build_level_min_f32")
+            .map_err(|_| CudaDonchianError::MissingKernelSymbol {
+                name: "rmq_build_level_min_f32",
+            })?;
+        let build_or = self
+            .module
+            .get_function("rmq_build_level_or_u8")
+            .map_err(|_| CudaDonchianError::MissingKernelSymbol {
+                name: "rmq_build_level_or_u8",
+            })?;
+        let func_query = self
+            .module
+            .get_function("donchian_batch_from_rmq_f32")
+            .map_err(|_| CudaDonchianError::MissingKernelSymbol {
+                name: "donchian_batch_from_rmq_f32",
+            })?;
+
+        let build_bx: u32 = 256;
+        let query_bx: u32 = match self.policy.batch {
+            BatchKernelPolicy::Auto => std::env::var("DONCHIAN_QUERY_BX")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(32)
+                .clamp(32, 1024),
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+        };
+        let build_grid_x: u32 = ((len as u32) + build_bx - 1) / build_bx;
+        let build_grid: GridSize = (build_grid_x.max(1), 1, 1).into();
+        let build_block: BlockSize = (build_bx, 1, 1).into();
+        Self::validate_launch(build_grid, build_block)?;
+        let query_grid_x: u32 = ((combos.len() as u32) + query_bx - 1) / query_bx;
+        let query_grid: GridSize = (query_grid_x.max(1), 1, 1).into();
+        let query_block: BlockSize = (query_bx, 1, 1).into();
+        Self::validate_launch(query_grid, query_block)?;
+        unsafe {
+            (*(self as *const _ as *mut CudaDonchian)).last_batch =
+                Some(BatchKernelSelected::Rmq { build_bx, query_bx });
+        }
+
+        unsafe {
+            let mut high_in = d_high.as_device_ptr().as_raw();
+            let mut low_in = d_low.as_device_ptr().as_raw();
+            let mut out_hi0 = as_raw_offset(&d_st_high, 0);
+            let mut out_lo0 = as_raw_offset(&d_st_low, 0);
+            let mut n_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let mut mask0 = as_raw_offset(&d_st_nan, 0);
+
+            let mut args_hi0: &mut [*mut c_void] = &mut [
+                &mut high_in as *mut _ as *mut c_void,
+                &mut out_hi0 as *mut _ as *mut c_void,
+                &mut n_i as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&init_lvl0_f32, build_grid, build_block, 0, &mut args_hi0)?;
+
+            let mut args_lo0: &mut [*mut c_void] = &mut [
+                &mut low_in as *mut _ as *mut c_void,
+                &mut out_lo0 as *mut _ as *mut c_void,
+                &mut n_i as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&init_lvl0_f32, build_grid, build_block, 0, &mut args_lo0)?;
+
+            let mut args_nm0: &mut [*mut c_void] = &mut [
+                &mut high_in as *mut _ as *mut c_void,
+                &mut low_in as *mut _ as *mut c_void,
+                &mut n_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut mask0 as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&init_nan_u8, build_grid, build_block, 0, &mut args_nm0)?;
+        }
+
+        for k in 1..levels {
+            let offset = 1 << (k - 1);
+            unsafe {
+                let mut n_i = len as i32;
+                let mut off_i = offset as i32;
+                let prev_elems = (k - 1) * stride;
+                let curr_elems = k * stride;
+
+                let mut prev = as_raw_offset(&d_st_high, prev_elems);
+                let mut curr = as_raw_offset(&d_st_high, curr_elems);
+                let mut args: &mut [*mut c_void] = &mut [
+                    &mut prev as *mut _ as *mut c_void,
+                    &mut curr as *mut _ as *mut c_void,
+                    &mut n_i as *mut _ as *mut c_void,
+                    &mut off_i as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&build_max, build_grid, build_block, 0, &mut args)?;
+
+                prev = as_raw_offset(&d_st_low, prev_elems);
+                curr = as_raw_offset(&d_st_low, curr_elems);
+                let mut args2: &mut [*mut c_void] = &mut [
+                    &mut prev as *mut _ as *mut c_void,
+                    &mut curr as *mut _ as *mut c_void,
+                    &mut n_i as *mut _ as *mut c_void,
+                    &mut off_i as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&build_min, build_grid, build_block, 0, &mut args2)?;
+
+                let mut prevm = as_raw_offset(&d_st_nan, prev_elems);
+                let mut currm = as_raw_offset(&d_st_nan, curr_elems);
+                let mut args3: &mut [*mut c_void] = &mut [
+                    &mut prevm as *mut _ as *mut c_void,
+                    &mut currm as *mut _ as *mut c_void,
+                    &mut n_i as *mut _ as *mut c_void,
+                    &mut off_i as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&build_or, build_grid, build_block, 0, &mut args3)?;
+            }
+        }
+
+        unsafe {
+            let mut periods = d_periods.as_device_ptr().as_raw();
+            let mut n_i = len as i32;
+            let mut rows_i = combos.len() as i32;
+            let mut first_i = first_valid as i32;
+            let mut st_hi = d_st_high.as_device_ptr().as_raw();
+            let mut st_lo = d_st_low.as_device_ptr().as_raw();
+            let mut st_nm = d_st_nan.as_device_ptr().as_raw();
+            let mut up = d_upper.as_device_ptr().as_raw();
+            let mut mid = d_middle.as_device_ptr().as_raw();
+            let mut lo = d_lower.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut periods as *mut _ as *mut c_void,
+                &mut n_i as *mut _ as *mut c_void,
+                &mut rows_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut st_hi as *mut _ as *mut c_void,
+                &mut st_lo as *mut _ as *mut c_void,
+                &mut st_nm as *mut _ as *mut c_void,
+                &mut up as *mut _ as *mut c_void,
+                &mut mid as *mut _ as *mut c_void,
+                &mut lo as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func_query, query_grid, query_block, 0, args)?;
+        }
+
+        self.maybe_log_batch_debug();
+        Ok((
+            DeviceArrayF32Triplet {
+                wt1: DeviceArrayF32 {
+                    buf: d_upper,
+                    rows: combos.len(),
+                    cols: len,
+                    ctx: self.context.clone(),
+                    device_id: self.device_id,
+                },
+                wt2: DeviceArrayF32 {
+                    buf: d_middle,
+                    rows: combos.len(),
+                    cols: len,
+                    ctx: self.context.clone(),
+                    device_id: self.device_id,
+                },
+                hist: DeviceArrayF32 {
+                    buf: d_lower,
+                    rows: combos.len(),
+                    cols: len,
+                    ctx: self.context.clone(),
+                    device_id: self.device_id,
+                },
+            },
+            combos,
+        ))
+    }
+
     pub fn donchian_many_series_one_param_time_major_dev(
         &self,
         high_tm_f32: &[f32],

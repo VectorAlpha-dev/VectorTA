@@ -19,7 +19,6 @@ void decycler_batch_f32(const float* __restrict__ prices,
                         const float* __restrict__ c_vals,
                         const float* __restrict__ two_1m_vals,
                         const float* __restrict__ neg_oma_sq_vals,
-                        const float* __restrict__ diff,
                         int series_len,
                         int n_combos,
                         int first_valid,
@@ -54,11 +53,14 @@ void decycler_batch_f32(const float* __restrict__ prices,
         float hp_im1 = prices[first_valid + 1];
 
         for (int t = first_valid + 2; t < series_len; ++t) {
-
-            const float s3 = __fmaf_rn(two_1m, hp_im1, c * diff[t]);
+            const float x = prices[t];
+            const float x1 = prices[t - 1];
+            const float x2 = prices[t - 2];
+            const float diff = x - 2.0f * x1 + x2;
+            const float s3 = __fmaf_rn(two_1m, hp_im1, c * diff);
             const float hp = __fmaf_rn(neg_oma_sq, hp_im2, s3);
 
-            out_row[t] = prices[t] - hp;
+            out_row[t] = x - hp;
 
             hp_im2 = hp_im1;
             hp_im1 = hp;
@@ -86,7 +88,6 @@ void decycler_batch_warp_scan_f32(const float* __restrict__ prices,
                                  const float* __restrict__ c_vals,
                                  const float* __restrict__ two_1m_vals,
                                  const float* __restrict__ neg_oma_sq_vals,
-                                 const float* __restrict__ diff,
                                  int series_len,
                                  int n_combos,
                                  int first_valid,
@@ -141,7 +142,10 @@ void decycler_batch_warp_scan_f32(const float* __restrict__ prices,
 
         float u = 0.0f;
         if (valid) {
-            u = c * diff[t];
+            const float x = prices[t];
+            const float x1 = prices[t - 1];
+            const float x2 = prices[t - 2];
+            u = c * (x - 2.0f * x1 + x2);
         }
 
 
@@ -240,4 +244,3 @@ void decycler_many_series_one_param_f32(const float* __restrict__ prices_tm,
         }
     }
 }
-

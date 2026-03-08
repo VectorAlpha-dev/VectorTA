@@ -304,6 +304,94 @@ impl CudaVlma {
             .collect())
     }
 
+    fn prepare_batch_params(
+        len: usize,
+        first_valid: usize,
+        sweep: &VlmaBatchRange,
+    ) -> Result<(Vec<VlmaParams>, Vec<i32>, Vec<i32>), CudaVlmaError> {
+        if len == 0 {
+            return Err(CudaVlmaError::InvalidInput("empty data".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaVlmaError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, len
+            )));
+        }
+
+        let combos = Self::expand_supported_combos(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaVlmaError::InvalidInput(
+                "no supported parameter combinations (require matype='sma', devtype=0)".into(),
+            ));
+        }
+
+        for c in &combos {
+            let max_p = c.max_period.unwrap_or(0);
+            if max_p == 0 || max_p > len {
+                return Err(CudaVlmaError::InvalidInput(format!(
+                    "invalid max_period {} for length {}",
+                    max_p, len
+                )));
+            }
+            if len - first_valid < max_p {
+                return Err(CudaVlmaError::InvalidInput(format!(
+                    "not enough valid data for max_period {} (valid after first {}: {})",
+                    max_p,
+                    first_valid,
+                    len - first_valid
+                )));
+            }
+        }
+
+        let min_periods: Vec<i32> = combos
+            .iter()
+            .map(|c| c.min_period.unwrap_or(1) as i32)
+            .collect();
+        let max_periods: Vec<i32> = combos
+            .iter()
+            .map(|c| c.max_period.unwrap_or(1) as i32)
+            .collect();
+
+        Ok((combos, min_periods, max_periods))
+    }
+
+    fn launch_prefix_builder_kernel(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        d_ps: &mut DeviceBuffer<f64>,
+        d_pss: &mut DeviceBuffer<f64>,
+        d_pn: &mut DeviceBuffer<i32>,
+    ) -> Result<(), CudaVlmaError> {
+        let func = self
+            .module
+            .get_function("vlma_build_prefixes_f32")
+            .map_err(|_| CudaVlmaError::MissingKernelSymbol {
+                name: "vlma_build_prefixes_f32",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+        self.validate_launch(grid.x, grid.y, grid.z, block.x, block.y, block.z)?;
+
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut ps_ptr = d_ps.as_device_ptr().as_raw();
+            let mut pss_ptr = d_pss.as_device_ptr().as_raw();
+            let mut pn_ptr = d_pn.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut ps_ptr as *mut _ as *mut c_void,
+                &mut pss_ptr as *mut _ as *mut c_void,
+                &mut pn_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
     fn launch_batch(
         &mut self,
         d_prices: &DeviceBuffer<f32>,
@@ -445,37 +533,23 @@ impl CudaVlma {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaVlmaError::InvalidInput("all values are NaN".into()))?;
 
-        let combos = Self::expand_supported_combos(sweep)?;
-        if combos.is_empty() {
-            return Err(CudaVlmaError::InvalidInput(
-                "no supported parameter combinations (require matype='sma', devtype=0)".into(),
-            ));
-        }
+        let d_prices = DeviceBuffer::from_slice(data_f32)?;
+        let dev = self.vlma_batch_dev_from_device_prices(&d_prices, len, first_valid, sweep)?;
+        self.synchronize()?;
+        Ok(dev)
+    }
 
-        for c in &combos {
-            let max_p = c.max_period.unwrap_or(0);
-            if max_p == 0 || max_p > len {
-                return Err(CudaVlmaError::InvalidInput(format!(
-                    "invalid max_period {} for length {}",
-                    max_p, len
-                )));
-            }
-            if len - first_valid < max_p {
-                return Err(CudaVlmaError::InvalidInput(format!(
-                    "not enough valid data for max_period {} (valid after first {}: {})",
-                    max_p,
-                    first_valid,
-                    len - first_valid
-                )));
-            }
-        }
-
-        let (ps, pss, pn) = Self::build_prefixes(data_f32);
-        let n = len;
+    pub fn vlma_batch_dev_from_device_prices(
+        &mut self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &VlmaBatchRange,
+    ) -> Result<DeviceArrayF32, CudaVlmaError> {
+        let (combos, min_periods, max_periods) =
+            Self::prepare_batch_params(series_len, first_valid, sweep)?;
+        let n = series_len;
         let m = combos.len();
-        let prices_b = n
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaVlmaError::InvalidInput("prices size overflow".into()))?;
         let prefixes_b = (n + 1)
             .checked_mul(std::mem::size_of::<f64>() * 2 + std::mem::size_of::<i32>())
             .ok_or_else(|| CudaVlmaError::InvalidInput("prefix size overflow".into()))?;
@@ -486,9 +560,8 @@ impl CudaVlma {
             .checked_mul(n)
             .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| CudaVlmaError::InvalidInput("output size overflow".into()))?;
-        let bytes = prices_b
-            .checked_add(prefixes_b)
-            .and_then(|x| x.checked_add(periods_b))
+        let bytes = prefixes_b
+            .checked_add(periods_b)
             .and_then(|x| x.checked_add(out_b))
             .ok_or_else(|| CudaVlmaError::InvalidInput("total VRAM size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
@@ -506,28 +579,19 @@ impl CudaVlma {
             }
         }
 
-        let d_prices = DeviceBuffer::from_slice(data_f32)?;
-        let d_ps = DeviceBuffer::from_slice(&ps)?;
-        let d_pss = DeviceBuffer::from_slice(&pss)?;
-        let d_pn = DeviceBuffer::from_slice(&pn)?;
-        let min_periods: Vec<i32> = combos
-            .iter()
-            .map(|c| c.min_period.unwrap_or(1) as i32)
-            .collect();
-        let max_periods: Vec<i32> = combos
-            .iter()
-            .map(|c| c.max_period.unwrap() as i32)
-            .collect();
+        let mut d_ps = unsafe { DeviceBuffer::<f64>::uninitialized(n + 1) }?;
+        let mut d_pss = unsafe { DeviceBuffer::<f64>::uninitialized(n + 1) }?;
+        let mut d_pn = unsafe { DeviceBuffer::<i32>::uninitialized(n + 1) }?;
         let d_min = DeviceBuffer::from_slice(&min_periods)?;
         let d_max = DeviceBuffer::from_slice(&max_periods)?;
-
         let total_elems = m
             .checked_mul(n)
             .ok_or_else(|| CudaVlmaError::InvalidInput("m * n overflowed".into()))?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(total_elems) }?;
 
+        self.launch_prefix_builder_kernel(d_prices, n, &mut d_ps, &mut d_pss, &mut d_pn)?;
         self.launch_batch(
-            &d_prices,
+            d_prices,
             &d_ps,
             &d_pss,
             &d_pn,
@@ -538,7 +602,6 @@ impl CudaVlma {
             m,
             &mut d_out,
         )?;
-        self.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: m,

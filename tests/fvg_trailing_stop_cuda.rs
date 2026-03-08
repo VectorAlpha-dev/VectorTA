@@ -10,6 +10,8 @@ use cust::memory::CopyDestination;
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::fvg_trailing_stop_wrapper::CudaFvgTs;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
 
 fn approx(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -210,5 +212,78 @@ fn fvg_ts_cuda_many_series_matches_cpu() -> Result<(), Box<dyn std::error::Error
             i
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn fvg_ts_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[fvg_ts_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 1024usize;
+    let mut high = vec![f64::NAN; len];
+    let mut low = vec![f64::NAN; len];
+    let mut close = vec![f64::NAN; len];
+    for i in 4..len {
+        let x = i as f64;
+        let base = (x * 0.0021).sin() + 0.0002 * x;
+        high[i] = base + 0.15;
+        low[i] = base - 0.14;
+        close[i] = base + 0.01;
+    }
+
+    let sweep = FvgTsBatchRange {
+        lookback: (3, 9, 3),
+        smoothing: (5, 15, 5),
+        reset_on_cross: (true, false),
+    };
+    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+    let d_close = runtime.upload_f32(&close_f32).expect("upload close");
+    let cuda = CudaFvgTs::new(0).expect("CudaFvgTs::new");
+
+    let legacy = cuda
+        .fvg_ts_batch_dev(&high_f32, &low_f32, &close_f32, &sweep)
+        .expect("legacy fvg_ts");
+    let device = cuda
+        .fvg_ts_batch_dev_from_device_inputs(
+            d_high.buffer(),
+            d_low.buffer(),
+            d_close.buffer(),
+            len,
+            4,
+            &sweep,
+        )
+        .expect("device fvg_ts");
+
+    for (legacy_arr, device_arr, label) in [
+        (&legacy.upper, &device.upper, "upper"),
+        (&legacy.lower, &device.lower, "lower"),
+        (&legacy.upper_ts, &device.upper_ts, "upper_ts"),
+        (&legacy.lower_ts, &device.lower_ts, "lower_ts"),
+    ] {
+        let mut legacy_host = vec![0f32; legacy_arr.len()];
+        let mut device_host = vec![0f32; device_arr.len()];
+        legacy_arr.buf.copy_to(&mut legacy_host)?;
+        device_arr.buf.copy_to(&mut device_host)?;
+        for idx in 0..legacy_host.len() {
+            assert!(
+                approx(legacy_host[idx] as f64, device_host[idx] as f64, 1e-4),
+                "{label} mismatch at {}: legacy={} device={}",
+                idx,
+                legacy_host[idx],
+                device_host[idx]
+            );
+        }
+    }
+
     Ok(())
 }

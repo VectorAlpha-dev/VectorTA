@@ -7,7 +7,7 @@ use vector_ta::indicators::deviation::{
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::{cuda_available, CudaDeviation};
+use vector_ta::cuda::{cuda_available, CudaDeviation, CudaRuntime};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -144,5 +144,68 @@ fn deviation_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
             gpu[i]
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn deviation_cuda_device_prices_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[deviation_cuda_device_prices_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 4096usize;
+    let first_valid = 6usize;
+    let mut data_f32 = vec![f32::NAN; len];
+    for (i, value) in data_f32.iter_mut().enumerate().skip(first_valid) {
+        let x = i as f32;
+        let base = (x * 0.00041).sin() - (x * 0.00017).cos();
+        *value = base + 0.0013 * ((i % 9) as f32 - 4.0);
+        if i % 257 == 0 {
+            *value = f32::NAN;
+        }
+    }
+
+    let sweep = DeviationBatchRange {
+        period: (10, 40, 10),
+        devtype: (0, 0, 0),
+    };
+
+    let cuda = CudaDeviation::new(0).expect("CudaDeviation::new");
+    let (legacy, legacy_params) = cuda
+        .deviation_batch_dev(&data_f32, &sweep)
+        .expect("legacy batch");
+
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let device_prices = runtime.upload_f32(&data_f32).expect("upload prices");
+    let (device, device_params) = cuda
+        .deviation_batch_dev_from_device_prices(device_prices.buffer(), len, first_valid, &sweep)
+        .expect("device prices");
+    cuda.synchronize().expect("sync");
+
+    assert_eq!(legacy.rows, device.rows);
+    assert_eq!(legacy.cols, device.cols);
+    assert_eq!(legacy_params.len(), device_params.len());
+    for (lhs, rhs) in legacy_params.iter().zip(device_params.iter()) {
+        assert_eq!(lhs.period, rhs.period);
+        assert_eq!(lhs.devtype, rhs.devtype);
+    }
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    let mut device_host = vec![0f32; device.len()];
+    device.buf.copy_to(&mut device_host)?;
+
+    for (idx, (&lhs, &rhs)) in legacy_host.iter().zip(device_host.iter()).enumerate() {
+        assert!(
+            approx_eq(lhs as f64, rhs as f64, 5e-4),
+            "mismatch at {}: legacy={} device={}",
+            idx,
+            lhs,
+            rhs
+        );
+    }
+
     Ok(())
 }

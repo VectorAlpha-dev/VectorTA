@@ -5,7 +5,7 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::CudaUi;
+use vector_ta::cuda::{CudaRuntime, CudaUi};
 
 use vector_ta::indicators::ui::{ui_batch_slice, ui_with_kernel, UiBatchRange, UiInput, UiParams};
 
@@ -134,5 +134,64 @@ fn ui_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
             idx
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn ui_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[ui_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 16_384usize;
+    let mut price = vec![f64::NAN; len];
+    for i in 9..len {
+        let x = i as f64;
+        price[i] = (x * 0.0011).sin() + 0.00015 * x;
+    }
+    let sweep = UiBatchRange {
+        period: (10, 22, 4),
+        scalar: (80.0, 120.0, 20.0),
+    };
+
+    let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let d_prices = runtime.upload_f32(&price_f32).expect("upload prices");
+    let first_valid = price_f32
+        .iter()
+        .position(|v| v.is_finite())
+        .expect("first_valid");
+
+    let cuda = CudaUi::new(0).expect("CudaUi::new");
+    let (legacy_dev, legacy_combos) = cuda.ui_batch_dev(&price_f32, &sweep)?;
+    let (device_dev, device_combos) = cuda.ui_batch_dev_from_device_prices(
+        d_prices.buffer(),
+        price_f32.len(),
+        first_valid,
+        &sweep,
+    )?;
+
+    assert_eq!(legacy_dev.rows, device_dev.rows);
+    assert_eq!(legacy_dev.cols, device_dev.cols);
+    assert_eq!(legacy_combos.len(), device_combos.len());
+
+    let mut legacy_host = vec![0f32; legacy_dev.len()];
+    legacy_dev.buf.copy_to(&mut legacy_host)?;
+    let mut device_host = vec![0f32; device_dev.len()];
+    device_dev.buf.copy_to(&mut device_host)?;
+
+    let tol = 2e-3;
+    for idx in 0..legacy_host.len() {
+        assert!(
+            approx_eq(legacy_host[idx] as f64, device_host[idx] as f64, tol),
+            "mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_host[idx],
+            device_host[idx]
+        );
+    }
+
     Ok(())
 }

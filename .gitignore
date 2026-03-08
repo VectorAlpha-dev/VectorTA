@@ -108,6 +108,7 @@ target-cuda-tests*/
 
 # Local scratch/temp directories
 .tmp/
+.codex_tmp/
 
 # Stray worktree/merge leftovers
 .git.bak

@@ -69,6 +69,43 @@ __device__ __forceinline__ float2 ff2_scale(const float2 a, const float s) {
 #endif
 
 extern "C" __global__
+void ttm_trend_build_hl2_f32(
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    int len,
+    float* __restrict__ out)
+{
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= len) return;
+    out[idx] = 0.5f * (high[idx] + low[idx]);
+}
+
+extern "C" __global__
+void ttm_trend_build_prefix_source_ff2_f32(
+    const float* __restrict__ source,
+    int len,
+    int first_valid,
+    float2* __restrict__ prefix_ff2)
+{
+    if (blockIdx.x != 0 || blockIdx.y != 0 || blockIdx.z != 0 ||
+        threadIdx.x != 0 || threadIdx.y != 0 || threadIdx.z != 0) {
+        return;
+    }
+
+    float hi = 0.0f;
+    float lo = 0.0f;
+    for (int i = 0; i < len; ++i) {
+        if (i >= first_valid) {
+            float s, e;
+            two_sum(hi, source[i], s, e);
+            e += lo;
+            two_sum(s, e, hi, lo);
+        }
+        prefix_ff2[i] = make_float2(hi, lo);
+    }
+}
+
+extern "C" __global__
 void ttm_trend_batch_prefix_ff2_tiled(
     const float2* __restrict__ prefix_ff2,
     const float*  __restrict__ close,

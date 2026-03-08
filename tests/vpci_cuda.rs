@@ -8,6 +8,8 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
+#[cfg(feature = "cuda")]
 use vector_ta::cuda::vpci_wrapper::CudaVpci;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
@@ -76,6 +78,76 @@ fn vpci_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             idx
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn vpci_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[vpci_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 2048usize;
+    let mut close = vec![f32::NAN; len];
+    let mut volume = vec![f32::NAN; len];
+    for i in 7..len {
+        let x = i as f32 * 0.0027;
+        close[i] = (x * 0.71).sin() + 0.0009 * i as f32;
+        volume[i] = ((x * 0.37).cos().abs() + 0.2) * 1500.0;
+    }
+    let first_valid = (0..len)
+        .find(|&i| close[i].is_finite() && volume[i].is_finite())
+        .expect("first valid");
+    let sweep = VpciBatchRange {
+        short_range: (5, 11, 3),
+        long_range: (16, 28, 6),
+    };
+
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_close = runtime.upload_f32(&close).expect("upload close");
+    let d_volume = runtime.upload_f32(&volume).expect("upload volume");
+    let cuda = CudaVpci::new(0).expect("CudaVpci::new");
+
+    let (legacy, legacy_combos) = cuda
+        .vpci_batch_dev(&close, &volume, &sweep)
+        .expect("legacy vpci");
+    let (device, device_combos) = cuda
+        .vpci_batch_dev_from_device_inputs(
+            d_close.buffer(),
+            d_volume.buffer(),
+            len,
+            first_valid,
+            &sweep,
+        )
+        .expect("device vpci");
+    cuda.synchronize().expect("vpci sync");
+
+    assert_eq!(legacy_combos.len(), device_combos.len());
+    for (legacy_params, device_params) in legacy_combos.iter().zip(device_combos.iter()) {
+        assert_eq!(legacy_params.short_range, device_params.short_range);
+        assert_eq!(legacy_params.long_range, device_params.long_range);
+    }
+
+    for ((legacy_buf, device_buf), label) in [
+        ((&legacy.a, &device.a), "vpci"),
+        ((&legacy.b, &device.b), "vpcis"),
+    ] {
+        assert_eq!(legacy_buf.rows, device_buf.rows);
+        assert_eq!(legacy_buf.cols, device_buf.cols);
+        let mut legacy_host = vec![0f32; legacy_buf.len()];
+        let mut device_host = vec![0f32; device_buf.len()];
+        legacy_buf.buf.copy_to(&mut legacy_host)?;
+        device_buf.buf.copy_to(&mut device_host)?;
+        for (lhs, rhs) in legacy_host.iter().zip(device_host.iter()) {
+            if lhs.is_nan() && rhs.is_nan() {
+                continue;
+            }
+            assert!((lhs - rhs).abs() <= 1e-6, "{label} lhs={lhs} rhs={rhs}");
+        }
+    }
+
     Ok(())
 }
 

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::indicators::damiani_volatmeter::{DamianiVolatmeterBatchRange, DamianiVolatmeterParams};
+use crate::cuda::DeviceArrayF32;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -147,6 +148,9 @@ impl CudaDamianiVolatmeter {
     }
     pub fn device_id(&self) -> u32 {
         self.device_id
+    }
+    pub fn synchronize(&self) -> Result<(), CudaDamianiError> {
+        self.stream.synchronize().map_err(CudaDamianiError::Cuda)
     }
 
     #[inline]
@@ -468,6 +472,83 @@ impl CudaDamianiVolatmeter {
         Some(buf)
     }
 
+    fn launch_workspace_builder(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        d_s: &mut DeviceBuffer<Float2>,
+        d_ss: &mut DeviceBuffer<Float2>,
+        d_tr: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaDamianiError> {
+        let func = self
+            .module
+            .get_function("damiani_build_close_workspace_f32")
+            .map_err(|_| CudaDamianiError::MissingKernelSymbol {
+                name: "damiani_build_close_workspace_f32",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+        unsafe {
+            let mut prices = d_prices.as_device_ptr().as_raw();
+            let mut n = series_len as i32;
+            let mut fv = first_valid as i32;
+            let mut s = d_s.as_device_ptr().as_raw();
+            let mut ss = d_ss.as_device_ptr().as_raw();
+            let mut tr = d_tr.as_device_ptr().as_raw();
+            let mut args: [*mut c_void; 6] = [
+                &mut prices as *mut _ as *mut c_void,
+                &mut n as *mut _ as *mut c_void,
+                &mut fv as *mut _ as *mut c_void,
+                &mut s as *mut _ as *mut c_void,
+                &mut ss as *mut _ as *mut c_void,
+                &mut tr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, &mut args)
+                .map_err(CudaDamianiError::Cuda)?;
+        }
+        Ok(())
+    }
+
+    fn launch_select_output_rows(
+        &self,
+        d_packed: &DeviceBuffer<f32>,
+        combo_count: usize,
+        series_len: usize,
+        output_index: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaDamianiError> {
+        let func = self
+            .module
+            .get_function("damiani_select_output_rows_f32")
+            .map_err(|_| CudaDamianiError::MissingKernelSymbol {
+                name: "damiani_select_output_rows_f32",
+            })?;
+        let block_x = 256u32;
+        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), combo_count as u32, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        unsafe {
+            let mut packed = d_packed.as_device_ptr().as_raw();
+            let mut len = series_len as i32;
+            let mut rows = combo_count as i32;
+            let mut output = output_index as i32;
+            let mut out = d_out.as_device_ptr().as_raw();
+            let mut args: [*mut c_void; 5] = [
+                &mut packed as *mut _ as *mut c_void,
+                &mut len as *mut _ as *mut c_void,
+                &mut rows as *mut _ as *mut c_void,
+                &mut output as *mut _ as *mut c_void,
+                &mut out as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, &mut args)
+                .map_err(CudaDamianiError::Cuda)?;
+        }
+        Ok(())
+    }
+
     fn launch_batch(
         &self,
         series_len: usize,
@@ -580,10 +661,93 @@ impl CudaDamianiVolatmeter {
             }
         }
 
-        let tr = Self::compute_tr_close_only(prices, first_valid);
-        let (s_prefix_f64, ss_prefix_f64) = Self::compute_prefix_sums(prices, first_valid);
-        let s_prefix: Vec<Float2> = Self::pack_double_prefix_to_float2(&s_prefix_f64);
-        let ss_prefix: Vec<Float2> = Self::pack_double_prefix_to_float2(&ss_prefix_f64);
+        let rows = combos.len();
+        let param_bytes = rows
+            .checked_mul(4 * std::mem::size_of::<i32>() + std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaDamianiError::InvalidInput("parameter size overflow".into()))?;
+        let prefix_bytes = series_len
+            .checked_mul(2 * std::mem::size_of::<Float2>())
+            .ok_or_else(|| CudaDamianiError::InvalidInput("prefix size overflow".into()))?;
+        let tr_bytes = series_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaDamianiError::InvalidInput("TR size overflow".into()))?;
+        let out_bytes = rows
+            .checked_mul(series_len)
+            .and_then(|n| n.checked_mul(2 * std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaDamianiError::InvalidInput("output size overflow".into()))?;
+        let req = param_bytes
+            .checked_add(prefix_bytes)
+            .and_then(|v| v.checked_add(tr_bytes))
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaDamianiError::InvalidInput("total VRAM size overflow".into()))?;
+        let headroom = std::env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
+        if !Self::will_fit(req, headroom) {
+            let free = cust::memory::mem_get_info().map(|(f, _)| f).unwrap_or(0);
+            return Err(CudaDamianiError::OutOfMemory {
+                required: req,
+                free,
+                headroom,
+            });
+        }
+
+        let d_prices = DeviceBuffer::from_slice(prices)?;
+        let out = self.damiani_volatmeter_batch_dev_from_device_prices(
+            &d_prices,
+            series_len,
+            first_valid,
+            sweep,
+        )?;
+        self.synchronize()?;
+        Ok(out)
+    }
+
+    pub fn damiani_volatmeter_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &DamianiVolatmeterBatchRange,
+    ) -> Result<(DeviceArrayF32Damiani, Vec<DamianiVolatmeterParams>), CudaDamianiError> {
+        if d_prices.len() != series_len {
+            return Err(CudaDamianiError::InvalidInput(
+                "device price buffer length mismatch".into(),
+            ));
+        }
+        if series_len == 0 {
+            return Err(CudaDamianiError::InvalidInput("empty series".into()));
+        }
+        if first_valid >= series_len {
+            return Err(CudaDamianiError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = Self::expand_grid(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaDamianiError::InvalidInput("no combinations".into()));
+        }
+        for prm in &combos {
+            let needed = *[
+                prm.vis_atr.unwrap(),
+                prm.vis_std.unwrap(),
+                prm.sed_atr.unwrap(),
+                prm.sed_std.unwrap(),
+                3,
+            ]
+            .iter()
+            .max()
+            .unwrap();
+            if series_len - first_valid < needed {
+                return Err(CudaDamianiError::InvalidInput(format!(
+                    "not enough valid data (need >= {}, have {})",
+                    needed,
+                    series_len - first_valid
+                )));
+            }
+        }
 
         let rows = combos.len();
         let param_bytes = rows
@@ -627,29 +791,17 @@ impl CudaDamianiVolatmeter {
         let d_sa = DeviceBuffer::from_slice(&sed_atr)?;
         let d_ss_ = DeviceBuffer::from_slice(&sed_std)?;
         let d_th = DeviceBuffer::from_slice(&thresh)?;
-
-        let (d_s, d_ss) = match (
-            Self::pack_double_prefix_to_float2_pinned(&s_prefix_f64),
-            Self::pack_double_prefix_to_float2_pinned(&ss_prefix_f64),
-        ) {
-            (Some(s_pin), Some(ss_pin)) => {
-                let ds = unsafe { DeviceBuffer::from_slice_async(&*s_pin, &self.stream) }?;
-                let dss = unsafe { DeviceBuffer::from_slice_async(&*ss_pin, &self.stream) }?;
-                (ds, dss)
-            }
-            _ => {
-                let ds = unsafe { DeviceBuffer::from_slice_async(&s_prefix, &self.stream) }?;
-                let dss = unsafe { DeviceBuffer::from_slice_async(&ss_prefix, &self.stream) }?;
-                (ds, dss)
-            }
-        };
-        let d_tr = if let Some(tr_pin) = Self::compute_tr_close_only_pinned(prices, first_valid) {
-            unsafe { DeviceBuffer::from_slice_async(&*tr_pin, &self.stream) }
-                .map_err(CudaDamianiError::Cuda)?
-        } else {
-            unsafe { DeviceBuffer::from_slice_async(&tr, &self.stream) }
-                .map_err(CudaDamianiError::Cuda)?
-        };
+        let mut d_s: DeviceBuffer<Float2> = unsafe { DeviceBuffer::uninitialized(series_len) }?;
+        let mut d_ss: DeviceBuffer<Float2> = unsafe { DeviceBuffer::uninitialized(series_len) }?;
+        let mut d_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }?;
+        self.launch_workspace_builder(
+            d_prices,
+            series_len,
+            first_valid,
+            &mut d_s,
+            &mut d_ss,
+            &mut d_tr,
+        )?;
         let len_out = rows
             .checked_mul(series_len)
             .and_then(|n| n.checked_mul(2))
@@ -674,7 +826,6 @@ impl CudaDamianiVolatmeter {
             &d_tr,
             &mut d_out,
         )?;
-        self.stream.synchronize().map_err(CudaDamianiError::Cuda)?;
 
         Ok((
             DeviceArrayF32Damiani {
@@ -683,6 +834,43 @@ impl CudaDamianiVolatmeter {
                 cols: series_len,
                 ctx: Arc::clone(&self.context),
                 device_id: self.device_id,
+            },
+            combos,
+        ))
+    }
+
+    pub fn damiani_volatmeter_batch_output_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &DamianiVolatmeterBatchRange,
+        output_index: usize,
+    ) -> Result<(DeviceArrayF32, Vec<DamianiVolatmeterParams>), CudaDamianiError> {
+        if output_index > 1 {
+            return Err(CudaDamianiError::InvalidInput(
+                "output_index must be 0 or 1".into(),
+            ));
+        }
+        let (packed, combos) =
+            self.damiani_volatmeter_batch_dev_from_device_prices(d_prices, series_len, first_valid, sweep)?;
+        let out_len = combos
+            .len()
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaDamianiError::InvalidInput("output rows*cols overflow".into()))?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_len) }?;
+        self.launch_select_output_rows(
+            &packed.buf,
+            combos.len(),
+            series_len,
+            output_index,
+            &mut d_out,
+        )?;
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: combos.len(),
+                cols: series_len,
             },
             combos,
         ))

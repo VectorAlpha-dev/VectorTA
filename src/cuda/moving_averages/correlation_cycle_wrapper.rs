@@ -666,6 +666,220 @@ impl CudaCorrelationCycle {
         })
     }
 
+    pub fn correlation_cycle_batch_dev_from_device_prices(
+        &mut self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &CorrelationCycleBatchRange,
+    ) -> Result<DeviceCorrelationCycleQuad, CudaCorrelationCycleError> {
+        if series_len == 0 {
+            return Err(CudaCorrelationCycleError::InvalidInput(
+                "empty input".into(),
+            ));
+        }
+        if first_valid >= series_len {
+            return Err(CudaCorrelationCycleError::InvalidInput("all NaN".into()));
+        }
+
+        let combos = Self::expand_grid(sweep);
+        let n_combos = combos.len();
+        if n_combos == 0 {
+            return Err(CudaCorrelationCycleError::InvalidInput(
+                "empty sweep".into(),
+            ));
+        }
+        let max_period = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        if max_period == 0 {
+            return Err(CudaCorrelationCycleError::InvalidInput("period=0".into()));
+        }
+
+        let mut periods_i32 = vec![0i32; n_combos];
+        let mut thresholds_f32 = vec![0f32; n_combos];
+        let mut sum_cos = vec![0f32; n_combos];
+        let mut sum_sin = vec![0f32; n_combos];
+        let mut sqrt_t2 = vec![0f32; n_combos];
+        let mut sqrt_t4 = vec![0f32; n_combos];
+        let mut cos_flat = vec![0f32; n_combos * max_period];
+        let mut sin_flat = vec![0f32; n_combos * max_period];
+        for (i, prm) in combos.iter().enumerate() {
+            let p = prm.period.unwrap();
+            let t = prm.threshold.unwrap() as f32;
+            periods_i32[i] = p as i32;
+            thresholds_f32[i] = t;
+            let (wc, ws, sc, ss, st2, st4) = Self::compute_trig_weights_and_consts(p);
+            let base = i * max_period;
+            cos_flat[base..base + p].copy_from_slice(&wc);
+            sin_flat[base..base + p].copy_from_slice(&ws);
+            sum_cos[i] = sc;
+            sum_sin[i] = ss;
+            sqrt_t2[i] = st2;
+            sqrt_t4[i] = st4;
+        }
+
+        let total_out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("rows*cols overflow".into()))?;
+        let f32_bytes = std::mem::size_of::<f32>();
+        let i32_bytes = std::mem::size_of::<i32>();
+        let per_combo_meta = i32_bytes
+            .checked_add(5usize.checked_mul(f32_bytes).ok_or_else(|| {
+                CudaCorrelationCycleError::InvalidInput("meta bytes overflow".into())
+            })?)
+            .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("meta bytes overflow".into()))?;
+        let meta_bytes = n_combos.checked_mul(per_combo_meta).ok_or_else(|| {
+            CudaCorrelationCycleError::InvalidInput("params bytes overflow".into())
+        })?;
+        let weight_elems = n_combos.checked_mul(max_period).ok_or_else(|| {
+            CudaCorrelationCycleError::InvalidInput("n_combos*max_period overflow".into())
+        })?;
+        let weight_bytes = weight_elems
+            .checked_mul(2usize.checked_mul(f32_bytes).ok_or_else(|| {
+                CudaCorrelationCycleError::InvalidInput("weight bytes overflow".into())
+            })?)
+            .ok_or_else(|| {
+                CudaCorrelationCycleError::InvalidInput("weight bytes overflow".into())
+            })?;
+        let params_bytes = meta_bytes.checked_add(weight_bytes).ok_or_else(|| {
+            CudaCorrelationCycleError::InvalidInput("params bytes overflow".into())
+        })?;
+        let outputs_bytes = total_out_elems
+            .checked_mul(4)
+            .and_then(|v| v.checked_mul(f32_bytes))
+            .ok_or_else(|| {
+                CudaCorrelationCycleError::InvalidInput("output bytes overflow".into())
+            })?;
+        let required = params_bytes
+            .checked_add(outputs_bytes)
+            .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("VRAM size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            let free = Self::device_mem_info().map(|(f, _)| f).unwrap_or(0);
+            return Err(CudaCorrelationCycleError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            });
+        }
+
+        let d_cos = DeviceBuffer::from_slice(&cos_flat)?;
+        let d_sin = DeviceBuffer::from_slice(&sin_flat)?;
+        let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
+        let d_thresholds = DeviceBuffer::from_slice(&thresholds_f32)?;
+        let d_sum_cos = DeviceBuffer::from_slice(&sum_cos)?;
+        let d_sum_sin = DeviceBuffer::from_slice(&sum_sin)?;
+        let d_sqrt_t2 = DeviceBuffer::from_slice(&sqrt_t2)?;
+        let d_sqrt_t4 = DeviceBuffer::from_slice(&sqrt_t4)?;
+        let total = total_out_elems;
+        let mut d_real: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
+        let mut d_imag: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
+        let mut d_angle: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
+        let mut d_state: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
+
+        let (grid, block, bx) = match self.policy.batch {
+            BatchKernelPolicy::Auto | BatchKernelPolicy::Plain { .. } => {
+                self.pick_launch_1d(series_len, Some(256))
+            }
+        };
+        self.last_batch = Some(BatchKernelSelected::Plain { block_x: bx });
+        self.maybe_log_batch_debug();
+
+        let func_ria = self
+            .module
+            .get_function("correlation_cycle_batch_f32_ria")
+            .map_err(|_| CudaCorrelationCycleError::MissingKernelSymbol {
+                name: "correlation_cycle_batch_f32_ria",
+            })?;
+        let smem = (max_period * 2 * std::mem::size_of::<f32>()) as u32;
+        let stream = &self.stream;
+
+        let mut processed = 0usize;
+        while processed < n_combos {
+            let chunk = (n_combos - processed).min(65_535);
+            let grid_chunk: GridSize = (grid.x, chunk as u32, 1).into();
+            self.validate_launch(
+                grid_chunk.x,
+                grid_chunk.y,
+                grid_chunk.z,
+                block.x,
+                block.y,
+                block.z,
+            )?;
+            let out_off = processed * series_len;
+            let out_real_ptr = unsafe { d_real.as_device_ptr().add(out_off) };
+            let out_imag_ptr = unsafe { d_imag.as_device_ptr().add(out_off) };
+            let out_angle_ptr = unsafe { d_angle.as_device_ptr().add(out_off) };
+            unsafe {
+                launch!(func_ria<<<grid_chunk, block, smem, stream>>>(
+                    d_prices.as_device_ptr(),
+                    d_cos.as_device_ptr(),
+                    d_sin.as_device_ptr(),
+                    d_periods.as_device_ptr(),
+                    d_sum_cos.as_device_ptr(),
+                    d_sum_sin.as_device_ptr(),
+                    d_sqrt_t2.as_device_ptr(),
+                    d_sqrt_t4.as_device_ptr(),
+                    max_period as i32,
+                    series_len as i32,
+                    n_combos as i32,
+                    first_valid as i32,
+                    processed as i32,
+                    out_real_ptr,
+                    out_imag_ptr,
+                    out_angle_ptr
+                ))?;
+            }
+
+            let func_state = self
+                .module
+                .get_function("correlation_cycle_state_batch_f32")
+                .map_err(|_| CudaCorrelationCycleError::MissingKernelSymbol {
+                    name: "correlation_cycle_state_batch_f32",
+                })?;
+            let out_state_ptr = unsafe { d_state.as_device_ptr().add(out_off) };
+            unsafe {
+                launch!(func_state<<<grid_chunk, block, 0, stream>>>(
+                    d_angle.as_device_ptr(),
+                    d_thresholds.as_device_ptr(),
+                    d_periods.as_device_ptr(),
+                    series_len as i32,
+                    n_combos as i32,
+                    first_valid as i32,
+                    processed as i32,
+                    out_state_ptr
+                ))?;
+            }
+            processed += chunk;
+        }
+
+        Ok(DeviceCorrelationCycleQuad {
+            real: DeviceArrayF32 {
+                buf: d_real,
+                rows: n_combos,
+                cols: series_len,
+            },
+            imag: DeviceArrayF32 {
+                buf: d_imag,
+                rows: n_combos,
+                cols: series_len,
+            },
+            angle: DeviceArrayF32 {
+                buf: d_angle,
+                rows: n_combos,
+                cols: series_len,
+            },
+            state: DeviceArrayF32 {
+                buf: d_state,
+                rows: n_combos,
+                cols: series_len,
+            },
+        })
+    }
+
     pub fn correlation_cycle_many_series_one_param_time_major_dev(
         &mut self,
         prices_tm_f32: &[f32],

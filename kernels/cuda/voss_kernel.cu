@@ -73,6 +73,18 @@ __device__ __forceinline__ dsfloat ds_fma_scalar(dsfloat a, float s, dsfloat c) 
 }
 
 
+extern "C" __global__ void voss_cast_f32_to_f64(
+    const float* __restrict__ input,
+    int len,
+    double* __restrict__ output)
+{
+    const int idx = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    if (idx < len) {
+        output[idx] = (double)input[idx];
+    }
+}
+
+
 
 
 extern "C" __global__ void voss_batch_f32(

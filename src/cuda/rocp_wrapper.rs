@@ -385,6 +385,103 @@ impl CudaRocp {
         ))
     }
 
+    pub fn rocp_batch_dev_from_device_prices(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &RocpBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<RocpParams>), CudaRocpError> {
+        if len == 0 {
+            return Err(CudaRocpError::InvalidInput("empty data".into()));
+        }
+        if d_data.len() != len {
+            return Err(CudaRocpError::InvalidInput(
+                "device prices length mismatch".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaRocpError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let periods = Self::expand_periods(sweep)?;
+        let max_p = *periods
+            .iter()
+            .max()
+            .ok_or_else(|| CudaRocpError::InvalidInput("no parameter combinations".into()))?;
+        if len - first_valid < max_p {
+            return Err(CudaRocpError::InvalidInput("not enough valid data".into()));
+        }
+        let combos: Vec<RocpParams> = periods
+            .iter()
+            .map(|&p| RocpParams { period: Some(p) })
+            .collect();
+
+        let rows = combos.len();
+        let in_bytes = 2usize
+            .checked_mul(len)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaRocpError::InvalidInput("size overflow".into()))?;
+        let out_bytes = rows
+            .checked_mul(len)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaRocpError::InvalidInput("size overflow".into()))?;
+        let param_bytes = rows
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaRocpError::InvalidInput("size overflow".into()))?;
+        let required = in_bytes
+            .checked_add(out_bytes)
+            .and_then(|x| x.checked_add(param_bytes))
+            .ok_or_else(|| CudaRocpError::InvalidInput("size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if let Err(e) = Self::will_fit(required, headroom) {
+            if let Ok((free, _)) = mem_get_info() {
+                return Err(CudaRocpError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(e);
+            }
+        }
+
+        let periods_host: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let d_periods = DeviceBuffer::from_slice(&periods_host).map_err(CudaRocpError::Cuda)?;
+        let mut d_inv = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
+            .map_err(CudaRocpError::Cuda)?;
+        let mut d_out = unsafe {
+            DeviceBuffer::<f32>::uninitialized_async(
+                rows.checked_mul(len)
+                    .ok_or_else(|| CudaRocpError::InvalidInput("size overflow".into()))?,
+                &self.stream,
+            )
+        }
+        .map_err(CudaRocpError::Cuda)?;
+
+        self.launch_reciprocal_build(d_data, len, &mut d_inv)?;
+        self.launch_batch(
+            d_data,
+            &d_inv,
+            &d_periods,
+            len,
+            rows,
+            first_valid,
+            &mut d_out,
+        )?;
+
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols: len,
+            },
+            combos,
+        ))
+    }
+
     pub fn rocp_batch_into_host_f32(
         &self,
         data: &[f32],
@@ -461,6 +558,45 @@ impl CudaRocp {
                 &mut f_i as *mut _ as *mut c_void,
                 &mut r_i as *mut _ as *mut c_void,
                 &mut o_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, &mut args)
+                .map_err(CudaRocpError::Cuda)?;
+        }
+        Ok(())
+    }
+
+    fn launch_reciprocal_build(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: usize,
+        d_inv: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaRocpError> {
+        if d_data.len() != len || d_inv.len() != len {
+            return Err(CudaRocpError::InvalidInput(
+                "reciprocal build buffer length mismatch".into(),
+            ));
+        }
+        let func = self
+            .module
+            .get_function("rocp_build_reciprocals_f32")
+            .map_err(|_| CudaRocpError::MissingKernelSymbol {
+                name: "rocp_build_reciprocals_f32",
+            })?;
+        let block_x = 256u32;
+        let grid_x = ((len as u32).saturating_add(block_x - 1)) / block_x;
+        let gx = grid_x.max(1);
+        let grid: GridSize = (gx, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch(gx, 1, 1, block_x, 1, 1)?;
+        unsafe {
+            let mut d_ptr = d_data.as_device_ptr().as_raw();
+            let mut n_i = len as i32;
+            let mut i_ptr = d_inv.as_device_ptr().as_raw();
+            let mut args: [*mut c_void; 3] = [
+                &mut d_ptr as *mut _ as *mut c_void,
+                &mut n_i as *mut _ as *mut c_void,
+                &mut i_ptr as *mut _ as *mut c_void,
             ];
             self.stream
                 .launch(&func, grid, block, 0, &mut args)

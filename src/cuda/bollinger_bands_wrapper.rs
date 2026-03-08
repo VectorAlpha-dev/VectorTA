@@ -6,7 +6,7 @@ use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
 use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::memory::{mem_get_info, DeviceBuffer, DevicePointer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -351,6 +351,76 @@ impl CudaBollingerBands {
         Ok((combos, first_valid, len))
     }
 
+    fn prepare_batch_inputs_device(
+        len: usize,
+        first_valid: usize,
+        sweep: &BollingerBandsBatchRange,
+    ) -> Result<Vec<BbCombo>, CudaBollingerError> {
+        if len == 0 {
+            return Err(CudaBollingerError::InvalidInput("empty data".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaBollingerError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, len
+            )));
+        }
+
+        let raw = Self::expand_combos(sweep)?;
+        if raw.is_empty() {
+            return Err(CudaBollingerError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+
+        let mut unsupported_ma: HashSet<String> = HashSet::new();
+        let mut combos = Vec::with_capacity(raw.len());
+        for (p, u, d, ma, devt) in raw {
+            if p == 0 || p > len {
+                return Err(CudaBollingerError::InvalidInput(format!(
+                    "invalid period {} for len {}",
+                    p, len
+                )));
+            }
+            if len - first_valid < p {
+                return Err(CudaBollingerError::InvalidInput(format!(
+                    "not enough valid data for period {} (valid after first {}: {})",
+                    p,
+                    first_valid,
+                    len - first_valid
+                )));
+            }
+            if devt != 0 {
+                return Err(CudaBollingerError::InvalidInput(format!(
+                    "unsupported devtype {} (only 0=stddev)",
+                    devt
+                )));
+            }
+            if ma.to_ascii_lowercase() != "sma" {
+                unsupported_ma.insert(ma);
+                continue;
+            }
+            combos.push(BbCombo {
+                period: p,
+                devup: u as f32,
+                devdn: d as f32,
+            });
+        }
+        if combos.is_empty() {
+            if unsupported_ma.is_empty() {
+                return Err(CudaBollingerError::InvalidInput(
+                    "no supported combos (require ma_type='sma' and devtype=0)".into(),
+                ));
+            } else {
+                return Err(CudaBollingerError::InvalidInput(format!(
+                    "unsupported ma_type(s): {} (only 'sma' supported for CUDA)",
+                    unsupported_ma.into_iter().collect::<Vec<_>>().join(", ")
+                )));
+            }
+        }
+        Ok(combos)
+    }
+
     #[inline(always)]
     fn two_sum(a: f32, b: f32) -> (f32, f32) {
         let s = a + b;
@@ -479,6 +549,54 @@ impl CudaBollingerBands {
         Ok(())
     }
 
+    fn build_prefixes_device(
+        &self,
+        d_data: DevicePointer<f32>,
+        len: usize,
+    ) -> Result<
+        (
+            DeviceBuffer<[f32; 2]>,
+            DeviceBuffer<[f32; 2]>,
+            DeviceBuffer<i32>,
+        ),
+        CudaBollingerError,
+    > {
+        let func = self
+            .module
+            .get_function("bollinger_bands_build_prefix_f32")
+            .map_err(|_| CudaBollingerError::MissingKernelSymbol {
+                name: "bollinger_bands_build_prefix_f32",
+            })?;
+
+        let prefix_len = len
+            .checked_add(1)
+            .ok_or_else(|| CudaBollingerError::InvalidInput("len+1 overflow".into()))?;
+        let mut d_ps: DeviceBuffer<[f32; 2]> = unsafe { DeviceBuffer::uninitialized(prefix_len) }?;
+        let mut d_ps2: DeviceBuffer<[f32; 2]> = unsafe { DeviceBuffer::uninitialized(prefix_len) }?;
+        let mut d_pn: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(prefix_len) }?;
+
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+        unsafe {
+            let mut p_data = d_data.as_raw();
+            let mut len_i = len as i32;
+            let mut p_ps = d_ps.as_device_ptr().as_raw();
+            let mut p_ps2 = d_ps2.as_device_ptr().as_raw();
+            let mut p_pn = d_pn.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut p_data as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut p_ps as *mut _ as *mut c_void,
+                &mut p_ps2 as *mut _ as *mut c_void,
+                &mut p_pn as *mut _ as *mut c_void,
+            ];
+            Self::validate_launch(grid, block)?;
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+
+        Ok((d_ps, d_ps2, d_pn))
+    }
+
     fn run_batch_kernel(
         &self,
         data_f32: &[f32],
@@ -535,8 +653,6 @@ impl CudaBollingerBands {
             &mut d_mid,
             &mut d_lo,
         )?;
-        self.stream.synchronize()?;
-
         let ctx = self.context_arc();
         let dev = self.device_id();
         Ok((
@@ -600,6 +716,104 @@ impl CudaBollingerBands {
                 ))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
         self.run_batch_kernel(data_f32, &combos, first_valid)
+    }
+
+    pub fn bollinger_bands_batch_from_device_ptr(
+        &self,
+        d_data: DevicePointer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &BollingerBandsBatchRange,
+    ) -> Result<(DeviceArrayF32Bb, DeviceArrayF32Bb, DeviceArrayF32Bb), CudaBollingerError> {
+        let combos = Self::prepare_batch_inputs_device(len, first_valid, sweep)?;
+
+        let item_f32 = std::mem::size_of::<f32>();
+        let item_i32 = std::mem::size_of::<i32>();
+        let prefix_each = 2 * std::mem::size_of::<[f32; 2]>() + item_i32;
+        let prefix_bytes =
+            (len + 1)
+                .checked_mul(prefix_each)
+                .ok_or(CudaBollingerError::InvalidInput(
+                    "prefix bytes overflow".into(),
+                ))?;
+        let out_elems = combos
+            .len()
+            .checked_mul(len)
+            .ok_or(CudaBollingerError::InvalidInput(
+                "output elems overflow".into(),
+            ))?;
+        let out_bytes =
+            out_elems
+                .checked_mul(3 * item_f32)
+                .ok_or(CudaBollingerError::InvalidInput(
+                    "output bytes overflow".into(),
+                ))?;
+        let required =
+            prefix_bytes
+                .checked_add(out_bytes)
+                .ok_or(CudaBollingerError::InvalidInput(
+                    "total bytes overflow".into(),
+                ))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
+
+        let (d_ps, d_ps2, d_pn) = self.build_prefixes_device(d_data, len)?;
+        let periods: Vec<i32> = combos.iter().map(|c| c.period as i32).collect();
+        let devups: Vec<f32> = combos.iter().map(|c| c.devup).collect();
+        let devdns: Vec<f32> = combos.iter().map(|c| c.devdn).collect();
+        let d_periods = DeviceBuffer::from_slice(&periods)?;
+        let d_devups = DeviceBuffer::from_slice(&devups)?;
+        let d_devdns = DeviceBuffer::from_slice(&devdns)?;
+
+        let elems = combos
+            .len()
+            .checked_mul(len)
+            .ok_or(CudaBollingerError::InvalidInput(
+                "output elems overflow".into(),
+            ))?;
+        let mut d_up: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_mid: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_lo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+
+        self.launch_batch_kernel(
+            &d_ps,
+            &d_ps2,
+            &d_pn,
+            &d_periods,
+            &d_devups,
+            &d_devdns,
+            len,
+            first_valid,
+            combos.len(),
+            &mut d_up,
+            &mut d_mid,
+            &mut d_lo,
+        )?;
+
+        let ctx = self.context_arc();
+        let dev = self.device_id();
+        Ok((
+            DeviceArrayF32Bb {
+                buf: d_up,
+                rows: combos.len(),
+                cols: len,
+                ctx: ctx.clone(),
+                device_id: dev,
+            },
+            DeviceArrayF32Bb {
+                buf: d_mid,
+                rows: combos.len(),
+                cols: len,
+                ctx: ctx.clone(),
+                device_id: dev,
+            },
+            DeviceArrayF32Bb {
+                buf: d_lo,
+                rows: combos.len(),
+                cols: len,
+                ctx,
+                device_id: dev,
+            },
+        ))
     }
 
     pub fn bollinger_bands_many_series_one_param_time_major_dev(

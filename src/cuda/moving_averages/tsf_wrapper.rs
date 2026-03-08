@@ -295,6 +295,35 @@ impl CudaTsf {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaTsfError::InvalidInput("all values are NaN".into()))?;
 
+        let (combos, periods_i32, x_sums, denom_invs, inv_periods) =
+            Self::prepare_batch_params(len, first_valid, sweep)?;
+
+        Ok((
+            combos,
+            first_valid,
+            len,
+            periods_i32,
+            x_sums,
+            denom_invs,
+            inv_periods,
+        ))
+    }
+
+    fn prepare_batch_params(
+        len: usize,
+        first_valid: usize,
+        sweep: &TsfBatchRange,
+    ) -> Result<(Vec<TsfParams>, Vec<i32>, Vec<f32>, Vec<f32>, Vec<f32>), CudaTsfError> {
+        if len == 0 {
+            return Err(CudaTsfError::InvalidInput("empty data".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaTsfError::InvalidInput(format!(
+                "invalid first_valid {} for series length {}",
+                first_valid, len
+            )));
+        }
+
         let combos = expand_grid_local(sweep);
         if combos.is_empty() {
             let (start, end, step) = sweep.period;
@@ -350,15 +379,7 @@ impl CudaTsf {
             inv_periods.push((1.0 / pf) as f32);
         }
 
-        Ok((
-            combos,
-            first_valid,
-            len,
-            periods_i32,
-            x_sums,
-            denom_invs,
-            inv_periods,
-        ))
+        Ok((combos, periods_i32, x_sums, denom_invs, inv_periods))
     }
 
     fn launch_batch_kernel(
@@ -659,6 +680,110 @@ impl CudaTsf {
         })
     }
 
+    fn run_batch_kernel_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        combos_len: usize,
+        first_valid: usize,
+        series_len: usize,
+        periods_i32: &[i32],
+        x_sums: &[f32],
+        denom_invs: &[f32],
+        inv_periods: &[f32],
+    ) -> Result<DeviceArrayF32, CudaTsfError> {
+        let per_combo_bytes = std::mem::size_of::<i32>() + 3 * std::mem::size_of::<f32>();
+        let params_bytes = combos_len
+            .checked_mul(per_combo_bytes)
+            .ok_or_else(|| CudaTsfError::InvalidInput("combos * param bytes overflow".into()))?;
+        let out_elems = combos_len
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaTsfError::InvalidInput("combos * series_len overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaTsfError::InvalidInput("output bytes overflow".into()))?;
+        let required = if matches!(self.policy.batch, BatchKernelPolicy::Plain { .. }) {
+            params_bytes
+                .checked_add(out_bytes)
+                .ok_or_else(|| CudaTsfError::InvalidInput("required bytes overflow".into()))?
+        } else {
+            let prefix_elems = series_len
+                .checked_add(1)
+                .ok_or_else(|| CudaTsfError::InvalidInput("prefix elems overflow".into()))?;
+            let prefix_bytes = prefix_elems
+                .checked_mul(std::mem::size_of::<f64>())
+                .and_then(|v| v.checked_mul(2))
+                .ok_or_else(|| CudaTsfError::InvalidInput("prefix bytes overflow".into()))?;
+            params_bytes
+                .checked_add(prefix_bytes)
+                .and_then(|v| v.checked_add(out_bytes))
+                .ok_or_else(|| CudaTsfError::InvalidInput("required bytes overflow".into()))?
+        };
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaTsfError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
+            }
+            return Err(CudaTsfError::InvalidInput(
+                "insufficient device memory".into(),
+            ));
+        }
+
+        let d_periods = DeviceBuffer::from_slice(periods_i32)?;
+        let d_x_sums = DeviceBuffer::from_slice(x_sums)?;
+        let d_denoms = DeviceBuffer::from_slice(denom_invs)?;
+        let d_inv_p = DeviceBuffer::from_slice(inv_periods)?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems)? };
+
+        match self.policy.batch {
+            BatchKernelPolicy::Plain { .. } => {
+                self.launch_batch_kernel(
+                    d_prices,
+                    &d_periods,
+                    &d_x_sums,
+                    &d_denoms,
+                    &d_inv_p,
+                    series_len,
+                    combos_len,
+                    first_valid,
+                    &mut d_out,
+                )?;
+            }
+            BatchKernelPolicy::Auto | BatchKernelPolicy::Prefix { .. } => {
+                let mut d_prefix_y = unsafe { DeviceBuffer::<f64>::uninitialized(series_len + 1)? };
+                let mut d_prefix_yi =
+                    unsafe { DeviceBuffer::<f64>::uninitialized(series_len + 1)? };
+                self.launch_prefix_kernel(
+                    d_prices,
+                    series_len,
+                    first_valid,
+                    &mut d_prefix_y,
+                    &mut d_prefix_yi,
+                )?;
+                self.launch_batch_from_prefix_kernel(
+                    &d_prefix_y,
+                    &d_prefix_yi,
+                    &d_periods,
+                    &d_x_sums,
+                    &d_denoms,
+                    &d_inv_p,
+                    series_len,
+                    combos_len,
+                    first_valid,
+                    &mut d_out,
+                )?;
+            }
+        }
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combos_len,
+            cols: series_len,
+        })
+    }
+
     pub fn tsf_batch_dev(
         &self,
         data_f32: &[f32],
@@ -678,6 +803,27 @@ impl CudaTsf {
         )?;
         self.stream.synchronize()?;
         Ok((arr, combos))
+    }
+
+    pub fn tsf_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &TsfBatchRange,
+    ) -> Result<DeviceArrayF32, CudaTsfError> {
+        let (combos, periods_i32, x_sums, denom_invs, inv_periods) =
+            Self::prepare_batch_params(series_len, first_valid, sweep)?;
+        self.run_batch_kernel_from_device_prices(
+            d_prices,
+            combos.len(),
+            first_valid,
+            series_len,
+            &periods_i32,
+            &x_sums,
+            &denom_invs,
+            &inv_periods,
+        )
     }
 
     pub fn tsf_batch_into_host_f32(

@@ -419,6 +419,46 @@ impl CudaCmo {
         })
     }
 
+    pub fn cmo_batch_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        periods: &[i32],
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaCmoError> {
+        if len == 0 {
+            return Err(CudaCmoError::InvalidInput("empty data".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaCmoError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+        if d_prices.len() != len {
+            return Err(CudaCmoError::InvalidInput(
+                "device price buffer length mismatch".into(),
+            ));
+        }
+        if periods.is_empty() {
+            return Err(CudaCmoError::InvalidInput("empty period sweep".into()));
+        }
+        let out_elems = periods
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaCmoError::InvalidInput("size overflow".into()))?;
+        if d_out.len() != out_elems {
+            return Err(CudaCmoError::InvalidInput(
+                "output buffer length mismatch".into(),
+            ));
+        }
+
+        let d_periods = DeviceBuffer::from_slice(periods)?;
+        self.launch_batch_kernel(d_prices, &d_periods, len, periods.len(), first_valid, d_out)?;
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
     fn prepare_many_series_inputs(
         data_tm_f32: &[f32],
         cols: usize,

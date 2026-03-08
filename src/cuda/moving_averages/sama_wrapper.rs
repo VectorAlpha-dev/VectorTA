@@ -308,6 +308,68 @@ impl CudaSama {
         )
     }
 
+    pub fn sama_batch_device_with_host_lengths(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_lengths: &DeviceBuffer<i32>,
+        d_min_alphas: &DeviceBuffer<f32>,
+        d_maj_alphas: &DeviceBuffer<f32>,
+        d_first_valids: &DeviceBuffer<i32>,
+        lengths: &[i32],
+        series_len: usize,
+        n_combos: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaSamaError> {
+        if series_len == 0 {
+            return Err(CudaSamaError::InvalidInput(
+                "series_len must be positive".into(),
+            ));
+        }
+        if n_combos == 0 {
+            return Err(CudaSamaError::InvalidInput(
+                "n_combos must be positive".into(),
+            ));
+        }
+        if d_lengths.len() != n_combos
+            || d_min_alphas.len() != n_combos
+            || d_maj_alphas.len() != n_combos
+            || d_first_valids.len() != n_combos
+        {
+            return Err(CudaSamaError::InvalidInput(
+                "device buffer length mismatch".into(),
+            ));
+        }
+        if lengths.len() != n_combos {
+            return Err(CudaSamaError::InvalidInput(
+                "host lengths length mismatch".into(),
+            ));
+        }
+        if d_prices.len() != series_len {
+            return Err(CudaSamaError::InvalidInput(
+                "prices length must equal series_len".into(),
+            ));
+        }
+        if d_out.len() != n_combos * series_len {
+            return Err(CudaSamaError::InvalidInput(
+                "output buffer length mismatch".into(),
+            ));
+        }
+
+        let max_window_total: i32 = *lengths.iter().max().unwrap_or(&0);
+        self.launch_batch_kernel_sliced_opt(
+            d_prices,
+            d_lengths,
+            d_min_alphas,
+            d_maj_alphas,
+            d_first_valids,
+            series_len,
+            n_combos,
+            Some(lengths),
+            max_window_total,
+            d_out,
+        )
+    }
+
     pub fn sama_batch_into_host_f32(
         &self,
         data_f32: &[f32],

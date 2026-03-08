@@ -1,13 +1,13 @@
 use vector_ta::indicators::squeeze_momentum::{
     squeeze_momentum_batch_with_kernel, squeeze_momentum_with_kernel, SqueezeMomentumBatchRange,
-    SqueezeMomentumBuilder, SqueezeMomentumData, SqueezeMomentumInput, SqueezeMomentumParams,
+    SqueezeMomentumData, SqueezeMomentumInput, SqueezeMomentumParams,
 };
 use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::{cuda_available, CudaSqueezeMomentum};
+use vector_ta::cuda::{cuda_available, CudaRuntime, CudaSqueezeMomentum};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -216,6 +216,82 @@ fn squeeze_momentum_cuda_many_series_one_param_matches_cpu(
         let gs = si_g[idx] as f64;
         if !(cs.is_nan() || gs.is_nan()) {
             assert!(approx_eq(cs, gs, 1e-5), "signal mismatch at {}", idx);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn squeeze_momentum_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>>
+{
+    if !cuda_available() {
+        eprintln!(
+            "[squeeze_momentum_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device"
+        );
+        return Ok(());
+    }
+
+    let len = 8192usize;
+    let first_valid = 2usize;
+    let mut high = vec![f32::NAN; len];
+    let mut low = vec![f32::NAN; len];
+    let mut close = vec![f32::NAN; len];
+    for i in first_valid..len {
+        let x = i as f32;
+        high[i] = (x * 0.001).sin() + 0.5;
+        low[i] = high[i] - 1.0;
+        close[i] = (x * 0.0007).cos() + 0.1;
+    }
+
+    let sweep = SqueezeMomentumBatchRange {
+        length_bb: (10, 28, 6),
+        mult_bb: (2.0, 2.0, 0.0),
+        length_kc: (12, 24, 6),
+        mult_kc: (1.5, 1.5, 0.0),
+    };
+
+    let cuda = CudaSqueezeMomentum::new(0).expect("CudaSqueezeMomentum::new");
+    let (legacy_sq, legacy_mo, legacy_si) = cuda
+        .squeeze_momentum_batch_dev(&high, &low, &close, &sweep)
+        .expect("legacy batch");
+
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let device_high = runtime.upload_f32(&high).expect("upload high");
+    let device_low = runtime.upload_f32(&low).expect("upload low");
+    let device_close = runtime.upload_f32(&close).expect("upload close");
+    let (device_sq, device_mo, device_si) = cuda
+        .squeeze_momentum_batch_dev_from_device_inputs(
+            device_high.buffer(),
+            device_low.buffer(),
+            device_close.buffer(),
+            len,
+            first_valid,
+            &sweep,
+        )
+        .expect("device inputs");
+
+    for (legacy, device, label) in [
+        (legacy_sq, device_sq, "squeeze"),
+        (legacy_mo, device_mo, "momentum"),
+        (legacy_si, device_si, "signal"),
+    ] {
+        assert_eq!(legacy.rows, device.rows, "{label} rows");
+        assert_eq!(legacy.cols, device.cols, "{label} cols");
+
+        let mut legacy_host = vec![0.0f32; legacy.len()];
+        legacy.buf.copy_to(legacy_host.as_mut_slice())?;
+        let mut device_host = vec![0.0f32; device.len()];
+        device.buf.copy_to(device_host.as_mut_slice())?;
+
+        for (idx, (lhs, rhs)) in legacy_host.iter().zip(device_host.iter()).enumerate() {
+            if lhs.is_nan() && rhs.is_nan() {
+                continue;
+            }
+            assert!(
+                (lhs - rhs).abs() < 1e-6,
+                "{label} mismatch at {idx}: lhs={lhs} rhs={rhs}"
+            );
         }
     }
     Ok(())

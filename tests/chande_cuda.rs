@@ -7,9 +7,9 @@ use vector_ta::utilities::enums::Kernel;
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::cuda_available;
-#[cfg(feature = "cuda")]
 use vector_ta::cuda::CudaChande;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::{cuda_available, CudaRuntime};
 
 fn approx_eq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -142,7 +142,7 @@ fn chande_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     let high_tm_f32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let low_tm_f32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let close_tm_f32: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();
-    let mut cuda = CudaChande::new(0).expect("CudaChande::new");
+    let cuda = CudaChande::new(0).expect("CudaChande::new");
     let dev = cuda
         .chande_many_series_one_param_time_major_dev(
             &high_tm_f32,
@@ -169,5 +169,71 @@ fn chande_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
             idx
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn chande_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[chande_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+    let candles: Candles = read_candles_from_csv(file)?;
+    let high_f32: Vec<f32> = candles.high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = candles.low.iter().map(|&v| v as f32).collect();
+    let close_f32: Vec<f32> = candles.close.iter().map(|&v| v as f32).collect();
+    let len = close_f32.len();
+    let first_valid = high_f32
+        .iter()
+        .zip(low_f32.iter())
+        .zip(close_f32.iter())
+        .position(|((high, low), close)| high.is_finite() && low.is_finite() && close.is_finite())
+        .expect("first valid");
+    let sweep = ChandeBatchRange {
+        period: (10, 30, 5),
+        mult: (2.0, 4.0, 1.0),
+    };
+    let direction = "long";
+
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+    let d_close = runtime.upload_f32(&close_f32).expect("upload close");
+    let mut cuda = CudaChande::new(0).expect("CudaChande::new");
+
+    let legacy = cuda
+        .chande_batch_dev(&high_f32, &low_f32, &close_f32, &sweep, direction)
+        .expect("legacy chande");
+    let device = cuda
+        .chande_batch_dev_from_device_inputs(
+            d_high.buffer(),
+            d_low.buffer(),
+            d_close.buffer(),
+            len,
+            first_valid,
+            &sweep,
+            direction,
+        )
+        .expect("device chande");
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    let mut device_host = vec![0f32; device.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    device.buf.copy_to(&mut device_host)?;
+
+    let (atol, rtol) = (1e-3, 1e-6);
+    for idx in 0..legacy_host.len() {
+        assert!(
+            approx_eq(legacy_host[idx] as f64, device_host[idx] as f64, atol, rtol),
+            "mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_host[idx],
+            device_host[idx]
+        );
+    }
+
     Ok(())
 }

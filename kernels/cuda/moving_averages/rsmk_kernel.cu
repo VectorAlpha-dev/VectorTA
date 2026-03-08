@@ -66,73 +66,74 @@ extern "C" __global__ void rsmk_apply_mom_single_row_ema_ema_f32(
     const float nanf = qnan32();
     if (len <= 0 || period <= 0 || signal_period <= 0) return;
 
-
-
-
-
     int first = first_valid_mom;
     if (first < 0) first = 0;
     if (first >= len) return;
     while (first < len && isnan(mom[first])) { first += 1; }
+    if (first >= len) return;
 
+    const int ind_warm = first + period - 1;
+    const int sig_warm = ind_warm + signal_period - 1;
 
-    for (int i = 0; i < min(first, len); ++i) {
+    for (int i = 0; i < min(ind_warm, len); ++i) {
         out_indicator[i] = nanf;
+    }
+    for (int i = 0; i < min(sig_warm, len); ++i) {
         out_signal[i] = nanf;
     }
-    if (first >= len) return;
+    if (ind_warm >= len) return;
 
     const double alpha_ind = 2.0 / (double(period) + 1.0);
     const double beta_ind = 1.0 - alpha_ind;
     const double alpha_sig = 2.0 / (double(signal_period) + 1.0);
     const double beta_sig = 1.0 - alpha_sig;
 
+    double sum = 0.0;
+    int count = 0;
+    const int init_end = min(len, first + period);
+    for (int i = first; i < init_end; ++i) {
+        const float mv = mom[i];
+        if (!isnan(mv)) {
+            sum += (double)mv;
+            count += 1;
+        }
+    }
 
-    double ind_mean = (double)mom[first] * 100.0;
-    double ind_val = ind_mean;
-    out_indicator[first] = (float)ind_val;
-    int ind_count = 1;
-    int ind_warm_end = first + period;
-    if (ind_warm_end > len) ind_warm_end = len;
+    if (count == 0) {
+        for (int i = ind_warm; i < len; ++i) { out_indicator[i] = nanf; }
+        for (int i = sig_warm; i < len; ++i) { out_signal[i] = nanf; }
+        return;
+    }
 
+    double ind_val = (sum / (double)count) * 100.0;
+    out_indicator[ind_warm] = (float)ind_val;
 
-    double sig_mean = ind_val;
-    double sig_val = sig_mean;
-    out_signal[first] = (float)sig_val;
+    double sig_val = 0.0;
+    double acc_sig = ind_val;
     int sig_count = 1;
-    int sig_warm_end = first + signal_period;
-    if (sig_warm_end > len) sig_warm_end = len;
+    if (sig_warm == ind_warm) {
+        sig_val = acc_sig / (double)sig_count;
+        out_signal[sig_warm] = (float)sig_val;
+    }
 
-    for (int i = first + 1; i < len; ++i) {
-        const double x = (double)mom[i] * 100.0;
-        if (i < ind_warm_end) {
-            if (isfinite(x)) {
-                ind_count += 1;
-                const double vc = (double)ind_count;
-                ind_mean = ((vc - 1.0) * ind_mean + x) / vc;
-            }
-            ind_val = ind_mean;
-        } else {
-            if (isfinite(x)) {
-                ind_val = beta_ind * ind_val + alpha_ind * x;
-            }
+    for (int i = ind_warm + 1; i < len; ++i) {
+        const float mv = mom[i];
+        if (!isnan(mv)) {
+            const double src100 = (double)mv * 100.0;
+            ind_val = beta_ind * ind_val + alpha_ind * src100;
         }
         out_indicator[i] = (float)ind_val;
 
-
-        if (i < sig_warm_end) {
-            if (isfinite(ind_val)) {
-                sig_count += 1;
-                const double vc = (double)sig_count;
-                sig_mean = ((vc - 1.0) * sig_mean + ind_val) / vc;
-            }
-            sig_val = sig_mean;
+        if (i < sig_warm) {
+            acc_sig += ind_val;
+            sig_count += 1;
+        } else if (i == sig_warm) {
+            sig_val = acc_sig / (double)sig_count;
+            out_signal[i] = (float)sig_val;
         } else {
-            if (isfinite(ind_val)) {
-                sig_val = beta_sig * sig_val + alpha_sig * ind_val;
-            }
+            sig_val = beta_sig * sig_val + alpha_sig * ind_val;
+            out_signal[i] = (float)sig_val;
         }
-        out_signal[i] = (float)sig_val;
     }
 }
 

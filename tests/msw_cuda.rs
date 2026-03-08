@@ -6,7 +6,7 @@ use vector_ta::utilities::enums::Kernel;
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::{cuda_available, CudaMsw};
+use vector_ta::cuda::{cuda_available, CudaMsw, CudaRuntime};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -81,6 +81,99 @@ fn msw_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn msw_cuda_device_prices_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[msw_cuda_device_prices_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 8192usize;
+    let first_valid = 16usize;
+    let mut price_f32 = vec![f32::NAN; len];
+    for (i, value) in price_f32.iter_mut().enumerate().skip(first_valid) {
+        let x = i as f32;
+        *value = (x * 0.00123).sin() + 0.00017 * x;
+    }
+
+    let sweep = MswBatchRange { period: (5, 40, 5) };
+    let cuda = CudaMsw::new(0).expect("CudaMsw::new");
+    let (legacy, legacy_combos) = cuda
+        .msw_batch_dev(&price_f32, &sweep)
+        .expect("legacy batch");
+
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let device_prices = runtime.upload_f32(&price_f32).expect("upload prices");
+    let (sine, sine_combos) = cuda
+        .msw_batch_output_dev_from_device_prices(
+            device_prices.buffer(),
+            len,
+            first_valid,
+            &sweep,
+            0,
+        )
+        .expect("device sine");
+    let (lead, lead_combos) = cuda
+        .msw_batch_output_dev_from_device_prices(
+            device_prices.buffer(),
+            len,
+            first_valid,
+            &sweep,
+            1,
+        )
+        .expect("device lead");
+    cuda.synchronize().expect("sync");
+
+    assert_eq!(legacy_combos.len(), sine_combos.len());
+    assert_eq!(legacy_combos.len(), lead_combos.len());
+    for ((lhs, rhs), third) in legacy_combos
+        .iter()
+        .zip(sine_combos.iter())
+        .zip(lead_combos.iter())
+    {
+        assert_eq!(lhs.period, rhs.period);
+        assert_eq!(lhs.period, third.period);
+    }
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    let mut sine_host = vec![0f32; sine.len()];
+    sine.buf.copy_to(&mut sine_host)?;
+    let mut lead_host = vec![0f32; lead.len()];
+    lead.buf.copy_to(&mut lead_host)?;
+
+    let tol = 1.5e-3;
+    for row in 0..legacy_combos.len() {
+        let legacy_sine = &legacy_host[(2 * row) * len..(2 * row + 1) * len];
+        let legacy_lead = &legacy_host[(2 * row + 1) * len..(2 * row + 2) * len];
+        let device_sine = &sine_host[row * len..(row + 1) * len];
+        let device_lead = &lead_host[row * len..(row + 1) * len];
+        for (idx, (&lhs, &rhs)) in legacy_sine.iter().zip(device_sine.iter()).enumerate() {
+            assert!(
+                approx_eq(lhs as f64, rhs as f64, tol),
+                "sine mismatch row={} idx={}: legacy={} device={}",
+                row,
+                idx,
+                lhs,
+                rhs
+            );
+        }
+        for (idx, (&lhs, &rhs)) in legacy_lead.iter().zip(device_lead.iter()).enumerate() {
+            assert!(
+                approx_eq(lhs as f64, rhs as f64, tol),
+                "lead mismatch row={} idx={}: legacy={} device={}",
+                row,
+                idx,
+                lhs,
+                rhs
+            );
+        }
+    }
+
     Ok(())
 }
 

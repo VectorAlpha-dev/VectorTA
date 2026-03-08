@@ -33,6 +33,58 @@ static __device__ inline double window_sum(const double* __restrict__ pref, int 
     return pref[t1] - pref[t0];
 }
 
+extern "C" __global__ void macz_build_prefix_single_f32(
+    const float* __restrict__ close,
+    const float* __restrict__ volume,
+    int len,
+    double* __restrict__ pref_close_sum,
+    double* __restrict__ pref_close_sumsq,
+    int* __restrict__ pref_close_nan,
+    double* __restrict__ pref_vol_sum,
+    double* __restrict__ pref_pv_sum,
+    int* __restrict__ pref_vol_nan) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    pref_close_sum[0] = 0.0;
+    pref_close_sumsq[0] = 0.0;
+    pref_close_nan[0] = 0;
+    if (pref_vol_sum) pref_vol_sum[0] = 0.0;
+    if (pref_pv_sum) pref_pv_sum[0] = 0.0;
+    if (pref_vol_nan) pref_vol_nan[0] = 0;
+
+    double acc_close = 0.0;
+    double acc_close_sq = 0.0;
+    int acc_close_nan = 0;
+    double acc_vol = 0.0;
+    double acc_pv = 0.0;
+    int acc_vol_nan = 0;
+
+    for (int i = 0; i < len; ++i) {
+        const double c = (double)close[i];
+        if (isnan(c)) {
+            acc_close_nan += 1;
+        } else {
+            acc_close += c;
+            acc_close_sq += c * c;
+        }
+        pref_close_sum[i + 1] = acc_close;
+        pref_close_sumsq[i + 1] = acc_close_sq;
+        pref_close_nan[i + 1] = acc_close_nan;
+
+        if (pref_vol_sum && pref_pv_sum && pref_vol_nan) {
+            const double v = (double)volume[i];
+            if (isnan(c) || isnan(v)) {
+                acc_vol_nan += 1;
+            } else {
+                acc_vol += v;
+                acc_pv += v * c;
+            }
+            pref_vol_sum[i + 1] = acc_vol;
+            pref_pv_sum[i + 1] = acc_pv;
+            pref_vol_nan[i + 1] = acc_vol_nan;
+        }
+    }
+}
+
 
 
 

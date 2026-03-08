@@ -45,6 +45,30 @@ static __device__ __forceinline__ float prefix_window_tm(
 }
 
 extern "C" __global__
+void volume_adjusted_ma_build_prefix_f32(
+    const float* __restrict__ prices,
+    const float* __restrict__ volumes,
+    int series_len,
+    float* __restrict__ prefix_volumes,
+    float* __restrict__ prefix_price_volumes) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    float accum_vol = 0.0f;
+    float accum_price_vol = 0.0f;
+    for (int t = 0; t < series_len; ++t) {
+        const float vol = volumes[t];
+        const float price = prices[t];
+        const float vol_nz = isnan(vol) ? 0.0f : vol;
+        const float price_nz = isnan(price) ? 0.0f : price;
+        accum_vol += vol_nz;
+        accum_price_vol += price_nz * vol_nz;
+        prefix_volumes[t] = accum_vol;
+        prefix_price_volumes[t] = accum_price_vol;
+    }
+}
+
+extern "C" __global__
 void volume_adjusted_ma_batch_f32(
     const float* __restrict__ prices,
     const float* __restrict__ volumes,

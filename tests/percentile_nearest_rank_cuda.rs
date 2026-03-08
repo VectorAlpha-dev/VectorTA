@@ -6,7 +6,7 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::percentile_nearest_rank_wrapper::CudaPercentileNearestRank;
+use vector_ta::cuda::{percentile_nearest_rank_wrapper::CudaPercentileNearestRank, CudaRuntime};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -128,6 +128,65 @@ fn percentile_nearest_rank_cuda_many_series_one_param_matches_cpu(
             approx_eq(cpu_tm[idx], host[idx] as f64, tol),
             "mismatch at {}",
             idx
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn percentile_nearest_rank_cuda_device_inputs_match_legacy_batch(
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[pnr_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 4096usize;
+    let mut price = vec![f64::NAN; len];
+    for i in 4..len {
+        let x = i as f64;
+        price[i] = (x * 0.00117).sin() + 0.00012 * x;
+    }
+    let sweep = pnr::PercentileNearestRankBatchRange {
+        length: (10, 20, 5),
+        percentage: (25.0, 75.0, 25.0),
+    };
+
+    let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
+    let first_valid = price_f32
+        .iter()
+        .position(|v| !v.is_nan())
+        .expect("first_valid");
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let d_prices = runtime.upload_f32(&price_f32).expect("upload");
+
+    let cuda = CudaPercentileNearestRank::new(0).expect("CudaPercentileNearestRank::new");
+    let (legacy_dev, legacy_combos) = cuda.pnr_batch_dev(&price_f32, &sweep)?;
+    let (device_dev, device_combos) = cuda.pnr_batch_dev_from_device_prices(
+        d_prices.buffer(),
+        price_f32.len(),
+        first_valid,
+        &sweep,
+    )?;
+
+    assert_eq!(legacy_dev.rows, device_dev.rows);
+    assert_eq!(legacy_dev.cols, device_dev.cols);
+    assert_eq!(legacy_combos.len(), device_combos.len());
+
+    let mut legacy_host = vec![0f32; legacy_dev.len()];
+    legacy_dev.buf.copy_to(&mut legacy_host)?;
+    let mut device_host = vec![0f32; device_dev.len()];
+    device_dev.buf.copy_to(&mut device_host)?;
+
+    let tol = 1e-4;
+    for idx in 0..legacy_host.len() {
+        assert!(
+            approx_eq(legacy_host[idx] as f64, device_host[idx] as f64, tol),
+            "mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_host[idx],
+            device_host[idx]
         );
     }
     Ok(())

@@ -258,6 +258,109 @@ impl CudaTtmTrend {
         pref
     }
 
+    fn prepare_device_batch_inputs(
+        len: usize,
+        first_valid: usize,
+        sweep: &TtmTrendBatchRange,
+    ) -> Result<Vec<Combo>, CudaTtmTrendError> {
+        if len == 0 {
+            return Err(CudaTtmTrendError::InvalidInput("empty inputs".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaTtmTrendError::InvalidInput(
+                "first_valid must be within the input length".into(),
+            ));
+        }
+        let periods = Self::expand_grid(sweep)?;
+        let mut combos = Vec::with_capacity(periods.len());
+        for &p in &periods {
+            let pu = p as usize;
+            if pu == 0 || pu > len {
+                return Err(CudaTtmTrendError::InvalidInput(format!(
+                    "invalid period {} for len {}",
+                    pu, len
+                )));
+            }
+            if len - first_valid < pu {
+                return Err(CudaTtmTrendError::InvalidInput(format!(
+                    "not enough valid data: needed >= {}, valid = {}",
+                    pu,
+                    len - first_valid
+                )));
+            }
+            let warm = (first_valid + pu - 1) as i32;
+            combos.push(Combo { period: p, warm });
+        }
+        Ok(combos)
+    }
+
+    fn launch_hl2_builder_raw(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        len: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaTtmTrendError> {
+        let func = self
+            .module
+            .get_function("ttm_trend_build_hl2_f32")
+            .map_err(|_| CudaTtmTrendError::MissingKernelSymbol {
+                name: "ttm_trend_build_hl2_f32",
+            })?;
+        let block_x = 256u32;
+        let grid_x = ((len as u32) + block_x - 1) / block_x;
+        let gx = grid_x.max(1);
+        let grid: GridSize = (gx, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch_dims((gx, 1, 1), (block_x, 1, 1))?;
+        unsafe {
+            let mut high_ptr = d_high.as_device_ptr().as_raw();
+            let mut low_ptr = d_low.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut high_ptr as *mut _ as *mut c_void,
+                &mut low_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
+    fn launch_prefix_builder_device_raw(
+        &self,
+        d_source: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_prefix: &mut DeviceBuffer<[f32; 2]>,
+    ) -> Result<(), CudaTtmTrendError> {
+        let func = self
+            .module
+            .get_function("ttm_trend_build_prefix_source_ff2_f32")
+            .map_err(|_| CudaTtmTrendError::MissingKernelSymbol {
+                name: "ttm_trend_build_prefix_source_ff2_f32",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+        self.validate_launch_dims((1, 1, 1), (1, 1, 1))?;
+        unsafe {
+            let mut src_ptr = d_source.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let mut pref_ptr = d_prefix.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut src_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut pref_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
     #[inline]
     fn chunk_rows(n_rows: usize) -> usize {
         let max_grid_y = 65_000usize;
@@ -350,6 +453,110 @@ impl CudaTtmTrend {
         }
 
         self.stream.synchronize()?;
+
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: len,
+        })
+    }
+
+    pub fn ttm_trend_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &TtmTrendBatchRange,
+    ) -> Result<DeviceArrayF32, CudaTtmTrendError> {
+        if d_high.len() != len || d_low.len() != len || d_close.len() != len {
+            return Err(CudaTtmTrendError::InvalidInput(
+                "device input length mismatch".into(),
+            ));
+        }
+
+        let combos = Self::prepare_device_batch_inputs(len, first_valid, sweep)?;
+        let n_combos = combos.len();
+        let elem_ff2 = std::mem::size_of::<[f32; 2]>();
+        let elem_f32 = std::mem::size_of::<f32>();
+        let elem_i32 = std::mem::size_of::<i32>();
+
+        let source_bytes = len.checked_mul(elem_f32).ok_or_else(|| {
+            CudaTtmTrendError::InvalidInput("size overflow in source bytes".into())
+        })?;
+        let prefix_bytes = len.checked_mul(elem_ff2).ok_or_else(|| {
+            CudaTtmTrendError::InvalidInput("size overflow in prefix bytes".into())
+        })?;
+        let params_bytes = n_combos
+            .checked_mul(elem_i32)
+            .and_then(|x| x.checked_mul(2))
+            .ok_or_else(|| {
+                CudaTtmTrendError::InvalidInput("size overflow in params bytes".into())
+            })?;
+        let out_elems = n_combos
+            .checked_mul(len)
+            .ok_or_else(|| CudaTtmTrendError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = out_elems.checked_mul(elem_f32).ok_or_else(|| {
+            CudaTtmTrendError::InvalidInput("size overflow in output bytes".into())
+        })?;
+        let logical = source_bytes
+            .checked_add(prefix_bytes)
+            .and_then(|x| x.checked_add(params_bytes))
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaTtmTrendError::InvalidInput("total VRAM size overflow".into()))?;
+        let headroom = 64usize << 20;
+        Self::will_fit(logical, headroom)?;
+
+        let mut d_source: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
+        let mut d_prefix: DeviceBuffer<[f32; 2]> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
+        self.launch_hl2_builder_raw(d_high, d_low, len, &mut d_source)?;
+        self.launch_prefix_builder_device_raw(&d_source, len, first_valid, &mut d_prefix)?;
+
+        let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
+        let warms: Vec<i32> = combos.iter().map(|c| c.warm).collect();
+        let d_periods = DeviceBuffer::from_slice(&periods)?;
+        let d_warms = DeviceBuffer::from_slice(&warms)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
+
+        let mut func = self
+            .module
+            .get_function("ttm_trend_batch_prefix_ff2_tiled")
+            .map_err(|_| CudaTtmTrendError::MissingKernelSymbol {
+                name: "ttm_trend_batch_prefix_ff2_tiled",
+            })?;
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
+
+        const TTM_TILE_TIME: u32 = 256;
+        const TTM_TILE_PARAMS: u32 = 4;
+        let grid_x: u32 = ((len as u32) + TTM_TILE_TIME - 1) / TTM_TILE_TIME;
+        let grid_y: u32 = ((n_combos as u32) + TTM_TILE_PARAMS - 1) / TTM_TILE_PARAMS;
+        let gx = grid_x.max(1);
+        let gy = grid_y.max(1);
+        let grid: GridSize = (gx, gy, 1).into();
+        let block: BlockSize = (TTM_TILE_TIME, TTM_TILE_PARAMS, 1).into();
+        self.validate_launch_dims((gx, gy, 1), (TTM_TILE_TIME, TTM_TILE_PARAMS, 1))?;
+        unsafe {
+            let mut pref_ptr = d_prefix.as_device_ptr().as_raw();
+            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut per_ptr = d_periods.as_device_ptr().as_raw();
+            let mut warm_ptr = d_warms.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut ncomb_i = n_combos as i32;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut pref_ptr as *mut _ as *mut c_void,
+                &mut close_ptr as *mut _ as *mut c_void,
+                &mut per_ptr as *mut _ as *mut c_void,
+                &mut warm_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut ncomb_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
 
         Ok(DeviceArrayF32 {
             buf: d_out,

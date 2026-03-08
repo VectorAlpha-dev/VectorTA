@@ -285,9 +285,48 @@ impl CudaUltosc {
         close_f32: &[f32],
         sweep: &UltOscBatchRange,
     ) -> Result<DeviceArrayF32, CudaUltoscError> {
-        let (combos, first_valid, len) =
+        let (_combos, first_valid, len) =
             Self::prepare_batch_inputs(high_f32, low_f32, close_f32, sweep)?;
-        let (pcmtl, ptr) = build_prefix_sums_ulthlc(high_f32, low_f32, close_f32, first_valid);
+
+        let d_high = unsafe { DeviceBuffer::from_slice_async(high_f32, &self.stream)? };
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low_f32, &self.stream)? };
+        let d_close = unsafe { DeviceBuffer::from_slice_async(close_f32, &self.stream)? };
+        let dev = self.ultosc_batch_dev_from_device_inputs(
+            &d_high,
+            &d_low,
+            &d_close,
+            len,
+            first_valid,
+            sweep,
+        )?;
+        self.stream.synchronize()?;
+        Ok(dev)
+    }
+
+    pub fn ultosc_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &UltOscBatchRange,
+    ) -> Result<DeviceArrayF32, CudaUltoscError> {
+        if len == 0 {
+            return Err(CudaUltoscError::InvalidInput("empty input".into()));
+        }
+        if d_high.len() != len || d_low.len() != len || d_close.len() != len {
+            return Err(CudaUltoscError::InvalidInput(
+                "device inputs must have equal non-zero length".into(),
+            ));
+        }
+        if first_valid == 0 || first_valid >= len {
+            return Err(CudaUltoscError::InvalidInput(
+                "first_valid must be in 1..len".into(),
+            ));
+        }
+
+        let combos = Self::prepare_batch_combos(sweep, len, first_valid)?;
 
         let headroom = 64 * 1024 * 1024usize;
         let prefix_bytes = (len
@@ -323,10 +362,19 @@ impl CudaUltosc {
             }
         }
 
-        let d_pcmtl: DeviceBuffer<Float2> =
-            unsafe { DeviceBuffer::from_slice_async(&pcmtl, &self.stream)? };
-        let d_ptr: DeviceBuffer<Float2> =
-            unsafe { DeviceBuffer::from_slice_async(&ptr, &self.stream)? };
+        let mut d_pcmtl: DeviceBuffer<Float2> =
+            unsafe { DeviceBuffer::uninitialized_async(len + 1, &self.stream)? };
+        let mut d_ptr: DeviceBuffer<Float2> =
+            unsafe { DeviceBuffer::uninitialized_async(len + 1, &self.stream)? };
+        self.launch_precompute_prefix_kernel(
+            d_high,
+            d_low,
+            d_close,
+            len,
+            first_valid,
+            &mut d_pcmtl,
+            &mut d_ptr,
+        )?;
 
         let mut periods = Vec::with_capacity(combos.len());
         for c in &combos {
@@ -351,13 +399,60 @@ impl CudaUltosc {
             combos.len(),
             &mut d_out,
         )?;
-        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: combos.len(),
             cols: len,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_precompute_prefix_kernel(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_pcmtl: &mut DeviceBuffer<Float2>,
+        d_ptr: &mut DeviceBuffer<Float2>,
+    ) -> Result<(), CudaUltoscError> {
+        if len == 0 {
+            return Ok(());
+        }
+
+        let func = self
+            .module
+            .get_function("ultosc_build_prefix_sums_f32")
+            .map_err(|_| CudaUltoscError::MissingKernelSymbol {
+                name: "ultosc_build_prefix_sums_f32",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+        self.validate_launch(1, 1, 1, 1, 1, 1)?;
+
+        unsafe {
+            let mut high_ptr = d_high.as_device_ptr().as_raw();
+            let mut low_ptr = d_low.as_device_ptr().as_raw();
+            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let mut pcmtl_ptr = d_pcmtl.as_device_ptr().as_raw();
+            let mut ptr_ptr = d_ptr.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut high_ptr as *mut _ as *mut c_void,
+                &mut low_ptr as *mut _ as *mut c_void,
+                &mut close_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut pcmtl_ptr as *mut _ as *mut c_void,
+                &mut ptr_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -461,6 +556,15 @@ impl CudaUltosc {
         let first = first_valid
             .ok_or_else(|| CudaUltoscError::InvalidInput("all values are NaN".into()))?;
 
+        let combos = Self::prepare_batch_combos(sweep, len, first)?;
+        Ok((combos, first, len))
+    }
+
+    fn prepare_batch_combos(
+        sweep: &UltOscBatchRange,
+        len: usize,
+        first: usize,
+    ) -> Result<Vec<UltOscParams>, CudaUltoscError> {
         let combos = expand_grid_ultosc(sweep)?;
         if combos.is_empty() {
             return Err(CudaUltoscError::InvalidInput(
@@ -487,7 +591,7 @@ impl CudaUltosc {
                 ));
             }
         }
-        Ok((combos, first, len))
+        Ok(combos)
     }
 
     pub fn ultosc_many_series_one_param_time_major_dev(

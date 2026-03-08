@@ -6,9 +6,9 @@ use vector_ta::utilities::enums::Kernel;
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::cuda_available;
-#[cfg(feature = "cuda")]
 use vector_ta::cuda::oscillators::ppo_wrapper::CudaPpo;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::{cuda_available, CudaRuntime};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -127,6 +127,66 @@ fn ppo_cuda_batch_matches_cpu_ema() -> Result<(), Box<dyn std::error::Error>> {
             g
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn ppo_cuda_device_prices_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[ppo_cuda_device_prices_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 20_000usize;
+    let first_valid = 7usize;
+    let mut price_f32 = vec![f32::NAN; len];
+    for (i, value) in price_f32.iter_mut().enumerate().skip(first_valid) {
+        let x = i as f32;
+        *value = (x * 0.00131).sin() + 0.00009 * x;
+    }
+    let sweep = PpoBatchRange {
+        fast_period: (4, 22, 3),
+        slow_period: (8, 30, 4),
+        ma_type: "sma".into(),
+    };
+
+    let cuda = CudaPpo::new(0).expect("CudaPpo::new");
+    let (legacy, legacy_params) = cuda
+        .ppo_batch_dev(&price_f32, &sweep)
+        .expect("legacy batch");
+
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let device_prices = runtime.upload_f32(&price_f32).expect("upload prices");
+    let (device, device_params) = cuda
+        .ppo_batch_dev_from_device_prices(device_prices.buffer(), len, first_valid, &sweep)
+        .expect("device prices");
+    cuda.synchronize().expect("sync");
+
+    assert_eq!(legacy.rows, device.rows);
+    assert_eq!(legacy.cols, device.cols);
+    assert_eq!(legacy_params.len(), device_params.len());
+    for (lhs, rhs) in legacy_params.iter().zip(device_params.iter()) {
+        assert_eq!(lhs.fast_period, rhs.fast_period);
+        assert_eq!(lhs.slow_period, rhs.slow_period);
+        assert_eq!(lhs.ma_type, rhs.ma_type);
+    }
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    let mut device_host = vec![0f32; device.len()];
+    device.buf.copy_to(&mut device_host)?;
+
+    for (idx, (&lhs, &rhs)) in legacy_host.iter().zip(device_host.iter()).enumerate() {
+        assert!(
+            approx_eq(lhs as f64, rhs as f64, 1e-5),
+            "mismatch at {}: legacy={} device={}",
+            idx,
+            lhs,
+            rhs
+        );
+    }
+
     Ok(())
 }
 

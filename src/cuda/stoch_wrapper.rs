@@ -1,9 +1,9 @@
 #![cfg(feature = "cuda")]
 
-use crate::cuda::moving_averages::ma_selector::{CudaMaData, CudaMaSelector};
+use crate::cuda::moving_averages::ma_selector::{CudaMaData, CudaMaDeviceDataRef, CudaMaSelector};
 use crate::cuda::moving_averages::DeviceArrayF32;
+use crate::cuda::CudaDeviceSliceF32Ref;
 use crate::indicators::stoch::{StochBatchRange, StochParams};
-use crate::indicators::utility_functions::{max_rolling, min_rolling};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
@@ -199,7 +199,55 @@ impl CudaStoch {
             .ok_or_else(|| CudaStochError::InvalidInput("size overflow".into()))?;
         Self::will_fit(required_bytes, 64 * 1024 * 1024)?;
 
+        let d_high = DeviceBuffer::from_slice(high_f32).map_err(CudaStochError::Cuda)?;
+        let d_low = DeviceBuffer::from_slice(low_f32).map_err(CudaStochError::Cuda)?;
         let d_close = DeviceBuffer::from_slice(close_f32).map_err(CudaStochError::Cuda)?;
+        let batch =
+            self.stoch_batch_dev_from_device_ptrs(&d_high, &d_low, &d_close, first_valid, sweep)?;
+        self.stream.synchronize().map_err(CudaStochError::Cuda)?;
+        Ok(batch)
+    }
+
+    pub fn stoch_batch_dev_from_device_ptrs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        first_valid: usize,
+        sweep: &StochBatchRange,
+    ) -> Result<CudaStochBatch, CudaStochError> {
+        let len = d_high.len();
+        if len == 0 || d_low.len() != len || d_close.len() != len {
+            return Err(CudaStochError::InvalidInput(
+                "inputs must be non-empty and same length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaStochError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, len
+            )));
+        }
+
+        let combos = expand_grid_stoch(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaStochError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        let max_fkp = combos
+            .iter()
+            .map(|c| c.fastk_period.unwrap_or(14))
+            .max()
+            .unwrap_or(14);
+        if len - first_valid < max_fkp {
+            return Err(CudaStochError::InvalidInput(format!(
+                "not enough valid data for fastk {} (tail = {})",
+                max_fkp,
+                len - first_valid
+            )));
+        }
+        let rows_total = combos.len();
 
         let total_out = rows_total
             .checked_mul(len)
@@ -209,12 +257,6 @@ impl CudaStoch {
         let mut d_d: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(total_out) }.map_err(CudaStochError::Cuda)?;
 
-        let func_kraw = self
-            .module
-            .get_function("stoch_k_raw_from_hhll_f32")
-            .map_err(|_| CudaStochError::MissingKernelSymbol {
-                name: "stoch_k_raw_from_hhll_f32",
-            })?;
         let func_pack = self
             .module
             .get_function("pack_row_broadcast_rowmajor_f32")
@@ -301,11 +343,6 @@ impl CudaStoch {
                         .checked_mul(std::mem::size_of::<f32>())
                         .ok_or_else(|| CudaStochError::InvalidInput("size overflow".into()))?;
                     if Self::will_fit(required_fast, 64 * 1024 * 1024).is_ok() {
-                        let d_high =
-                            DeviceBuffer::from_slice(high_f32).map_err(CudaStochError::Cuda)?;
-                        let d_low =
-                            DeviceBuffer::from_slice(low_f32).map_err(CudaStochError::Cuda)?;
-
                         let mut fastk_periods = Vec::<i32>::with_capacity(rows_total);
                         let mut first_valids = Vec::<i32>::with_capacity(rows_total);
                         let mut first_kraws = Vec::<i32>::with_capacity(rows_total);
@@ -537,7 +574,6 @@ impl CudaStoch {
                             }
                         }
 
-                        self.stream.synchronize().map_err(CudaStochError::Cuda)?;
                         return Ok(CudaStochBatch {
                             k: DeviceArrayF32 {
                                 buf: d_k,
@@ -565,8 +601,6 @@ impl CudaStoch {
                 .push(row);
         }
 
-        let mut d_hh: Option<DeviceBuffer<f32>> = None;
-        let mut d_ll: Option<DeviceBuffer<f32>> = None;
         let mut d_kraw: Option<DeviceBuffer<f32>> = None;
 
         let launch_1d = |n: usize| -> (GridSize, BlockSize) {
@@ -576,79 +610,48 @@ impl CudaStoch {
         };
 
         let norm = |s: &str| s.to_ascii_lowercase();
-
-        let high_f64: Vec<f64> = high_f32.iter().map(|&v| v as f64).collect();
-        let low_f64: Vec<f64> = low_f32.iter().map(|&v| v as f64).collect();
-        let mut hh_host = vec![f32::NAN; len];
-        let mut ll_host = vec![f32::NAN; len];
+        let func_kraw_many = self
+            .module
+            .get_function("stoch_one_series_many_params_f32")
+            .map_err(|_| CudaStochError::MissingKernelSymbol {
+                name: "stoch_one_series_many_params_f32",
+            })?;
 
         for (fkp, rows_in_group) in by_fastk {
-            hh_host.fill(f32::NAN);
-            ll_host.fill(f32::NAN);
-            let highs = max_rolling(&high_f64[first_valid..], fkp)
-                .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
-            let lows = min_rolling(&low_f64[first_valid..], fkp)
-                .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
-            for (i, &v) in highs.iter().enumerate() {
-                if v.is_finite() {
-                    hh_host[first_valid + i] = v as f32;
-                }
-            }
-            for (i, &v) in lows.iter().enumerate() {
-                if v.is_finite() {
-                    ll_host[first_valid + i] = v as f32;
-                }
-            }
-
-            if d_hh.as_ref().map(|b| b.len()).unwrap_or(0) != len {
-                d_hh = Some(
-                    unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaStochError::Cuda)?,
-                );
-            }
-            if d_ll.as_ref().map(|b| b.len()).unwrap_or(0) != len {
-                d_ll = Some(
-                    unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaStochError::Cuda)?,
-                );
-            }
             if d_kraw.as_ref().map(|b| b.len()).unwrap_or(0) != len {
                 d_kraw = Some(
                     unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaStochError::Cuda)?,
                 );
             }
-            let d_hh_ref = d_hh.as_mut().unwrap();
-            let d_ll_ref = d_ll.as_mut().unwrap();
             let d_kraw_ref = d_kraw.as_mut().unwrap();
 
-            unsafe {
-                d_hh_ref
-                    .async_copy_from(&hh_host, &self.stream)
-                    .map_err(CudaStochError::Cuda)?;
-                d_ll_ref
-                    .async_copy_from(&ll_host, &self.stream)
-                    .map_err(CudaStochError::Cuda)?;
-            }
-
             {
-                let (grid, block) = launch_1d(len);
+                let d_fastk =
+                    DeviceBuffer::from_slice(&[fkp as i32]).map_err(CudaStochError::Cuda)?;
+                let d_first = DeviceBuffer::from_slice(&[first_valid as i32])
+                    .map_err(CudaStochError::Cuda)?;
+                let (grid, block) = launch_1d(1);
                 unsafe {
-                    let mut p_close = d_close.as_device_ptr().as_raw();
-                    let mut p_hh = d_hh_ref.as_device_ptr().as_raw();
-                    let mut p_ll = d_ll_ref.as_device_ptr().as_raw();
+                    let mut p_h = d_high.as_device_ptr().as_raw();
+                    let mut p_l = d_low.as_device_ptr().as_raw();
+                    let mut p_c = d_close.as_device_ptr().as_raw();
+                    let mut p_fastk = d_fastk.as_device_ptr().as_raw();
+                    let mut p_first = d_first.as_device_ptr().as_raw();
                     let mut p_len = len as i32;
-                    let mut p_fv = first_valid as i32;
-                    let mut p_fastk = fkp as i32;
+                    let mut p_n = 1i32;
                     let mut p_out = d_kraw_ref.as_device_ptr().as_raw();
                     let args: &mut [*mut c_void] = &mut [
-                        &mut p_close as *mut _ as *mut c_void,
-                        &mut p_hh as *mut _ as *mut c_void,
-                        &mut p_ll as *mut _ as *mut c_void,
-                        &mut p_len as *mut _ as *mut c_void,
-                        &mut p_fv as *mut _ as *mut c_void,
+                        &mut p_h as *mut _ as *mut c_void,
+                        &mut p_l as *mut _ as *mut c_void,
+                        &mut p_c as *mut _ as *mut c_void,
                         &mut p_fastk as *mut _ as *mut c_void,
+                        &mut p_first as *mut _ as *mut c_void,
+                        &mut p_len as *mut _ as *mut c_void,
+                        &mut p_n as *mut _ as *mut c_void,
                         &mut p_out as *mut _ as *mut c_void,
                     ];
                     self.stream
-                        .launch(&func_kraw, grid, block, 0, args)
+                        .launch(&func_kraw_many, grid, block, 0, args)
                         .map_err(CudaStochError::Cuda)?;
                 }
             }
@@ -725,19 +728,20 @@ impl CudaStoch {
                     }
                     out
                 } else {
-                    let selector = CudaMaSelector::new(0);
-                    let mut kraw_host: LockedBuffer<f32> =
-                        unsafe { LockedBuffer::uninitialized(len).map_err(CudaStochError::Cuda)? };
-                    unsafe {
-                        d_kraw_ref
-                            .async_copy_to(kraw_host.as_mut_slice(), &self.stream)
-                            .map_err(CudaStochError::Cuda)?;
-                    }
-                    self.stream.synchronize().map_err(CudaStochError::Cuda)?;
+                    let selector = CudaMaSelector::new(self.device_id as usize);
+                    let kraw_view = unsafe {
+                        CudaDeviceSliceF32Ref::from_raw_parts(
+                            d_kraw_ref.as_device_ptr().as_raw(),
+                            len,
+                            self.device_id,
+                        )
+                        .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?
+                    };
                     let dev = selector
-                        .ma_to_device(
+                        .ma_to_device_ref(
                             &sk_key.ty,
-                            CudaMaData::SliceF32(kraw_host.as_slice()),
+                            CudaMaDeviceDataRef::Slice(kraw_view),
+                            first_valid + fkp - 1,
                             sk_key.p,
                         )
                         .map_err(|e| CudaStochError::InvalidInput(format!("slowK: {}", e)))?;
@@ -844,20 +848,20 @@ impl CudaStoch {
                         }
                         out
                     } else {
-                        let selector = CudaMaSelector::new(0);
-                        let mut slowk_host: LockedBuffer<f32> = unsafe {
-                            LockedBuffer::uninitialized(len).map_err(CudaStochError::Cuda)?
+                        let selector = CudaMaSelector::new(self.device_id as usize);
+                        let slowk_view = unsafe {
+                            CudaDeviceSliceF32Ref::from_raw_parts(
+                                slowk_dev_buf.as_device_ptr().as_raw(),
+                                len,
+                                self.device_id,
+                            )
+                            .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?
                         };
-                        unsafe {
-                            slowk_dev_buf
-                                .async_copy_to(slowk_host.as_mut_slice(), &self.stream)
-                                .map_err(CudaStochError::Cuda)?;
-                        }
-                        self.stream.synchronize().map_err(CudaStochError::Cuda)?;
                         let dev = selector
-                            .ma_to_device(
+                            .ma_to_device_ref(
                                 &sd_key.ty,
-                                CudaMaData::SliceF32(slowk_host.as_slice()),
+                                CudaMaDeviceDataRef::Slice(slowk_view),
+                                first_slowk,
                                 sd_key.p,
                             )
                             .map_err(|e| CudaStochError::InvalidInput(format!("slowD: {}", e)))?;
@@ -890,8 +894,6 @@ impl CudaStoch {
                 }
             }
         }
-
-        self.stream.synchronize().map_err(CudaStochError::Cuda)?;
 
         Ok(CudaStochBatch {
             k: DeviceArrayF32 {

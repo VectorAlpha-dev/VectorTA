@@ -8,7 +8,7 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::oscillators::CudaRvi;
+use vector_ta::cuda::{CudaRuntime, CudaRvi};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -132,6 +132,65 @@ fn rvi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             );
             assert!(false, "mismatch at {}", idx);
         }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn rvi_cuda_device_prices_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[rvi_cuda_device_prices_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 262_144usize;
+    let first_valid = 256usize;
+    let mut data = vec![f32::NAN; len];
+    for (i, value) in data.iter_mut().enumerate().skip(first_valid) {
+        let x = i as f32;
+        *value = (x * 0.0011).sin() + x * 0.00021;
+    }
+
+    let sweep = RviBatchRange {
+        period: (10, 24, 2),
+        ma_len: (14, 14, 0),
+        matype: (1, 1, 0),
+        devtype: (0, 0, 0),
+    };
+
+    let cuda = CudaRvi::new(0).expect("CudaRvi::new");
+    let (legacy_dev, legacy_combos) = cuda.rvi_batch_dev(&data, &sweep).expect("legacy");
+
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let device_prices = runtime.upload_f32(&data).expect("upload");
+    let (device_dev, device_combos) = cuda
+        .rvi_batch_dev_from_device_prices(device_prices.buffer(), len, first_valid, &sweep)
+        .expect("device inputs");
+
+    assert_eq!(legacy_combos.len(), device_combos.len());
+    for (legacy, device) in legacy_combos.iter().zip(device_combos.iter()) {
+        assert_eq!(legacy.period, device.period);
+        assert_eq!(legacy.ma_len, device.ma_len);
+        assert_eq!(legacy.matype, device.matype);
+        assert_eq!(legacy.devtype, device.devtype);
+    }
+    assert_eq!(legacy_dev.rows, device_dev.rows);
+    assert_eq!(legacy_dev.cols, device_dev.cols);
+
+    let mut legacy = vec![0.0f32; legacy_dev.len()];
+    legacy_dev.buf.copy_to(legacy.as_mut_slice())?;
+    let mut device = vec![0.0f32; device_dev.len()];
+    device_dev.buf.copy_to(device.as_mut_slice())?;
+
+    for (idx, (lhs, rhs)) in legacy.iter().zip(device.iter()).enumerate() {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!(
+            (lhs - rhs).abs() < 1e-6,
+            "mismatch at {idx}: lhs={lhs} rhs={rhs}"
+        );
     }
     Ok(())
 }

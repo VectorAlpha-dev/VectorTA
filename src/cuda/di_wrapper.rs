@@ -442,6 +442,50 @@ impl CudaDi {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn launch_precompute_terms_raw(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_up: &mut DeviceBuffer<f32>,
+        d_dn: &mut DeviceBuffer<f32>,
+        d_tr: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaDiError> {
+        let func = self
+            .module
+            .get_function("di_build_up_dn_tr_f32")
+            .map_err(|_| CudaDiError::MissingKernelSymbol {
+                name: "di_build_up_dn_tr_f32",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+        unsafe {
+            let mut high_ptr = d_high.as_device_ptr().as_raw();
+            let mut low_ptr = d_low.as_device_ptr().as_raw();
+            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let mut up_ptr = d_up.as_device_ptr().as_raw();
+            let mut dn_ptr = d_dn.as_device_ptr().as_raw();
+            let mut tr_ptr = d_tr.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut high_ptr as *mut _ as *mut c_void,
+                &mut low_ptr as *mut _ as *mut c_void,
+                &mut close_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut up_ptr as *mut _ as *mut c_void,
+                &mut dn_ptr as *mut _ as *mut c_void,
+                &mut tr_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
     pub fn di_batch_dev(
         &self,
         high: &[f32],
@@ -457,6 +501,35 @@ impl CudaDi {
             return Err(CudaDiError::InvalidInput("empty input".into()));
         }
         let first_valid = Self::first_valid_hlc(high, low, close)?;
+        let d_high = unsafe { DeviceBuffer::from_slice_async(high, &self.stream)? };
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low, &self.stream)? };
+        let d_close = unsafe { DeviceBuffer::from_slice_async(close, &self.stream)? };
+        let out = self.di_batch_dev_from_device_inputs(
+            &d_high,
+            &d_low,
+            &d_close,
+            len,
+            first_valid,
+            sweep,
+        )?;
+        self.synchronize()?;
+        Ok(out)
+    }
+
+    pub fn di_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &DiBatchRange,
+    ) -> Result<(DeviceArrayF32, DeviceArrayF32, Vec<DiParams>), CudaDiError> {
+        if d_high.len() != len || d_low.len() != len || d_close.len() != len {
+            return Err(CudaDiError::InvalidInput(
+                "device input length mismatch".into(),
+            ));
+        }
         let periods = Self::expand_periods(sweep)?;
         for &p in &periods {
             if p == 0 || p > len || (len - first_valid) < p {
@@ -469,15 +542,6 @@ impl CudaDi {
                 )));
             }
         }
-
-        let (up_h, dn_h, tr_h) = Self::build_up_dn_tr(high, low, close, first_valid);
-
-        let d_up: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::from_slice_async(&up_h, &self.stream)? };
-        let d_dn: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::from_slice_async(&dn_h, &self.stream)? };
-        let d_tr: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::from_slice_async(&tr_h, &self.stream)? };
 
         let n_combos = periods.len();
         let periods_i32: Vec<i32> = periods.iter().map(|&p| p as i32).collect();
@@ -511,6 +575,22 @@ impl CudaDi {
             .ok_or_else(|| CudaDiError::InvalidInput("byte size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         let _ = self.will_fit(required, headroom)?;
+        let mut d_up: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream)? };
+        let mut d_dn: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream)? };
+        let mut d_tr: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream)? };
+        self.launch_precompute_terms_raw(
+            d_high,
+            d_low,
+            d_close,
+            len,
+            first_valid,
+            &mut d_up,
+            &mut d_dn,
+            &mut d_tr,
+        )?;
         let mut d_plus: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream)? };
         let mut d_minus: DeviceBuffer<f32> =
@@ -536,8 +616,6 @@ impl CudaDi {
             )?;
             processed += this_chunk;
         }
-
-        self.synchronize()?;
 
         let plus = DeviceArrayF32 {
             buf: d_plus,

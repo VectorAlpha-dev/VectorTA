@@ -172,6 +172,23 @@ impl CudaTrix {
         self.run_batch_kernel(&inputs)
     }
 
+    pub fn trix_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &TrixBatchRange,
+    ) -> Result<DeviceArrayF32, CudaTrixError> {
+        let (combos, periods) = Self::prepare_batch_params(series_len, first_valid, sweep)?;
+        self.run_batch_kernel_from_device_prices(
+            d_prices,
+            &periods,
+            combos.len(),
+            first_valid,
+            series_len,
+        )
+    }
+
     pub fn trix_batch_into_host_f32(
         &self,
         prices: &[f32],
@@ -364,6 +381,103 @@ impl CudaTrix {
             rows: inputs.combos.len(),
             cols: inputs.series_len,
         })
+    }
+
+    fn run_batch_kernel_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        periods: &[i32],
+        combo_count: usize,
+        first_valid: usize,
+        series_len: usize,
+    ) -> Result<DeviceArrayF32, CudaTrixError> {
+        let logs_bytes = series_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaTrixError::InvalidInput("logs byte size overflow".into()))?;
+        let periods_bytes = periods
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaTrixError::InvalidInput("periods byte size overflow".into()))?;
+        let out_elems = series_len
+            .checked_mul(combo_count)
+            .ok_or_else(|| CudaTrixError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaTrixError::InvalidInput("output byte size overflow".into()))?;
+        let bytes = logs_bytes
+            .checked_add(periods_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaTrixError::InvalidInput("VRAM requirement overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(bytes, headroom) {
+            if let Some((free, _total)) = Self::device_mem_info() {
+                return Err(CudaTrixError::OutOfMemory {
+                    required: bytes,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaTrixError::InvalidInput(
+                    "insufficient device memory for TRIX batch".into(),
+                ));
+            }
+        }
+
+        let mut d_logs: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(series_len, &self.stream) }?;
+        let d_periods = self.htod_copy_i32(periods)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
+
+        self.launch_log_builder_kernel(d_prices, series_len, first_valid, &mut d_logs)?;
+        self.launch_batch_kernel(
+            &d_logs,
+            &d_periods,
+            series_len,
+            combo_count,
+            first_valid,
+            &mut d_out,
+        )?;
+
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combo_count,
+            cols: series_len,
+        })
+    }
+
+    fn launch_log_builder_kernel(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        d_logs: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaTrixError> {
+        let func = self
+            .module
+            .get_function("trix_build_logs_f32")
+            .map_err(|_| CudaTrixError::MissingKernelSymbol {
+                name: "trix_build_logs_f32",
+            })?;
+        let block_x: u32 = 256;
+        let grid_x: u32 = ((series_len as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut series_len_i = series_len as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut logs_ptr = d_logs.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut logs_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
     }
 
     fn launch_batch_kernel(
@@ -687,6 +801,65 @@ impl CudaTrix {
             series_len,
             logs,
         })
+    }
+
+    fn prepare_batch_params(
+        series_len: usize,
+        first_valid: usize,
+        sweep: &TrixBatchRange,
+    ) -> Result<(Vec<TrixParams>, Vec<i32>), CudaTrixError> {
+        if series_len == 0 {
+            return Err(CudaTrixError::InvalidInput("empty prices".into()));
+        }
+        if first_valid >= series_len {
+            return Err(CudaTrixError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, series_len
+            )));
+        }
+        let combos = expand_grid_trix(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaTrixError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+
+        let mut periods = Vec::with_capacity(combos.len());
+        let mut max_period = 0usize;
+        for params in &combos {
+            let period = params.period.unwrap_or(0);
+            if period == 0 {
+                return Err(CudaTrixError::InvalidInput(
+                    "period must be positive".into(),
+                ));
+            }
+            if period > i32::MAX as usize {
+                return Err(CudaTrixError::InvalidInput(
+                    "period exceeds i32 kernel limit".into(),
+                ));
+            }
+            periods.push(period as i32);
+            max_period = max_period.max(period);
+        }
+
+        let needed = max_period
+            .checked_sub(1)
+            .and_then(|v| v.checked_mul(3))
+            .and_then(|v| v.checked_add(2))
+            .ok_or_else(|| {
+                CudaTrixError::InvalidInput(
+                    "period overflow when computing TRIX warmup length".into(),
+                )
+            })?;
+        if series_len - first_valid < needed {
+            return Err(CudaTrixError::InvalidInput(format!(
+                "not enough valid data (needed >= {}, valid = {})",
+                needed,
+                series_len - first_valid
+            )));
+        }
+
+        Ok((combos, periods))
     }
 
     fn prepare_many_series_inputs(

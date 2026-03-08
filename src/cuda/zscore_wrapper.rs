@@ -5,7 +5,7 @@ use crate::indicators::zscore::ZscoreBatchRange;
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, DevicePointer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -332,6 +332,81 @@ impl CudaZscore {
         Ok((out, first_valid, len))
     }
 
+    fn prepare_batch_inputs_device(
+        len: usize,
+        first_valid: usize,
+        sweep: &ZscoreBatchRange,
+    ) -> Result<Vec<ZscoreCombo>, CudaZscoreError> {
+        if len == 0 {
+            return Err(CudaZscoreError::InvalidInput("empty data".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaZscoreError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, len
+            )));
+        }
+
+        let combos_raw = Self::expand_combos(sweep)?;
+        if combos_raw.is_empty() {
+            return Err(CudaZscoreError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+
+        let mut seen_ma = HashSet::new();
+        let mut out = Vec::with_capacity(combos_raw.len());
+        for (period, nbdev, ma_type, devtype) in combos_raw {
+            if period == 0 {
+                return Err(CudaZscoreError::InvalidInput("period must be > 0".into()));
+            }
+            if period > len {
+                return Err(CudaZscoreError::InvalidInput(format!(
+                    "period {} exceeds data length {}",
+                    period, len
+                )));
+            }
+            if len - first_valid < period {
+                return Err(CudaZscoreError::InvalidInput(format!(
+                    "not enough valid data for period {} (valid after first {}: {})",
+                    period,
+                    first_valid,
+                    len - first_valid
+                )));
+            }
+            if devtype != 0 {
+                return Err(CudaZscoreError::InvalidInput(format!(
+                    "unsupported devtype {} (only devtype=0 supported)",
+                    devtype
+                )));
+            }
+            if ma_type != "sma" {
+                seen_ma.insert(ma_type);
+                continue;
+            }
+            out.push(ZscoreCombo {
+                period,
+                nbdev: nbdev as f32,
+            });
+        }
+
+        if out.is_empty() {
+            if seen_ma.is_empty() {
+                return Err(CudaZscoreError::InvalidInput(
+                    "no supported parameter combinations (require ma_type='sma' and devtype=0)"
+                        .into(),
+                ));
+            } else {
+                return Err(CudaZscoreError::InvalidInput(format!(
+                    "unsupported ma_type(s): {} (only 'sma' supported for CUDA)",
+                    seen_ma.into_iter().collect::<Vec<_>>().join(", ")
+                )));
+            }
+        }
+
+        Ok(out)
+    }
+
     fn build_prefixes(data: &[f32]) -> (Vec<f64>, Vec<f64>, Vec<i32>) {
         let len = data.len();
         let mut prefix_sum = vec![0.0f64; len + 1];
@@ -478,7 +553,7 @@ impl CudaZscore {
 
     fn launch_batch_kernel_ds(
         &self,
-        d_data: &DeviceBuffer<f32>,
+        d_data: DevicePointer<f32>,
         d_prefix_sum: &DeviceBuffer<Float2>,
         d_prefix_sum_sq: &DeviceBuffer<Float2>,
         d_prefix_nan: &DeviceBuffer<i32>,
@@ -514,7 +589,7 @@ impl CudaZscore {
             let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
             unsafe {
-                let mut data_ptr = d_data.as_device_ptr().as_raw();
+                let mut data_ptr = d_data.as_raw();
                 let mut ps_ptr = d_prefix_sum.as_device_ptr().as_raw();
                 let mut ps2_ptr = d_prefix_sum_sq.as_device_ptr().as_raw();
                 let mut pnan_ptr = d_prefix_nan.as_device_ptr().as_raw();
@@ -541,6 +616,53 @@ impl CudaZscore {
             }
         }
         Ok(())
+    }
+
+    fn build_prefixes_ds_device(
+        &self,
+        d_data: DevicePointer<f32>,
+        len: usize,
+    ) -> Result<
+        (
+            DeviceBuffer<Float2>,
+            DeviceBuffer<Float2>,
+            DeviceBuffer<i32>,
+        ),
+        CudaZscoreError,
+    > {
+        let func = self
+            .module
+            .get_function("zscore_build_prefix_f32ds")
+            .map_err(|_| CudaZscoreError::MissingKernelSymbol {
+                name: "zscore_build_prefix_f32ds",
+            })?;
+
+        let prefix_len = len
+            .checked_add(1)
+            .ok_or_else(|| CudaZscoreError::InvalidInput("len+1 overflow".into()))?;
+        let mut d_ps: DeviceBuffer<Float2> = unsafe { DeviceBuffer::uninitialized(prefix_len) }?;
+        let mut d_ps2: DeviceBuffer<Float2> = unsafe { DeviceBuffer::uninitialized(prefix_len) }?;
+        let mut d_pnan: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(prefix_len) }?;
+
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+        unsafe {
+            let mut data_ptr = d_data.as_raw();
+            let mut len_i = len as i32;
+            let mut ps_ptr = d_ps.as_device_ptr().as_raw();
+            let mut ps2_ptr = d_ps2.as_device_ptr().as_raw();
+            let mut pnan_ptr = d_pnan.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut data_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut ps_ptr as *mut _ as *mut c_void,
+                &mut ps2_ptr as *mut _ as *mut c_void,
+                &mut pnan_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+
+        Ok((d_ps, d_ps2, d_pnan))
     }
 
     #[inline]
@@ -577,7 +699,7 @@ impl CudaZscore {
             let d_pnan: DeviceBuffer<i32> = DeviceBuffer::from_slice(pnan.as_slice())?;
 
             self.launch_batch_kernel_ds(
-                &d_data,
+                d_data.as_device_ptr(),
                 &d_ps,
                 &d_ps2,
                 &d_pnan,
@@ -615,6 +737,76 @@ impl CudaZscore {
             rows: combos.len(),
             cols: len,
         })
+    }
+
+    pub fn zscore_batch_from_device_ptr(
+        &self,
+        d_data: DevicePointer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &ZscoreBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<(usize, f32)>), CudaZscoreError> {
+        let combos = Self::prepare_batch_inputs_device(len, first_valid, sweep)?;
+        let prefix_len = len
+            .checked_add(1)
+            .ok_or_else(|| CudaZscoreError::InvalidInput("len+1 overflow".into()))?;
+        let prefixes_f2 = prefix_len
+            .checked_mul(2 * std::mem::size_of::<Float2>())
+            .ok_or_else(|| CudaZscoreError::InvalidInput("prefix Float2 bytes overflow".into()))?;
+        let prefixes_i32 = prefix_len
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaZscoreError::InvalidInput("prefix i32 bytes overflow".into()))?;
+        let prefixes = prefixes_f2
+            .checked_add(prefixes_i32)
+            .ok_or_else(|| CudaZscoreError::InvalidInput("prefix bytes overflow".into()))?;
+        let params = combos
+            .len()
+            .checked_mul(std::mem::size_of::<i32>() + std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaZscoreError::InvalidInput("params bytes overflow".into()))?;
+        let out_bytes = combos
+            .len()
+            .checked_mul(len)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaZscoreError::InvalidInput("output bytes overflow".into()))?;
+        let required = prefixes
+            .checked_add(params)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaZscoreError::InvalidInput("VRAM requirement overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
+
+        let periods: Vec<i32> = combos.iter().map(|c| c.period as i32).collect();
+        let nbdevs: Vec<f32> = combos.iter().map(|c| c.nbdev).collect();
+        let d_periods = DeviceBuffer::from_slice(&periods)?;
+        let d_nbdevs = DeviceBuffer::from_slice(&nbdevs)?;
+
+        let elems = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaZscoreError::InvalidInput("rows*cols overflow".into()))?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
+
+        let (d_ps, d_ps2, d_pnan) = self.build_prefixes_ds_device(d_data, len)?;
+        self.launch_batch_kernel_ds(
+            d_data,
+            &d_ps,
+            &d_ps2,
+            &d_pnan,
+            &d_periods,
+            &d_nbdevs,
+            len,
+            first_valid,
+            combos.len(),
+            &mut d_out,
+        )?;
+        let meta = combos.iter().map(|c| (c.period, c.nbdev)).collect();
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: combos.len(),
+                cols: len,
+            },
+            meta,
+        ))
     }
 
     pub fn zscore_batch_dev(
@@ -896,7 +1088,7 @@ pub mod benches {
         fn launch(&mut self) {
             self.cuda
                 .launch_batch_kernel_ds(
-                    &self.d_data,
+                    self.d_data.as_device_ptr(),
                     &self.d_ps,
                     &self.d_ps2,
                     &self.d_pnan,

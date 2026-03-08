@@ -547,6 +547,85 @@ impl CudaCvi {
         Ok(())
     }
 
+    pub fn cvi_batch_device(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        periods: &[i32],
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaCviError> {
+        if len == 0 {
+            return Err(CudaCviError::InvalidInput("empty input".into()));
+        }
+        if d_high.len() != len || d_low.len() != len {
+            return Err(CudaCviError::InvalidInput(
+                "device high/low buffer length mismatch".into(),
+            ));
+        }
+        if periods.is_empty() {
+            return Err(CudaCviError::InvalidInput("empty period sweep".into()));
+        }
+        let rows = periods.len();
+        let needed = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaCviError::InvalidInput("size overflow".into()))?;
+        if d_out.len() < needed {
+            return Err(CudaCviError::InvalidInput("output buffer too small".into()));
+        }
+
+        let mut d_range: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
+        let range_func = self
+            .module
+            .get_function("range_from_high_low_f32")
+            .map_err(|_| CudaCviError::MissingKernelSymbol {
+                name: "range_from_high_low_f32",
+            })?;
+        unsafe {
+            let mut len_i = len as i32;
+            let mut high_ptr = d_high.as_device_ptr().as_raw();
+            let mut low_ptr = d_low.as_device_ptr().as_raw();
+            let mut out_ptr = d_range.as_device_ptr().as_raw();
+            let block_x_range = 256u32;
+            let (gx_range, grid) = Self::grid_1d_for_elems(len, block_x_range);
+            let block: BlockSize = (block_x_range, 1, 1).into();
+            self.validate_launch(gx_range, 1, 1, block_x_range, 1, 1)?;
+            let args: &mut [*mut c_void] = &mut [
+                &mut high_ptr as *mut _ as *mut c_void,
+                &mut low_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&range_func, grid, block, 0, args)?;
+        }
+
+        let alphas: Vec<f32> = periods
+            .iter()
+            .map(|&period| 2.0f32 / (period as f32 + 1.0))
+            .collect();
+        let warms: Vec<i32> = periods
+            .iter()
+            .map(|&period| first_valid + (2usize * period as usize) - 1)
+            .map(|warm| i32::try_from(warm).unwrap_or(i32::MAX))
+            .collect();
+        let d_periods = DeviceBuffer::from_slice(periods)?;
+        let d_alphas = DeviceBuffer::from_slice(alphas.as_slice())?;
+        let d_warms = DeviceBuffer::from_slice(warms.as_slice())?;
+        self.cvi_batch_from_range_device_inplace(
+            &d_range,
+            len,
+            first_valid,
+            &d_periods,
+            &d_alphas,
+            &d_warms,
+            rows,
+            d_out,
+        )?;
+        self.synchronize()?;
+        Ok(())
+    }
+
     fn first_valids_time_major(
         high_tm: &[f32],
         low_tm: &[f32],

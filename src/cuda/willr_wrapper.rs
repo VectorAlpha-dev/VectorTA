@@ -71,6 +71,16 @@ struct PreparedWillrBatch {
     tables: WillrGpuTables,
 }
 
+struct PreparedWillrDeviceBatch {
+    combos: Vec<WillrParams>,
+    periods: Vec<i32>,
+    period_levels: Vec<i32>,
+    first_valid: usize,
+    series_len: usize,
+    level_offsets: Vec<i32>,
+    total_sparse_len: usize,
+}
+
 impl CudaWillr {
     pub fn new(device_id: usize) -> Result<Self, CudaWillrError> {
         cust::init(CudaFlags::empty())?;
@@ -232,6 +242,86 @@ impl CudaWillr {
         })
     }
 
+    pub fn willr_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &WillrBatchRange,
+    ) -> Result<DeviceArrayF32, CudaWillrError> {
+        if series_len == 0
+            || d_high.len() != series_len
+            || d_low.len() != series_len
+            || d_close.len() != series_len
+        {
+            return Err(CudaWillrError::InvalidInput(
+                "device input buffers must match non-zero length".into(),
+            ));
+        }
+
+        let prepared = Self::prepare_device_batch_inputs(series_len, first_valid, sweep)?;
+        let n_combos = prepared.combos.len();
+        let elems = series_len
+            .checked_mul(n_combos)
+            .ok_or_else(|| CudaWillrError::InvalidInput("series_len*n_combos overflow".into()))?;
+        let f32_bytes = core::mem::size_of::<f32>();
+        let i32_bytes = core::mem::size_of::<i32>();
+        let param_bytes = n_combos
+            .checked_mul(2 * i32_bytes)
+            .and_then(|v| v.checked_add(prepared.level_offsets.len() * i32_bytes))
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let table_bytes = prepared
+            .total_sparse_len
+            .checked_mul(2 * f32_bytes)
+            .and_then(|v| v.checked_add((series_len + 1) * i32_bytes))
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let out_bytes = elems
+            .checked_mul(f32_bytes)
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        let required = param_bytes
+            .checked_add(table_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
+
+        let d_periods = DeviceBuffer::from_slice(&prepared.periods)?;
+        let d_period_levels = DeviceBuffer::from_slice(&prepared.period_levels)?;
+        let d_offsets = DeviceBuffer::from_slice(&prepared.level_offsets)?;
+        let level_count = prepared.level_offsets.len().saturating_sub(1);
+        let (d_st_max, d_st_min, d_nan_psum) = self.build_tables_device_from_inputs(
+            &self.stream,
+            d_high,
+            d_low,
+            series_len,
+            &prepared.level_offsets,
+            prepared.total_sparse_len,
+        )?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
+
+        self.launch_batch_kernel_levels_raw(
+            d_close,
+            &d_periods,
+            &d_period_levels,
+            &d_offsets,
+            &d_st_max,
+            &d_st_min,
+            &d_nan_psum,
+            prepared.series_len,
+            prepared.first_valid,
+            level_count,
+            n_combos,
+            &mut d_out,
+        )?;
+
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: prepared.series_len,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn willr_batch_device(
         &self,
@@ -328,6 +418,81 @@ impl CudaWillr {
         })
     }
 
+    fn prepare_device_batch_inputs(
+        len: usize,
+        first_valid: usize,
+        sweep: &WillrBatchRange,
+    ) -> Result<PreparedWillrDeviceBatch, CudaWillrError> {
+        if len == 0 {
+            return Err(CudaWillrError::InvalidInput("empty input".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaWillrError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = expand_periods(sweep)?;
+        let max_period = combos
+            .iter()
+            .map(|p| p.period.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        if max_period == 0 {
+            return Err(CudaWillrError::InvalidInput(
+                "period must be positive".into(),
+            ));
+        }
+        let valid = len - first_valid;
+        if valid < max_period {
+            return Err(CudaWillrError::InvalidInput(format!(
+                "not enough valid data: needed >= {}, have {}",
+                max_period, valid
+            )));
+        }
+
+        let periods: Vec<i32> = combos
+            .iter()
+            .map(|p| p.period.unwrap_or(0) as i32)
+            .collect();
+        let period_levels: Vec<i32> = combos
+            .iter()
+            .map(|p| {
+                let period = p.period.unwrap_or(0);
+                if period <= 1 {
+                    0
+                } else {
+                    (usize::BITS - 1 - period.leading_zeros()) as i32
+                }
+            })
+            .collect();
+
+        let mut level_offsets = Vec::new();
+        level_offsets.push(0i32);
+        let mut total = len;
+        let mut window = 2usize;
+        while window <= len {
+            let curr = len + 1 - window;
+            let next = total
+                .checked_add(curr)
+                .ok_or_else(|| CudaWillrError::InvalidInput("sparse table size overflow".into()))?;
+            level_offsets.push(i32::try_from(total).unwrap_or(i32::MAX));
+            total = next;
+            window <<= 1;
+        }
+        level_offsets.push(i32::try_from(total).unwrap_or(i32::MAX));
+
+        Ok(PreparedWillrDeviceBatch {
+            combos,
+            periods,
+            period_levels,
+            first_valid,
+            series_len: len,
+            level_offsets,
+            total_sparse_len: total,
+        })
+    }
+
     fn launch_batch_kernel(
         &self,
         d_close: &DeviceBuffer<f32>,
@@ -357,6 +522,187 @@ impl CudaWillr {
             n_combos,
             d_out,
         )
+    }
+
+    pub(crate) fn build_tables_device_from_inputs(
+        &self,
+        stream: &Stream,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        series_len: usize,
+        level_offsets: &[i32],
+        total_sparse_len: usize,
+    ) -> Result<(DeviceBuffer<f32>, DeviceBuffer<f32>, DeviceBuffer<i32>), CudaWillrError> {
+        let block_x: u32 = 256;
+        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+        let mut d_st_max: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(total_sparse_len)? };
+        let mut d_st_min: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(total_sparse_len)? };
+        let mut d_nan_flags: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::uninitialized(series_len)? };
+        let mut d_nan_psum: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::uninitialized(series_len + 1)? };
+
+        let base_func = self
+            .module
+            .get_function("willr_build_base_and_nan_f32")
+            .map_err(|_| CudaWillrError::MissingKernelSymbol {
+                name: "willr_build_base_and_nan_f32",
+            })?;
+        unsafe {
+            let mut high_ptr = d_high.as_device_ptr().as_raw();
+            let mut low_ptr = d_low.as_device_ptr().as_raw();
+            let mut len_i = series_len as i32;
+            let mut st_max_ptr = d_st_max.as_device_ptr().as_raw();
+            let mut st_min_ptr = d_st_min.as_device_ptr().as_raw();
+            let mut flags_ptr = d_nan_flags.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut high_ptr as *mut _ as *mut c_void,
+                &mut low_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut st_max_ptr as *mut _ as *mut c_void,
+                &mut st_min_ptr as *mut _ as *mut c_void,
+                &mut flags_ptr as *mut _ as *mut c_void,
+            ];
+            stream.launch(
+                &base_func,
+                GridSize::xyz(grid_x.max(1), 1, 1),
+                BlockSize::xyz(block_x, 1, 1),
+                0,
+                args,
+            )?;
+        }
+
+        let prefix_func = self
+            .module
+            .get_function("willr_prefix_nan_psum_i32")
+            .map_err(|_| CudaWillrError::MissingKernelSymbol {
+                name: "willr_prefix_nan_psum_i32",
+            })?;
+        unsafe {
+            let mut flags_ptr = d_nan_flags.as_device_ptr().as_raw();
+            let mut len_i = series_len as i32;
+            let mut psum_ptr = d_nan_psum.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut flags_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut psum_ptr as *mut _ as *mut c_void,
+            ];
+            stream.launch(
+                &prefix_func,
+                GridSize::xyz(1, 1, 1),
+                BlockSize::xyz(1, 1, 1),
+                0,
+                args,
+            )?;
+        }
+
+        let level_func = self
+            .module
+            .get_function("willr_build_sparse_level_f32")
+            .map_err(|_| CudaWillrError::MissingKernelSymbol {
+                name: "willr_build_sparse_level_f32",
+            })?;
+        for level in 1..level_offsets.len().saturating_sub(1) {
+            let prev_offset = level_offsets[level - 1];
+            let curr_offset = level_offsets[level];
+            let next_offset = level_offsets[level + 1];
+            let curr_len = next_offset - curr_offset;
+            if curr_len <= 0 {
+                continue;
+            }
+            let half_offset = 1i32 << (level as i32 - 1);
+            let level_grid_x = ((curr_len as u32) + block_x - 1) / block_x;
+            unsafe {
+                let mut st_max_ptr = d_st_max.as_device_ptr().as_raw();
+                let mut st_min_ptr = d_st_min.as_device_ptr().as_raw();
+                let mut prev_off_i = prev_offset;
+                let mut curr_off_i = curr_offset;
+                let mut curr_len_i = curr_len;
+                let mut half_off_i = half_offset;
+                let args: &mut [*mut c_void] = &mut [
+                    &mut st_max_ptr as *mut _ as *mut c_void,
+                    &mut st_min_ptr as *mut _ as *mut c_void,
+                    &mut prev_off_i as *mut _ as *mut c_void,
+                    &mut curr_off_i as *mut _ as *mut c_void,
+                    &mut curr_len_i as *mut _ as *mut c_void,
+                    &mut half_off_i as *mut _ as *mut c_void,
+                ];
+                stream.launch(
+                    &level_func,
+                    GridSize::xyz(level_grid_x.max(1), 1, 1),
+                    BlockSize::xyz(block_x, 1, 1),
+                    0,
+                    args,
+                )?;
+            }
+        }
+
+        Ok((d_st_max, d_st_min, d_nan_psum))
+    }
+
+    fn launch_batch_kernel_levels_raw(
+        &self,
+        d_close: &DeviceBuffer<f32>,
+        d_periods: &DeviceBuffer<i32>,
+        d_period_levels: &DeviceBuffer<i32>,
+        d_offsets: &DeviceBuffer<i32>,
+        d_st_max: &DeviceBuffer<f32>,
+        d_st_min: &DeviceBuffer<f32>,
+        d_nan_psum: &DeviceBuffer<i32>,
+        series_len: usize,
+        first_valid: usize,
+        level_count: usize,
+        n_combos: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaWillrError> {
+        if n_combos == 0 {
+            return Ok(());
+        }
+
+        let func = self
+            .module
+            .get_function("willr_batch_period_levels_f32")
+            .map_err(|_| CudaWillrError::MissingKernelSymbol {
+                name: "willr_batch_period_levels_f32",
+            })?;
+        let block_x: u32 = Self::block_for_time_parallel(series_len);
+        let grid: GridSize = (n_combos as u32, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        unsafe {
+            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+            let mut levels_ptr = d_period_levels.as_device_ptr().as_raw();
+            let mut offsets_ptr = d_offsets.as_device_ptr().as_raw();
+            let mut st_max_ptr = d_st_max.as_device_ptr().as_raw();
+            let mut st_min_ptr = d_st_min.as_device_ptr().as_raw();
+            let mut nan_psum_ptr = d_nan_psum.as_device_ptr().as_raw();
+            let mut series_len_i = series_len as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut level_count_i = level_count as i32;
+            let mut n_combos_i = n_combos as i32;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+
+            let args: &mut [*mut c_void] = &mut [
+                &mut close_ptr as *mut _ as *mut c_void,
+                &mut periods_ptr as *mut _ as *mut c_void,
+                &mut levels_ptr as *mut _ as *mut c_void,
+                &mut offsets_ptr as *mut _ as *mut c_void,
+                &mut st_max_ptr as *mut _ as *mut c_void,
+                &mut st_min_ptr as *mut _ as *mut c_void,
+                &mut nan_psum_ptr as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut level_count_i as *mut _ as *mut c_void,
+                &mut n_combos_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
     }
 
     pub fn prepare_tables_device(

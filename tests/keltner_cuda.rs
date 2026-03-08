@@ -6,7 +6,7 @@ use vector_ta::utilities::enums::Kernel;
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::{cuda_available, CudaKeltner};
+use vector_ta::cuda::{cuda_available, CudaKeltner, CudaRuntime};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -104,6 +104,99 @@ fn keltner_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             idx
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn keltner_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[keltner_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 8192usize;
+    let mut close = vec![f32::NAN; len];
+    let mut high = vec![f32::NAN; len];
+    let mut low = vec![f32::NAN; len];
+    for i in 4..len {
+        let x = i as f32;
+        close[i] = (x * 0.00123).sin() + 0.00019 * x;
+        let off = (0.004 * (x * 0.002).sin()).abs() + 0.12;
+        high[i] = close[i] + off;
+        low[i] = close[i] - off;
+    }
+    let src = close.clone();
+    let sweep = vector_ta::indicators::keltner::KeltnerBatchRange {
+        period: (10, 32, 3),
+        multiplier: (1.0, 2.0, 0.5),
+    };
+
+    let cuda = CudaKeltner::new(0).expect("CudaKeltner::new");
+    let legacy = cuda
+        .keltner_batch_dev(&high, &low, &close, &src, &sweep, "ema")
+        .expect("legacy batch");
+
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let d_high = runtime.upload_f32(&high).expect("upload high");
+    let d_low = runtime.upload_f32(&low).expect("upload low");
+    let d_close = runtime.upload_f32(&close).expect("upload close");
+    let d_source = runtime.upload_f32(&src).expect("upload source");
+    let device = cuda
+        .keltner_batch_dev_from_device_inputs(
+            d_high.buffer(),
+            d_low.buffer(),
+            d_close.buffer(),
+            d_source.buffer(),
+            len,
+            4,
+            &sweep,
+            "ema",
+        )
+        .expect("device inputs");
+
+    assert_eq!(legacy.combos.len(), device.combos.len(), "combos len");
+    for (idx, (legacy, dev)) in legacy.combos.iter().zip(device.combos.iter()).enumerate() {
+        assert_eq!(legacy.period, dev.period, "period at {idx}");
+        assert_eq!(legacy.multiplier, dev.multiplier, "multiplier at {idx}");
+    }
+    for (legacy_buf, device_buf, label, tol) in [
+        (
+            &legacy.outputs.upper,
+            &device.outputs.upper,
+            "upper",
+            1e-6f32,
+        ),
+        (
+            &legacy.outputs.middle,
+            &device.outputs.middle,
+            "middle",
+            1e-6f32,
+        ),
+        (
+            &legacy.outputs.lower,
+            &device.outputs.lower,
+            "lower",
+            1e-6f32,
+        ),
+    ] {
+        assert_eq!(legacy_buf.rows, device_buf.rows, "{label} rows");
+        assert_eq!(legacy_buf.cols, device_buf.cols, "{label} cols");
+        let mut legacy_host = vec![0f32; legacy_buf.len()];
+        legacy_buf.buf.copy_to(&mut legacy_host)?;
+        let mut device_host = vec![0f32; device_buf.len()];
+        device_buf.buf.copy_to(&mut device_host)?;
+        for (idx, (&lhs, &rhs)) in legacy_host.iter().zip(device_host.iter()).enumerate() {
+            if lhs.is_nan() && rhs.is_nan() {
+                continue;
+            }
+            assert!(
+                (lhs - rhs).abs() < tol,
+                "{label} mismatch at {idx}: legacy={lhs} device={rhs}"
+            );
+        }
+    }
+
     Ok(())
 }
 

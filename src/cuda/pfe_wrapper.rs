@@ -183,20 +183,12 @@ impl CudaPfe {
         v
     }
 
-    pub fn pfe_batch_dev(
-        &self,
-        data_f32: &[f32],
-        sweep: &PfeBatchRange,
-    ) -> Result<DeviceArrayF32, CudaPfeError> {
-        if data_f32.is_empty() {
-            return Err(CudaPfeError::InvalidInput("empty data".into()));
-        }
-        let len = data_f32.len();
-        let first_valid = Self::first_valid(data_f32)
-            .ok_or_else(|| CudaPfeError::InvalidInput("all NaN".into()))?;
-        let combos = Self::expand_grid(sweep)?;
-
-        for c in &combos {
+    fn validate_batch_inputs(
+        len: usize,
+        first_valid: usize,
+        combos: &[PfeCombo],
+    ) -> Result<(), CudaPfeError> {
+        for c in combos {
             let p = c.period as usize;
             let s = c.smoothing as usize;
             if p == 0 || p > len {
@@ -209,41 +201,79 @@ impl CudaPfe {
                 return Err(CudaPfeError::InvalidInput("not enough valid data".into()));
             }
         }
+        Ok(())
+    }
 
+    fn estimate_batch_bytes(len: usize, combos_len: usize) -> Result<usize, CudaPfeError> {
         let len_bytes = len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaPfeError::InvalidInput("size overflow".into()))?;
-        let combo_i32 = combos
-            .len()
+        let combo_i32 = combos_len
             .checked_mul(std::mem::size_of::<i32>())
             .ok_or_else(|| CudaPfeError::InvalidInput("size overflow".into()))?;
-        let combo_f32 = combos
-            .len()
+        let combo_f32 = combos_len
             .checked_mul(len)
             .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| CudaPfeError::InvalidInput("rows*cols overflow".into()))?;
         let aux_f32 = len_bytes
             .checked_mul(3)
             .ok_or_else(|| CudaPfeError::InvalidInput("size overflow".into()))?;
-        let required = len_bytes
+        len_bytes
             .checked_add(combo_i32)
             .and_then(|x| x.checked_add(combo_i32))
             .and_then(|x| x.checked_add(aux_f32))
             .and_then(|x| x.checked_add(combo_f32))
-            .ok_or_else(|| CudaPfeError::InvalidInput("size overflow".into()))?;
-        let headroom = 64usize << 20;
-        Self::will_fit(required, headroom)?;
+            .ok_or_else(|| CudaPfeError::InvalidInput("size overflow".into()))
+    }
+
+    fn launch_prepare_data_raw(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaPfeError> {
+        let func = self
+            .module
+            .get_function("pfe_prepare_data_f32")
+            .map_err(|_| CudaPfeError::MissingKernelSymbol {
+                name: "pfe_prepare_data_f32",
+            })?;
+        let block_x: u32 = 256;
+        let grid_x: u32 = (((len as u32) + block_x - 1) / block_x).max(1);
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        unsafe {
+            let mut data_ptr = d_data.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut fv_i = first_valid as i32;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut data_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut fv_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
+    fn run_batch_with_prepared_device_data(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        combos: &[PfeCombo],
+    ) -> Result<DeviceArrayF32, CudaPfeError> {
+        let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
+        let smooths: Vec<i32> = combos.iter().map(|c| c.smoothing).collect();
 
         if let (Ok(func_steps), Ok(func_pref), Ok(func_main)) = (
             self.module.get_function("pfe_build_steps_f32"),
             self.module.get_function("pfe_build_prefix_float2_serial"),
             self.module.get_function("pfe_many_params_prefix_f32"),
         ) {
-            let data_filled = Self::clone_fill_head_with_first_valid(data_f32, first_valid);
-
-            let d_data = DeviceBuffer::from_slice(&data_filled)?;
-            let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
-            let smooths: Vec<i32> = combos.iter().map(|c| c.smoothing).collect();
             let d_periods = DeviceBuffer::from_slice(&periods)?;
             let d_smooths = DeviceBuffer::from_slice(&smooths)?;
 
@@ -319,8 +349,6 @@ impl CudaPfe {
                 self.stream.launch(&func_main, grid_np, block_np, 0, args)?;
             }
 
-            self.stream.synchronize()?;
-
             return Ok(DeviceArrayF32 {
                 buf: d_out,
                 rows: combos.len(),
@@ -328,19 +356,17 @@ impl CudaPfe {
             });
         }
 
+        let mut host_data = vec![0.0f32; len];
+        d_data.copy_to(host_data.as_mut_slice())?;
         let mut prefix = vec![0.0f64; len];
         for i in 1..len {
-            let d = (data_f32[i] as f64) - (data_f32[i - 1] as f64);
+            let d = (host_data[i] as f64) - (host_data[i - 1] as f64);
             prefix[i] = prefix[i - 1] + (d.mul_add(d, 1.0)).sqrt();
         }
 
-        let d_data = DeviceBuffer::from_slice(data_f32)?;
         let d_prefix = DeviceBuffer::from_slice(&prefix)?;
-        let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
-        let smooths: Vec<i32> = combos.iter().map(|c| c.smoothing).collect();
         let d_periods = DeviceBuffer::from_slice(&periods)?;
         let d_smooths = DeviceBuffer::from_slice(&smooths)?;
-
         let total_out = combos
             .len()
             .checked_mul(len)
@@ -419,13 +445,56 @@ impl CudaPfe {
             }
         }
 
-        self.stream.synchronize()?;
-
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: combos.len(),
             cols: len,
         })
+    }
+
+    pub fn pfe_batch_dev(
+        &self,
+        data_f32: &[f32],
+        sweep: &PfeBatchRange,
+    ) -> Result<DeviceArrayF32, CudaPfeError> {
+        if data_f32.is_empty() {
+            return Err(CudaPfeError::InvalidInput("empty data".into()));
+        }
+        let len = data_f32.len();
+        let first_valid = Self::first_valid(data_f32)
+            .ok_or_else(|| CudaPfeError::InvalidInput("all NaN".into()))?;
+        let combos = Self::expand_grid(sweep)?;
+        Self::validate_batch_inputs(len, first_valid, &combos)?;
+        let required = Self::estimate_batch_bytes(len, combos.len())?;
+        let headroom = 64usize << 20;
+        Self::will_fit(required, headroom)?;
+        let data_filled = Self::clone_fill_head_with_first_valid(data_f32, first_valid);
+        let d_data = DeviceBuffer::from_slice(&data_filled)?;
+        let out = self.run_batch_with_prepared_device_data(&d_data, len, first_valid, &combos)?;
+        self.stream.synchronize()?;
+        Ok(out)
+    }
+
+    pub fn pfe_batch_dev_from_device_prices(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &PfeBatchRange,
+    ) -> Result<DeviceArrayF32, CudaPfeError> {
+        if len == 0 || d_data.len() != len {
+            return Err(CudaPfeError::InvalidInput(
+                "device input buffer must match non-zero length".into(),
+            ));
+        }
+        let combos = Self::expand_grid(sweep)?;
+        Self::validate_batch_inputs(len, first_valid, &combos)?;
+        let required = Self::estimate_batch_bytes(len, combos.len())?;
+        Self::will_fit(required, 64usize << 20)?;
+
+        let mut d_prepared: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
+        self.launch_prepare_data_raw(d_data, len, first_valid, &mut d_prepared)?;
+        self.run_batch_with_prepared_device_data(&d_prepared, len, first_valid, &combos)
     }
 
     pub fn pfe_many_series_one_param_time_major_dev(

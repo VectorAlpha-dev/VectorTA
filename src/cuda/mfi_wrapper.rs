@@ -275,10 +275,59 @@ impl CudaMfi {
         volume_f32: &[f32],
         sweep: &MfiBatchRange,
     ) -> Result<(DeviceArrayF32, Vec<MfiParams>), CudaMfiError> {
+        let (_combos, first_valid, len) =
+            Self::prepare_batch_inputs(typical_f32, volume_f32, sweep)?;
+        let d_tp = unsafe { DeviceBuffer::from_slice_async(typical_f32, &self.stream) }?;
+        let d_vol = unsafe { DeviceBuffer::from_slice_async(volume_f32, &self.stream) }?;
+        let out = self.mfi_batch_dev_from_device_inputs(&d_tp, &d_vol, len, first_valid, sweep)?;
+        self.stream.synchronize()?;
+        Ok(out)
+    }
+
+    pub fn mfi_batch_dev_from_device_inputs(
+        &self,
+        d_typical: &DeviceBuffer<f32>,
+        d_volume: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &MfiBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<MfiParams>), CudaMfiError> {
         use std::mem::size_of;
 
-        let (combos, first_valid, len) =
-            Self::prepare_batch_inputs(typical_f32, volume_f32, sweep)?;
+        if len == 0 {
+            return Err(CudaMfiError::InvalidInput("empty input".into()));
+        }
+        if d_typical.len() != len || d_volume.len() != len {
+            return Err(CudaMfiError::InvalidInput(
+                "device input length mismatch".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaMfiError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = Self::expand_grid(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaMfiError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        for c in &combos {
+            let p = c.period.unwrap_or(0);
+            if p == 0 {
+                return Err(CudaMfiError::InvalidInput("period must be > 0".into()));
+            }
+            if p > len {
+                return Err(CudaMfiError::InvalidInput(
+                    "period exceeds data length".into(),
+                ));
+            }
+            if len - first_valid < p {
+                return Err(CudaMfiError::InvalidInput("not enough valid data".into()));
+            }
+        }
 
         let block_x_scan: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
@@ -327,9 +376,6 @@ impl CudaMfi {
                 ));
             }
         }
-
-        let d_tp = unsafe { DeviceBuffer::from_slice_async(typical_f32, &self.stream) }?;
-        let d_vol = unsafe { DeviceBuffer::from_slice_async(volume_f32, &self.stream) }?;
 
         let periods_i32: Vec<i32> = combos
             .iter()
@@ -391,8 +437,8 @@ impl CudaMfi {
             let grid: GridSize = ((nb as u32).max(1), 1, 1).into();
             let block: BlockSize = (block_x_scan, 1, 1).into();
             unsafe {
-                let mut tp_ptr = d_tp.as_device_ptr().as_raw();
-                let mut vol_ptr = d_vol.as_device_ptr().as_raw();
+                let mut tp_ptr = d_typical.as_device_ptr().as_raw();
+                let mut vol_ptr = d_volume.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
                 let mut first_i = first_valid as i32;
                 let mut pos_ps = d_pos_ps.as_device_ptr().as_raw();
@@ -484,7 +530,6 @@ impl CudaMfi {
             launched += chunk;
         }
 
-        self.stream.synchronize()?;
         self.maybe_log_batch_debug();
         Ok((
             DeviceArrayF32 {

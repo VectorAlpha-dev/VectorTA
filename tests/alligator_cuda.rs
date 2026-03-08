@@ -6,9 +6,9 @@ use vector_ta::utilities::enums::Kernel;
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::cuda_available;
-#[cfg(feature = "cuda")]
 use vector_ta::cuda::CudaAlligator;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::{cuda_available, CudaRuntime};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -159,6 +159,92 @@ fn alligator_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
             approx_eq(lips_tm[idx], lips_gpu[idx] as f64, tol),
             "lips mismatch at {}",
             idx
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn alligator_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[alligator_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let series_len = 4096usize;
+    let mut data = vec![f64::NAN; series_len];
+    for i in 18..series_len {
+        let x = i as f64;
+        data[i] = (x * 0.0013).sin() + 0.00018 * x;
+    }
+
+    let sweep = AlligatorBatchRange {
+        jaw_period: (10, 18, 4),
+        jaw_offset: (3, 6, 1),
+        teeth_period: (6, 14, 4),
+        teeth_offset: (2, 5, 1),
+        lips_period: (3, 9, 3),
+        lips_offset: (1, 3, 1),
+    };
+
+    let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+    let first_valid = data_f32
+        .iter()
+        .position(|v| v.is_finite())
+        .expect("first_valid");
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let d_prices = runtime.upload_f32(&data_f32).expect("upload");
+
+    let cuda = CudaAlligator::new(0).expect("CudaAlligator::new");
+    let legacy = cuda.alligator_batch_dev(&data_f32, &sweep)?;
+    let device = cuda.alligator_batch_dev_from_device_prices(
+        d_prices.buffer(),
+        data_f32.len(),
+        first_valid,
+        &sweep,
+    )?;
+
+    assert_eq!(legacy.outputs.rows(), device.outputs.rows());
+    assert_eq!(legacy.outputs.cols(), device.outputs.cols());
+    assert_eq!(legacy.combos.len(), device.combos.len());
+
+    let mut legacy_jaw = vec![0f32; legacy.outputs.rows() * legacy.outputs.cols()];
+    let mut legacy_teeth = vec![0f32; legacy_jaw.len()];
+    let mut legacy_lips = vec![0f32; legacy_jaw.len()];
+    let mut device_jaw = vec![0f32; device.outputs.rows() * device.outputs.cols()];
+    let mut device_teeth = vec![0f32; device_jaw.len()];
+    let mut device_lips = vec![0f32; device_jaw.len()];
+    legacy.outputs.jaw.buf.copy_to(&mut legacy_jaw)?;
+    legacy.outputs.teeth.buf.copy_to(&mut legacy_teeth)?;
+    legacy.outputs.lips.buf.copy_to(&mut legacy_lips)?;
+    device.outputs.jaw.buf.copy_to(&mut device_jaw)?;
+    device.outputs.teeth.buf.copy_to(&mut device_teeth)?;
+    device.outputs.lips.buf.copy_to(&mut device_lips)?;
+
+    let tol = 1e-4;
+    for idx in 0..legacy_jaw.len() {
+        assert!(
+            approx_eq(legacy_jaw[idx] as f64, device_jaw[idx] as f64, tol),
+            "alligator jaw mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_jaw[idx],
+            device_jaw[idx]
+        );
+        assert!(
+            approx_eq(legacy_teeth[idx] as f64, device_teeth[idx] as f64, tol),
+            "alligator teeth mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_teeth[idx],
+            device_teeth[idx]
+        );
+        assert!(
+            approx_eq(legacy_lips[idx] as f64, device_lips[idx] as f64, tol),
+            "alligator lips mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_lips[idx],
+            device_lips[idx]
         );
     }
 

@@ -28,6 +28,28 @@ __device__ __forceinline__ float sma_from_prefix_f32(
     return (float)(sum / (double)period);
 }
 
+extern "C" __global__ void mab_build_prefix_single_f32(
+    const float* __restrict__ prices,
+    int len,
+    double* __restrict__ pref_sum,
+    int* __restrict__ pref_nan
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    pref_sum[0] = 0.0;
+    pref_nan[0] = 0;
+    double acc_s = 0.0;
+    int acc_nan = 0;
+    for (int i = 0; i < len; ++i) {
+        const float x = prices[i];
+        if (isnan(x)) {
+            ++acc_nan;
+        } else {
+            acc_s += (double)x;
+        }
+        pref_sum[i + 1] = acc_s;
+        pref_nan[i + 1] = acc_nan;
+    }
+}
 
 
 

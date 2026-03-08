@@ -214,6 +214,125 @@ impl CudaCfo {
         })
     }
 
+    fn launch_prefix_builders_raw(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_ps: &mut DeviceBuffer<f64>,
+        d_pw: &mut DeviceBuffer<f64>,
+    ) -> Result<(), CudaCfoError> {
+        let func = self
+            .module
+            .get_function("cfo_build_prefixes_serial_f64")
+            .map_err(|_| CudaCfoError::MissingKernelSymbol {
+                name: "cfo_build_prefixes_serial_f64",
+            })?;
+        let grid: GridSize = (1u32, 1u32, 1u32).into();
+        let block: BlockSize = (1u32, 1u32, 1u32).into();
+        unsafe {
+            let mut data_ptr = d_data.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut fv_i = first_valid as i32;
+            let mut ps_ptr = d_ps.as_device_ptr().as_raw();
+            let mut pw_ptr = d_pw.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut data_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut fv_i as *mut _ as *mut c_void,
+                &mut ps_ptr as *mut _ as *mut c_void,
+                &mut pw_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
+    pub fn cfo_batch_dev_from_device_prices(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &CfoBatchRange,
+    ) -> Result<DeviceArrayF32, CudaCfoError> {
+        if len == 0 {
+            return Err(CudaCfoError::InvalidInput("empty data".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaCfoError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = expand_grid(sweep)?;
+        let mut periods = Vec::with_capacity(combos.len());
+        let mut scalars = Vec::with_capacity(combos.len());
+        for c in combos {
+            let p = c.period.unwrap_or(0);
+            if p == 0 || p > len {
+                return Err(CudaCfoError::InvalidInput(format!(
+                    "invalid period {} for data length {}",
+                    p, len
+                )));
+            }
+            if len - first_valid < p {
+                return Err(CudaCfoError::InvalidInput(format!(
+                    "not enough valid data: needed {}, valid {}",
+                    p,
+                    len - first_valid
+                )));
+            }
+            periods.push(p as i32);
+            scalars.push(c.scalar.unwrap_or(100.0) as f32);
+        }
+        let n_combos = periods.len();
+
+        let bytes_prefix = (len + 1)
+            .checked_mul(std::mem::size_of::<f64>())
+            .and_then(|b| b.checked_mul(2))
+            .ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
+        let bytes_params = n_combos
+            .checked_mul(std::mem::size_of::<i32>() + std::mem::size_of::<f32>())
+            .ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
+        let bytes_out = len
+            .checked_mul(n_combos)
+            .and_then(|e| e.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024usize;
+        let required = bytes_prefix
+            .checked_add(bytes_params)
+            .and_then(|v| v.checked_add(bytes_out))
+            .and_then(|v| v.checked_add(headroom))
+            .ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
+        Self::will_fit(required, headroom)?;
+
+        let mut d_ps: DeviceBuffer<f64> = unsafe { DeviceBuffer::uninitialized(len + 1)? };
+        let mut d_pw: DeviceBuffer<f64> = unsafe { DeviceBuffer::uninitialized(len + 1)? };
+        self.launch_prefix_builders_raw(d_data, len, first_valid, &mut d_ps, &mut d_pw)?;
+
+        let d_periods = DeviceBuffer::from_slice(&periods)?;
+        let d_scalars = DeviceBuffer::from_slice(&scalars)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len * n_combos)? };
+
+        self.launch_batch_kernel(
+            d_data,
+            &d_ps,
+            &d_pw,
+            len as i32,
+            first_valid as i32,
+            &d_periods,
+            &d_scalars,
+            n_combos as i32,
+            &mut d_out,
+        )?;
+
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: len,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn launch_batch_kernel(
         &self,

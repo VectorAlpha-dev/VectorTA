@@ -1,5 +1,6 @@
 #![cfg(feature = "cuda")]
 
+use crate::cuda::oscillators::CudaWillr;
 use crate::indicators::chop::{ChopBatchRange, ChopParams};
 use crate::indicators::willr::build_willr_gpu_tables;
 use cust::context::{CacheConfig, Context};
@@ -71,6 +72,19 @@ pub struct CudaChop {
     stream: Stream,
     context: Arc<Context>,
     device_id: u32,
+}
+
+struct PreparedChopDeviceBatch {
+    combos: Vec<ChopParams>,
+    first_valid: usize,
+    series_len: usize,
+    max_period: usize,
+    log2: Vec<i32>,
+    level_offsets: Vec<i32>,
+    total_sparse_len: usize,
+    periods: Vec<i32>,
+    drifts: Vec<i32>,
+    scalars: Vec<f32>,
 }
 
 impl CudaChop {
@@ -232,6 +246,72 @@ impl CudaChop {
         Ok(combos)
     }
 
+    #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaChopError> {
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
+    fn prepare_device_batch_inputs(
+        len: usize,
+        first_valid: usize,
+        sweep: &ChopBatchRange,
+    ) -> Result<PreparedChopDeviceBatch, CudaChopError> {
+        if len == 0 {
+            return Err(CudaChopError::InvalidInput("empty input".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaChopError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = Self::expand_grid(sweep)?;
+        let max_period = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+        if len - first_valid < max_period {
+            return Err(CudaChopError::InvalidInput(format!(
+                "not enough valid data: needed >= {}, have {}",
+                max_period,
+                len - first_valid
+            )));
+        }
+
+        let mut log2 = vec![0i32; len + 1];
+        for i in 2..=len {
+            log2[i] = log2[i / 2] + 1;
+        }
+
+        let mut level_offsets = Vec::new();
+        level_offsets.push(0i32);
+        let mut total = len;
+        let mut window = 2usize;
+        while window <= len {
+            level_offsets.push(i32::try_from(total).unwrap_or(i32::MAX));
+            total = total
+                .checked_add(len + 1 - window)
+                .ok_or_else(|| CudaChopError::InvalidInput("sparse table size overflow".into()))?;
+            window <<= 1;
+        }
+        level_offsets.push(i32::try_from(total).unwrap_or(i32::MAX));
+
+        let periods = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let drifts = combos.iter().map(|c| c.drift.unwrap() as i32).collect();
+        let scalars = combos.iter().map(|c| c.scalar.unwrap() as f32).collect();
+
+        Ok(PreparedChopDeviceBatch {
+            combos,
+            first_valid,
+            series_len: len,
+            max_period,
+            log2,
+            level_offsets,
+            total_sparse_len: total,
+            periods,
+            drifts,
+            scalars,
+        })
+    }
+
     pub fn chop_batch_dev(
         &self,
         high_f32: &[f32],
@@ -245,8 +325,6 @@ impl CudaChop {
                 "input slices are empty or mismatched".into(),
             ));
         }
-
-        let combos = Self::expand_grid(sweep)?;
 
         let mut first = -1isize;
         for i in 0..n {
@@ -263,121 +341,76 @@ impl CudaChop {
         }
         let first = first as usize;
 
-        let max_period = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-        if n - first < max_period {
-            return Err(CudaChopError::InvalidInput(format!(
-                "not enough valid data: needed >= {}, have {}",
-                max_period,
-                n - first
-            )));
-        }
-
-        let tables = build_willr_gpu_tables(high_f32, low_f32);
-
-        let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
-        let drifts_i32: Vec<i32> = combos.iter().map(|c| c.drift.unwrap() as i32).collect();
-        let scalars_f32: Vec<f32> = combos.iter().map(|c| c.scalar.unwrap() as f32).collect();
-
-        let out_elems = combos
-            .len()
-            .checked_mul(n)
-            .ok_or_else(|| CudaChopError::InvalidInput("rows*cols overflow".into()))?;
-
-        let mut bytes: usize = 0;
-        bytes = bytes
-            .checked_add(
-                high_f32
-                    .len()
-                    .checked_add(low_f32.len())
-                    .and_then(|x| x.checked_add(close_f32.len()))
-                    .and_then(|x| x.checked_mul(4))
-                    .ok_or_else(|| CudaChopError::InvalidInput("byte size overflow".into()))?,
-            )
-            .ok_or_else(|| CudaChopError::InvalidInput("byte size overflow".into()))?;
-        bytes = bytes
-            .checked_add(
-                periods_i32
-                    .len()
-                    .checked_add(drifts_i32.len())
-                    .and_then(|x| x.checked_mul(4))
-                    .ok_or_else(|| CudaChopError::InvalidInput("byte size overflow".into()))?,
-            )
-            .ok_or_else(|| CudaChopError::InvalidInput("byte size overflow".into()))?;
-        bytes = bytes
-            .checked_add(
-                scalars_f32
-                    .len()
-                    .checked_mul(4)
-                    .ok_or_else(|| CudaChopError::InvalidInput("byte size overflow".into()))?,
-            )
-            .ok_or_else(|| CudaChopError::InvalidInput("byte size overflow".into()))?;
-        bytes = bytes
-            .checked_add(
-                tables
-                    .log2
-                    .len()
-                    .checked_mul(4)
-                    .ok_or_else(|| CudaChopError::InvalidInput("byte size overflow".into()))?,
-            )
-            .ok_or_else(|| CudaChopError::InvalidInput("byte size overflow".into()))?;
-        bytes = bytes
-            .checked_add(
-                tables
-                    .level_offsets
-                    .len()
-                    .checked_mul(4)
-                    .ok_or_else(|| CudaChopError::InvalidInput("byte size overflow".into()))?,
-            )
-            .ok_or_else(|| CudaChopError::InvalidInput("byte size overflow".into()))?;
-        bytes = bytes
-            .checked_add(
-                tables
-                    .st_max
-                    .len()
-                    .checked_mul(4)
-                    .ok_or_else(|| CudaChopError::InvalidInput("byte size overflow".into()))?,
-            )
-            .ok_or_else(|| CudaChopError::InvalidInput("byte size overflow".into()))?;
-        bytes = bytes
-            .checked_add(
-                tables
-                    .st_min
-                    .len()
-                    .checked_mul(4)
-                    .ok_or_else(|| CudaChopError::InvalidInput("byte size overflow".into()))?,
-            )
-            .ok_or_else(|| CudaChopError::InvalidInput("byte size overflow".into()))?;
-        bytes = bytes
-            .checked_add(
-                tables
-                    .nan_psum
-                    .len()
-                    .checked_mul(4)
-                    .ok_or_else(|| CudaChopError::InvalidInput("byte size overflow".into()))?,
-            )
-            .ok_or_else(|| CudaChopError::InvalidInput("byte size overflow".into()))?;
-        bytes = bytes
-            .checked_add(
-                out_elems
-                    .checked_mul(4)
-                    .ok_or_else(|| CudaChopError::InvalidInput("byte size overflow".into()))?,
-            )
-            .ok_or_else(|| CudaChopError::InvalidInput("byte size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024;
-        Self::will_fit(bytes, headroom)?;
-
         let d_high = self.upload_slice_async(high_f32)?;
         let d_low = self.upload_slice_async(low_f32)?;
         let d_close = self.upload_slice_async(close_f32)?;
-        let d_periods = self.upload_slice_async(&periods_i32)?;
-        let d_drifts = self.upload_slice_async(&drifts_i32)?;
-        let d_scalars = self.upload_slice_async(&scalars_f32)?;
+        let out =
+            self.chop_batch_dev_from_device_inputs(&d_high, &d_low, &d_close, n, first, sweep)?;
+        self.stream.synchronize()?;
+        Ok(out)
+    }
 
-        let d_log2 = self.upload_slice_async(&tables.log2)?;
-        let d_offsets = self.upload_slice_async(&tables.level_offsets)?;
-        let d_st_max = self.upload_slice_async(&tables.st_max)?;
-        let d_st_min = self.upload_slice_async(&tables.st_min)?;
-        let d_nan_psum = self.upload_slice_async(&tables.nan_psum)?;
+    pub fn chop_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &ChopBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<ChopParams>), CudaChopError> {
+        if len == 0 || d_high.len() != len || d_low.len() != len || d_close.len() != len {
+            return Err(CudaChopError::InvalidInput(
+                "device input buffers must match non-zero length".into(),
+            ));
+        }
+
+        let prepared = Self::prepare_device_batch_inputs(len, first_valid, sweep)?;
+        let rows = prepared.combos.len();
+        let out_elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaChopError::InvalidInput("rows*cols overflow".into()))?;
+
+        let sz_f32 = std::mem::size_of::<f32>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let params_bytes = rows
+            .checked_mul(2usize)
+            .and_then(|n| n.checked_mul(sz_i32))
+            .and_then(|n| n.checked_add(rows.checked_mul(sz_f32)?))
+            .ok_or_else(|| CudaChopError::InvalidInput("params bytes overflow".into()))?;
+        let table_bytes = prepared.log2.len().saturating_mul(sz_i32)
+            + prepared.level_offsets.len().saturating_mul(sz_i32)
+            + prepared.total_sparse_len.saturating_mul(2 * sz_f32)
+            + (len + 1).saturating_mul(sz_i32);
+        let out_bytes = out_elems
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaChopError::InvalidInput("output bytes overflow".into()))?;
+        Self::will_fit(
+            params_bytes
+                .checked_add(table_bytes)
+                .and_then(|n| n.checked_add(out_bytes))
+                .ok_or_else(|| CudaChopError::InvalidInput("total bytes overflow".into()))?,
+            64 * 1024 * 1024,
+        )?;
+
+        let d_periods = self.upload_slice_async(&prepared.periods)?;
+        let d_drifts = self.upload_slice_async(&prepared.drifts)?;
+        let d_scalars = self.upload_slice_async(&prepared.scalars)?;
+        let d_log2 = self.upload_slice_async(&prepared.log2)?;
+        let d_offsets = self.upload_slice_async(&prepared.level_offsets)?;
+
+        let cuda_willr = CudaWillr::new(self.device_id as usize)
+            .map_err(|e| CudaChopError::InvalidInput(format!("willr: {}", e)))?;
+        let (d_st_max, d_st_min, d_nan_psum) = cuda_willr
+            .build_tables_device_from_inputs(
+                &self.stream,
+                d_high,
+                d_low,
+                prepared.series_len,
+                &prepared.level_offsets,
+                prepared.total_sparse_len,
+            )
+            .map_err(|e| CudaChopError::InvalidInput(format!("willr: {}", e)))?;
 
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
@@ -388,10 +421,11 @@ impl CudaChop {
             }
         })?;
 
-        let shared_bytes: usize = if max_period <= CHOP_REG_RING_MAX {
+        let shared_bytes: usize = if prepared.max_period <= CHOP_REG_RING_MAX {
             0
         } else {
-            max_period
+            prepared
+                .max_period
                 .checked_mul(std::mem::size_of::<f32>())
                 .ok_or_else(|| CudaChopError::InvalidInput("shared memory size overflow".into()))?
         };
@@ -401,7 +435,6 @@ impl CudaChop {
             func.set_cache_config(CacheConfig::PreferShared)
         };
 
-        let rows = combos.len();
         let mut launched = 0usize;
         while launched < rows {
             let n_this = (rows - launched).min(65_535);
@@ -422,29 +455,27 @@ impl CudaChop {
                         d_st_max.as_device_ptr(),
                         d_st_min.as_device_ptr(),
                         d_nan_psum.as_device_ptr(),
-                        n as i32,
-                        first as i32,
-                        (tables.level_offsets.len() - 1) as i32,
+                        len as i32,
+                        prepared.first_valid as i32,
+                        (prepared.level_offsets.len() - 1) as i32,
                         n_this as i32,
-                        max_period as i32,
-                        d_out.as_device_ptr().add(launched * n)
+                        prepared.max_period as i32,
+                        d_out.as_device_ptr().add(launched * len)
                     )
                 )?;
             }
             launched += n_this;
         }
 
-        self.stream.synchronize()?;
-
         Ok((
             DeviceArrayF32 {
                 buf: d_out,
                 rows,
-                cols: n,
+                cols: len,
                 ctx: self.context.clone(),
                 device_id: self.device_id,
             },
-            combos,
+            prepared.combos,
         ))
     }
 

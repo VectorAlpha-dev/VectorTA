@@ -16,6 +16,8 @@ use thiserror::Error;
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
 use crate::indicators::pivot::{PivotBatchRange, PivotParams};
 
+const LEVELS: usize = 9;
+
 #[derive(Debug, Error)]
 pub enum CudaPivotError {
     #[error(transparent)]
@@ -131,6 +133,11 @@ impl CudaPivot {
     #[inline]
     fn device_mem_info() -> Option<(usize, usize)> {
         mem_get_info().ok()
+    }
+
+    #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaPivotError> {
+        self.stream.synchronize().map_err(CudaPivotError::Cuda)
     }
 
     #[inline]
@@ -321,21 +328,113 @@ impl CudaPivot {
         if combos.is_empty() {
             return Err(CudaPivotError::InvalidInput("empty mode sweep".into()));
         }
-        let n_combos = combos.len();
 
+        let d_high = DeviceBuffer::from_slice(high).map_err(CudaPivotError::Cuda)?;
+        let d_low = DeviceBuffer::from_slice(low).map_err(CudaPivotError::Cuda)?;
+        let d_close = DeviceBuffer::from_slice(close).map_err(CudaPivotError::Cuda)?;
+        let d_open = DeviceBuffer::from_slice(open).map_err(CudaPivotError::Cuda)?;
+        let (dev, combos) = self.pivot_batch_dev_from_device_inputs(
+            &d_high,
+            &d_low,
+            &d_close,
+            &d_open,
+            n,
+            first_valid,
+            sweep,
+        )?;
+        self.stream.synchronize().map_err(CudaPivotError::Cuda)?;
+
+        Ok((dev, combos))
+    }
+
+    fn launch_extract_output_rows(
+        &self,
+        packed: &DeviceBuffer<f32>,
+        rows: usize,
+        cols: usize,
+        output_index: usize,
+        out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaPivotError> {
+        let func = self
+            .module
+            .get_function("pivot_extract_output_rows_f32")
+            .map_err(|_| CudaPivotError::MissingKernelSymbol {
+                name: "pivot_extract_output_rows_f32",
+            })?;
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaPivotError::InvalidInput("rows*cols overflow".into()))?;
+        let block_x = 256u32;
+        let grid_x = ((total as u32) + block_x - 1) / block_x;
+        let grid_dims = (grid_x.max(1), 1, 1);
+        let block_dims = (block_x, 1, 1);
+        self.validate_launch(grid_dims, block_dims)?;
+        let grid: GridSize = grid_dims.into();
+        let block: BlockSize = block_dims.into();
+        unsafe {
+            let mut packed_ptr = packed.as_device_ptr().as_raw();
+            let mut rows_i = rows as i32;
+            let mut cols_i = cols as i32;
+            let mut output_i = output_index as i32;
+            let mut out_ptr = out.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut packed_ptr as *mut _ as *mut c_void,
+                &mut rows_i as *mut _ as *mut c_void,
+                &mut cols_i as *mut _ as *mut c_void,
+                &mut output_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(CudaPivotError::Cuda)?;
+        }
+        Ok(())
+    }
+
+    pub fn pivot_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        d_open: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &PivotBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<PivotParams>), CudaPivotError> {
+        if len == 0
+            || d_high.len() != len
+            || d_low.len() != len
+            || d_close.len() != len
+            || d_open.len() != len
+        {
+            return Err(CudaPivotError::InvalidInput(
+                "device OHLC buffers must match non-zero length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaPivotError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = Self::expand_grid(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaPivotError::InvalidInput("empty mode sweep".into()));
+        }
+        let n_combos = combos.len();
         let need_o_any = combos.iter().any(|p| matches!(p.mode.unwrap_or(3), 2 | 4));
 
         let inputs_arrays: usize = 3 + if need_o_any { 1 } else { 0 };
         let bytes_inputs = inputs_arrays
-            .checked_mul(n)
+            .checked_mul(len)
             .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| CudaPivotError::InvalidInput("size overflow".into()))?;
         let bytes_modes = n_combos
             .checked_mul(std::mem::size_of::<i32>())
             .ok_or_else(|| CudaPivotError::InvalidInput("size overflow".into()))?;
         let out_elems = n_combos
-            .checked_mul(9)
-            .and_then(|x| x.checked_mul(n))
+            .checked_mul(LEVELS)
+            .and_then(|x| x.checked_mul(len))
             .ok_or_else(|| CudaPivotError::InvalidInput("size overflow".into()))?;
         let bytes_out = out_elems
             .checked_mul(std::mem::size_of::<f32>())
@@ -347,42 +446,78 @@ impl CudaPivot {
         let headroom = 64 * 1024 * 1024;
         Self::will_fit(required, headroom)?;
 
-        let d_high = DeviceBuffer::from_slice(high).map_err(CudaPivotError::Cuda)?;
-        let d_low = DeviceBuffer::from_slice(low).map_err(CudaPivotError::Cuda)?;
-        let d_close = DeviceBuffer::from_slice(close).map_err(CudaPivotError::Cuda)?;
-
-        let d_open_opt = if need_o_any {
-            Some(DeviceBuffer::from_slice(open).map_err(CudaPivotError::Cuda)?)
-        } else {
-            None
-        };
-        let d_open_ref: &DeviceBuffer<f32> = d_open_opt.as_ref().unwrap_or(&d_close);
+        let d_open_ref = if need_o_any { d_open } else { d_close };
         let mut modes_i32 = Vec::with_capacity(n_combos);
         for p in &combos {
             modes_i32.push(p.mode.unwrap_or(3) as i32);
         }
         let d_modes = DeviceBuffer::from_slice(&modes_i32).map_err(CudaPivotError::Cuda)?;
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(out_elems) }.map_err(CudaPivotError::Cuda)?;
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }
+                .map_err(CudaPivotError::Cuda)?;
 
         self.launch_pivot_batch(
-            &d_high,
-            &d_low,
-            &d_close,
+            d_high,
+            d_low,
+            d_close,
             d_open_ref,
-            n,
+            len,
             first_valid,
             &d_modes,
             n_combos,
             &mut d_out,
         )?;
-        self.stream.synchronize().map_err(CudaPivotError::Cuda)?;
 
         Ok((
             DeviceArrayF32 {
                 buf: d_out,
-                rows: 9 * n_combos,
-                cols: n,
+                rows: LEVELS * n_combos,
+                cols: len,
+            },
+            combos,
+        ))
+    }
+
+    pub fn pivot_batch_output_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        d_open: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &PivotBatchRange,
+        output_index: usize,
+    ) -> Result<(DeviceArrayF32, Vec<PivotParams>), CudaPivotError> {
+        if output_index >= LEVELS {
+            return Err(CudaPivotError::InvalidInput(
+                "output_index out of range".into(),
+            ));
+        }
+
+        let (packed, combos) = self.pivot_batch_dev_from_device_inputs(
+            d_high,
+            d_low,
+            d_close,
+            d_open,
+            len,
+            first_valid,
+            sweep,
+        )?;
+        let rows = combos.len();
+        let elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaPivotError::InvalidInput("rows*cols overflow".into()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaPivotError::Cuda)?;
+        self.launch_extract_output_rows(&packed.buf, rows, len, output_index, &mut d_out)?;
+
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols: len,
             },
             combos,
         ))

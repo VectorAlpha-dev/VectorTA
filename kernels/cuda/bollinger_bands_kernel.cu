@@ -66,6 +66,37 @@ __device__ __forceinline__ dsf load_dsf(const float2* __restrict__ p, int idx) {
     return ds_make(v.x, v.y);
 }
 
+extern "C" __global__ void bollinger_bands_build_prefix_f32(
+    const float* __restrict__ data,
+    int len,
+    float2* __restrict__ prefix_sum,
+    float2* __restrict__ prefix_sum_sq,
+    int* __restrict__ prefix_nan) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+
+    dsf sum = ds_make(0.0f, 0.0f);
+    dsf sum_sq = ds_make(0.0f, 0.0f);
+    int nan_count = 0;
+
+    prefix_sum[0] = make_float2(0.0f, 0.0f);
+    prefix_sum_sq[0] = make_float2(0.0f, 0.0f);
+    prefix_nan[0] = 0;
+
+    for (int i = 0; i < len; ++i) {
+        const float v = data[i];
+        if (isnan(v)) {
+            ++nan_count;
+        } else {
+            const dsf x = ds_make(v, 0.0f);
+            sum = ds_add(sum, x);
+            sum_sq = ds_add(sum_sq, ds_mul(x, x));
+        }
+        prefix_sum[i + 1] = make_float2(sum.hi, sum.lo);
+        prefix_sum_sq[i + 1] = make_float2(sum_sq.hi, sum_sq.lo);
+        prefix_nan[i + 1] = nan_count;
+    }
+}
+
 extern "C" __global__ void bollinger_bands_sma_prefix_f32(
     const float* __restrict__ data,
     const float2* __restrict__ prefix_sum,

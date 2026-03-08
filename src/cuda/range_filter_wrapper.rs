@@ -485,6 +485,201 @@ impl CudaRangeFilter {
         ))
     }
 
+    pub fn range_filter_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &RangeFilterBatchRange,
+    ) -> Result<(DeviceRangeFilterTrio, Vec<RangeFilterParams>), CudaRangeFilterError> {
+        if len == 0 || d_prices.len() != len {
+            return Err(CudaRangeFilterError::InvalidInput(
+                "device price buffer must match non-zero length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaRangeFilterError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = expand_grid(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaRangeFilterError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+
+        let max_needed = combos
+            .iter()
+            .map(|c| {
+                let rp = c.range_period.unwrap_or(14);
+                let sp = if c.smooth_range.unwrap_or(true) {
+                    c.smooth_period.unwrap_or(27)
+                } else {
+                    0
+                };
+                rp.max(sp)
+            })
+            .max()
+            .unwrap_or(0);
+        let valid = len - first_valid;
+        if valid < max_needed {
+            return Err(CudaRangeFilterError::InvalidInput(format!(
+                "not enough valid data: needed = {}, valid = {}",
+                max_needed, valid
+            )));
+        }
+        for p in &combos {
+            let rs = p.range_size.unwrap_or(2.618);
+            if !rs.is_finite() || rs <= 0.0 {
+                return Err(CudaRangeFilterError::InvalidInput(
+                    "invalid range_size".into(),
+                ));
+            }
+            let rp = p.range_period.unwrap_or(14);
+            if rp == 0 || rp > len {
+                return Err(CudaRangeFilterError::InvalidInput(
+                    "invalid range_period".into(),
+                ));
+            }
+            let sr = p.smooth_range.unwrap_or(true);
+            let sp = p.smooth_period.unwrap_or(27);
+            if sr && (sp == 0 || sp > len) {
+                return Err(CudaRangeFilterError::InvalidInput(
+                    "invalid smooth_period".into(),
+                ));
+            }
+        }
+
+        let rows = combos.len();
+        let elem_size = std::mem::size_of::<f32>();
+        let params_row_bytes = elem_size
+            .checked_add(
+                3usize
+                    .checked_mul(std::mem::size_of::<i32>())
+                    .ok_or_else(|| CudaRangeFilterError::InvalidInput("size overflow".into()))?,
+            )
+            .ok_or_else(|| CudaRangeFilterError::InvalidInput("size overflow".into()))?;
+        let params_bytes = rows
+            .checked_mul(params_row_bytes)
+            .ok_or_else(|| CudaRangeFilterError::InvalidInput("size overflow".into()))?;
+        let out_elems_per_row = len
+            .checked_mul(3)
+            .ok_or_else(|| CudaRangeFilterError::InvalidInput("size overflow".into()))?;
+        let out_bytes = rows
+            .checked_mul(out_elems_per_row)
+            .and_then(|v| v.checked_mul(elem_size))
+            .ok_or_else(|| CudaRangeFilterError::InvalidInput("size overflow".into()))?;
+        let required = params_bytes
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaRangeFilterError::InvalidInput("size overflow".into()))?;
+        Self::will_fit(required, Self::headroom_bytes())?;
+
+        let range_sizes_f32: Vec<f32> = combos
+            .iter()
+            .map(|c| c.range_size.unwrap_or(2.618) as f32)
+            .collect();
+        let range_periods_i32: Vec<i32> = combos
+            .iter()
+            .map(|c| {
+                let rp = c.range_period.unwrap_or(14);
+                rp.try_into().map_err(|_| {
+                    CudaRangeFilterError::InvalidInput("range_period exceeds i32".into())
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        let smooth_flags_i32: Vec<i32> = combos
+            .iter()
+            .map(|c| if c.smooth_range.unwrap_or(true) { 1 } else { 0 })
+            .collect();
+        let smooth_periods_i32: Vec<i32> = combos
+            .iter()
+            .map(|c| {
+                let sp = c.smooth_period.unwrap_or(27);
+                sp.try_into().map_err(|_| {
+                    CudaRangeFilterError::InvalidInput("smooth_period exceeds i32".into())
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        let d_rs =
+            DeviceBuffer::from_slice(&range_sizes_f32).map_err(CudaRangeFilterError::Cuda)?;
+        let d_rp =
+            DeviceBuffer::from_slice(&range_periods_i32).map_err(CudaRangeFilterError::Cuda)?;
+        let d_sf =
+            DeviceBuffer::from_slice(&smooth_flags_i32).map_err(CudaRangeFilterError::Cuda)?;
+        let d_sp =
+            DeviceBuffer::from_slice(&smooth_periods_i32).map_err(CudaRangeFilterError::Cuda)?;
+
+        let elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaRangeFilterError::InvalidInput("rows*len overflow".into()))?;
+        let mut d_f: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaRangeFilterError::Cuda)?;
+        let mut d_h: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaRangeFilterError::Cuda)?;
+        let mut d_l: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaRangeFilterError::Cuda)?;
+
+        let func = self
+            .module
+            .get_function("range_filter_batch_f32")
+            .map_err(|_| CudaRangeFilterError::MissingKernelSymbol {
+                name: "range_filter_batch_f32",
+            })?;
+
+        let (grid, block) = self.pick_1d_launch_for_batch(rows)?;
+
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut rs_ptr = d_rs.as_device_ptr().as_raw();
+            let mut rp_ptr = d_rp.as_device_ptr().as_raw();
+            let mut sf_ptr = d_sf.as_device_ptr().as_raw();
+            let mut sp_ptr = d_sp.as_device_ptr().as_raw();
+            let mut len_i: i32 = len
+                .try_into()
+                .map_err(|_| CudaRangeFilterError::InvalidInput("length exceeds i32".into()))?;
+            let mut nrows_i: i32 = rows
+                .try_into()
+                .map_err(|_| CudaRangeFilterError::InvalidInput("rows exceeds i32".into()))?;
+            let mut first_i: i32 = first_valid.try_into().map_err(|_| {
+                CudaRangeFilterError::InvalidInput("first_valid exceeds i32".into())
+            })?;
+            let mut f_ptr = d_f.as_device_ptr().as_raw();
+            let mut h_ptr = d_h.as_device_ptr().as_raw();
+            let mut l_ptr = d_l.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut rs_ptr as *mut _ as *mut c_void,
+                &mut rp_ptr as *mut _ as *mut c_void,
+                &mut sf_ptr as *mut _ as *mut c_void,
+                &mut sp_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut nrows_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut f_ptr as *mut _ as *mut c_void,
+                &mut h_ptr as *mut _ as *mut c_void,
+                &mut l_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(CudaRangeFilterError::Cuda)?;
+        }
+
+        Ok((
+            DeviceRangeFilterTrio {
+                filter: d_f,
+                high: d_h,
+                low: d_l,
+                rows,
+                cols: len,
+                ctx: self.context.clone(),
+                device_id: self.device_id,
+            },
+            combos,
+        ))
+    }
+
     pub fn range_filter_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],

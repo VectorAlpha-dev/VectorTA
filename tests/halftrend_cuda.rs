@@ -4,7 +4,7 @@ use vector_ta::utilities::enums::Kernel;
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::{cuda_available, CudaHalftrend};
+use vector_ta::cuda::{cuda_available, CudaHalftrend, CudaRuntime};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -118,6 +118,134 @@ fn halftrend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
             assert!(approx_eq(cs, gs, 5e-2), "sell mismatch at {}", idx);
         }
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn halftrend_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[halftrend_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 4096usize;
+    let mut close = vec![f64::NAN; len];
+    for i in 4..len {
+        let x = i as f64 * 0.0023;
+        close[i] = 100.0 + x.sin() * 0.7 + 0.0004 * i as f64;
+    }
+    let mut high = close.clone();
+    let mut low = close.clone();
+    for i in 0..len {
+        if !close[i].is_nan() {
+            let x = i as f64 * 0.0031;
+            let off = 0.14 + (x * 0.37).cos().abs() * 0.03;
+            high[i] = close[i] + off;
+            low[i] = close[i] - off;
+        }
+    }
+
+    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+    let first_valid = high_f32
+        .iter()
+        .zip(low_f32.iter())
+        .zip(close_f32.iter())
+        .position(|((high, low), close)| high.is_finite() && low.is_finite() && close.is_finite())
+        .expect("first valid");
+    let sweep = HalfTrendBatchRange {
+        amplitude: (2, 16, 2),
+        channel_deviation: (2.0, 2.0, 0.0),
+        atr_period: (14, 14, 0),
+    };
+
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+    let d_close = runtime.upload_f32(&close_f32).expect("upload close");
+    let cuda = CudaHalftrend::new(0).expect("CudaHalftrend::new");
+
+    let legacy = cuda
+        .halftrend_batch_dev(&high_f32, &low_f32, &close_f32, &sweep)
+        .expect("legacy halftrend");
+    let device = cuda
+        .halftrend_batch_dev_from_device_inputs(
+            d_high.buffer(),
+            d_low.buffer(),
+            d_close.buffer(),
+            len,
+            first_valid,
+            &sweep,
+        )
+        .expect("device halftrend");
+    cuda.synchronize().expect("halftrend sync");
+
+    let need = legacy.halftrend.rows * legacy.halftrend.cols;
+    let mut legacy_ht = vec![0f32; need];
+    let mut legacy_tr = vec![0f32; need];
+    let mut legacy_ah = vec![0f32; need];
+    let mut legacy_al = vec![0f32; need];
+    let mut legacy_bs = vec![0f32; need];
+    let mut legacy_ss = vec![0f32; need];
+    legacy.halftrend.buf.copy_to(&mut legacy_ht)?;
+    legacy.trend.buf.copy_to(&mut legacy_tr)?;
+    legacy.atr_high.buf.copy_to(&mut legacy_ah)?;
+    legacy.atr_low.buf.copy_to(&mut legacy_al)?;
+    legacy.buy.buf.copy_to(&mut legacy_bs)?;
+    legacy.sell.buf.copy_to(&mut legacy_ss)?;
+
+    let mut device_ht = vec![0f32; need];
+    let mut device_tr = vec![0f32; need];
+    let mut device_ah = vec![0f32; need];
+    let mut device_al = vec![0f32; need];
+    let mut device_bs = vec![0f32; need];
+    let mut device_ss = vec![0f32; need];
+    device.halftrend.buf.copy_to(&mut device_ht)?;
+    device.trend.buf.copy_to(&mut device_tr)?;
+    device.atr_high.buf.copy_to(&mut device_ah)?;
+    device.atr_low.buf.copy_to(&mut device_al)?;
+    device.buy.buf.copy_to(&mut device_bs)?;
+    device.sell.buf.copy_to(&mut device_ss)?;
+
+    for (lhs, rhs) in legacy_ht.iter().zip(device_ht.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!((lhs - rhs).abs() <= 1e-6, "halftrend lhs={lhs} rhs={rhs}");
+    }
+    for (lhs, rhs) in legacy_tr.iter().zip(device_tr.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!((lhs - rhs).abs() <= 1e-6, "trend lhs={lhs} rhs={rhs}");
+    }
+    for (lhs, rhs) in legacy_ah.iter().zip(device_ah.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!((lhs - rhs).abs() <= 1e-6, "atr_high lhs={lhs} rhs={rhs}");
+    }
+    for (lhs, rhs) in legacy_al.iter().zip(device_al.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!((lhs - rhs).abs() <= 1e-6, "atr_low lhs={lhs} rhs={rhs}");
+    }
+    for (lhs, rhs) in legacy_bs.iter().zip(device_bs.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!((lhs - rhs).abs() <= 1e-6, "buy lhs={lhs} rhs={rhs}");
+    }
+    for (lhs, rhs) in legacy_ss.iter().zip(device_ss.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!((lhs - rhs).abs() <= 1e-6, "sell lhs={lhs} rhs={rhs}");
+    }
+
     Ok(())
 }
 

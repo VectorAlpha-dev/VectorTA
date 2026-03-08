@@ -61,7 +61,40 @@ __device__ __forceinline__ dsf warp_bcast_dsf_first(dsf v_any) {
     return ds_make(hi, lo);
 }
 
+extern "C" __global__ void vpci_build_prefix_single_f32(
+    const float* __restrict__ close,
+    const float* __restrict__ volume,
+    int series_len,
+    int first_valid,
+    float2* __restrict__ pfx_c,
+    float2* __restrict__ pfx_v,
+    float2* __restrict__ pfx_cv
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (series_len <= 0 || first_valid < 0 || first_valid >= series_len) {
+        return;
+    }
 
+    for (int i = 0; i < first_valid; ++i) {
+        pfx_c[i] = make_float2(0.0f, 0.0f);
+        pfx_v[i] = make_float2(0.0f, 0.0f);
+        pfx_cv[i] = make_float2(0.0f, 0.0f);
+    }
+
+    dsf sc = ds_make(0.0f, 0.0f);
+    dsf sv = ds_make(0.0f, 0.0f);
+    dsf scv = ds_make(0.0f, 0.0f);
+    for (int i = first_valid; i < series_len; ++i) {
+        const float c = isfinite(close[i]) ? close[i] : 0.0f;
+        const float v = isfinite(volume[i]) ? volume[i] : 0.0f;
+        sc = ds_add(sc, ds_set(c));
+        sv = ds_add(sv, ds_set(v));
+        scv = ds_add(scv, ds_set(c * v));
+        pfx_c[i] = make_float2(sc.hi, sc.lo);
+        pfx_v[i] = make_float2(sv.hi, sv.lo);
+        pfx_cv[i] = make_float2(scv.hi, scv.lo);
+    }
+}
 
 extern "C" __global__ void vpci_batch_f32(
     const float2* __restrict__ pfx_c,
@@ -120,12 +153,13 @@ extern "C" __global__ void vpci_batch_f32(
         float vol_i = volume[i];
 
 
-        const dsf c_prev_l  = load_dsf_f2(pfx_c,  idx_long_prev);
-        const dsf v_prev_l  = load_dsf_f2(pfx_v,  idx_long_prev);
-        const dsf cv_prev_l = load_dsf_f2(pfx_cv, idx_long_prev);
-        const dsf c_prev_s  = load_dsf_f2(pfx_c,  idx_short_prev);
-        const dsf v_prev_s  = load_dsf_f2(pfx_v,  idx_short_prev);
-        const dsf cv_prev_s = load_dsf_f2(pfx_cv, idx_short_prev);
+        const dsf zero = ds_make(0.0f, 0.0f);
+        const dsf c_prev_l  = (idx_long_prev < first_valid) ? zero : load_dsf_f2(pfx_c,  idx_long_prev);
+        const dsf v_prev_l  = (idx_long_prev < first_valid) ? zero : load_dsf_f2(pfx_v,  idx_long_prev);
+        const dsf cv_prev_l = (idx_long_prev < first_valid) ? zero : load_dsf_f2(pfx_cv, idx_long_prev);
+        const dsf c_prev_s  = (idx_short_prev < first_valid) ? zero : load_dsf_f2(pfx_c,  idx_short_prev);
+        const dsf v_prev_s  = (idx_short_prev < first_valid) ? zero : load_dsf_f2(pfx_v,  idx_short_prev);
+        const dsf cv_prev_s = (idx_short_prev < first_valid) ? zero : load_dsf_f2(pfx_cv, idx_short_prev);
 
 
         const dsf sc_l  = ds_sub(c_cur,  c_prev_l);
@@ -228,12 +262,13 @@ extern "C" __global__ void vpci_many_series_one_param_f32(
         const dsf v_cur  = load_dsf_f2(pfx_v_tm,  idx);
         const dsf cv_cur = load_dsf_f2(pfx_cv_tm, idx);
 
-        const dsf sc_l  = ds_sub(c_cur,  load_dsf_f2(pfx_c_tm,  idx_long_pr));
-        const dsf sv_l  = ds_sub(v_cur,  load_dsf_f2(pfx_v_tm,  idx_long_pr));
-        const dsf scv_l = ds_sub(cv_cur, load_dsf_f2(pfx_cv_tm, idx_long_pr));
-        const dsf sc_s  = ds_sub(c_cur,  load_dsf_f2(pfx_c_tm,  idx_short_pr));
-        const dsf sv_s  = ds_sub(v_cur,  load_dsf_f2(pfx_v_tm,  idx_short_pr));
-        const dsf scv_s = ds_sub(cv_cur, load_dsf_f2(pfx_cv_tm, idx_short_pr));
+        const dsf zero = ds_make(0.0f, 0.0f);
+        const dsf sc_l  = ds_sub(c_cur,  (idx_long_pr < first * cols + series) ? zero : load_dsf_f2(pfx_c_tm,  idx_long_pr));
+        const dsf sv_l  = ds_sub(v_cur,  (idx_long_pr < first * cols + series) ? zero : load_dsf_f2(pfx_v_tm,  idx_long_pr));
+        const dsf scv_l = ds_sub(cv_cur, (idx_long_pr < first * cols + series) ? zero : load_dsf_f2(pfx_cv_tm, idx_long_pr));
+        const dsf sc_s  = ds_sub(c_cur,  (idx_short_pr < first * cols + series) ? zero : load_dsf_f2(pfx_c_tm,  idx_short_pr));
+        const dsf sv_s  = ds_sub(v_cur,  (idx_short_pr < first * cols + series) ? zero : load_dsf_f2(pfx_v_tm,  idx_short_pr));
+        const dsf scv_s = ds_sub(cv_cur, (idx_short_pr < first * cols + series) ? zero : load_dsf_f2(pfx_cv_tm, idx_short_pr));
 
         const dsf sma_l   = ds_scale(sc_l,  inv_long);
         const dsf sma_s   = ds_scale(sc_s,  inv_short);

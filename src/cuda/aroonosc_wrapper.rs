@@ -208,6 +208,85 @@ impl CudaAroonOsc {
         })
     }
 
+    pub fn aroonosc_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &AroonOscBatchRange,
+    ) -> Result<DeviceArrayF32Aroonosc, CudaAroonOscError> {
+        if series_len == 0 || d_high.len() != series_len || d_low.len() != series_len {
+            return Err(CudaAroonOscError::InvalidInput(
+                "device input buffers must match non-zero length".into(),
+            ));
+        }
+        let combos = expand_lengths(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaAroonOscError::InvalidInput(
+                "no length combinations".into(),
+            ));
+        }
+        if first_valid >= series_len {
+            return Err(CudaAroonOscError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let max_len = combos
+            .iter()
+            .map(|p| p.length.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        if max_len == 0 || series_len - first_valid < max_len {
+            return Err(CudaAroonOscError::InvalidInput(
+                "not enough valid data".into(),
+            ));
+        }
+
+        let n_combos = combos.len();
+        let lengths_i32: Vec<i32> = combos
+            .iter()
+            .map(|p| p.length.unwrap_or(0) as i32)
+            .collect();
+        let param_bytes = lengths_i32.len().saturating_mul(4);
+        let out_bytes = n_combos
+            .checked_mul(series_len)
+            .and_then(|x| x.checked_mul(4))
+            .ok_or_else(|| CudaAroonOscError::InvalidInput("byte size overflow".into()))?;
+        let required = param_bytes
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaAroonOscError::InvalidInput("byte size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
+
+        let d_lengths = DeviceBuffer::from_slice(&lengths_i32).map_err(CudaAroonOscError::Cuda)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(series_len * n_combos).map_err(CudaAroonOscError::Cuda)?
+        };
+
+        let avg_len: f32 =
+            lengths_i32.iter().map(|&x| (x.max(1)) as f32).sum::<f32>() / (n_combos as f32);
+
+        self.launch_batch_kernel(
+            d_high,
+            d_low,
+            &d_lengths,
+            series_len as i32,
+            first_valid as i32,
+            n_combos as i32,
+            &mut d_out,
+            avg_len,
+        )?;
+
+        Ok(DeviceArrayF32Aroonosc {
+            buf: d_out,
+            rows: n_combos,
+            cols: series_len,
+            ctx: self.context.clone(),
+            device_id: self.device_id,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn launch_batch_kernel(
         &self,

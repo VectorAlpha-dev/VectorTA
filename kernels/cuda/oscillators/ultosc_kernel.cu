@@ -72,6 +72,48 @@ __device__ __forceinline__ float recip_nr1(float x)
 
 __device__ __forceinline__ float uo_nan() { return __int_as_float(0x7fffffff); }
 
+__global__ void ultosc_build_prefix_sums_f32(
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    const float* __restrict__ close,
+    int len,
+    int first,
+    float2* __restrict__ pcmtl,
+    float2* __restrict__ ptr)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (len < 0) return;
+
+    pcmtl[0] = make_float2(0.0f, 0.0f);
+    ptr[0] = make_float2(0.0f, 0.0f);
+
+    double pcmtl_acc = 0.0;
+    double ptr_acc = 0.0;
+    for (int i = 0; i < len; ++i) {
+        double add_c = 0.0;
+        double add_t = 0.0;
+        if (i >= first) {
+            const double hi = (double)high[i];
+            const double lo = (double)low[i];
+            const double ci = (double)close[i];
+            const double pc = (double)close[i - 1];
+            const double tl = lo < pc ? lo : pc;
+            double trv = hi - lo;
+            const double d1 = fabs(hi - pc);
+            if (d1 > trv) trv = d1;
+            const double d2 = fabs(lo - pc);
+            if (d2 > trv) trv = d2;
+            add_c = ci - tl;
+            add_t = trv;
+        }
+
+        pcmtl_acc += add_c;
+        ptr_acc += add_t;
+        d_to_ds(pcmtl[i + 1].x, pcmtl[i + 1].y, pcmtl_acc);
+        d_to_ds(ptr[i + 1].x, ptr[i + 1].y, ptr_acc);
+    }
+}
+
 
 
 

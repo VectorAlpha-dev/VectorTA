@@ -77,6 +77,45 @@ __device__ __forceinline__ ds ds_square(ds a) { return ds_mul(a, a); }
 #ifndef STDDEV_COMBO_TILE
 #define STDDEV_COMBO_TILE 4
 #endif
+
+extern "C" __global__ void stddev_build_prefix_f32(
+    const float* __restrict__ data,
+    int len,
+    int first_valid,
+    float2* __restrict__ ps_x,
+    float2* __restrict__ ps_x2,
+    int* __restrict__ ps_nan
+) {
+    if (blockIdx.x != 0 || blockIdx.y != 0 || blockIdx.z != 0 ||
+        threadIdx.x != 0 || threadIdx.y != 0 || threadIdx.z != 0) {
+        return;
+    }
+
+    ds sum = ds(0.0f, 0.0f);
+    ds sum_sq = ds(0.0f, 0.0f);
+    int nan_count = 0;
+
+    ps_x[0] = make_float2(0.0f, 0.0f);
+    ps_x2[0] = make_float2(0.0f, 0.0f);
+    ps_nan[0] = 0;
+
+    for (int i = 0; i < len; ++i) {
+        if (i >= first_valid) {
+            const float v = data[i];
+            if (isnan(v)) {
+                nan_count += 1;
+            } else {
+                const ds x = ds(v, 0.0f);
+                sum = ds_add(sum, x);
+                sum_sq = ds_add(sum_sq, ds_square(x));
+            }
+        }
+        ps_x[i + 1] = make_float2(sum.hi, sum.lo);
+        ps_x2[i + 1] = make_float2(sum_sq.hi, sum_sq.lo);
+        ps_nan[i + 1] = nan_count;
+    }
+}
+
 extern "C" __global__ void stddev_batch_f32(
     const float2* __restrict__ ps_x,
     const float2* __restrict__ ps_x2,

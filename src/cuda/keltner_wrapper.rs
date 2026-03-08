@@ -124,6 +124,11 @@ impl CudaKeltner {
     }
 
     #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaKeltnerError> {
+        self.stream.synchronize().map_err(Into::into)
+    }
+
+    #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
             Ok(v) => v != "0" && v.to_lowercase() != "false",
@@ -221,6 +226,63 @@ impl CudaKeltner {
             return Err(CudaKeltnerError::InvalidInput("empty series".into()));
         }
 
+        let first_valid = high
+            .iter()
+            .zip(low.iter())
+            .zip(close.iter())
+            .zip(source.iter())
+            .position(|(((h, l), c), s)| {
+                h.is_finite() && l.is_finite() && c.is_finite() && s.is_finite()
+            })
+            .ok_or_else(|| CudaKeltnerError::InvalidInput("all values are NaN".into()))?;
+
+        let d_high = DeviceBuffer::from_slice(high).map_err(CudaKeltnerError::Cuda)?;
+        let d_low = DeviceBuffer::from_slice(low).map_err(CudaKeltnerError::Cuda)?;
+        let d_close = DeviceBuffer::from_slice(close).map_err(CudaKeltnerError::Cuda)?;
+        let d_source = DeviceBuffer::from_slice(source).map_err(CudaKeltnerError::Cuda)?;
+        let out = self.keltner_batch_dev_from_device_inputs(
+            &d_high,
+            &d_low,
+            &d_close,
+            &d_source,
+            len,
+            first_valid,
+            sweep,
+            ma_type,
+        )?;
+        self.stream.synchronize()?;
+        Ok(out)
+    }
+
+    pub fn keltner_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        d_source: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &KeltnerBatchRange,
+        ma_type: &str,
+    ) -> Result<CudaKeltnerBatchResult, CudaKeltnerError> {
+        if !(d_high.len() == d_low.len()
+            && d_low.len() == d_close.len()
+            && d_close.len() == d_source.len()
+            && d_source.len() == len)
+        {
+            return Err(CudaKeltnerError::InvalidInput(
+                "device input length mismatch".into(),
+            ));
+        }
+        if len == 0 {
+            return Err(CudaKeltnerError::InvalidInput("empty series".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaKeltnerError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
         let combos = expand_grid_local(sweep)?;
         if combos.is_empty() {
             return Err(CudaKeltnerError::InvalidInput("empty sweep".into()));
@@ -238,10 +300,12 @@ impl CudaKeltner {
         let ma_rows = match ma_type.to_ascii_lowercase().as_str() {
             "ema" => {
                 use crate::indicators::moving_averages::ema::EmaBatchRange;
-                let cuda =
-                    CudaEma::new(0).map_err(|e| CudaKeltnerError::InvalidInput(e.to_string()))?;
-                cuda.ema_batch_dev(
-                    source,
+                let cuda = CudaEma::new(self.device_id as usize)
+                    .map_err(|e| CudaKeltnerError::InvalidInput(e.to_string()))?;
+                cuda.ema_batch_from_device_ptr(
+                    d_source.as_device_ptr(),
+                    len,
+                    first_valid,
                     &EmaBatchRange {
                         period: (min_p, max_p, 1),
                     },
@@ -250,11 +314,13 @@ impl CudaKeltner {
             }
             "sma" => {
                 use crate::indicators::moving_averages::sma::SmaBatchRange;
-                let cuda =
-                    CudaSma::new(0).map_err(|e| CudaKeltnerError::InvalidInput(e.to_string()))?;
-                let (dev, _combos) = cuda
-                    .sma_batch_dev(
-                        source,
+                let cuda = CudaSma::new(self.device_id as usize)
+                    .map_err(|e| CudaKeltnerError::InvalidInput(e.to_string()))?;
+                let dev = cuda
+                    .sma_batch_from_device_ptr(
+                        d_source.as_device_ptr(),
+                        len,
+                        first_valid,
                         &SmaBatchRange {
                             period: (min_p, max_p, 1),
                         },
@@ -265,50 +331,20 @@ impl CudaKeltner {
             other => return Err(CudaKeltnerError::UnsupportedMa(other.to_string())),
         };
 
-        let cuda_atr = crate::cuda::atr_wrapper::CudaAtr::new(0)
+        let cuda_atr = crate::cuda::atr_wrapper::CudaAtr::new(self.device_id as usize)
             .map_err(|e| CudaKeltnerError::InvalidInput(e.to_string()))?;
-        let d_high_atr = DeviceBuffer::from_slice(high).map_err(CudaKeltnerError::Cuda)?;
-        let d_low_atr = DeviceBuffer::from_slice(low).map_err(CudaKeltnerError::Cuda)?;
-        let d_close_atr = DeviceBuffer::from_slice(close).map_err(CudaKeltnerError::Cuda)?;
-        let mut d_tr: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaKeltnerError::Cuda)?;
-
-        cuda_atr
-            .tr_from_hlc_device(&d_high_atr, &d_low_atr, &d_close_atr, len, 0, &mut d_tr)
-            .map_err(|e| CudaKeltnerError::InvalidInput(e.to_string()))?;
-
-        let mut h_periods: Vec<i32> = Vec::with_capacity(rows_p);
-        let mut h_alphas: Vec<f32> = Vec::with_capacity(rows_p);
-        let mut h_warms: Vec<i32> = Vec::with_capacity(rows_p);
-        for p in min_p..=max_p {
-            h_periods.push(p as i32);
-            h_alphas.push(1.0f32 / (p as f32));
-            h_warms.push((p - 1) as i32);
-        }
-        let d_periods = DeviceBuffer::from_slice(&h_periods).map_err(CudaKeltnerError::Cuda)?;
-        let d_alphas = DeviceBuffer::from_slice(&h_alphas).map_err(CudaKeltnerError::Cuda)?;
-        let d_warms = DeviceBuffer::from_slice(&h_warms).map_err(CudaKeltnerError::Cuda)?;
-
-        let mut d_atr_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(rows_p * len) }.map_err(CudaKeltnerError::Cuda)?;
-        cuda_atr
-            .atr_batch_device_with_tr(
-                &d_tr,
-                &d_periods,
-                &d_alphas,
-                &d_warms,
+        let atr_rows = cuda_atr
+            .atr_batch_from_device_ptrs(
+                d_high.as_device_ptr(),
+                d_low.as_device_ptr(),
+                d_close.as_device_ptr(),
                 len,
-                0,
-                rows_p,
-                &mut d_atr_out,
+                first_valid,
+                &crate::indicators::atr::AtrBatchRange {
+                    length: (min_p, max_p, 1),
+                },
             )
             .map_err(|e| CudaKeltnerError::InvalidInput(e.to_string()))?;
-
-        let atr_rows = DeviceArrayF32 {
-            buf: d_atr_out,
-            rows: rows_p,
-            cols: len,
-        };
 
         let out_elems = combos
             .len()
@@ -355,14 +391,9 @@ impl CudaKeltner {
             .iter()
             .map(|c| c.multiplier.unwrap() as f32)
             .collect();
-
-        let first_valid_close = close
-            .iter()
-            .position(|v| !v.is_nan())
-            .ok_or_else(|| CudaKeltnerError::InvalidInput("all close values are NaN".into()))?;
         let row_warms: Vec<i32> = combos
             .iter()
-            .map(|c| (first_valid_close + c.period.unwrap() - 1) as i32)
+            .map(|c| (first_valid + c.period.unwrap() - 1) as i32)
             .collect();
 
         let d_row_period_idx =
@@ -440,9 +471,6 @@ impl CudaKeltner {
             }
             launched += chunk;
         }
-
-        self.stream.synchronize()?;
-        self.stream.synchronize()?;
 
         Ok(CudaKeltnerBatchResult {
             outputs: DeviceKeltnerTriplet {

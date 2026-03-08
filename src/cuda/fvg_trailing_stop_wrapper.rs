@@ -283,21 +283,19 @@ impl CudaFvgTs {
         Ok(out)
     }
 
-    pub fn fvg_ts_batch_dev(
-        &self,
-        high: &[f32],
-        low: &[f32],
-        close: &[f32],
+    fn validate_batch_meta(
+        len: usize,
+        first_valid: usize,
         sweep: &FvgTsBatchRange,
-    ) -> Result<CudaFvgTsBatch, CudaFvgTsError> {
-        let len = high.len();
-        if len == 0 || low.len() != len || close.len() != len {
+    ) -> Result<Vec<FvgTrailingStopParams>, CudaFvgTsError> {
+        if len == 0 {
+            return Err(CudaFvgTsError::InvalidInput("empty input".into()));
+        }
+        if first_valid >= len {
             return Err(CudaFvgTsError::InvalidInput(
-                "inconsistent or empty inputs".into(),
+                "first_valid out of range".into(),
             ));
         }
-        let _first = Self::first_valid_ohlc_f32(high, low, close)
-            .ok_or_else(|| CudaFvgTsError::InvalidInput("all values are NaN".into()))?;
 
         let combos = Self::expand_grid(sweep)?;
         if combos.is_empty() {
@@ -325,15 +323,33 @@ impl CudaFvgTs {
             }
         }
 
+        Ok(combos)
+    }
+
+    fn launch_batch_with_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        combos: Vec<FvgTrailingStopParams>,
+    ) -> Result<CudaFvgTsBatch, CudaFvgTsError> {
+        if len == 0 || d_high.len() != len || d_low.len() != len || d_close.len() != len {
+            return Err(CudaFvgTsError::InvalidInput(
+                "device input buffers must match non-zero length".into(),
+            ));
+        }
+        if combos.is_empty() {
+            return Err(CudaFvgTsError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+
         let nrows = combos.len();
         let rows_cols = nrows
             .checked_mul(len)
             .ok_or_else(|| CudaFvgTsError::InvalidInput("rows*cols overflow".into()))?;
 
-        let prices_bytes = len
-            .checked_mul(3)
-            .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
-            .ok_or_else(|| CudaFvgTsError::InvalidInput("price bytes overflow".into()))?;
         let params_bytes = nrows
             .checked_mul(3)
             .and_then(|n| n.checked_mul(std::mem::size_of::<i32>()))
@@ -342,9 +358,8 @@ impl CudaFvgTs {
             .checked_mul(4)
             .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| CudaFvgTsError::InvalidInput("output bytes overflow".into()))?;
-        let required = prices_bytes
-            .checked_add(params_bytes)
-            .and_then(|n| n.checked_add(out_bytes))
+        let required = params_bytes
+            .checked_add(out_bytes)
             .ok_or_else(|| CudaFvgTsError::InvalidInput("total bytes overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
@@ -360,10 +375,6 @@ impl CudaFvgTs {
                 ));
             }
         }
-
-        let d_high = DeviceBuffer::from_slice(high)?;
-        let d_low = DeviceBuffer::from_slice(low)?;
-        let d_close = DeviceBuffer::from_slice(close)?;
 
         let mut h_lb: Vec<i32> = Vec::with_capacity(nrows);
         let mut h_sw: Vec<i32> = Vec::with_capacity(nrows);
@@ -507,7 +518,6 @@ impl CudaFvgTs {
             self.stream
                 .launch(&func, grid, block, dynamic_smem_bytes as u32, args)?;
         }
-        self.stream.synchronize()?;
 
         Ok(CudaFvgTsBatch {
             upper: DeviceArrayF32 {
@@ -532,6 +542,80 @@ impl CudaFvgTs {
             },
             combos,
         })
+    }
+
+    pub fn fvg_ts_batch_dev(
+        &self,
+        high: &[f32],
+        low: &[f32],
+        close: &[f32],
+        sweep: &FvgTsBatchRange,
+    ) -> Result<CudaFvgTsBatch, CudaFvgTsError> {
+        let len = high.len();
+        if len == 0 || low.len() != len || close.len() != len {
+            return Err(CudaFvgTsError::InvalidInput(
+                "inconsistent or empty inputs".into(),
+            ));
+        }
+        let first_valid = Self::first_valid_ohlc_f32(high, low, close)
+            .ok_or_else(|| CudaFvgTsError::InvalidInput("all values are NaN".into()))?;
+        let combos = Self::validate_batch_meta(len, first_valid, sweep)?;
+
+        let nrows = combos.len();
+        let rows_cols = nrows
+            .checked_mul(len)
+            .ok_or_else(|| CudaFvgTsError::InvalidInput("rows*cols overflow".into()))?;
+
+        let prices_bytes = len
+            .checked_mul(3)
+            .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaFvgTsError::InvalidInput("price bytes overflow".into()))?;
+        let params_bytes = nrows
+            .checked_mul(3)
+            .and_then(|n| n.checked_mul(std::mem::size_of::<i32>()))
+            .ok_or_else(|| CudaFvgTsError::InvalidInput("param bytes overflow".into()))?;
+        let out_bytes = rows_cols
+            .checked_mul(4)
+            .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaFvgTsError::InvalidInput("output bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(params_bytes)
+            .and_then(|n| n.checked_add(out_bytes))
+            .ok_or_else(|| CudaFvgTsError::InvalidInput("total bytes overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaFvgTsError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaFvgTsError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
+        }
+
+        let d_high = DeviceBuffer::from_slice(high)?;
+        let d_low = DeviceBuffer::from_slice(low)?;
+        let d_close = DeviceBuffer::from_slice(close)?;
+        let batch = self.launch_batch_with_device_inputs(&d_high, &d_low, &d_close, len, combos)?;
+        self.stream.synchronize()?;
+        Ok(batch)
+    }
+
+    pub fn fvg_ts_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &FvgTsBatchRange,
+    ) -> Result<CudaFvgTsBatch, CudaFvgTsError> {
+        let combos = Self::validate_batch_meta(len, first_valid, sweep)?;
+        self.launch_batch_with_device_inputs(d_high, d_low, d_close, len, combos)
     }
 
     pub fn fvg_ts_many_series_one_param_time_major_dev(

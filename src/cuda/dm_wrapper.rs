@@ -277,6 +277,81 @@ impl CudaDm {
         Ok((pair, combos))
     }
 
+    pub fn dm_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &DmBatchRange,
+    ) -> Result<(DeviceDmPair, Vec<DmParams>), CudaDmError> {
+        if len == 0 || d_high.len() != len || d_low.len() != len {
+            return Err(CudaDmError::InvalidInput(
+                "device high/low buffers must match non-zero length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaDmError::InvalidInput("first_valid out of range".into()));
+        }
+
+        let periods = Self::expand_periods(sweep)?;
+        if periods.is_empty() {
+            return Err(CudaDmError::InvalidInput("empty period sweep".into()));
+        }
+        let max_period = *periods.iter().max().unwrap();
+        if len - first_valid < max_period {
+            return Err(CudaDmError::InvalidInput("not enough valid data".into()));
+        }
+
+        let combos: Vec<DmParams> = periods
+            .iter()
+            .map(|&p| DmParams { period: Some(p) })
+            .collect();
+        let rows = combos.len();
+        let rows_len = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaDmError::InvalidInput("size overflow (rows*len)".into()))?;
+        let mut req = std::mem::size_of::<f32>()
+            .checked_mul(2 * rows_len)
+            .ok_or_else(|| CudaDmError::InvalidInput("size overflow (bytes)".into()))?;
+        req = req
+            .checked_add(std::mem::size_of::<i32>() * rows)
+            .ok_or_else(|| CudaDmError::InvalidInput("size overflow (periods)".into()))?;
+        Self::will_fit(req, 64 * 1024 * 1024)?;
+
+        let periods_host: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_host, &self.stream) }?;
+        let mut d_plus: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(rows_len, &self.stream) }?;
+        let mut d_minus: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(rows_len, &self.stream) }?;
+
+        self.launch_batch(
+            d_high,
+            d_low,
+            &d_periods,
+            len,
+            rows,
+            first_valid,
+            &mut d_plus,
+            &mut d_minus,
+        )?;
+
+        let pair = DeviceDmPair {
+            plus: DeviceArrayF32 {
+                buf: d_plus,
+                rows,
+                cols: len,
+            },
+            minus: DeviceArrayF32 {
+                buf: d_minus,
+                rows,
+                cols: len,
+            },
+        };
+        Ok((pair, combos))
+    }
+
     fn launch_batch(
         &self,
         d_high: &DeviceBuffer<f32>,

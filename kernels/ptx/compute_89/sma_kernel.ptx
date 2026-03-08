@@ -12,6 +12,8 @@
 
 	// .globl	sma_prefix_stage1_scan_f64
 // _ZZ26sma_prefix_stage1_scan_f64E11warp_totals has been demoted
+// _ZZ35sma_prefix_stage2_block_offsets_f64E7s_carry has been demoted
+.extern .shared .align 16 .b8 s_scan[];
 
 .visible .entry sma_prefix_stage1_scan_f64(
 	.param .u64 sma_prefix_stage1_scan_f64_param_0,
@@ -278,78 +280,108 @@ $L__BB0_19:
 	.param .u32 sma_prefix_stage2_block_offsets_f64_param_2
 )
 {
-	.reg .pred 	%p<8>;
-	.reg .b32 	%r<21>;
-	.reg .f64 	%fd<19>;
-	.reg .b64 	%rd<20>;
+	.reg .pred 	%p<12>;
+	.reg .b32 	%r<26>;
+	.reg .f64 	%fd<18>;
+	.reg .b64 	%rd<10>;
+	// demoted variable
+	.shared .align 8 .f64 _ZZ35sma_prefix_stage2_block_offsets_f64E7s_carry;
 
-
-	ld.param.u64 	%rd13, [sma_prefix_stage2_block_offsets_f64_param_0];
-	ld.param.u64 	%rd14, [sma_prefix_stage2_block_offsets_f64_param_1];
+	ld.param.u64 	%rd3, [sma_prefix_stage2_block_offsets_f64_param_0];
+	ld.param.u64 	%rd4, [sma_prefix_stage2_block_offsets_f64_param_1];
 	ld.param.u32 	%r10, [sma_prefix_stage2_block_offsets_f64_param_2];
-	cvta.to.global.u64 	%rd1, %rd13;
-	cvta.to.global.u64 	%rd2, %rd14;
-	mov.u32 	%r11, %tid.x;
-	mov.u32 	%r12, %ctaid.x;
-	or.b32  	%r13, %r11, %r12;
-	setp.ne.s32 	%p1, %r13, 0;
+	mov.u32 	%r11, %ctaid.x;
+	setp.ne.s32 	%p1, %r11, 0;
 	setp.lt.s32 	%p2, %r10, 1;
 	or.pred  	%p3, %p1, %p2;
-	@%p3 bra 	$L__BB1_7;
+	@%p3 bra 	$L__BB1_16;
 
-	add.s32 	%r15, %r10, -1;
-	and.b32  	%r20, %r10, 3;
-	setp.lt.u32 	%p4, %r15, 3;
-	mov.f64 	%fd17, 0d0000000000000000;
-	mov.u32 	%r19, 0;
-	@%p4 bra 	$L__BB1_4;
+	mov.u32 	%r1, %tid.x;
+	mov.u32 	%r2, %ntid.x;
+	setp.ne.s32 	%p4, %r1, 0;
+	@%p4 bra 	$L__BB1_3;
 
-	sub.s32 	%r18, %r10, %r20;
-	mov.f64 	%fd17, 0d0000000000000000;
-	mov.u32 	%r19, 0;
-	mov.u64 	%rd16, %rd1;
-	mov.u64 	%rd17, %rd2;
+	mov.u64 	%rd5, 0;
+	st.shared.u64 	[_ZZ35sma_prefix_stage2_block_offsets_f64E7s_carry], %rd5;
 
 $L__BB1_3:
-	st.global.f64 	[%rd17], %fd17;
-	ld.global.nc.f64 	%fd8, [%rd16];
-	add.f64 	%fd9, %fd17, %fd8;
-	st.global.f64 	[%rd17+8], %fd9;
-	ld.global.nc.f64 	%fd10, [%rd16+8];
-	add.f64 	%fd11, %fd9, %fd10;
-	st.global.f64 	[%rd17+16], %fd11;
-	ld.global.nc.f64 	%fd12, [%rd16+16];
-	add.f64 	%fd13, %fd11, %fd12;
-	st.global.f64 	[%rd17+24], %fd13;
-	ld.global.nc.f64 	%fd14, [%rd16+24];
-	add.f64 	%fd17, %fd13, %fd14;
-	add.s32 	%r19, %r19, 4;
-	add.s64 	%rd17, %rd17, 32;
-	add.s64 	%rd16, %rd16, 32;
-	add.s32 	%r18, %r18, -4;
-	setp.ne.s32 	%p5, %r18, 0;
-	@%p5 bra 	$L__BB1_3;
+	bar.sync 	0;
+	shl.b32 	%r13, %r1, 3;
+	mov.u32 	%r14, s_scan;
+	add.s32 	%r3, %r14, %r13;
+	cvta.to.global.u64 	%rd1, %rd4;
+	cvta.to.global.u64 	%rd2, %rd3;
+	mov.u32 	%r24, 0;
 
 $L__BB1_4:
-	setp.eq.s32 	%p6, %r20, 0;
-	@%p6 bra 	$L__BB1_7;
+	add.s32 	%r5, %r24, %r1;
+	sub.s32 	%r15, %r10, %r24;
+	min.s32 	%r6, %r2, %r15;
+	setp.ge.s32 	%p5, %r1, %r6;
+	mov.f64 	%fd16, 0d0000000000000000;
+	@%p5 bra 	$L__BB1_6;
 
-	mul.wide.s32 	%rd15, %r19, 8;
-	add.s64 	%rd19, %rd1, %rd15;
-	add.s64 	%rd18, %rd2, %rd15;
+	mul.wide.s32 	%rd6, %r5, 8;
+	add.s64 	%rd7, %rd2, %rd6;
+	ld.global.nc.f64 	%fd16, [%rd7];
 
 $L__BB1_6:
-	.pragma "nounroll";
-	st.global.f64 	[%rd18], %fd17;
-	ld.global.nc.f64 	%fd15, [%rd19];
-	add.f64 	%fd17, %fd17, %fd15;
-	add.s64 	%rd19, %rd19, 8;
-	add.s64 	%rd18, %rd18, 8;
-	add.s32 	%r20, %r20, -1;
-	setp.ne.s32 	%p7, %r20, 0;
-	@%p7 bra 	$L__BB1_6;
+	st.shared.f64 	[%r3], %fd16;
+	bar.sync 	0;
+	setp.lt.s32 	%p6, %r2, 2;
+	@%p6 bra 	$L__BB1_11;
 
-$L__BB1_7:
+	mov.u32 	%r25, 1;
+
+$L__BB1_8:
+	setp.lt.s32 	%p7, %r1, %r25;
+	mov.f64 	%fd17, 0d0000000000000000;
+	@%p7 bra 	$L__BB1_10;
+
+	sub.s32 	%r17, %r1, %r25;
+	shl.b32 	%r18, %r17, 3;
+	add.s32 	%r20, %r14, %r18;
+	ld.shared.f64 	%fd17, [%r20];
+
+$L__BB1_10:
+	bar.sync 	0;
+	ld.shared.f64 	%fd7, [%r3];
+	add.f64 	%fd8, %fd17, %fd7;
+	st.shared.f64 	[%r3], %fd8;
+	bar.sync 	0;
+	shl.b32 	%r25, %r25, 1;
+	setp.lt.s32 	%p8, %r25, %r2;
+	@%p8 bra 	$L__BB1_8;
+
+$L__BB1_11:
+	@%p5 bra 	$L__BB1_13;
+
+	ld.shared.f64 	%fd9, [_ZZ35sma_prefix_stage2_block_offsets_f64E7s_carry];
+	ld.shared.f64 	%fd10, [%r3];
+	sub.f64 	%fd11, %fd10, %fd16;
+	add.f64 	%fd12, %fd9, %fd11;
+	mul.wide.s32 	%rd8, %r5, 8;
+	add.s64 	%rd9, %rd1, %rd8;
+	st.global.f64 	[%rd9], %fd12;
+
+$L__BB1_13:
+	bar.sync 	0;
+	@%p4 bra 	$L__BB1_15;
+
+	shl.b32 	%r21, %r6, 3;
+	add.s32 	%r23, %r14, %r21;
+	ld.shared.f64 	%fd13, [_ZZ35sma_prefix_stage2_block_offsets_f64E7s_carry];
+	ld.shared.f64 	%fd14, [%r23+-8];
+	add.f64 	%fd15, %fd14, %fd13;
+	st.shared.f64 	[_ZZ35sma_prefix_stage2_block_offsets_f64E7s_carry], %fd15;
+
+$L__BB1_15:
+	bar.sync 	0;
+	add.s32 	%r24, %r24, %r2;
+	setp.lt.s32 	%p11, %r24, %r10;
+	@%p11 bra 	$L__BB1_4;
+
+$L__BB1_16:
 	ret;
 
 }

@@ -126,6 +126,12 @@ impl CudaModGodMode {
     }
 
     #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaModGodModeError> {
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
+    #[inline]
     fn device_mem_info() -> Option<(usize, usize)> {
         mem_get_info().ok()
     }
@@ -305,9 +311,6 @@ impl CudaModGodMode {
                 ));
             }
         }
-        let combos = Self::expand_range(sweep)?;
-        let rows = combos.len();
-
         let mut first_valid_opt = None;
         for (i, &v) in close.iter().enumerate() {
             if v.is_finite() {
@@ -317,6 +320,67 @@ impl CudaModGodMode {
         }
         let first_valid = first_valid_opt
             .ok_or_else(|| CudaModGodModeError::InvalidInput("all values are NaN".into()))?;
+        let d_close = DeviceBuffer::from_slice(close)?;
+        let d_volume = if let Some(v) = volume {
+            Some(DeviceBuffer::from_slice(v)?)
+        } else {
+            None
+        };
+        let d_high = DeviceBuffer::from_slice(high)?;
+        let d_low = DeviceBuffer::from_slice(low)?;
+        let result = self.mod_god_mode_batch_dev_from_device_inputs(
+            &d_high,
+            &d_low,
+            &d_close,
+            d_volume.as_ref(),
+            n,
+            first_valid,
+            sweep,
+            volume.is_some(),
+        )?;
+        self.stream.synchronize()?;
+        Ok(result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn mod_god_mode_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        d_volume: Option<&DeviceBuffer<f32>>,
+        len: usize,
+        first_valid: usize,
+        sweep: &ModGodModeBatchRange,
+        use_volume: bool,
+    ) -> Result<CudaModGodModeBatchResult, CudaModGodModeError> {
+        if len == 0 {
+            return Err(CudaModGodModeError::InvalidInput("empty inputs".into()));
+        }
+        if d_high.len() != len || d_low.len() != len || d_close.len() != len {
+            return Err(CudaModGodModeError::InvalidInput(
+                "device H/L/C length mismatch".into(),
+            ));
+        }
+        if let Some(v) = d_volume {
+            if v.len() != len {
+                return Err(CudaModGodModeError::InvalidInput(
+                    "device volume length mismatch".into(),
+                ));
+            }
+        }
+        if first_valid >= len {
+            return Err(CudaModGodModeError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let mut combos = Self::expand_range(sweep)?;
+        let rows = combos.len();
+        let use_vol = use_volume && d_volume.is_some();
+        for combo in combos.iter_mut() {
+            combo.use_volume = Some(use_vol);
+        }
 
         let mut n1s: Vec<i32> = Vec::with_capacity(rows);
         let mut n2s: Vec<i32> = Vec::with_capacity(rows);
@@ -345,19 +409,18 @@ impl CudaModGodMode {
             }
         }
 
-        let use_vol = volume.is_some();
         let elem_f32 = std::mem::size_of::<f32>();
         let base_scalars = if use_vol {
-            n.checked_mul(3)
+            len.checked_mul(3)
                 .ok_or_else(|| CudaModGodModeError::InvalidInput("input size overflow".into()))?
         } else {
-            n
+            len
         };
         let in_bytes_base = base_scalars
             .checked_mul(elem_f32)
             .ok_or_else(|| CudaModGodModeError::InvalidInput("input size overflow".into()))?;
-        let vol_bytes = if volume.is_some() {
-            n.checked_mul(elem_f32)
+        let vol_bytes = if use_vol {
+            len.checked_mul(elem_f32)
                 .ok_or_else(|| CudaModGodModeError::InvalidInput("volume size overflow".into()))?
         } else {
             0
@@ -370,7 +433,7 @@ impl CudaModGodMode {
             .and_then(|v| v.checked_mul(std::mem::size_of::<i32>()))
             .ok_or_else(|| CudaModGodModeError::InvalidInput("param size overflow".into()))?;
         let out_elems = rows
-            .checked_mul(n)
+            .checked_mul(len)
             .ok_or_else(|| CudaModGodModeError::InvalidInput("rows*cols overflow".into()))?;
         let out_bytes = out_elems
             .checked_mul(3)
@@ -386,22 +449,6 @@ impl CudaModGodMode {
             return Err(e);
         }
 
-        let d_close = DeviceBuffer::from_slice(close)?;
-        let d_high = if use_vol {
-            Some(DeviceBuffer::from_slice(high)?)
-        } else {
-            None
-        };
-        let d_low = if use_vol {
-            Some(DeviceBuffer::from_slice(low)?)
-        } else {
-            None
-        };
-        let d_volume = if let Some(v) = volume {
-            Some(DeviceBuffer::from_slice(v)?)
-        } else {
-            None
-        };
         let d_n1s = DeviceBuffer::from_slice(&n1s)?;
         let d_n2s = DeviceBuffer::from_slice(&n2s)?;
         let d_n3s = DeviceBuffer::from_slice(&n3s)?;
@@ -440,20 +487,22 @@ impl CudaModGodMode {
             let mut launched = 0usize;
             while launched < rows {
                 let chunk = std::cmp::min(rows - launched, rows_per_launch);
-                let mut high_ptr = d_high
-                    .as_ref()
-                    .map(|b| b.as_device_ptr().as_raw())
-                    .unwrap_or(0);
-                let mut low_ptr = d_low
-                    .as_ref()
-                    .map(|b| b.as_device_ptr().as_raw())
-                    .unwrap_or(0);
+                let mut high_ptr = if use_vol {
+                    d_high.as_device_ptr().as_raw()
+                } else {
+                    0
+                };
+                let mut low_ptr = if use_vol {
+                    d_low.as_device_ptr().as_raw()
+                } else {
+                    0
+                };
                 let mut close_ptr = d_close.as_device_ptr().as_raw();
                 let mut vol_ptr = d_volume
                     .as_ref()
                     .map(|b| b.as_device_ptr().as_raw())
                     .unwrap_or(0);
-                let mut len_i = n as i32;
+                let mut len_i = len as i32;
                 let mut first_i = first_valid as i32;
                 let mut rows_i = chunk as i32;
                 let mut n1_ptr =
@@ -466,11 +515,11 @@ impl CudaModGodMode {
                     + (launched * std::mem::size_of::<i32>()) as u64;
                 let mut use_vol_i = if use_vol { 1i32 } else { 0i32 };
                 let mut wt_ptr = d_wt.as_device_ptr().as_raw()
-                    + (launched * n * std::mem::size_of::<f32>()) as u64;
+                    + (launched * len * std::mem::size_of::<f32>()) as u64;
                 let mut sig_ptr = d_sig.as_device_ptr().as_raw()
-                    + (launched * n * std::mem::size_of::<f32>()) as u64;
+                    + (launched * len * std::mem::size_of::<f32>()) as u64;
                 let mut hist_ptr = d_hist.as_device_ptr().as_raw()
-                    + (launched * n * std::mem::size_of::<f32>()) as u64;
+                    + (launched * len * std::mem::size_of::<f32>()) as u64;
                 let args: &mut [*mut c_void] = &mut [
                     &mut high_ptr as *mut _ as *mut c_void,
                     &mut low_ptr as *mut _ as *mut c_void,
@@ -494,7 +543,7 @@ impl CudaModGodMode {
                 self.validate_launch(grid, block)?;
                 unsafe {
                     self.stream
-                        .launch(&func_fast, grid, block, (shmem_bytes as u32), args)?;
+                        .launch(&func_fast, grid, block, shmem_bytes as u32, args)?;
                 }
                 launched += chunk;
             }
@@ -523,20 +572,22 @@ impl CudaModGodMode {
                         let chunk = std::cmp::min(range_len - launched, rows_per_launch);
                         let start_row = range_start + launched;
 
-                        let mut high_ptr = d_high
-                            .as_ref()
-                            .map(|b| b.as_device_ptr().as_raw())
-                            .unwrap_or(0);
-                        let mut low_ptr = d_low
-                            .as_ref()
-                            .map(|b| b.as_device_ptr().as_raw())
-                            .unwrap_or(0);
+                        let mut high_ptr = if use_vol {
+                            d_high.as_device_ptr().as_raw()
+                        } else {
+                            0
+                        };
+                        let mut low_ptr = if use_vol {
+                            d_low.as_device_ptr().as_raw()
+                        } else {
+                            0
+                        };
                         let mut close_ptr = d_close.as_device_ptr().as_raw();
                         let mut vol_ptr = d_volume
                             .as_ref()
                             .map(|b| b.as_device_ptr().as_raw())
                             .unwrap_or(0);
-                        let mut len_i = n as i32;
+                        let mut len_i = len as i32;
                         let mut first_i = first_valid as i32;
                         let mut rows_i = chunk as i32;
 
@@ -549,7 +600,7 @@ impl CudaModGodMode {
                         let mut modes_ptr = d_modes.as_device_ptr().as_raw()
                             + (start_row * std::mem::size_of::<i32>()) as u64;
 
-                        let out_off = start_row * n;
+                        let out_off = start_row * len;
                         let mut wt_ptr = d_wt.as_device_ptr().as_raw()
                             + (out_off * std::mem::size_of::<f32>()) as u64;
                         let mut sig_ptr = d_sig.as_device_ptr().as_raw()
@@ -599,23 +650,22 @@ impl CudaModGodMode {
             }
             launch_range(range_start, (prev + 1) - range_start)?;
         }
-        self.stream.synchronize()?;
 
         let outputs = DeviceArrayF32Triplet {
             wt1: DeviceArrayF32 {
                 buf: d_wt,
                 rows,
-                cols: n,
+                cols: len,
             },
             wt2: DeviceArrayF32 {
                 buf: d_sig,
                 rows,
-                cols: n,
+                cols: len,
             },
             hist: DeviceArrayF32 {
                 buf: d_hist,
                 rows,
-                cols: n,
+                cols: len,
             },
         };
         Ok(CudaModGodModeBatchResult { outputs, combos })

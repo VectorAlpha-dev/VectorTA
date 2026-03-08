@@ -372,6 +372,89 @@ impl CudaMediumAd {
         self.run_batch_kernel(data_f32, &combos, first_valid)
     }
 
+    pub fn medium_ad_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &MediumAdBatchRange,
+    ) -> Result<DeviceArrayF32, CudaMediumAdError> {
+        if len == 0 {
+            return Err(CudaMediumAdError::InvalidInput("empty data".into()));
+        }
+        if d_prices.len() != len {
+            return Err(CudaMediumAdError::InvalidInput(
+                "device prices length mismatch".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaMediumAdError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = Self::expand_grid(sweep)?;
+        for c in &combos {
+            let p = c.period as usize;
+            if p == 0 || p > len {
+                return Err(CudaMediumAdError::InvalidInput(format!(
+                    "invalid period {} for len {}",
+                    p, len
+                )));
+            }
+            if p > MEDIUM_AD_MAX_PERIOD {
+                return Err(CudaMediumAdError::InvalidInput(format!(
+                    "period {} exceeds MEDIUM_AD_MAX_PERIOD {} for CUDA path",
+                    p, MEDIUM_AD_MAX_PERIOD
+                )));
+            }
+            if len - first_valid < p {
+                return Err(CudaMediumAdError::InvalidInput(format!(
+                    "not enough valid data: needed >= {}, valid = {}",
+                    p,
+                    len - first_valid
+                )));
+            }
+        }
+
+        let elem_size = std::mem::size_of::<f32>();
+        let periods_bytes = combos
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| {
+                CudaMediumAdError::InvalidInput("period bytes overflow in medium_ad batch".into())
+            })?;
+        let n_elems = combos.len().checked_mul(len).ok_or_else(|| {
+            CudaMediumAdError::InvalidInput("rows*cols overflow in medium_ad batch".into())
+        })?;
+        let out_bytes = n_elems.checked_mul(elem_size).ok_or_else(|| {
+            CudaMediumAdError::InvalidInput("output bytes overflow in medium_ad batch".into())
+        })?;
+        Self::will_fit(periods_bytes.saturating_add(out_bytes), 64 << 20)?;
+
+        let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
+        let h_periods = LockedBuffer::from_slice(&periods)?;
+        let mut d_periods =
+            unsafe { DeviceBuffer::<i32>::uninitialized_async(periods.len(), &self.stream) }?;
+        unsafe { d_periods.async_copy_from(&h_periods, &self.stream) }?;
+
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(n_elems, &self.stream) }?;
+        self.launch_batch_kernel(
+            d_prices,
+            len,
+            first_valid,
+            &d_periods,
+            combos.len(),
+            &mut d_out,
+        )?;
+
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combos.len(),
+            cols: len,
+        })
+    }
+
     fn prepare_many_series_inputs(
         data_tm_f32: &[f32],
         cols: usize,

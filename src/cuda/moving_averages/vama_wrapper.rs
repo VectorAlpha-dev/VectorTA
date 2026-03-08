@@ -434,12 +434,12 @@ impl CudaVama {
                 "ema buffer must be either 1-element (unused) or combos * series_len".into(),
             ));
         }
-
-        let mut host_vols = vec![0i32; n_combos];
-        d_vol_periods
-            .copy_to(&mut host_vols)
-            .map_err(CudaVamaError::Cuda)?;
-        let max_vol_period = host_vols.iter().copied().max().unwrap_or(0).max(1) as usize;
+        if host_vol_periods.len() != n_combos {
+            return Err(CudaVamaError::InvalidInput(
+                "host_vol_periods length mismatch".into(),
+            ));
+        }
+        let max_vol_period = host_vol_periods.iter().copied().max().unwrap_or(0).max(1) as usize;
 
         self.launch_batch_kernel(
             d_prices,

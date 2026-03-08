@@ -7,7 +7,7 @@ use vector_ta::utilities::enums::Kernel;
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::{cuda_available, CudaTtmSqueeze};
+use vector_ta::cuda::{cuda_available, CudaRuntime, CudaTtmSqueeze};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -15,6 +15,32 @@ fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     } else {
         (a - b).abs() <= tol
     }
+}
+
+fn sample_ohlc_with_leading_nans_f64(
+    len: usize,
+    first_valid: usize,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let mut high: Vec<f64> = (0..len)
+        .map(|i| 100.0f64 + (i as f64 * 0.1) + ((i as f64) * 0.03).sin() + 1.0)
+        .collect();
+    let mut low: Vec<f64> = high
+        .iter()
+        .enumerate()
+        .map(|(i, v)| v - 1.6 - ((i as f64) * 0.02).sin().abs() * 0.2)
+        .collect();
+    let mut close: Vec<f64> = low
+        .iter()
+        .zip(high.iter())
+        .enumerate()
+        .map(|(i, (l, h))| (l + h) * 0.5 + ((i as f64) * 0.05).sin() * 0.2)
+        .collect();
+    for series in [&mut high, &mut low, &mut close] {
+        for value in series.iter_mut().take(first_valid.min(len)) {
+            *value = f64::NAN;
+        }
+    }
+    (high, low, close)
 }
 
 #[test]
@@ -34,15 +60,7 @@ fn ttm_squeeze_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>
     }
 
     let len = 8192usize;
-    let mut high = vec![f64::NAN; len];
-    let mut low = vec![f64::NAN; len];
-    let mut close = vec![f64::NAN; len];
-    for i in 2..len {
-        let x = i as f64;
-        high[i] = (x * 0.001).sin() + 0.5;
-        low[i] = high[i] - 1.0;
-        close[i] = (x * 0.0007).cos() + 0.1;
-    }
+    let (high, low, close) = sample_ohlc_with_leading_nans_f64(len, 2);
     let sweep = TtmSqueezeBatchRange {
         length: (10, 28, 6),
         bb_mult: (2.0, 2.0, 0.0),
@@ -95,6 +113,71 @@ fn ttm_squeeze_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>
             );
         }
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn ttm_squeeze_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[ttm_squeeze_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 8192usize;
+    let (high_f64, low_f64, close_f64) = sample_ohlc_with_leading_nans_f64(len, 2);
+    let high: Vec<f32> = high_f64.iter().map(|&v| v as f32).collect();
+    let low: Vec<f32> = low_f64.iter().map(|&v| v as f32).collect();
+    let close: Vec<f32> = close_f64.iter().map(|&v| v as f32).collect();
+    let sweep = TtmSqueezeBatchRange {
+        length: (10, 28, 6),
+        bb_mult: (2.0, 2.0, 0.0),
+        kc_high: (1.0, 1.0, 0.0),
+        kc_mid: (1.5, 1.5, 0.0),
+        kc_low: (2.0, 2.0, 0.0),
+    };
+
+    let cuda = CudaTtmSqueeze::new(0).expect("CudaTtmSqueeze::new");
+    let (legacy_momentum, legacy_squeeze) = cuda
+        .ttm_squeeze_batch_dev(&high, &low, &close, &sweep)
+        .expect("legacy batch");
+
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let d_high = runtime.upload_f32(&high).expect("upload high");
+    let d_low = runtime.upload_f32(&low).expect("upload low");
+    let d_close = runtime.upload_f32(&close).expect("upload close");
+    let (device_momentum, device_squeeze) = cuda
+        .ttm_squeeze_batch_dev_from_device_inputs(
+            d_high.buffer(),
+            d_low.buffer(),
+            d_close.buffer(),
+            len,
+            2,
+            &sweep,
+        )
+        .expect("device inputs");
+
+    for (legacy, device, label, tol) in [
+        (legacy_momentum, device_momentum, "momentum", 1e-6f32),
+        (legacy_squeeze, device_squeeze, "squeeze", 1e-6f32),
+    ] {
+        assert_eq!(legacy.rows, device.rows, "{label} rows");
+        assert_eq!(legacy.cols, device.cols, "{label} cols");
+        let mut legacy_host = vec![0f32; legacy.len()];
+        legacy.buf.copy_to(&mut legacy_host)?;
+        let mut device_host = vec![0f32; device.len()];
+        device.buf.copy_to(&mut device_host)?;
+        for (idx, (&lhs, &rhs)) in legacy_host.iter().zip(device_host.iter()).enumerate() {
+            if lhs.is_nan() && rhs.is_nan() {
+                continue;
+            }
+            assert!(
+                (lhs - rhs).abs() < tol,
+                "{label} mismatch at {idx}: legacy={lhs} device={rhs}"
+            );
+        }
+    }
+
     Ok(())
 }
 

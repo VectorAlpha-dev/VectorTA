@@ -6,7 +6,7 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
+use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -284,6 +284,24 @@ impl CudaKurtosis {
             .iter()
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaKurtosisError::InvalidInput("all values are NaN".into()))?;
+        let combos = Self::prepare_device_batch_inputs(len, first_valid, sweep)?;
+        Ok((combos, first_valid, len))
+    }
+
+    fn prepare_device_batch_inputs(
+        len: usize,
+        first_valid: usize,
+        sweep: &KurtosisBatchRange,
+    ) -> Result<Vec<KurtosisParams>, CudaKurtosisError> {
+        if len == 0 {
+            return Err(CudaKurtosisError::InvalidInput("empty data".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaKurtosisError::InvalidInput(
+                "first_valid must be within the input length".into(),
+            ));
+        }
+
         let combos = Self::expand_grid(sweep)?;
         if combos.is_empty() {
             return Err(CudaKurtosisError::InvalidInput(
@@ -306,7 +324,7 @@ impl CudaKurtosis {
                 ));
             }
         }
-        Ok((combos, first_valid, len))
+        Ok(combos)
     }
 
     fn build_prefixes_ds(
@@ -441,20 +459,88 @@ impl CudaKurtosis {
         Ok(())
     }
 
+    fn launch_prefix_builder_device_raw(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_ps1: &mut DeviceBuffer<Float2>,
+        d_ps2: &mut DeviceBuffer<Float2>,
+        d_ps3: &mut DeviceBuffer<Float2>,
+        d_ps4: &mut DeviceBuffer<Float2>,
+        d_ps_nan: &mut DeviceBuffer<i32>,
+    ) -> Result<(), CudaKurtosisError> {
+        let func = self
+            .module
+            .get_function("kurtosis_build_prefix_f32")
+            .map_err(|_| CudaKurtosisError::MissingKernelSymbol {
+                name: "kurtosis_build_prefix_f32",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+
+        unsafe {
+            let mut data_ptr = d_data.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut ps1_ptr = d_ps1.as_device_ptr().as_raw();
+            let mut ps2_ptr = d_ps2.as_device_ptr().as_raw();
+            let mut ps3_ptr = d_ps3.as_device_ptr().as_raw();
+            let mut ps4_ptr = d_ps4.as_device_ptr().as_raw();
+            let mut psn_ptr = d_ps_nan.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut data_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut ps1_ptr as *mut _ as *mut c_void,
+                &mut ps2_ptr as *mut _ as *mut c_void,
+                &mut ps3_ptr as *mut _ as *mut c_void,
+                &mut ps4_ptr as *mut _ as *mut c_void,
+                &mut psn_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
     pub fn kurtosis_batch_dev(
         &self,
         data_f32: &[f32],
         sweep: &KurtosisBatchRange,
     ) -> Result<(DeviceArrayF32, Vec<KurtosisParams>), CudaKurtosisError> {
-        let (combos, first_valid, len) = Self::prepare_batch_inputs(data_f32, sweep)?;
-        let (h_ps1, h_ps2, h_ps3, h_ps4, h_ps_nan) = self.build_prefixes_ds(data_f32)?;
-        let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let (_, first_valid, len) = Self::prepare_batch_inputs(data_f32, sweep)?;
+        let d_data = DeviceBuffer::from_slice(data_f32)?;
+        let out = self.kurtosis_batch_dev_from_device_prices(&d_data, len, first_valid, sweep)?;
+        self.stream.synchronize()?;
+        Ok(out)
+    }
 
-        let bytes_prefix = (h_ps1.len() + h_ps2.len() + h_ps3.len() + h_ps4.len())
-            .checked_mul(std::mem::size_of::<Float2>())
+    pub fn kurtosis_batch_dev_from_device_prices(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &KurtosisBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<KurtosisParams>), CudaKurtosisError> {
+        if d_data.len() != len {
+            return Err(CudaKurtosisError::InvalidInput(format!(
+                "device input length mismatch (buffer={}, len={})",
+                d_data.len(),
+                len
+            )));
+        }
+
+        let combos = Self::prepare_device_batch_inputs(len, first_valid, sweep)?;
+        let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let prefix_elems = len
+            .checked_add(1)
+            .ok_or_else(|| CudaKurtosisError::InvalidInput("prefix length overflow".into()))?;
+        let bytes_prefix = prefix_elems
+            .checked_mul(4)
+            .and_then(|n| n.checked_mul(std::mem::size_of::<Float2>()))
             .ok_or_else(|| CudaKurtosisError::InvalidInput("prefix bytes overflow".into()))?;
-        let bytes_nan = h_ps_nan
-            .len()
+        let bytes_nan = prefix_elems
             .checked_mul(std::mem::size_of::<i32>())
             .ok_or_else(|| CudaKurtosisError::InvalidInput("nan bytes overflow".into()))?;
         let bytes_periods = periods
@@ -488,14 +574,24 @@ impl CudaKurtosis {
             }
         }
 
-        let d_ps1 = unsafe { DeviceBuffer::from_slice_async(h_ps1.as_slice(), &self.stream) }?;
-        let d_ps2 = unsafe { DeviceBuffer::from_slice_async(h_ps2.as_slice(), &self.stream) }?;
-        let d_ps3 = unsafe { DeviceBuffer::from_slice_async(h_ps3.as_slice(), &self.stream) }?;
-        let d_ps4 = unsafe { DeviceBuffer::from_slice_async(h_ps4.as_slice(), &self.stream) }?;
-        let d_psn = unsafe { DeviceBuffer::from_slice_async(h_ps_nan.as_slice(), &self.stream) }?;
-        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods, &self.stream) }?;
-        let mut d_out =
-            unsafe { DeviceBuffer::<f32>::uninitialized_async(out_elems, &self.stream)? };
+        let mut d_ps1 = unsafe { DeviceBuffer::<Float2>::uninitialized(prefix_elems) }?;
+        let mut d_ps2 = unsafe { DeviceBuffer::<Float2>::uninitialized(prefix_elems) }?;
+        let mut d_ps3 = unsafe { DeviceBuffer::<Float2>::uninitialized(prefix_elems) }?;
+        let mut d_ps4 = unsafe { DeviceBuffer::<Float2>::uninitialized(prefix_elems) }?;
+        let mut d_psn = unsafe { DeviceBuffer::<i32>::uninitialized(prefix_elems) }?;
+        self.launch_prefix_builder_device_raw(
+            d_data,
+            len,
+            first_valid,
+            &mut d_ps1,
+            &mut d_ps2,
+            &mut d_ps3,
+            &mut d_ps4,
+            &mut d_psn,
+        )?;
+
+        let d_periods = DeviceBuffer::from_slice(&periods)?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
 
         self.launch_batch(
             &d_ps1,
@@ -509,7 +605,6 @@ impl CudaKurtosis {
             combos.len(),
             &mut d_out,
         )?;
-        self.stream.synchronize()?;
         self.maybe_log_batch_debug();
 
         Ok((

@@ -4,7 +4,7 @@ use crate::indicators::atr::AtrBatchRange;
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::memory::{mem_get_info, DeviceBuffer, DevicePointer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -563,6 +563,114 @@ impl CudaAtr {
         })
     }
 
+    fn prepare_batch_inputs_device(
+        &self,
+        len: usize,
+        first_valid: usize,
+        sweep: &AtrBatchRange,
+    ) -> Result<(Vec<i32>, Vec<f32>, Vec<i32>, usize), CudaAtrError> {
+        if len == 0 {
+            return Err(CudaAtrError::InvalidInput("empty input".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaAtrError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let (start, end, step) = sweep.length;
+        if start == 0 {
+            return Err(CudaAtrError::InvalidInput("period must be > 0".into()));
+        }
+        let periods: Vec<usize> = if step == 0 || start == end {
+            vec![start]
+        } else if start < end {
+            (start..=end).step_by(step).collect()
+        } else {
+            let mut v: Vec<usize> = (end..=start).step_by(step).collect();
+            v.reverse();
+            v
+        };
+        if periods.is_empty() {
+            return Err(CudaAtrError::InvalidInput("no parameter combos".into()));
+        }
+        for &p in &periods {
+            if p == 0 || p > len || (len - first_valid) < p {
+                return Err(CudaAtrError::InvalidInput(format!(
+                    "invalid period {} for data length {} (valid after {}: {})",
+                    p,
+                    len,
+                    first_valid,
+                    len - first_valid
+                )));
+            }
+        }
+
+        let h_periods_i32: Vec<i32> = periods.iter().map(|&p| p as i32).collect();
+        let h_alphas: Vec<f32> = periods.iter().map(|&p| 1.0f32 / (p as f32)).collect();
+        let h_warms: Vec<i32> = periods
+            .iter()
+            .map(|&p| (first_valid + p - 1) as i32)
+            .collect();
+        Ok((h_periods_i32, h_alphas, h_warms, periods.len()))
+    }
+
+    pub fn atr_batch_from_device_ptrs(
+        &self,
+        d_high: DevicePointer<f32>,
+        d_low: DevicePointer<f32>,
+        d_close: DevicePointer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &AtrBatchRange,
+    ) -> Result<DeviceArrayF32Atr, CudaAtrError> {
+        let (h_periods_i32, h_alphas, h_warms, n_combos) =
+            self.prepare_batch_inputs_device(series_len, first_valid, sweep)?;
+        let params_bytes = h_periods_i32
+            .len()
+            .checked_mul(std::mem::size_of::<i32>() * 2 + std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAtrError::InvalidInput("params size overflow".into()))?;
+        Self::will_fit(params_bytes, 8 * 1024 * 1024)?;
+
+        let d_periods = DeviceBuffer::from_slice(&h_periods_i32)?;
+        let d_alphas = DeviceBuffer::from_slice(&h_alphas)?;
+        let d_warms = DeviceBuffer::from_slice(&h_warms)?;
+
+        let tr_bytes = series_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAtrError::InvalidInput("tr buffer size overflow".into()))?;
+        Self::will_fit(tr_bytes, 8 * 1024 * 1024)?;
+        let mut d_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }?;
+        self.tr_from_hlc_device_ptrs(d_high, d_low, d_close, series_len, first_valid, &mut d_tr)?;
+
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaAtrError::InvalidInput("n_combos*len overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAtrError::InvalidInput("output size overflow".into()))?;
+        Self::will_fit(out_bytes, 16 * 1024 * 1024)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
+        self.atr_batch_device_with_tr_ptr(
+            d_tr.as_device_ptr(),
+            &d_periods,
+            &d_alphas,
+            &d_warms,
+            series_len,
+            first_valid,
+            n_combos,
+            &mut d_out,
+        )?;
+
+        Ok(DeviceArrayF32Atr {
+            buf: d_out,
+            rows: n_combos,
+            cols: series_len,
+            ctx: Arc::clone(&self._context),
+            device_id: self.device_id,
+        })
+    }
+
     pub fn tr_from_hlc_device(
         &self,
         d_high: &DeviceBuffer<f32>,
@@ -591,6 +699,39 @@ impl CudaAtr {
             ));
         }
 
+        self.tr_from_hlc_device_ptrs(
+            d_high.as_device_ptr(),
+            d_low.as_device_ptr(),
+            d_close.as_device_ptr(),
+            series_len,
+            first_valid,
+            d_tr_out,
+        )
+    }
+
+    pub fn tr_from_hlc_device_ptrs(
+        &self,
+        d_high: DevicePointer<f32>,
+        d_low: DevicePointer<f32>,
+        d_close: DevicePointer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        d_tr_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaAtrError> {
+        if series_len == 0 {
+            return Err(CudaAtrError::InvalidInput("empty input".into()));
+        }
+        if d_tr_out.len() != series_len {
+            return Err(CudaAtrError::InvalidInput(
+                "TR output buffer wrong length".into(),
+            ));
+        }
+        if first_valid >= series_len {
+            return Err(CudaAtrError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
         let func = self.module.get_function("tr_from_hlc_f32").map_err(|_| {
             CudaAtrError::MissingKernelSymbol {
                 name: "tr_from_hlc_f32",
@@ -604,9 +745,9 @@ impl CudaAtr {
         self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
 
         unsafe {
-            let mut high_ptr = d_high.as_device_ptr().as_raw();
-            let mut low_ptr = d_low.as_device_ptr().as_raw();
-            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut high_ptr = d_high.as_raw();
+            let mut low_ptr = d_low.as_raw();
+            let mut close_ptr = d_close.as_raw();
             let mut len_i = series_len as i32;
             let mut first_i = first_valid as i32;
             let mut tr_ptr = d_tr_out.as_device_ptr().as_raw();
@@ -659,6 +800,51 @@ impl CudaAtr {
             ));
         }
 
+        self.atr_batch_device_with_tr_ptr(
+            d_tr.as_device_ptr(),
+            d_periods,
+            d_alphas,
+            d_warms,
+            series_len,
+            first_valid,
+            n_combos,
+            d_out,
+        )
+    }
+
+    pub fn atr_batch_device_with_tr_ptr(
+        &self,
+        d_tr: DevicePointer<f32>,
+        d_periods: &DeviceBuffer<i32>,
+        d_alphas: &DeviceBuffer<f32>,
+        d_warms: &DeviceBuffer<i32>,
+        series_len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaAtrError> {
+        if series_len == 0 {
+            return Err(CudaAtrError::InvalidInput("empty input".into()));
+        }
+        if d_periods.len() != n_combos || d_alphas.len() != n_combos || d_warms.len() != n_combos {
+            return Err(CudaAtrError::InvalidInput(
+                "parameter buffer length mismatch".into(),
+            ));
+        }
+        if first_valid >= series_len {
+            return Err(CudaAtrError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+        let expected = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaAtrError::InvalidInput("n_combos*len overflow".into()))?;
+        if d_out.len() != expected {
+            return Err(CudaAtrError::InvalidInput(
+                "output buffer wrong length".into(),
+            ));
+        }
+
         let func = self
             .module
             .get_function("atr_batch_unified_f32")
@@ -679,7 +865,7 @@ impl CudaAtr {
             let mut high_ptr = 0u64;
             let mut low_ptr = 0u64;
             let mut close_ptr = 0u64;
-            let mut tr_ptr = d_tr.as_device_ptr().as_raw();
+            let mut tr_ptr = d_tr.as_raw();
             let mut pfx_ptr = 0u64;
             let mut periods_ptr = d_periods.as_device_ptr().as_raw();
             let mut alphas_ptr = d_alphas.as_device_ptr().as_raw();

@@ -26,6 +26,8 @@ pub mod chande_wrapper;
 #[cfg(feature = "cuda")]
 pub mod cvi_wrapper;
 #[cfg(feature = "cuda")]
+pub mod device_types;
+#[cfg(feature = "cuda")]
 pub mod di_wrapper;
 #[cfg(feature = "cuda")]
 pub mod dm_wrapper;
@@ -47,6 +49,8 @@ pub mod moving_averages;
 pub mod qstick_wrapper;
 #[cfg(feature = "cuda")]
 pub mod rocr_wrapper;
+#[cfg(feature = "cuda")]
+pub mod runtime;
 #[cfg(feature = "cuda")]
 pub mod wavetrend;
 
@@ -77,6 +81,13 @@ pub use chande_wrapper::CudaChande;
 #[cfg(feature = "cuda")]
 pub use cvi_wrapper::{CudaCvi, CudaCviError};
 #[cfg(feature = "cuda")]
+pub use device_types::{
+    CudaDeviceCloseVolumeRef, CudaDeviceHighLowRef, CudaDeviceMatrix, CudaDeviceMatrixF32,
+    CudaDeviceMatrixF32Ref, CudaDeviceOhlc, CudaDeviceOhlcRef, CudaDeviceOhlcv, CudaDeviceOhlcvRef,
+    CudaDeviceSliceF32Ref, CudaDeviceSliceI32Ref, CudaDeviceSliceI64Ref, CudaDeviceVector,
+    CudaDeviceVectorF32, CudaDeviceVectorI32, CudaDeviceVectorI64, CudaDeviceViewError,
+};
+#[cfg(feature = "cuda")]
 pub use di_wrapper::{CudaDi, CudaDiError, DeviceArrayF32Pair};
 #[cfg(feature = "cuda")]
 pub use dm_wrapper::{CudaDm, CudaDmError};
@@ -100,8 +111,8 @@ pub use moving_averages::rsmk_wrapper::{CudaRsmk, CudaRsmkError};
 pub use moving_averages::wclprice_wrapper::CudaWclprice;
 #[cfg(feature = "cuda")]
 pub use moving_averages::{
-    CudaAlma, CudaDma, CudaEhlersPma, CudaGaussian, CudaJma, CudaMama, CudaReflex, CudaSqwma,
-    CudaTema, CudaVwma, DeviceArrayF32, DeviceEhlersPmaPair, DeviceMamaPair,
+    CudaAlma, CudaDma, CudaEhlersPma, CudaGaussian, CudaJma, CudaMaDeviceDataRef, CudaMama,
+    CudaReflex, CudaSqwma, CudaTema, CudaVwma, DeviceArrayF32, DeviceEhlersPmaPair, DeviceMamaPair,
 };
 #[cfg(feature = "cuda")]
 pub use qstick_wrapper::{
@@ -110,6 +121,8 @@ pub use qstick_wrapper::{
 };
 #[cfg(feature = "cuda")]
 pub use rocr_wrapper::{CudaRocr, CudaRocrError};
+#[cfg(feature = "cuda")]
+pub use runtime::{CudaRuntime, CudaRuntimeError};
 #[cfg(feature = "cuda")]
 pub mod oscillators;
 #[cfg(feature = "cuda")]

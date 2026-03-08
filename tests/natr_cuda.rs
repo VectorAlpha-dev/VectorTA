@@ -7,6 +7,8 @@ use cust::memory::CopyDestination;
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::CudaNatr;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
 
 fn approx_eq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -152,6 +154,71 @@ fn natr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
             idx,
             cpu_tm[idx],
             g[idx]
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn natr_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[natr_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 1024usize;
+    let mut high = vec![f64::NAN; len];
+    let mut low = vec![f64::NAN; len];
+    let mut close = vec![f64::NAN; len];
+    for i in 0..len {
+        let x = i as f64;
+        let base = (x * 0.0041).sin() + 0.0003 * x;
+        high[i] = base + 0.9;
+        low[i] = base - 0.75;
+        close[i] = base;
+    }
+
+    let sweep = NatrBatchRange { period: (7, 19, 4) };
+    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+    let d_close = runtime.upload_f32(&close_f32).expect("upload close");
+
+    let mut cuda = CudaNatr::new(0).expect("CudaNatr::new");
+    let legacy = cuda
+        .natr_batch_dev(&high_f32, &low_f32, &close_f32, &sweep)
+        .expect("legacy natr");
+    let device = cuda
+        .natr_batch_dev_from_device_inputs(
+            d_high.buffer(),
+            d_low.buffer(),
+            d_close.buffer(),
+            len,
+            0,
+            &sweep,
+        )
+        .expect("device natr");
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    let mut device_host = vec![0f32; device.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    device.buf.copy_to(&mut device_host)?;
+
+    let atol = 5e-3;
+    let rtol = 1e-7;
+    for idx in 0..legacy_host.len() {
+        assert!(
+            approx_eq(legacy_host[idx] as f64, device_host[idx] as f64, atol, rtol),
+            "mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_host[idx],
+            device_host[idx]
         );
     }
 

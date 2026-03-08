@@ -240,7 +240,7 @@ impl CudaBop {
         })
     }
 
-    fn launch_batch(
+    fn launch_batch_raw(
         &self,
         d_open: &DeviceBuffer<f32>,
         d_high: &DeviceBuffer<f32>,
@@ -305,7 +305,78 @@ impl CudaBop {
                 Some(BatchKernelSelected::Plain { block_x });
         }
         self.maybe_log_batch_debug();
+        Ok(())
+    }
+
+    fn launch_batch(
+        &self,
+        d_open: &DeviceBuffer<f32>,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaBopError> {
+        self.launch_batch_raw(d_open, d_high, d_low, d_close, len, first_valid, d_out)?;
         self.stream.synchronize().map_err(CudaBopError::Cuda)
+    }
+
+    pub fn bop_batch_dev_from_device_inputs(
+        &self,
+        d_open: &DeviceBuffer<f32>,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+    ) -> Result<DeviceArrayF32, CudaBopError> {
+        if len == 0
+            || d_open.len() != len
+            || d_high.len() != len
+            || d_low.len() != len
+            || d_close.len() != len
+        {
+            return Err(CudaBopError::InvalidInput(
+                "device input buffers must match non-zero length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaBopError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let elems = 5usize
+            .checked_mul(len)
+            .ok_or_else(|| CudaBopError::InvalidInput("size overflow".into()))?;
+        let bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaBopError::InvalidInput("size overflow".into()))?;
+        let headroom = 64usize * 1024 * 1024;
+        if !Self::will_fit(bytes, headroom)? {
+            if let Ok((free, _)) = mem_get_info() {
+                return Err(CudaBopError::OutOfMemory {
+                    required: bytes,
+                    free,
+                    headroom,
+                });
+            }
+            return Err(CudaBopError::InvalidInput(
+                "insufficient device memory".into(),
+            ));
+        }
+
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }
+                .map_err(CudaBopError::Cuda)?;
+        self.launch_batch_raw(d_open, d_high, d_low, d_close, len, first_valid, &mut d_out)?;
+        self.launch_batch_raw(d_open, d_high, d_low, d_close, len, first_valid, &mut d_out)?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: 1,
+            cols: len,
+        })
     }
 
     pub fn bop_many_series_one_param_time_major_dev(

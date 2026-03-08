@@ -25,6 +25,21 @@ __device__ __forceinline__ int warp_min_int(int v, unsigned mask) {
 }
 
 
+extern "C" __global__ void supertrend_build_hl2_f32(
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    int len,
+    float* __restrict__ out
+) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= len) return;
+
+    const float h = high[idx];
+    const float l = low[idx];
+    out[idx] = (isnan(h) || isnan(l)) ? qnan_f32() : 0.5f * (h + l);
+}
+
+
 extern "C" __global__ void supertrend_batch_f32(
     const float* __restrict__ hl2,
     const float* __restrict__ close,

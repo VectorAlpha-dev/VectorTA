@@ -1,4 +1,4 @@
-use vector_ta::indicators::dti::{DtiBatchBuilder, DtiBatchRange, DtiParams};
+use vector_ta::indicators::dti::{DtiBatchRange, DtiParams};
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
@@ -6,6 +6,8 @@ use cust::memory::CopyDestination;
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::oscillators::CudaDti;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -83,7 +85,6 @@ fn dti_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
                 2.0 / (s as f32 + 1.0),
                 2.0 / (u as f32 + 1.0),
             );
-            let (br, bs, bu) = (1.0 - ar, 1.0 - as_, 1.0 - au);
             let mut e0r = 0f32;
             let mut e0s = 0f32;
             let mut e0u = 0f32;
@@ -183,7 +184,6 @@ fn dti_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         2.0 / (s as f32 + 1.0),
         2.0 / (u as f32 + 1.0),
     );
-    let (br, bs, bu) = (1.0 - ar, 1.0 - as_, 1.0 - au);
     let hf: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let lf: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     for series in 0..cols {
@@ -267,6 +267,60 @@ fn dti_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             idx
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn dti_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[dti_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 2048usize;
+    let mut high = vec![0.0f64; len];
+    let mut low = vec![0.0f64; len];
+    for i in 0..len {
+        let x = i as f64 * 0.0027;
+        high[i] = (x.sin() + 0.0002 * i as f64) + 100.0;
+        low[i] = high[i] - (0.8 + (x * 0.8).cos().abs());
+    }
+    let sweep = DtiBatchRange {
+        r: (8, 16, 4),
+        s: (6, 12, 3),
+        u: (3, 9, 3),
+    };
+
+    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+    let cuda = CudaDti::new(0).expect("CudaDti::new");
+
+    let (legacy, _) = cuda
+        .dti_batch_dev(&high_f32, &low_f32, &sweep)
+        .expect("legacy dti");
+    let (device, _) = cuda
+        .dti_batch_dev_from_device_inputs(d_high.buffer(), d_low.buffer(), len, 0, &sweep)
+        .expect("device dti");
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    let mut device_host = vec![0f32; device.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    device.buf.copy_to(&mut device_host)?;
+
+    for idx in 0..legacy_host.len() {
+        assert!(
+            approx_eq(legacy_host[idx] as f64, device_host[idx] as f64, 1e-4),
+            "mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_host[idx],
+            device_host[idx]
+        );
+    }
+
     Ok(())
 }
 

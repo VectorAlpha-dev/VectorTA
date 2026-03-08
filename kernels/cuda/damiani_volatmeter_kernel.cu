@@ -96,6 +96,58 @@ __device__ __forceinline__ float std_from_ff_prefix(const float2 s_t, const floa
     return sqrtf(var);
 }
 
+extern "C" __global__
+void damiani_build_close_workspace_f32(const float* __restrict__ prices,
+                                       int series_len,
+                                       int first_valid,
+                                       float2* __restrict__ s_prefix,
+                                       float2* __restrict__ ss_prefix,
+                                       float* __restrict__ tr)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (series_len <= 0 || first_valid < 0 || first_valid >= series_len) return;
+
+    float2 acc_s = make_float2(0.f, 0.f);
+    float2 acc_ss = make_float2(0.f, 0.f);
+    float prev_close = nan_f32();
+    bool have_prev = false;
+
+    for (int i = 0; i < first_valid; ++i) {
+        s_prefix[i] = make_float2(0.f, 0.f);
+        ss_prefix[i] = make_float2(0.f, 0.f);
+        tr[i] = 0.f;
+    }
+
+    for (int i = first_valid; i < series_len; ++i) {
+        const float c = LDG(&prices[i]);
+        const float v = finite_f32(c) ? c : 0.0f;
+        acc_s = ff_add(acc_s, make_float2(v, 0.f));
+        acc_ss = ff_add(acc_ss, make_float2(v * v, 0.f));
+        s_prefix[i] = acc_s;
+        ss_prefix[i] = acc_ss;
+        tr[i] = (have_prev && finite_f32(c)) ? fabsf(c - prev_close) : 0.0f;
+        if (finite_f32(c)) {
+            prev_close = c;
+            have_prev = true;
+        }
+    }
+}
+
+extern "C" __global__
+void damiani_select_output_rows_f32(const float* __restrict__ packed,
+                                    int series_len,
+                                    int combo_count,
+                                    int output_index,
+                                    float* __restrict__ out)
+{
+    const int row = blockIdx.y;
+    const int t = (int)blockIdx.x * (int)blockDim.x + (int)threadIdx.x;
+    if (row >= combo_count || t >= series_len) return;
+
+    const int src_row = row * 2 + output_index;
+    out[row * series_len + t] = packed[src_row * series_len + t];
+}
+
 
 
 
@@ -172,7 +224,7 @@ void damiani_volatmeter_batch_f32(const float* __restrict__ prices,
             }
 
 
-            if (k >= needed - 1) {
+            if (k >= needed) {
                 const float inv_sed = 1.0f / safe_pos_den(atr_sed);
                 const float base    = atr_vis * inv_sed;
                 const float vol_t   = fmaf(lag_s, (vh1 - vh3), base);

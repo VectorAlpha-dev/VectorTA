@@ -3,9 +3,8 @@ use vector_ta::indicators::stc::{StcBatchRange, StcParams};
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::cuda_available;
+use vector_ta::cuda::{cuda_available, CudaRuntime, CudaStc};
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::oscillators::CudaStc;
 
 fn approx_eq_f32(a: f32, b: f32, tol: f32) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -392,6 +391,56 @@ fn stc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             approx_eq_f32(cpu_tm[idx], g_tm[idx], tol),
             "mismatch at {}",
             idx
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn stc_cuda_device_prices_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[stc_cuda_device_prices_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 2048usize;
+    let mut prices = vec![f32::NAN; len];
+    for i in 8..len {
+        let x = i as f32 * 0.0023;
+        prices[i] = x.sin() * 3.0 + 0.0003 * i as f32;
+    }
+    let sweep = StcBatchRange {
+        fast_period: (19, 23, 2),
+        slow_period: (42, 50, 4),
+        k_period: (8, 10, 2),
+        d_period: (3, 4, 1),
+    };
+
+    let first_valid = prices
+        .iter()
+        .position(|value| value.is_finite())
+        .expect("first valid");
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_prices = runtime.upload_f32(&prices).expect("upload prices");
+    let cuda = CudaStc::new(0).expect("CudaStc::new");
+
+    let (legacy, _) = cuda.stc_batch_dev(&prices, &sweep).expect("legacy stc");
+    let (device, _) = cuda
+        .stc_batch_dev_from_device_prices(d_prices.buffer(), len, first_valid, &sweep)
+        .expect("device stc");
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    let mut device_host = vec![0f32; device.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    device.buf.copy_to(&mut device_host)?;
+    for idx in 0..legacy_host.len() {
+        assert!(
+            approx_eq_f32(legacy_host[idx], device_host[idx], 1e-4),
+            "stc mismatch at {idx}: legacy={} device={}",
+            legacy_host[idx],
+            device_host[idx]
         );
     }
 

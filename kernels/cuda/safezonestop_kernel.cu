@@ -75,6 +75,31 @@ __device__ __forceinline__ float reduce_min4(const float r[4], int n) {
 }
 
 extern "C" __global__
+void safezonestop_build_dm_raw_f32(const float* __restrict__ high,
+                                   const float* __restrict__ low,
+                                   int len,
+                                   int first,
+                                   int dir_long,
+                                   float* __restrict__ dm_raw)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= len) return;
+
+    if (i <= first) {
+        dm_raw[i] = 0.0f;
+        return;
+    }
+
+    const float up = high[i] - high[i - 1];
+    const float dn = low[i - 1] - low[i];
+    const float up_pos = (up > 0.0f) ? up : 0.0f;
+    const float dn_pos = (dn > 0.0f) ? dn : 0.0f;
+
+    dm_raw[i] = dir_long ? ((dn_pos > up_pos) ? dn_pos : 0.0f)
+                         : ((up_pos > dn_pos) ? up_pos : 0.0f);
+}
+
+extern "C" __global__
 void safezonestop_batch_f32(const float* __restrict__ high,
                             const float* __restrict__ low,
                             const float* __restrict__ dm_raw,

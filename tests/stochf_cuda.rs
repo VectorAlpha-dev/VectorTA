@@ -8,7 +8,7 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::CudaStochf;
+use vector_ta::cuda::{CudaRuntime, CudaStochf};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -41,7 +41,7 @@ fn stochf_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     for i in 4..len {
         let x = i as f64;
         let c = (x * 0.00123).sin() + 0.00017 * x;
-        let off = (0.09 + 0.01 * (x * 0.0007).cos().abs());
+        let off = 0.09 + 0.01 * (x * 0.0007).cos().abs();
         close[i] = c;
         high[i] = c + off;
         low[i] = c - off;
@@ -96,6 +96,81 @@ fn stochf_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(feature = "cuda")]
 #[test]
+fn stochf_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[stochf_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 8192usize;
+    let mut close = vec![f32::NAN; len];
+    let mut high = vec![f32::NAN; len];
+    let mut low = vec![f32::NAN; len];
+    for i in 4..len {
+        let x = i as f32;
+        let c = (x * 0.00123).sin() + 0.00017 * x;
+        let off = 0.09 + 0.01 * (x * 0.0007).cos().abs();
+        close[i] = c;
+        high[i] = c + off;
+        low[i] = c - off;
+    }
+    let sweep = StochfBatchRange {
+        fastk_period: (5, 11, 2),
+        fastd_period: (3, 3, 0),
+    };
+
+    let cuda = CudaStochf::new(0).expect("CudaStochf::new");
+    let (legacy, legacy_combos) = cuda
+        .stochf_batch_dev(&high, &low, &close, &sweep)
+        .expect("legacy batch");
+
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let d_high = runtime.upload_f32(&high).expect("upload high");
+    let d_low = runtime.upload_f32(&low).expect("upload low");
+    let d_close = runtime.upload_f32(&close).expect("upload close");
+    let (device, device_combos) = cuda
+        .stochf_batch_dev_from_device_inputs(
+            d_high.buffer(),
+            d_low.buffer(),
+            d_close.buffer(),
+            len,
+            4,
+            &sweep,
+        )
+        .expect("device inputs");
+
+    assert_eq!(legacy_combos.len(), device_combos.len(), "combos len");
+    for (idx, (legacy, device)) in legacy_combos.iter().zip(device_combos.iter()).enumerate() {
+        assert_eq!(legacy.fastk_period, device.fastk_period, "fastk at {idx}");
+        assert_eq!(legacy.fastd_period, device.fastd_period, "fastd at {idx}");
+        assert_eq!(legacy.fastd_matype, device.fastd_matype, "matype at {idx}");
+    }
+    for (legacy_buf, device_buf, label, tol) in [
+        (&legacy.a, &device.a, "k", 1e-6f32),
+        (&legacy.b, &device.b, "d", 1e-6f32),
+    ] {
+        assert_eq!(legacy_buf.rows, device_buf.rows, "{label} rows");
+        assert_eq!(legacy_buf.cols, device_buf.cols, "{label} cols");
+        let mut legacy_host = vec![0f32; legacy_buf.len()];
+        legacy_buf.buf.copy_to(&mut legacy_host)?;
+        let mut device_host = vec![0f32; device_buf.len()];
+        device_buf.buf.copy_to(&mut device_host)?;
+        for (idx, (&lhs, &rhs)) in legacy_host.iter().zip(device_host.iter()).enumerate() {
+            if lhs.is_nan() && rhs.is_nan() {
+                continue;
+            }
+            assert!(
+                (lhs - rhs).abs() < tol,
+                "{label} mismatch at {idx}: legacy={lhs} device={rhs}"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
 fn stochf_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
         eprintln!("[stochf_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
@@ -111,7 +186,7 @@ fn stochf_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
         for t in s..rows {
             let x = (t as f64) + (s as f64) * 0.19;
             let c = (x * 0.0021).sin() + 0.00031 * x;
-            let off = (0.07 + 0.01 * (x * 0.0013).cos().abs());
+            let off = 0.07 + 0.01 * (x * 0.0013).cos().abs();
             close_tm[t * cols + s] = c;
             high_tm[t * cols + s] = c + off;
             low_tm[t * cols + s] = c - off;

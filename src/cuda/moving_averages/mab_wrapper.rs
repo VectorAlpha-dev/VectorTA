@@ -1,6 +1,8 @@
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
+use crate::cuda::device_types::CudaDeviceSliceF32Ref;
+use crate::cuda::moving_averages::ma_selector::{CudaMaDeviceDataRef, CudaMaSelector};
 use crate::indicators::mab::{MabBatchRange, MabParams};
 use cust::context::Context;
 use cust::device::Device;
@@ -154,6 +156,44 @@ impl CudaMab {
             pnan[i + 1] = acc_nan;
         }
         (pcs, pnan)
+    }
+
+    fn build_prefixes_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+    ) -> Result<(DeviceBuffer<f64>, DeviceBuffer<i32>), CudaMabError> {
+        let mut func: Function = self
+            .module
+            .get_function("mab_build_prefix_single_f32")
+            .map_err(|_e| CudaMabError::MissingKernelSymbol {
+                name: "mab_build_prefix_single_f32",
+            })?;
+        let prefix_len = len
+            .checked_add(1)
+            .ok_or_else(|| CudaMabError::InvalidInput("prefix length overflow".into()))?;
+        let mut d_pcs = unsafe { DeviceBuffer::<f64>::uninitialized(prefix_len)? };
+        let mut d_pcn = unsafe { DeviceBuffer::<i32>::uninitialized(prefix_len)? };
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut pcs_ptr = d_pcs.as_device_ptr().as_raw();
+            let mut pcn_ptr = d_pcn.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut pcs_ptr as *mut _ as *mut c_void,
+                &mut pcn_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(
+                &mut func,
+                GridSize::xyz(1, 1, 1),
+                BlockSize::xyz(1, 1, 1),
+                0,
+                args,
+            )?;
+        }
+        Ok((d_pcs, d_pcn))
     }
 
     fn compute_ma_host_time_major(
@@ -626,6 +666,332 @@ impl CudaMab {
             },
         };
         Ok((trip, combos))
+    }
+
+    pub fn mab_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &MabBatchRange,
+    ) -> Result<(DeviceArrayF32Triplet, Vec<MabParams>), CudaMabError> {
+        if len == 0 || d_prices.len() != len {
+            return Err(CudaMabError::InvalidInput(
+                "device price buffer must match non-zero length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaMabError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = crate::indicators::mab::expand_grid(sweep)
+            .map_err(|e| CudaMabError::InvalidInput(e.to_string()))?;
+        if combos.is_empty() {
+            return Err(CudaMabError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+
+        let rows = combos.len();
+        let elem_count = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaMabError::InvalidInput("rows*len overflow".into()))?;
+        let out_bytes = elem_count
+            .checked_mul(3)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaMabError::InvalidInput("output byte size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(out_bytes, headroom) {
+            if let Ok((free, _total)) = mem_get_info() {
+                return Err(CudaMabError::OutOfMemory {
+                    required: out_bytes,
+                    free,
+                    headroom,
+                });
+            }
+        }
+
+        let devups: Vec<f32> = combos.iter().map(|p| p.devup.unwrap() as f32).collect();
+        let devdns: Vec<f32> = combos.iter().map(|p| p.devdn.unwrap() as f32).collect();
+        let all_sma = combos.iter().all(|p| {
+            p.fast_ma_type
+                .as_deref()
+                .unwrap_or("sma")
+                .eq_ignore_ascii_case("sma")
+                && p.slow_ma_type
+                    .as_deref()
+                    .unwrap_or("sma")
+                    .eq_ignore_ascii_case("sma")
+        });
+        let p0 = &combos[0];
+        let all_same_ma = combos.iter().all(|p| {
+            p.fast_period == p0.fast_period
+                && p.slow_period == p0.slow_period
+                && p.fast_ma_type == p0.fast_ma_type
+                && p.slow_ma_type == p0.slow_ma_type
+        });
+
+        let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elem_count) }?;
+        let mut d_middle: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elem_count) }?;
+        let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elem_count) }?;
+        let prices_view = unsafe {
+            CudaDeviceSliceF32Ref::from_raw_parts(
+                d_prices.as_device_ptr().as_raw(),
+                len,
+                self.device_id,
+            )
+        }
+        .map_err(|e| CudaMabError::InvalidInput(e.to_string()))?;
+        let price_data = CudaMaDeviceDataRef::Slice(prices_view);
+        let selector = CudaMaSelector::new(self.device_id as usize);
+
+        if all_sma && !all_same_ma {
+            let (d_pcs, d_pcn) = self.build_prefixes_device(d_prices, len)?;
+            let fast_periods: Vec<i32> = combos
+                .iter()
+                .map(|p| p.fast_period.unwrap_or(0) as i32)
+                .collect();
+            let slow_periods: Vec<i32> = combos
+                .iter()
+                .map(|p| p.slow_period.unwrap_or(0) as i32)
+                .collect();
+            let d_fast_periods = DeviceBuffer::from_slice(&fast_periods)?;
+            let d_slow_periods = DeviceBuffer::from_slice(&slow_periods)?;
+            let d_devups = DeviceBuffer::from_slice(&devups)?;
+            let d_devdns = DeviceBuffer::from_slice(&devdns)?;
+            self.mab_batch_device_sma(
+                &d_pcs,
+                &d_pcn,
+                &d_fast_periods,
+                &d_slow_periods,
+                &d_devups,
+                &d_devdns,
+                len,
+                first_valid,
+                rows,
+                &mut d_upper,
+                &mut d_middle,
+                &mut d_lower,
+            )?;
+            return Ok((
+                DeviceArrayF32Triplet {
+                    upper: DeviceArrayF32 {
+                        buf: d_upper,
+                        rows,
+                        cols: len,
+                    },
+                    middle: DeviceArrayF32 {
+                        buf: d_middle,
+                        rows,
+                        cols: len,
+                    },
+                    lower: DeviceArrayF32 {
+                        buf: d_lower,
+                        rows,
+                        cols: len,
+                    },
+                },
+                combos,
+            ));
+        }
+
+        if all_same_ma && rows > 1 {
+            let d_fast = selector
+                .ma_to_device_ref(
+                    p0.fast_ma_type.as_deref().unwrap_or("sma"),
+                    price_data,
+                    first_valid,
+                    p0.fast_period.unwrap(),
+                )
+                .map_err(|e| CudaMabError::InvalidInput(format!("fast ma_to_device_ref: {}", e)))?;
+            let d_slow = selector
+                .ma_to_device_ref(
+                    p0.slow_ma_type.as_deref().unwrap_or("sma"),
+                    price_data,
+                    first_valid,
+                    p0.slow_period.unwrap(),
+                )
+                .map_err(|e| CudaMabError::InvalidInput(format!("slow ma_to_device_ref: {}", e)))?;
+
+            let mut d_dev: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
+            let mut f_dev: Function =
+                self.module
+                    .get_function("mab_dev_from_ma_f32")
+                    .map_err(|_e| CudaMabError::MissingKernelSymbol {
+                        name: "mab_dev_from_ma_f32",
+                    })?;
+            unsafe {
+                let mut fast_ptr = d_fast.buf.as_device_ptr().as_raw();
+                let mut slow_ptr = d_slow.buf.as_device_ptr().as_raw();
+                let mut fp_i = p0.fast_period.unwrap() as i32;
+                let mut fv_i = first_valid as i32;
+                let mut len_i = len as i32;
+                let mut dev_ptr = d_dev.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut fast_ptr as *mut _ as *mut c_void,
+                    &mut slow_ptr as *mut _ as *mut c_void,
+                    &mut fp_i as *mut _ as *mut c_void,
+                    &mut fv_i as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut dev_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(
+                    &mut f_dev,
+                    GridSize::xyz(1, 1, 1),
+                    BlockSize::xyz(1, 1, 1),
+                    0,
+                    args,
+                )?;
+            }
+
+            let d_ups = DeviceBuffer::from_slice(&devups)?;
+            let d_dns = DeviceBuffer::from_slice(&devdns)?;
+            let mut f_apply: Function = self
+                .module
+                .get_function("mab_apply_dev_shared_ma_batch_f32")
+                .map_err(|_e| CudaMabError::MissingKernelSymbol {
+                    name: "mab_apply_dev_shared_ma_batch_f32",
+                })?;
+            let block_x: u32 = 256;
+            let grid_x = ((len as u32) + block_x - 1) / block_x;
+            let grid = GridSize::xyz(grid_x.max(1), rows as u32, 1);
+            let block = BlockSize::xyz(block_x, 1, 1);
+            unsafe {
+                let mut fast_ptr = d_fast.buf.as_device_ptr().as_raw();
+                let mut slow_ptr = d_slow.buf.as_device_ptr().as_raw();
+                let mut dev_ptr = d_dev.as_device_ptr().as_raw();
+                let mut fp_i = p0.fast_period.unwrap() as i32;
+                let mut sp_i = p0.slow_period.unwrap() as i32;
+                let mut fv_i = first_valid as i32;
+                let mut len_i = len as i32;
+                let mut ups_ptr = d_ups.as_device_ptr().as_raw();
+                let mut dns_ptr = d_dns.as_device_ptr().as_raw();
+                let mut rows_i = rows as i32;
+                let mut up_ptr = d_upper.as_device_ptr().as_raw();
+                let mut mid_ptr = d_middle.as_device_ptr().as_raw();
+                let mut lo_ptr = d_lower.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut fast_ptr as *mut _ as *mut c_void,
+                    &mut slow_ptr as *mut _ as *mut c_void,
+                    &mut dev_ptr as *mut _ as *mut c_void,
+                    &mut fp_i as *mut _ as *mut c_void,
+                    &mut sp_i as *mut _ as *mut c_void,
+                    &mut fv_i as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut ups_ptr as *mut _ as *mut c_void,
+                    &mut dns_ptr as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut up_ptr as *mut _ as *mut c_void,
+                    &mut mid_ptr as *mut _ as *mut c_void,
+                    &mut lo_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(&mut f_apply, grid, block, 0, args)?;
+            }
+
+            return Ok((
+                DeviceArrayF32Triplet {
+                    upper: DeviceArrayF32 {
+                        buf: d_upper,
+                        rows,
+                        cols: len,
+                    },
+                    middle: DeviceArrayF32 {
+                        buf: d_middle,
+                        rows,
+                        cols: len,
+                    },
+                    lower: DeviceArrayF32 {
+                        buf: d_lower,
+                        rows,
+                        cols: len,
+                    },
+                },
+                combos,
+            ));
+        }
+
+        let mut f_row: Function = self
+            .module
+            .get_function("mab_single_row_from_ma_f32")
+            .map_err(|_e| CudaMabError::MissingKernelSymbol {
+                name: "mab_single_row_from_ma_f32",
+            })?;
+        for (row, p) in combos.iter().enumerate() {
+            let d_fast = selector
+                .ma_to_device_ref(
+                    p.fast_ma_type.as_deref().unwrap_or("sma"),
+                    price_data,
+                    first_valid,
+                    p.fast_period.unwrap(),
+                )
+                .map_err(|e| CudaMabError::InvalidInput(format!("fast ma_to_device_ref: {}", e)))?;
+            let d_slow = selector
+                .ma_to_device_ref(
+                    p.slow_ma_type.as_deref().unwrap_or("sma"),
+                    price_data,
+                    first_valid,
+                    p.slow_period.unwrap(),
+                )
+                .map_err(|e| CudaMabError::InvalidInput(format!("slow ma_to_device_ref: {}", e)))?;
+            let row_off = row * len;
+            let mut up_row = unsafe { d_upper.as_device_ptr().offset(row_off as isize).as_raw() };
+            let mut mid_row = unsafe { d_middle.as_device_ptr().offset(row_off as isize).as_raw() };
+            let mut lo_row = unsafe { d_lower.as_device_ptr().offset(row_off as isize).as_raw() };
+
+            unsafe {
+                let mut fast_ptr = d_fast.buf.as_device_ptr().as_raw();
+                let mut slow_ptr = d_slow.buf.as_device_ptr().as_raw();
+                let mut fp_i = p.fast_period.unwrap() as i32;
+                let mut sp_i = p.slow_period.unwrap() as i32;
+                let mut fv_i = first_valid as i32;
+                let mut len_i = len as i32;
+                let mut upf = p.devup.unwrap() as f32;
+                let mut dnf = p.devdn.unwrap() as f32;
+                let args: &mut [*mut c_void] = &mut [
+                    &mut fast_ptr as *mut _ as *mut c_void,
+                    &mut slow_ptr as *mut _ as *mut c_void,
+                    &mut fp_i as *mut _ as *mut c_void,
+                    &mut sp_i as *mut _ as *mut c_void,
+                    &mut fv_i as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut upf as *mut _ as *mut c_void,
+                    &mut dnf as *mut _ as *mut c_void,
+                    &mut up_row as *mut _ as *mut c_void,
+                    &mut mid_row as *mut _ as *mut c_void,
+                    &mut lo_row as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(
+                    &mut f_row,
+                    GridSize::xyz(1, 1, 1),
+                    BlockSize::xyz(1, 1, 1),
+                    0,
+                    args,
+                )?;
+            }
+        }
+
+        Ok((
+            DeviceArrayF32Triplet {
+                upper: DeviceArrayF32 {
+                    buf: d_upper,
+                    rows,
+                    cols: len,
+                },
+                middle: DeviceArrayF32 {
+                    buf: d_middle,
+                    rows,
+                    cols: len,
+                },
+                lower: DeviceArrayF32 {
+                    buf: d_lower,
+                    rows,
+                    cols: len,
+                },
+            },
+            combos,
+        ))
     }
 
     pub fn mab_many_series_one_param_time_major_dev(

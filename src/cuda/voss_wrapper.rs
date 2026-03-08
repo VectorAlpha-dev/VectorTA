@@ -181,23 +181,12 @@ impl CudaVoss {
         }
     }
 
-    pub fn voss_batch_dev(
-        &self,
-        data_f32: &[f32],
-        sweep: &VossBatchRange,
-    ) -> Result<(DeviceArrayF32, DeviceArrayF32, Vec<VossParams>), CudaVossError> {
-        if data_f32.is_empty() {
-            return Err(CudaVossError::InvalidInput("empty input".into()));
-        }
-        let len = data_f32.len();
-        let first = data_f32
-            .iter()
-            .position(|x| !x.is_nan())
-            .ok_or_else(|| CudaVossError::InvalidInput("all values are NaN".into()))?;
-
-        let combos =
-            expand_grid_voss(sweep).map_err(|e| CudaVossError::InvalidInput(e.to_string()))?;
-        for prm in &combos {
+    fn validate_batch_combos(
+        len: usize,
+        first: usize,
+        combos: &[VossParams],
+    ) -> Result<(), CudaVossError> {
+        for prm in combos {
             let p = prm.period.unwrap_or(0);
             let q = prm.predict.unwrap_or(0);
             let order = 3 * q;
@@ -213,14 +202,124 @@ impl CudaVoss {
                 return Err(CudaVossError::InvalidInput("invalid bandwidth".into()));
             }
         }
+        Ok(())
+    }
+
+    fn launch_cast_f32_to_f64(
+        &self,
+        d_prices_f32: &DeviceBuffer<f32>,
+        len: usize,
+        d_prices_f64: &mut DeviceBuffer<f64>,
+    ) -> Result<(), CudaVossError> {
+        let func = self
+            .module
+            .get_function("voss_cast_f32_to_f64")
+            .map_err(|_| CudaVossError::MissingKernelSymbol {
+                name: "voss_cast_f32_to_f64",
+            })?;
+        let block_x = 256u32;
+        let grid_x = ((len as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1u32, 1u32).into();
+        let block: BlockSize = (block_x, 1u32, 1u32).into();
+        unsafe {
+            let mut p_in = d_prices_f32.as_device_ptr().as_raw();
+            let mut p_len = len as i32;
+            let mut p_out = d_prices_f64.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut p_in as *mut _ as *mut c_void,
+                &mut p_len as *mut _ as *mut c_void,
+                &mut p_out as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
+    fn launch_batch_kernel(
+        &self,
+        d_prices: &DeviceBuffer<f64>,
+        len: usize,
+        first: usize,
+        d_periods: &DeviceBuffer<i32>,
+        d_predicts: &DeviceBuffer<i32>,
+        d_bandwidths: &DeviceBuffer<f64>,
+        rows: usize,
+        d_voss: &mut DeviceBuffer<f32>,
+        d_filt: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaVossError> {
+        let func = self.module.get_function("voss_batch_f32").map_err(|_| {
+            CudaVossError::MissingKernelSymbol {
+                name: "voss_batch_f32",
+            }
+        })?;
+
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
+            _ => 1,
+        };
+        const MAX_GRID_Y: usize = 65_535;
+        let mut start_row = 0usize;
+        while start_row < rows {
+            let count = (rows - start_row).min(MAX_GRID_Y);
+            let grid: GridSize = (1u32, count as u32, 1u32).into();
+            let block: BlockSize = (block_x, 1u32, 1u32).into();
+            unsafe {
+                let mut p_prices = d_prices.as_device_ptr().as_raw();
+                let mut p_len = len as i32;
+                let mut p_first = first as i32;
+                let mut p_per = d_periods.as_device_ptr().add(start_row).as_raw();
+                let mut p_pre = d_predicts.as_device_ptr().add(start_row).as_raw();
+                let mut p_bw = d_bandwidths.as_device_ptr().add(start_row).as_raw();
+                let mut p_nrows = count as i32;
+                let base = start_row * len;
+                let mut p_voss = d_voss.as_device_ptr().add(base).as_raw();
+                let mut p_filt = d_filt.as_device_ptr().add(base).as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut p_prices as *mut _ as *mut c_void,
+                    &mut p_len as *mut _ as *mut c_void,
+                    &mut p_first as *mut _ as *mut c_void,
+                    &mut p_per as *mut _ as *mut c_void,
+                    &mut p_pre as *mut _ as *mut c_void,
+                    &mut p_bw as *mut _ as *mut c_void,
+                    &mut p_nrows as *mut _ as *mut c_void,
+                    &mut p_voss as *mut _ as *mut c_void,
+                    &mut p_filt as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(&func, grid, block, 0, args)?;
+            }
+            start_row += count;
+        }
+        Ok(())
+    }
+
+    pub fn voss_batch_dev_from_device_prices(
+        &self,
+        d_prices_f32: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &VossBatchRange,
+    ) -> Result<(DeviceArrayF32, DeviceArrayF32, Vec<VossParams>), CudaVossError> {
+        if len == 0 || d_prices_f32.len() != len {
+            return Err(CudaVossError::InvalidInput(
+                "device prices must have non-zero input length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaVossError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos =
+            expand_grid_voss(sweep).map_err(|e| CudaVossError::InvalidInput(e.to_string()))?;
+        Self::validate_batch_combos(len, first_valid, &combos)?;
 
         let rows = combos.len();
-
-        let in_bytes = len
-            .checked_mul(8)
-            .ok_or(CudaVossError::ArithmeticOverflow {
-                what: "len * 8 (prices upload)",
-            })?;
+        let cast_bytes = len.checked_mul(std::mem::size_of::<f64>()).ok_or(
+            CudaVossError::ArithmeticOverflow {
+                what: "len * 8 (device cast buffer)",
+            },
+        )?;
         let params_per_row = std::mem::size_of::<i32>()
             .checked_mul(2)
             .and_then(|x| x.checked_add(std::mem::size_of::<f64>()))
@@ -242,7 +341,7 @@ impl CudaVoss {
                 what: "2 * rows * len * 4 (outputs)",
             },
         )?;
-        let required_bytes = in_bytes
+        let required_bytes = cast_bytes
             .checked_add(params_bytes)
             .and_then(|x| x.checked_add(outs_bytes))
             .ok_or(CudaVossError::ArithmeticOverflow {
@@ -250,13 +349,10 @@ impl CudaVoss {
             })?;
         Self::will_fit(required_bytes, Self::headroom_bytes())?;
 
-        let mut h_prices = unsafe { LockedBuffer::<f64>::uninitialized(len) }?;
-        for (dst, &src) in h_prices.as_mut_slice().iter_mut().zip(data_f32.iter()) {
-            *dst = src as f64;
-        }
-        let mut d_prices: DeviceBuffer<f64> =
+        let mut d_prices_f64: DeviceBuffer<f64> =
             unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
-        unsafe { d_prices.async_copy_from(h_prices.as_slice(), &self.stream) }?;
+        self.launch_cast_f32_to_f64(d_prices_f32, len, &mut d_prices_f64)?;
+
         let periods: Vec<i32> = combos
             .iter()
             .map(|c| c.period.unwrap_or(20) as i32)
@@ -266,57 +362,26 @@ impl CudaVoss {
             .map(|c| c.predict.unwrap_or(3) as i32)
             .collect();
         let bws: Vec<f64> = combos.iter().map(|c| c.bandwidth.unwrap_or(0.25)).collect();
-        let d_p = DeviceBuffer::from_slice(&periods)?;
-        let d_q = DeviceBuffer::from_slice(&predicts)?;
-        let d_bw = DeviceBuffer::from_slice(&bws)?;
+        let d_p = unsafe { DeviceBuffer::from_slice_async(&periods, &self.stream) }?;
+        let d_q = unsafe { DeviceBuffer::from_slice_async(&predicts, &self.stream) }?;
+        let d_bw = unsafe { DeviceBuffer::from_slice_async(&bws, &self.stream) }?;
 
-        let mut d_voss: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
-        let mut d_filt: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_voss: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
+        let mut d_filt: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
+        self.launch_batch_kernel(
+            &d_prices_f64,
+            len,
+            first_valid,
+            &d_p,
+            &d_q,
+            &d_bw,
+            rows,
+            &mut d_voss,
+            &mut d_filt,
+        )?;
 
-        let func = self.module.get_function("voss_batch_f32").map_err(|_| {
-            CudaVossError::MissingKernelSymbol {
-                name: "voss_batch_f32",
-            }
-        })?;
-
-        let block_x = match self.policy.batch {
-            BatchKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
-            _ => 1,
-        };
-        const MAX_GRID_Y: usize = 65_535;
-        let mut start_row = 0usize;
-        while start_row < rows {
-            let count = (rows - start_row).min(MAX_GRID_Y);
-            let grid: GridSize = (1u32, count as u32, 1u32).into();
-            let block: BlockSize = (block_x, 1, 1).into();
-            unsafe {
-                let mut p_prices = d_prices.as_device_ptr().as_raw();
-                let mut p_len = len as i32;
-                let mut p_first = first as i32;
-                let mut p_per = d_p.as_device_ptr().add(start_row).as_raw();
-                let mut p_pre = d_q.as_device_ptr().add(start_row).as_raw();
-                let mut p_bw = d_bw.as_device_ptr().add(start_row).as_raw();
-                let mut p_nrows = count as i32;
-                let base = start_row * len;
-                let mut p_voss = d_voss.as_device_ptr().add(base).as_raw();
-                let mut p_filt = d_filt.as_device_ptr().add(base).as_raw();
-                let args: &mut [*mut c_void] = &mut [
-                    &mut p_prices as *mut _ as *mut c_void,
-                    &mut p_len as *mut _ as *mut c_void,
-                    &mut p_first as *mut _ as *mut c_void,
-                    &mut p_per as *mut _ as *mut c_void,
-                    &mut p_pre as *mut _ as *mut c_void,
-                    &mut p_bw as *mut _ as *mut c_void,
-                    &mut p_nrows as *mut _ as *mut c_void,
-                    &mut p_voss as *mut _ as *mut c_void,
-                    &mut p_filt as *mut _ as *mut c_void,
-                ];
-                self.stream.launch(&func, grid, block, 0, args)?;
-            }
-            start_row += count;
-        }
-
-        self.stream.synchronize()?;
         Ok((
             DeviceArrayF32 {
                 buf: d_voss,
@@ -330,6 +395,25 @@ impl CudaVoss {
             },
             combos,
         ))
+    }
+
+    pub fn voss_batch_dev(
+        &self,
+        data_f32: &[f32],
+        sweep: &VossBatchRange,
+    ) -> Result<(DeviceArrayF32, DeviceArrayF32, Vec<VossParams>), CudaVossError> {
+        if data_f32.is_empty() {
+            return Err(CudaVossError::InvalidInput("empty input".into()));
+        }
+        let len = data_f32.len();
+        let first = data_f32
+            .iter()
+            .position(|x| !x.is_nan())
+            .ok_or_else(|| CudaVossError::InvalidInput("all values are NaN".into()))?;
+        let d_prices_f32 = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }?;
+        let result = self.voss_batch_dev_from_device_prices(&d_prices_f32, len, first, sweep)?;
+        self.stream.synchronize()?;
+        Ok(result)
     }
 
     pub fn voss_many_series_one_param_time_major_dev(

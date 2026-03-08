@@ -5,7 +5,7 @@ use crate::indicators::moving_averages::wma::{WmaBatchRange, WmaParams};
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer};
+use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer, DevicePointer};
 use cust::module::{Module, ModuleJitOption, OptLevel, Symbol};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -401,9 +401,59 @@ impl CudaWma {
         Ok((combos, first_valid, series_len, max_period))
     }
 
+    fn prepare_batch_inputs_device(
+        series_len: usize,
+        first_valid: usize,
+        sweep: &WmaBatchRange,
+    ) -> Result<(Vec<WmaParams>, usize), CudaWmaError> {
+        if series_len == 0 {
+            return Err(CudaWmaError::InvalidInput("empty input".into()));
+        }
+        if first_valid >= series_len {
+            return Err(CudaWmaError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, series_len
+            )));
+        }
+
+        let combos = Self::expand_periods(sweep);
+        if combos.is_empty() {
+            return Err(CudaWmaError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+
+        let mut max_period = 0usize;
+        for combo in &combos {
+            let period = combo.period.unwrap_or(0);
+            if period <= 1 {
+                return Err(CudaWmaError::InvalidInput(format!(
+                    "invalid period {} (must be > 1)",
+                    period
+                )));
+            }
+            if period > series_len {
+                return Err(CudaWmaError::InvalidInput(format!(
+                    "period {} exceeds data length {}",
+                    period, series_len
+                )));
+            }
+            if series_len - first_valid < period {
+                return Err(CudaWmaError::InvalidInput(format!(
+                    "not enough valid data for period {} (have {} after first valid)",
+                    period,
+                    series_len - first_valid
+                )));
+            }
+            max_period = max_period.max(period);
+        }
+
+        Ok((combos, max_period))
+    }
+
     fn launch_batch_kernel(
         &self,
-        d_prices: &DeviceBuffer<f32>,
+        d_prices: DevicePointer<f32>,
         d_periods: &DeviceBuffer<i32>,
         series_len: usize,
         n_combos: usize,
@@ -459,7 +509,7 @@ impl CudaWma {
 
         for (start, len) in Self::grid_y_chunks(n_combos) {
             unsafe {
-                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                let mut prices_ptr = d_prices.as_raw();
                 let mut periods_ptr = d_periods.as_device_ptr().add(start).as_raw();
                 let mut series_len_i = series_len as i32;
                 let mut combos_i = len as i32;
@@ -486,7 +536,7 @@ impl CudaWma {
 
     fn launch_batch_kernel_rolling(
         &self,
-        d_prices: &DeviceBuffer<f32>,
+        d_prices: DevicePointer<f32>,
         d_periods: &DeviceBuffer<i32>,
         series_len: usize,
         n_combos: usize,
@@ -513,7 +563,7 @@ impl CudaWma {
 
         for (start, len) in Self::grid_y_chunks(n_combos) {
             unsafe {
-                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                let mut prices_ptr = d_prices.as_raw();
                 let mut periods_ptr = d_periods.as_device_ptr().add(start).as_raw();
                 let mut series_len_i = series_len as i32;
                 let mut combos_i = len as i32;
@@ -680,7 +730,7 @@ impl CudaWma {
             }
             Path::Rolling => {
                 self.launch_batch_kernel_rolling(
-                    &d_prices,
+                    d_prices.as_device_ptr(),
                     &d_periods,
                     series_len,
                     n_combos,
@@ -690,7 +740,7 @@ impl CudaWma {
             }
             Path::Plain => {
                 self.launch_batch_kernel(
-                    &d_prices,
+                    d_prices.as_device_ptr(),
                     &d_periods,
                     series_len,
                     n_combos,
@@ -700,9 +750,6 @@ impl CudaWma {
                 )?;
             }
         }
-
-        self.stream.synchronize()?;
-
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: n_combos,
@@ -760,7 +807,7 @@ impl CudaWma {
             ));
         }
         self.launch_batch_kernel(
-            d_prices,
+            d_prices.as_device_ptr(),
             d_periods,
             series_len as usize,
             n_combos as usize,
@@ -768,6 +815,99 @@ impl CudaWma {
             max_period as usize,
             d_out,
         )
+    }
+
+    pub fn wma_batch_from_device_ptr(
+        &self,
+        d_prices: DevicePointer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &WmaBatchRange,
+    ) -> Result<DeviceArrayF32, CudaWmaError> {
+        let (combos, max_period) =
+            Self::prepare_batch_inputs_device(series_len, first_valid, sweep)?;
+        let n_combos = combos.len();
+
+        let has_rolling = self.module.get_function("wma_batch_rolling_f32").is_ok();
+        let rolling_min_p: usize = std::env::var("WMA_ROLLING_MIN_PERIOD")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(64);
+        let min_period = combos
+            .iter()
+            .map(|p| p.period.unwrap() as usize)
+            .min()
+            .unwrap_or(max_period);
+        let may_use_rolling = has_rolling
+            && self.ramp_inited
+            && max_period <= WMA_MAX_PERIOD
+            && min_period >= rolling_min_p
+            && series_len >= (min_period + 8);
+        let force_path = std::env::var("WMA_FORCE_PATH").ok();
+        let use_rolling = match force_path.as_deref() {
+            Some("rolling") => has_rolling,
+            Some("plain") => false,
+            Some("prefix") => false,
+            _ => may_use_rolling,
+        };
+
+        let item_f32 = std::mem::size_of::<f32>();
+        let item_i32 = std::mem::size_of::<i32>();
+        let periods_bytes = n_combos
+            .checked_mul(item_i32)
+            .ok_or_else(|| CudaWmaError::InvalidInput("periods byte size overflow".into()))?;
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaWmaError::InvalidInput("output elements overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(item_f32)
+            .ok_or_else(|| CudaWmaError::InvalidInput("output byte size overflow".into()))?;
+        let required = periods_bytes
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaWmaError::InvalidInput("required VRAM size overflow".into()))?;
+        let headroom = 32 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaWmaError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaWmaError::InvalidInput("insufficient VRAM".into()));
+            }
+        }
+
+        let periods_i32: Vec<i32> = combos.iter().map(|p| p.period.unwrap() as i32).collect();
+        let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
+
+        if use_rolling {
+            self.launch_batch_kernel_rolling(
+                d_prices,
+                &d_periods,
+                series_len,
+                n_combos,
+                first_valid,
+                &mut d_out,
+            )?;
+        } else {
+            self.launch_batch_kernel(
+                d_prices,
+                &d_periods,
+                series_len,
+                n_combos,
+                first_valid,
+                max_period,
+                &mut d_out,
+            )?;
+        }
+
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: series_len,
+        })
     }
 
     fn prepare_many_series_inputs(
@@ -1214,7 +1354,7 @@ pub mod benches {
         fn launch(&mut self) {
             self.cuda
                 .launch_batch_kernel(
-                    &self.d_prices,
+                    self.d_prices.as_device_ptr(),
                     &self.d_periods,
                     self.len,
                     self.n_combos,

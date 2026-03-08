@@ -18,7 +18,6 @@ static __device__ __forceinline__ float nzf(float x) {
 extern "C" __global__
 void otto_batch_f32(
     const float* __restrict__ prices,
-    const float* __restrict__ cabs,
     const int*   __restrict__ ott_periods,
     const float* __restrict__ ott_percents,
     const int*   __restrict__ fast_vidyas,
@@ -60,12 +59,20 @@ void otto_batch_f32(
     float v1 = 0.0f, v2 = 0.0f, v3 = 0.0f;
 
     const int CMO_P = 9;
-    float ring_up[CMO_P];
-    float ring_dn[CMO_P];
+    float ring_up_price[CMO_P];
+    float ring_dn_price[CMO_P];
+    float ring_up_lott[CMO_P];
+    float ring_dn_lott[CMO_P];
     #pragma unroll
-    for (int k = 0; k < CMO_P; ++k) { ring_up[k] = 0.0f; ring_dn[k] = 0.0f; }
-    float sum_up = 0.0f, sum_dn = 0.0f;
-    int head = 0;
+    for (int k = 0; k < CMO_P; ++k) {
+        ring_up_price[k] = 0.0f; ring_dn_price[k] = 0.0f;
+        ring_up_lott[k] = 0.0f; ring_dn_lott[k] = 0.0f;
+    }
+    float sum_up_price = 0.0f, sum_dn_price = 0.0f;
+    float sum_up_lott = 0.0f, sum_dn_lott = 0.0f;
+    int head_price = 0;
+    int head_lott = 0;
+    float prev_price = 0.0f;
 
     float prev_lott = 0.0f;
     float ma_prev = 0.0f;
@@ -73,8 +80,30 @@ void otto_batch_f32(
     int dir_prev = 1;
 
     for (int i = 0; i < series_len; ++i) {
-        const float x = nzf(__ldg(prices + i));
-        const float c_abs = __ldg(cabs + i);
+        const float price_raw = __ldg(prices + i);
+        const float x = nzf(price_raw);
+        if (i > 0) {
+            float d = price_raw - prev_price;
+            if (!isfinite(price_raw) || !isfinite(prev_price)) {
+                d = 0.0f;
+            }
+            if (i >= CMO_P) {
+                sum_up_price -= ring_up_price[head_price];
+                sum_dn_price -= ring_dn_price[head_price];
+            }
+            const float up = d > 0.0f ? d : 0.0f;
+            const float dn = d > 0.0f ? 0.0f : -d;
+            ring_up_price[head_price] = up;
+            ring_dn_price[head_price] = dn;
+            sum_up_price += up;
+            sum_dn_price += dn;
+            head_price = (head_price + 1) == CMO_P ? 0 : (head_price + 1);
+        }
+        prev_price = price_raw;
+
+        const float denom_price = sum_up_price + sum_dn_price;
+        const float c_abs =
+            (i >= CMO_P && denom_price != 0.0f) ? fabsf((sum_up_price - sum_dn_price) / denom_price) : 0.0f;
 
 
         const float a1 = a1_base * c_abs;
@@ -95,21 +124,22 @@ void otto_batch_f32(
         if (i > 0) {
             const float d = lott - prev_lott;
             if (i >= CMO_P) {
-                sum_up -= ring_up[head];
-                sum_dn -= ring_dn[head];
+                sum_up_lott -= ring_up_lott[head_lott];
+                sum_dn_lott -= ring_dn_lott[head_lott];
             }
             const float up = d > 0.0f ? d : 0.0f;
             const float dn = d > 0.0f ? 0.0f : -d;
-            ring_up[head] = up;
-            ring_dn[head] = dn;
-            sum_up += up;
-            sum_dn += dn;
-            head = (head + 1) == CMO_P ? 0 : (head + 1);
+            ring_up_lott[head_lott] = up;
+            ring_dn_lott[head_lott] = dn;
+            sum_up_lott += up;
+            sum_dn_lott += dn;
+            head_lott = (head_lott + 1) == CMO_P ? 0 : (head_lott + 1);
         }
         prev_lott = lott;
 
-        const float denom = sum_up + sum_dn;
-        const float c2 = (i >= CMO_P && denom != 0.0f) ? fabsf((sum_up - sum_dn) / denom) : 0.0f;
+        const float denom = sum_up_lott + sum_dn_lott;
+        const float c2 =
+            (i >= CMO_P && denom != 0.0f) ? fabsf((sum_up_lott - sum_dn_lott) / denom) : 0.0f;
         const float a_lott = a_base_lott * c2;
         const float ma = fmaf(a_lott, lott, (1.0f - a_lott) * ma_prev);
         ma_prev = ma;

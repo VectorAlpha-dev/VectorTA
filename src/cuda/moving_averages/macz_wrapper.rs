@@ -432,6 +432,88 @@ impl CudaMacz {
         }
     }
 
+    fn build_prefixes_device(
+        &self,
+        d_close: &DeviceBuffer<f32>,
+        d_volume: Option<&DeviceBuffer<f32>>,
+        len: usize,
+    ) -> Result<
+        (
+            DeviceBuffer<f64>,
+            DeviceBuffer<f64>,
+            DeviceBuffer<i32>,
+            Option<(DeviceBuffer<f64>, DeviceBuffer<f64>, DeviceBuffer<i32>)>,
+        ),
+        CudaMaczError,
+    > {
+        let func = self
+            .module
+            .get_function("macz_build_prefix_single_f32")
+            .map_err(|_| CudaMaczError::MissingKernelSymbol {
+                name: "macz_build_prefix_single_f32",
+            })?;
+        let prefix_len = len
+            .checked_add(1)
+            .ok_or_else(|| CudaMaczError::InvalidInput("prefix length overflow".into()))?;
+        let mut d_pcs = unsafe { DeviceBuffer::<f64>::uninitialized(prefix_len)? };
+        let mut d_pcsq = unsafe { DeviceBuffer::<f64>::uninitialized(prefix_len)? };
+        let mut d_pcn = unsafe { DeviceBuffer::<i32>::uninitialized(prefix_len)? };
+        let (mut d_pvs, mut d_pps, mut d_pvn) = if d_volume.is_some() {
+            (
+                Some(unsafe { DeviceBuffer::<f64>::uninitialized(prefix_len)? }),
+                Some(unsafe { DeviceBuffer::<f64>::uninitialized(prefix_len)? }),
+                Some(unsafe { DeviceBuffer::<i32>::uninitialized(prefix_len)? }),
+            )
+        } else {
+            (None, None, None)
+        };
+        let block: BlockSize = (1, 1, 1).into();
+        let grid: GridSize = (1, 1, 1).into();
+        unsafe {
+            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut volume_ptr = d_volume
+                .map(|buf| buf.as_device_ptr().as_raw())
+                .unwrap_or(0u64);
+            let mut len_i = len as i32;
+            let mut pcs_ptr = d_pcs.as_device_ptr().as_raw();
+            let mut pcsq_ptr = d_pcsq.as_device_ptr().as_raw();
+            let mut pcn_ptr = d_pcn.as_device_ptr().as_raw();
+            let mut pvs_ptr = d_pvs
+                .as_ref()
+                .map(|buf| buf.as_device_ptr().as_raw())
+                .unwrap_or(0u64);
+            let mut pps_ptr = d_pps
+                .as_ref()
+                .map(|buf| buf.as_device_ptr().as_raw())
+                .unwrap_or(0u64);
+            let mut pvn_ptr = d_pvn
+                .as_ref()
+                .map(|buf| buf.as_device_ptr().as_raw())
+                .unwrap_or(0u64);
+            let args: &mut [*mut c_void] = &mut [
+                &mut close_ptr as *mut _ as *mut c_void,
+                &mut volume_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut pcs_ptr as *mut _ as *mut c_void,
+                &mut pcsq_ptr as *mut _ as *mut c_void,
+                &mut pcn_ptr as *mut _ as *mut c_void,
+                &mut pvs_ptr as *mut _ as *mut c_void,
+                &mut pps_ptr as *mut _ as *mut c_void,
+                &mut pvn_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok((
+            d_pcs,
+            d_pcsq,
+            d_pcn,
+            match (d_pvs.take(), d_pps.take(), d_pvn.take()) {
+                (Some(pvs), Some(pps), Some(pvn)) => Some((pvs, pps, pvn)),
+                _ => None,
+            },
+        ))
+    }
+
     fn validate_first_valid(prices: &[f32]) -> Result<usize, CudaMaczError> {
         if prices.is_empty() {
             return Err(CudaMaczError::InvalidInput("empty input".into()));
@@ -860,6 +942,160 @@ impl CudaMacz {
         }
 
         Ok(())
+    }
+
+    pub fn macz_batch_dev_from_device_prices(
+        &self,
+        d_close: &DeviceBuffer<f32>,
+        d_volume: Option<&DeviceBuffer<f32>>,
+        first_valid: usize,
+        sweep: &MaczBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<MaczParams>), CudaMaczError> {
+        let combos = Self::expand_grid(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaMaczError::InvalidInput("empty param grid".into()));
+        }
+        let len = d_close.len();
+        if len == 0 {
+            return Err(CudaMaczError::InvalidInput("empty input".into()));
+        }
+        if let Some(vol) = d_volume {
+            if vol.len() != len {
+                return Err(CudaMaczError::InvalidInput(
+                    "price/volume length mismatch".into(),
+                ));
+            }
+        }
+        if first_valid >= len {
+            return Err(CudaMaczError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, len
+            )));
+        }
+
+        let mut max_need = 0usize;
+        for p in &combos {
+            let slow = p.slow_length.unwrap_or(25);
+            let lz = p.lengthz.unwrap_or(20);
+            let lsd = p.length_stdev.unwrap_or(25);
+            let sig = p.signal_length.unwrap_or(9);
+            let warm_hist = first_valid + slow.max(lz).max(lsd) + sig - 1;
+            if warm_hist > max_need {
+                max_need = warm_hist;
+            }
+        }
+        if len <= max_need {
+            return Err(CudaMaczError::InvalidInput("not enough valid data".into()));
+        }
+
+        let rows = combos.len();
+        let sz_f32 = std::mem::size_of::<f32>();
+        let sz_f64 = std::mem::size_of::<f64>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let prefix_slot = sz_f64
+            .checked_mul(2)
+            .and_then(|v| v.checked_add(sz_i32))
+            .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?;
+        let prefix_base = (len + 1)
+            .checked_mul(prefix_slot)
+            .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?;
+        let prefix_vol = if d_volume.is_some() {
+            (len + 1)
+                .checked_mul(prefix_slot)
+                .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?
+        } else {
+            0
+        };
+        let params_slot = 5usize
+            .checked_mul(sz_i32)
+            .and_then(|v| v.checked_add(2usize.checked_mul(sz_f32)?))
+            .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?;
+        let params_b = rows
+            .checked_mul(params_slot)
+            .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?;
+        let out_elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaMaczError::InvalidInput("rows*cols overflow".into()))?;
+        let out_b = out_elems
+            .checked_mul(sz_f32)
+            .and_then(|v| v.checked_mul(2))
+            .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?;
+        let req = prefix_base
+            .checked_add(prefix_vol)
+            .and_then(|v| v.checked_add(params_b))
+            .and_then(|v| v.checked_add(out_b))
+            .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?;
+        Self::will_fit(req, 64 * 1024 * 1024)?;
+
+        let (d_pcs, d_pcsq, d_pcn, vol_tuple) =
+            self.build_prefixes_device(d_close, d_volume, len)?;
+        let (d_pvs, d_pps, d_pvn) = match vol_tuple {
+            Some((pvs, pps, pvn)) => (Some(pvs), Some(pps), Some(pvn)),
+            None => (None, None, None),
+        };
+
+        let fasts: Vec<i32> = combos
+            .iter()
+            .map(|p| p.fast_length.unwrap_or(12) as i32)
+            .collect();
+        let slows: Vec<i32> = combos
+            .iter()
+            .map(|p| p.slow_length.unwrap_or(25) as i32)
+            .collect();
+        let sigs: Vec<i32> = combos
+            .iter()
+            .map(|p| p.signal_length.unwrap_or(9) as i32)
+            .collect();
+        let lzs: Vec<i32> = combos
+            .iter()
+            .map(|p| p.lengthz.unwrap_or(20) as i32)
+            .collect();
+        let lsds: Vec<i32> = combos
+            .iter()
+            .map(|p| p.length_stdev.unwrap_or(25) as i32)
+            .collect();
+        let a_s: Vec<f32> = combos.iter().map(|p| p.a.unwrap_or(1.0) as f32).collect();
+        let b_s: Vec<f32> = combos.iter().map(|p| p.b.unwrap_or(1.0) as f32).collect();
+        let d_fasts = DeviceBuffer::from_slice(&fasts)?;
+        let d_slows = DeviceBuffer::from_slice(&slows)?;
+        let d_sigs = DeviceBuffer::from_slice(&sigs)?;
+        let d_lzs = DeviceBuffer::from_slice(&lzs)?;
+        let d_lsds = DeviceBuffer::from_slice(&lsds)?;
+        let d_as = DeviceBuffer::from_slice(&a_s)?;
+        let d_bs = DeviceBuffer::from_slice(&b_s)?;
+
+        let mut d_macz: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems)? };
+        let mut d_hist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems)? };
+        self.macz_batch_device(
+            d_close,
+            d_volume,
+            &d_pcs,
+            &d_pcsq,
+            &d_pcn,
+            d_pvs.as_ref(),
+            d_pps.as_ref(),
+            d_pvn.as_ref(),
+            &d_fasts,
+            &d_slows,
+            &d_sigs,
+            &d_lzs,
+            &d_lsds,
+            &d_as,
+            &d_bs,
+            len,
+            rows,
+            first_valid,
+            &mut d_macz,
+            &mut d_hist,
+        )?;
+        Ok((
+            DeviceArrayF32 {
+                buf: d_hist,
+                rows,
+                cols: len,
+            },
+            combos,
+        ))
     }
 
     pub fn macz_many_series_one_param_time_major_dev(

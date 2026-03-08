@@ -719,6 +719,40 @@ impl CudaBuffAverages {
         (prefix_pv, prefix_vv)
     }
 
+    fn build_prefix_sums_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_volumes: &DeviceBuffer<f32>,
+        len: usize,
+    ) -> Result<(DeviceBuffer<f32>, DeviceBuffer<f32>), CudaBuffAveragesError> {
+        let func = self
+            .module
+            .get_function("buff_averages_build_prefix_f32")
+            .map_err(|_| CudaBuffAveragesError::MissingKernelSymbol {
+                name: "buff_averages_build_prefix_f32",
+            })?;
+        let mut d_prefix_pv = unsafe { DeviceBuffer::<f32>::uninitialized(len + 1) }?;
+        let mut d_prefix_vv = unsafe { DeviceBuffer::<f32>::uninitialized(len + 1) }?;
+        let block: BlockSize = (1, 1, 1).into();
+        let grid: GridSize = (1, 1, 1).into();
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut volumes_ptr = d_volumes.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut prefix_pv_ptr = d_prefix_pv.as_device_ptr().as_raw();
+            let mut prefix_vv_ptr = d_prefix_vv.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut volumes_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut prefix_pv_ptr as *mut _ as *mut c_void,
+                &mut prefix_vv_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok((d_prefix_pv, d_prefix_vv))
+    }
+
     fn launch_batch_kernel(
         &self,
         d_prefix_pv: &DeviceBuffer<f32>,
@@ -1239,6 +1273,140 @@ impl CudaBuffAverages {
             d_fast_out,
             d_slow_out,
         )
+    }
+
+    pub fn buff_averages_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_volumes: &DeviceBuffer<f32>,
+        first_valid: usize,
+        sweep: &BuffAveragesBatchRange,
+    ) -> Result<(DeviceArrayF32, DeviceArrayF32), CudaBuffAveragesError> {
+        let len = d_prices.len();
+        if len == 0 {
+            return Err(CudaBuffAveragesError::InvalidInput(
+                "empty price data".into(),
+            ));
+        }
+        if d_volumes.len() != len {
+            return Err(CudaBuffAveragesError::InvalidInput(format!(
+                "price/volume length mismatch ({} vs {})",
+                len,
+                d_volumes.len()
+            )));
+        }
+        if first_valid >= len {
+            return Err(CudaBuffAveragesError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, len
+            )));
+        }
+
+        let combos = Self::expand_grid(sweep);
+        if combos.is_empty() {
+            return Err(CudaBuffAveragesError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        for &(fast, slow) in &combos {
+            if fast == 0 || slow == 0 {
+                return Err(CudaBuffAveragesError::InvalidInput(format!(
+                    "invalid periods (fast={}, slow={})",
+                    fast, slow
+                )));
+            }
+            if fast > len || slow > len {
+                return Err(CudaBuffAveragesError::InvalidInput(format!(
+                    "period exceeds length (len={}, fast={}, slow={})",
+                    len, fast, slow
+                )));
+            }
+            if len - first_valid < slow {
+                return Err(CudaBuffAveragesError::InvalidInput(format!(
+                    "not enough valid data for slow={} (valid after first={}): {}",
+                    slow,
+                    first_valid,
+                    len - first_valid
+                )));
+            }
+            if fast > slow {
+                return Err(CudaBuffAveragesError::InvalidInput(format!(
+                    "fast period {} must be <= slow period {}",
+                    fast, slow
+                )));
+            }
+        }
+
+        let rows = combos.len();
+        let prefix_bytes =
+            (len + 1)
+                .checked_mul(4 * 2)
+                .ok_or(CudaBuffAveragesError::ArithmeticOverflow {
+                    context: "prefix bytes",
+                })?;
+        let period_bytes =
+            rows.checked_mul(4 * 2)
+                .ok_or(CudaBuffAveragesError::ArithmeticOverflow {
+                    context: "period bytes",
+                })?;
+        let out_elems = rows
+            .checked_mul(len)
+            .ok_or(CudaBuffAveragesError::ArithmeticOverflow {
+                context: "rows * len",
+            })?;
+        let output_bytes =
+            out_elems
+                .checked_mul(4 * 2)
+                .ok_or(CudaBuffAveragesError::ArithmeticOverflow {
+                    context: "output bytes",
+                })?;
+        let bytes_required = prefix_bytes
+            .checked_add(period_bytes)
+            .ok_or(CudaBuffAveragesError::ArithmeticOverflow {
+                context: "prefix+period",
+            })?
+            .checked_add(output_bytes)
+            .ok_or(CudaBuffAveragesError::ArithmeticOverflow {
+                context: "total bytes",
+            })?;
+        let headroom = env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
+        Self::will_fit_checked(bytes_required, headroom)?;
+
+        let (d_prefix_pv, d_prefix_vv) = self.build_prefix_sums_device(d_prices, d_volumes, len)?;
+        let fast_periods: Vec<i32> = combos.iter().map(|&(f, _)| f as i32).collect();
+        let slow_periods: Vec<i32> = combos.iter().map(|&(_, s)| s as i32).collect();
+        let d_fast = DeviceBuffer::from_slice(&fast_periods)?;
+        let d_slow = DeviceBuffer::from_slice(&slow_periods)?;
+        let mut d_fast_out =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(out_elems, &self.stream) }?;
+        let mut d_slow_out =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(out_elems, &self.stream) }?;
+        self.buff_averages_batch_from_device_prefixes(
+            &d_prefix_pv,
+            &d_prefix_vv,
+            &d_fast,
+            &d_slow,
+            len,
+            first_valid,
+            rows,
+            &mut d_fast_out,
+            &mut d_slow_out,
+        )?;
+        Ok((
+            DeviceArrayF32 {
+                buf: d_fast_out,
+                rows,
+                cols: len,
+            },
+            DeviceArrayF32 {
+                buf: d_slow_out,
+                rows,
+                cols: len,
+            },
+        ))
     }
 
     pub fn buff_averages_batch_dev(

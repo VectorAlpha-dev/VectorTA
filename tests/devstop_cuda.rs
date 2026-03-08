@@ -9,7 +9,7 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::CudaDevStop;
+use vector_ta::cuda::{CudaDevStop, CudaRuntime};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -40,7 +40,7 @@ fn devstop_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     for i in 3..len {
         let x = i as f64;
         let c = (x * 0.0019).sin() + 0.00021 * x;
-        let off = (0.35 + 0.01 * (x * 0.00031).cos().abs());
+        let off = 0.35 + 0.01 * (x * 0.00031).cos().abs();
         high[i] = c + off;
         low[i] = c - off;
     }
@@ -155,5 +155,77 @@ fn devstop_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
             i
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn devstop_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[devstop_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 4096usize;
+    let mut high = vec![f64::NAN; len];
+    let mut low = vec![f64::NAN; len];
+    for i in 5..len {
+        let x = i as f64 * 0.0023;
+        let base = 100.0 + (x * 0.71).sin() * 0.6 + 0.0004 * i as f64;
+        let width = 0.25 + (x * 0.19).cos().abs() * 0.09;
+        high[i] = base + width;
+        low[i] = base - width;
+    }
+
+    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let first_valid = high_f32
+        .iter()
+        .position(|value| !value.is_nan())
+        .zip(low_f32.iter().position(|value| !value.is_nan()))
+        .map(|(high_idx, low_idx)| high_idx.min(low_idx))
+        .expect("first valid");
+    let sweep = DevStopBatchRange {
+        period: (10, 26, 4),
+        mult: (0.0, 2.0, 0.5),
+        devtype: (0, 0, 0),
+    };
+
+    let cuda = CudaDevStop::new(0).expect("CudaDevStop::new");
+    let (legacy, legacy_meta) = cuda
+        .devstop_batch_dev(&high_f32, &low_f32, &sweep, true)
+        .expect("legacy devstop");
+
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let d_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+    let (device, device_meta) = cuda
+        .devstop_batch_dev_from_device_inputs(
+            d_high.buffer(),
+            d_low.buffer(),
+            len,
+            first_valid,
+            &sweep,
+            true,
+        )
+        .expect("device devstop");
+    cuda.synchronize().expect("devstop sync");
+
+    assert_eq!(legacy_meta, device_meta);
+    assert_eq!(legacy.rows, device.rows);
+    assert_eq!(legacy.cols, device.cols);
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    let mut device_host = vec![0f32; device.len()];
+    device.buf.copy_to(&mut device_host)?;
+
+    for (lhs, rhs) in legacy_host.iter().zip(device_host.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!((lhs - rhs).abs() <= 1e-6, "lhs={lhs} rhs={rhs}");
+    }
+
     Ok(())
 }

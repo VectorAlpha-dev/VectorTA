@@ -211,6 +211,49 @@ impl CudaMsw {
             .position(|x| x.is_finite())
             .ok_or_else(|| CudaMswError::InvalidInput("all values are NaN".into()))
     }
+
+    fn prepare_batch_plan(
+        len: usize,
+        first_valid: usize,
+        sweep: &MswBatchRange,
+    ) -> Result<(Vec<MswParams>, Vec<i32>, usize), CudaMswError> {
+        if len == 0 {
+            return Err(CudaMswError::InvalidInput("empty series".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaMswError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = Self::expand_grid(sweep)?;
+        let mut periods_i32 = Vec::with_capacity(combos.len());
+        let mut max_p = 0usize;
+        for prm in &combos {
+            let p = prm.period.unwrap_or(0);
+            if p == 0 {
+                return Err(CudaMswError::InvalidInput("period must be >= 1".into()));
+            }
+            if p > len {
+                return Err(CudaMswError::InvalidInput(format!(
+                    "period {} exceeds length {}",
+                    p, len
+                )));
+            }
+            if len - first_valid < p {
+                return Err(CudaMswError::InvalidInput(format!(
+                    "not enough valid data: need {}, valid {}",
+                    p,
+                    len - first_valid
+                )));
+            }
+            max_p = max_p.max(p);
+            periods_i32.push(p as i32);
+        }
+
+        Ok((combos, periods_i32, max_p))
+    }
+
     fn expand_grid(range: &MswBatchRange) -> Result<Vec<MswParams>, CudaMswError> {
         fn axis_usize(
             (start, end, step): (usize, usize, usize),
@@ -403,6 +446,70 @@ impl CudaMsw {
         Ok(())
     }
 
+    fn launch_batch_single_output_chunk(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_periods_all: &DeviceBuffer<i32>,
+        series_len: usize,
+        first_valid: usize,
+        chunk_rows: usize,
+        base_row: usize,
+        output_index: usize,
+        d_out: &mut DeviceBuffer<f32>,
+        block_x: u32,
+        shared_bytes: usize,
+        func: &Function,
+    ) -> Result<(), CudaMswError> {
+        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+        let grid_y = chunk_rows as u32;
+        let grid: GridSize = (grid_x.max(1), grid_y, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        let dev = Device::get_device(self.device_id)?;
+        let max_bx = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimX)
+            .unwrap_or(1024) as u32;
+        if block_x > max_bx || grid_y == 0 {
+            return Err(CudaMswError::LaunchConfigTooLarge {
+                gx: grid_x.max(1),
+                gy: grid_y,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
+
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut periods_ptr = d_periods_all.as_device_ptr().as_raw()
+                + ((base_row * std::mem::size_of::<i32>()) as u64);
+            let mut len_i = series_len as i32;
+            let mut combos_i = chunk_rows as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut output_index_i = output_index as i32;
+            let mut out_ptr = d_out.as_device_ptr().as_raw()
+                + ((base_row * series_len) * std::mem::size_of::<f32>()) as u64;
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut periods_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut combos_i as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut output_index_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(func, grid, block, shared_bytes as u32, args)?;
+        }
+        unsafe {
+            (*(self as *const _ as *mut CudaMsw)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
+        self.maybe_log_batch_debug();
+        Ok(())
+    }
+
     pub fn msw_batch_dev(
         &self,
         prices_f32: &[f32],
@@ -412,32 +519,8 @@ impl CudaMsw {
             return Err(CudaMswError::InvalidInput("empty series".into()));
         }
         let first_valid = Self::first_valid_f32(prices_f32)?;
-        let combos = Self::expand_grid(sweep)?;
-
         let len = prices_f32.len();
-        let mut periods_i32 = Vec::with_capacity(combos.len());
-        let mut max_p = 0usize;
-        for prm in &combos {
-            let p = prm.period.unwrap_or(0);
-            if p == 0 {
-                return Err(CudaMswError::InvalidInput("period must be >= 1".into()));
-            }
-            if p > len {
-                return Err(CudaMswError::InvalidInput(format!(
-                    "period {} exceeds length {}",
-                    p, len
-                )));
-            }
-            if len - first_valid < p {
-                return Err(CudaMswError::InvalidInput(format!(
-                    "not enough valid data: need {}, valid {}",
-                    p,
-                    len - first_valid
-                )));
-            }
-            max_p = max_p.max(p);
-            periods_i32.push(p as i32);
-        }
+        let (combos, periods_i32, max_p) = Self::prepare_batch_plan(len, first_valid, sweep)?;
 
         let rows = combos.len();
         let prices_bytes = len
@@ -504,6 +587,97 @@ impl CudaMsw {
             DeviceArrayF32 {
                 buf: d_out,
                 rows: 2 * combos.len(),
+                cols: len,
+            },
+            combos,
+        ))
+    }
+
+    pub fn msw_batch_output_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &MswBatchRange,
+        output_index: usize,
+    ) -> Result<(DeviceArrayF32, Vec<MswParams>), CudaMswError> {
+        if d_prices.len() != len {
+            return Err(CudaMswError::InvalidInput(format!(
+                "device price length mismatch (buffer={}, len={})",
+                d_prices.len(),
+                len
+            )));
+        }
+        if output_index > 1 {
+            return Err(CudaMswError::InvalidInput(format!(
+                "output_index {} out of range for msw",
+                output_index
+            )));
+        }
+
+        let (combos, periods_i32, max_p) = Self::prepare_batch_plan(len, first_valid, sweep)?;
+        let rows = combos.len();
+        let periods_bytes = periods_i32
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaMswError::InvalidInput("periods size overflow".into()))?;
+        let out_elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaMswError::InvalidInput("rows*len overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaMswError::InvalidInput("output size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024usize;
+        Self::will_fit(
+            periods_bytes
+                .checked_add(out_bytes)
+                .ok_or_else(|| CudaMswError::InvalidInput("total VRAM size overflow".into()))?,
+            headroom,
+        )?;
+
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
+
+        let func = self
+            .module
+            .get_function("msw_batch_single_output_f32")
+            .map_err(|_| CudaMswError::MissingKernelSymbol {
+                name: "msw_batch_single_output_f32",
+            })?;
+        let (block_x, shared_bytes) = self.try_pick_block_x(
+            &func,
+            max_p,
+            match self.policy_batch {
+                BatchKernelPolicy::Plain { block_x } => Some(block_x),
+                _ => None,
+            },
+        )?;
+
+        let mut base = 0usize;
+        const MAX_Y: usize = 65_535;
+        while base < rows {
+            let take = (rows - base).min(MAX_Y);
+            self.launch_batch_single_output_chunk(
+                d_prices,
+                &d_periods,
+                len,
+                first_valid,
+                take,
+                base,
+                output_index,
+                &mut d_out,
+                block_x,
+                shared_bytes,
+                &func,
+            )?;
+            base += take;
+        }
+
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows,
                 cols: len,
             },
             combos,

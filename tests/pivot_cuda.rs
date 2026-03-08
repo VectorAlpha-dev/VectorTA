@@ -3,7 +3,7 @@ use vector_ta::utilities::enums::Kernel;
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::cuda_available;
+use vector_ta::cuda::{cuda_available, CudaRuntime};
 
 #[cfg(feature = "cuda")]
 #[test]
@@ -155,6 +155,77 @@ fn pivot_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
         }
         assert!((gg - ee).abs() <= tol, "mismatch at {}", idx);
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn pivot_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[pivot_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 8192usize;
+    let mut h = vec![f64::NAN; len];
+    let mut l = vec![f64::NAN; len];
+    let mut c = vec![f64::NAN; len];
+    let mut o = vec![f64::NAN; len];
+    for i in 7..len {
+        let x = i as f64 * 0.0021;
+        let base = (x * 0.71).sin() + 0.0012 * x;
+        let range = 0.18 + 0.025 * (x * 0.29).cos().abs();
+        c[i] = base;
+        o[i] = base + 0.012 * (x * 0.19).sin();
+        l[i] = base - range;
+        h[i] = base + range;
+    }
+
+    let hf: Vec<f32> = h.iter().map(|&v| v as f32).collect();
+    let lf: Vec<f32> = l.iter().map(|&v| v as f32).collect();
+    let cf: Vec<f32> = c.iter().map(|&v| v as f32).collect();
+    let of: Vec<f32> = o.iter().map(|&v| v as f32).collect();
+    let sweep = vector_ta::indicators::pivot::PivotBatchRange { mode: (0, 4, 1) };
+
+    let cuda = vector_ta::cuda::pivot_wrapper::CudaPivot::new(0).expect("CudaPivot::new");
+    let (legacy, legacy_combos) = cuda
+        .pivot_batch_dev(&hf, &lf, &cf, &of, &sweep)
+        .expect("legacy pivot batch");
+
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let d_high = runtime.upload_f32(&hf).expect("upload high");
+    let d_low = runtime.upload_f32(&lf).expect("upload low");
+    let d_close = runtime.upload_f32(&cf).expect("upload close");
+    let d_open = runtime.upload_f32(&of).expect("upload open");
+    let (device, device_combos) = cuda
+        .pivot_batch_dev_from_device_inputs(
+            d_high.buffer(),
+            d_low.buffer(),
+            d_close.buffer(),
+            d_open.buffer(),
+            len,
+            7,
+            &sweep,
+        )
+        .expect("device pivot batch");
+    cuda.synchronize().expect("pivot sync");
+
+    assert_eq!(legacy_combos.len(), device_combos.len());
+    assert_eq!(legacy.rows, device.rows);
+    assert_eq!(legacy.cols, device.cols);
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    let mut device_host = vec![0f32; device.len()];
+    device.buf.copy_to(&mut device_host)?;
+
+    for (lhs, rhs) in legacy_host.iter().zip(device_host.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!((lhs - rhs).abs() <= 1e-6, "lhs={lhs} rhs={rhs}");
+    }
+
     Ok(())
 }
 

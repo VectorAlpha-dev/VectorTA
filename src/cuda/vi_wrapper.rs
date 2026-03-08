@@ -276,6 +276,24 @@ impl CudaVi {
         Ok((first, pfx_tr, pfx_vp, pfx_vm))
     }
 
+    fn first_valid_single(
+        &self,
+        high: &[f32],
+        low: &[f32],
+        close: &[f32],
+    ) -> Result<usize, CudaViError> {
+        if high.len() != low.len() || high.len() != close.len() {
+            return Err(CudaViError::InvalidInput("length mismatch".into()));
+        }
+        let n = high.len();
+        if n == 0 {
+            return Err(CudaViError::InvalidInput("empty input".into()));
+        }
+        (0..n)
+            .find(|&i| high[i].is_finite() && low[i].is_finite() && close[i].is_finite())
+            .ok_or_else(|| CudaViError::InvalidInput("all values NaN".into()))
+    }
+
     fn build_prefix_time_major(
         &self,
         high_tm: &[f32],
@@ -522,6 +540,83 @@ impl CudaVi {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn launch_vi_build_prefix_f32(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_tr: &mut DeviceBuffer<f32>,
+        d_vp: &mut DeviceBuffer<f32>,
+        d_vm: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaViError> {
+        let func = self
+            .module
+            .get_function("vi_build_prefix_f32")
+            .map_err(|_| CudaViError::MissingKernelSymbol {
+                name: "vi_build_prefix_f32",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+
+        unsafe {
+            let mut high_ptr = d_high.as_device_ptr().as_raw();
+            let mut low_ptr = d_low.as_device_ptr().as_raw();
+            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let mut tr_ptr = d_tr.as_device_ptr().as_raw();
+            let mut vp_ptr = d_vp.as_device_ptr().as_raw();
+            let mut vm_ptr = d_vm.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut high_ptr as *mut _ as *mut c_void,
+                &mut low_ptr as *mut _ as *mut c_void,
+                &mut close_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut tr_ptr as *mut _ as *mut c_void,
+                &mut vp_ptr as *mut _ as *mut c_void,
+                &mut vm_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
+    fn expand_grid_local(sweep: &ViBatchRange) -> Vec<ViParams> {
+        let (start, end, step) = sweep.period;
+        if step == 0 || start == end {
+            return vec![ViParams {
+                period: Some(start),
+            }];
+        }
+        if start < end {
+            return (start..=end)
+                .step_by(step)
+                .map(|p| ViParams { period: Some(p) })
+                .collect();
+        }
+        let mut out = Vec::new();
+        let mut cur = start;
+        loop {
+            out.push(ViParams { period: Some(cur) });
+            if cur == end {
+                break;
+            }
+            cur = match cur.checked_sub(step) {
+                Some(v) => v,
+                None => break,
+            };
+            if cur < end {
+                break;
+            }
+        }
+        out
+    }
+
     pub fn vi_batch_dev(
         &self,
         high_f32: &[f32],
@@ -536,47 +631,50 @@ impl CudaVi {
         if len == 0 {
             return Err(CudaViError::InvalidInput("empty input".into()));
         }
+        let first_valid = self.first_valid_single(high_f32, low_f32, close_f32)?;
+        let d_high = self.h2d_upload(high_f32)?;
+        let d_low = self.h2d_upload(low_f32)?;
+        let d_close = self.h2d_upload(close_f32)?;
+        let (pair, combos) = self.vi_batch_dev_from_device_inputs(
+            &d_high,
+            &d_low,
+            &d_close,
+            len,
+            first_valid,
+            sweep,
+        )?;
+        self.stream.synchronize()?;
+        Ok((pair, combos))
+    }
 
-        fn expand_grid_local(r: &ViBatchRange) -> Vec<ViParams> {
-            let (start, end, step) = r.period;
-            if step == 0 || start == end {
-                return vec![ViParams {
-                    period: Some(start),
-                }];
-            }
-            if start < end {
-                return (start..=end)
-                    .step_by(step)
-                    .map(|p| ViParams { period: Some(p) })
-                    .collect();
-            }
-            let mut out = Vec::new();
-            let mut cur = start;
-            loop {
-                out.push(ViParams { period: Some(cur) });
-                if cur == end {
-                    break;
-                }
-                cur = match cur.checked_sub(step) {
-                    Some(v) => v,
-                    None => break,
-                };
-                if cur < end {
-                    break;
-                }
-            }
-            out
+    pub fn vi_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &ViBatchRange,
+    ) -> Result<(DeviceArrayF32Pair, Vec<ViParams>), CudaViError> {
+        if len == 0 {
+            return Err(CudaViError::InvalidInput("empty input".into()));
         }
-        let combos = expand_grid_local(sweep);
+        if d_high.len() != len || d_low.len() != len || d_close.len() != len {
+            return Err(CudaViError::InvalidInput(
+                "device inputs must have equal non-zero length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaViError::InvalidInput("first_valid out of range".into()));
+        }
+
+        let combos = Self::expand_grid_local(sweep);
         if combos.is_empty() {
             return Err(CudaViError::InvalidInput(
                 "no parameter combinations".into(),
             ));
         }
         let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-
-        let (first_valid, pfx_tr, pfx_vp, pfx_vm) =
-            self.build_prefix_single(high_f32, low_f32, close_f32)?;
         if len - first_valid < max_p {
             return Err(CudaViError::InvalidInput(
                 "insufficient valid data after first_valid".into(),
@@ -593,7 +691,7 @@ impl CudaVi {
             })
             .and_then(|v| {
                 rows.checked_mul(len)
-                    .and_then(|rc| rc.checked_mul(std::mem::size_of::<f32>()))
+                    .and_then(|rc| rc.checked_mul(std::mem::size_of::<f32>() * 2))
                     .and_then(|out| v.checked_add(out))
             })
             .ok_or_else(|| CudaViError::InvalidInput("size overflow in VRAM estimate".into()))?;
@@ -615,9 +713,19 @@ impl CudaVi {
             }
         }
 
-        let d_tr = self.h2d_upload(&pfx_tr)?;
-        let d_vp = self.h2d_upload(&pfx_vp)?;
-        let d_vm = self.h2d_upload(&pfx_vm)?;
+        let mut d_tr = unsafe { DeviceBuffer::<f32>::uninitialized(len) }?;
+        let mut d_vp = unsafe { DeviceBuffer::<f32>::uninitialized(len) }?;
+        let mut d_vm = unsafe { DeviceBuffer::<f32>::uninitialized(len) }?;
+        self.launch_vi_build_prefix_f32(
+            d_high,
+            d_low,
+            d_close,
+            len,
+            first_valid,
+            &mut d_tr,
+            &mut d_vp,
+            &mut d_vm,
+        )?;
 
         let periods_host: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let d_periods = self.h2d_upload(&periods_host)?;
@@ -639,8 +747,6 @@ impl CudaVi {
             &mut d_plus,
             &mut d_minus,
         )?;
-
-        self.stream.synchronize()?;
 
         Ok((
             DeviceArrayF32Pair {

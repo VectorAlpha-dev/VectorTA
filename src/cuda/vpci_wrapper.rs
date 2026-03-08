@@ -200,6 +200,47 @@ impl CudaVpci {
         }
     }
 
+    fn launch_prefix_builder_raw(
+        &self,
+        d_close: &DeviceBuffer<f32>,
+        d_volume: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_pfx_c: &mut DeviceBuffer<Float2>,
+        d_pfx_v: &mut DeviceBuffer<Float2>,
+        d_pfx_cv: &mut DeviceBuffer<Float2>,
+    ) -> Result<(), CudaVpciError> {
+        let func = self
+            .module
+            .get_function("vpci_build_prefix_single_f32")
+            .map_err(|_| CudaVpciError::MissingKernelSymbol {
+                name: "vpci_build_prefix_single_f32",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+        unsafe {
+            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut volume_ptr = d_volume.as_device_ptr().as_raw();
+            let mut series_len_i = len as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut pfx_c_ptr = d_pfx_c.as_device_ptr().as_raw();
+            let mut pfx_v_ptr = d_pfx_v.as_device_ptr().as_raw();
+            let mut pfx_cv_ptr = d_pfx_cv.as_device_ptr().as_raw();
+
+            let mut args: [*mut c_void; 7] = [
+                &mut close_ptr as *mut _ as *mut c_void,
+                &mut volume_ptr as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut pfx_c_ptr as *mut _ as *mut c_void,
+                &mut pfx_v_ptr as *mut _ as *mut c_void,
+                &mut pfx_cv_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, &mut args[..])?;
+        }
+        Ok(())
+    }
+
     fn build_prefix_single(
         &self,
         close: &[f32],
@@ -456,15 +497,145 @@ impl CudaVpci {
             .unwrap_or(64 * 1024 * 1024);
         Self::will_fit(bytes, headroom)?;
 
-        let d_pfx_c: DeviceBuffer<Float2> =
-            unsafe { DeviceBuffer::from_slice_async(h_pfx_c.as_slice(), &self.stream) }?;
-        let d_pfx_v: DeviceBuffer<Float2> =
-            unsafe { DeviceBuffer::from_slice_async(h_pfx_v.as_slice(), &self.stream) }?;
-        let d_pfx_cv: DeviceBuffer<Float2> =
-            unsafe { DeviceBuffer::from_slice_async(h_pfx_cv.as_slice(), &self.stream) }?;
         let h_vol = LockedBuffer::from_slice(volume_f32)?;
+        let d_close: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(close_f32, &self.stream) }?;
         let d_vol: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::from_slice_async(h_vol.as_slice(), &self.stream) }?;
+        let (pair, combos) =
+            self.vpci_batch_dev_from_device_inputs(&d_close, &d_vol, len, first_valid, sweep)?;
+        self.synchronize()?;
+
+        Ok((pair, combos))
+    }
+
+    pub fn vpci_batch_dev_from_device_inputs(
+        &self,
+        d_close: &DeviceBuffer<f32>,
+        d_volume: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &VpciBatchRange,
+    ) -> Result<(DeviceArrayF32Pair, Vec<VpciParams>), CudaVpciError> {
+        if d_close.len() != len || d_volume.len() != len {
+            return Err(CudaVpciError::InvalidInput(
+                "device input length mismatch".into(),
+            ));
+        }
+        if len == 0 {
+            return Err(CudaVpciError::InvalidInput("empty input".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaVpciError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        fn axis_usize((s, e, st): (usize, usize, usize)) -> Vec<usize> {
+            if st == 0 || s == e {
+                return vec![s];
+            }
+            let mut out = Vec::new();
+            if s < e {
+                let mut v = s;
+                loop {
+                    out.push(v);
+                    match v.checked_add(st) {
+                        Some(next) if next <= e => v = next,
+                        _ => break,
+                    }
+                }
+            } else {
+                let mut v = s;
+                loop {
+                    out.push(v);
+                    if v == e {
+                        break;
+                    }
+                    match v.checked_sub(st) {
+                        Some(next) if next >= e => v = next,
+                        _ => break,
+                    }
+                }
+            }
+            out
+        }
+
+        let shorts = axis_usize(sweep.short_range);
+        let longs = axis_usize(sweep.long_range);
+        let rows = shorts.len().checked_mul(longs.len()).ok_or_else(|| {
+            CudaVpciError::InvalidInput("rows*cols overflow in vpci_batch_dev".into())
+        })?;
+        if rows == 0 {
+            return Err(CudaVpciError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+
+        let mut combos = Vec::with_capacity(rows);
+        for &s in &shorts {
+            for &l in &longs {
+                combos.push(VpciParams {
+                    short_range: Some(s),
+                    long_range: Some(l),
+                });
+            }
+        }
+        let max_long = combos.iter().map(|p| p.long_range.unwrap()).max().unwrap();
+        if len - first_valid < max_long {
+            return Err(CudaVpciError::InvalidInput(
+                "insufficient valid data after first_valid".into(),
+            ));
+        }
+
+        let float2_size = std::mem::size_of::<Float2>();
+        let f32_size = std::mem::size_of::<f32>();
+        let i32_size = std::mem::size_of::<i32>();
+        let prefix_bytes = len
+            .checked_mul(float2_size)
+            .and_then(|b| b.checked_mul(3))
+            .ok_or_else(|| {
+                CudaVpciError::InvalidInput("prefix byte size overflow in vpci_batch_dev".into())
+            })?;
+        let params_bytes = rows
+            .checked_mul(2)
+            .and_then(|n| n.checked_mul(i32_size))
+            .ok_or_else(|| {
+                CudaVpciError::InvalidInput("params byte size overflow in vpci_batch_dev".into())
+            })?;
+        let out_elems = rows.checked_mul(len).ok_or_else(|| {
+            CudaVpciError::InvalidInput("rows*len overflow in vpci_batch_dev".into())
+        })?;
+        let out_bytes = out_elems
+            .checked_mul(f32_size)
+            .and_then(|b| b.checked_mul(2))
+            .ok_or_else(|| {
+                CudaVpciError::InvalidInput("output byte size overflow in vpci_batch_dev".into())
+            })?;
+        let bytes = prefix_bytes
+            .checked_add(params_bytes)
+            .and_then(|b| b.checked_add(out_bytes))
+            .ok_or_else(|| {
+                CudaVpciError::InvalidInput("total byte size overflow in vpci_batch_dev".into())
+            })?;
+        let headroom = env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
+        Self::will_fit(bytes, headroom)?;
+
+        let mut d_pfx_c: DeviceBuffer<Float2> = unsafe { DeviceBuffer::uninitialized(len) }?;
+        let mut d_pfx_v: DeviceBuffer<Float2> = unsafe { DeviceBuffer::uninitialized(len) }?;
+        let mut d_pfx_cv: DeviceBuffer<Float2> = unsafe { DeviceBuffer::uninitialized(len) }?;
+        self.launch_prefix_builder_raw(
+            d_close,
+            d_volume,
+            len,
+            first_valid,
+            &mut d_pfx_c,
+            &mut d_pfx_v,
+            &mut d_pfx_cv,
+        )?;
 
         let shorts_i32: Vec<i32> = combos
             .iter()
@@ -474,12 +645,8 @@ impl CudaVpci {
             .iter()
             .map(|p| p.long_range.unwrap() as i32)
             .collect();
-        let h_shorts = LockedBuffer::from_slice(&shorts_i32)?;
-        let h_longs = LockedBuffer::from_slice(&longs_i32)?;
-        let d_shorts: DeviceBuffer<i32> =
-            unsafe { DeviceBuffer::from_slice_async(h_shorts.as_slice(), &self.stream) }?;
-        let d_longs: DeviceBuffer<i32> =
-            unsafe { DeviceBuffer::from_slice_async(h_longs.as_slice(), &self.stream) }?;
+        let d_shorts = DeviceBuffer::from_slice(&shorts_i32)?;
+        let d_longs = DeviceBuffer::from_slice(&longs_i32)?;
 
         let mut d_vpci: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
         let mut d_vpcis: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
@@ -533,12 +700,12 @@ impl CudaVpci {
             let mut pfx_c_ptr = d_pfx_c.as_device_ptr().as_raw();
             let mut pfx_v_ptr = d_pfx_v.as_device_ptr().as_raw();
             let mut pfx_cv_ptr = d_pfx_cv.as_device_ptr().as_raw();
-            let mut vol_ptr = d_vol.as_device_ptr().as_raw();
+            let mut vol_ptr = d_volume.as_device_ptr().as_raw();
             let mut shorts_ptr = d_shorts.as_device_ptr().as_raw();
             let mut longs_ptr = d_longs.as_device_ptr().as_raw();
             let mut series_len_i = len as i32;
             let mut n_rows_i = rows as i32;
-            let mut first_valid_i = (first_valid.min(len)) as i32;
+            let mut first_valid_i = first_valid as i32;
             let mut out_vpci_ptr = d_vpci.as_device_ptr().as_raw();
             let mut out_vpcis_ptr = d_vpcis.as_device_ptr().as_raw();
 
@@ -558,8 +725,6 @@ impl CudaVpci {
 
             self.stream.launch(&func, grid, block, 0, &mut args[..])?;
         }
-
-        self.synchronize()?;
 
         Ok((
             DeviceArrayF32Pair {

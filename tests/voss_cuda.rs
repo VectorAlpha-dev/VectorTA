@@ -5,7 +5,7 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::CudaVoss;
+use vector_ta::cuda::{CudaRuntime, CudaVoss};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -159,5 +159,63 @@ fn voss_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
             idx
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn voss_cuda_device_prices_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[voss_cuda_device_prices_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    use vector_ta::indicators::voss::VossBatchRange;
+
+    let len = 2048usize;
+    let mut data = vec![f64::NAN; len];
+    for i in 4..len {
+        let x = i as f64 * 0.0021;
+        data[i] = x.sin() + 0.00021 * i as f64;
+    }
+    let sweep = VossBatchRange {
+        period: (10, 26, 4),
+        predict: (1, 4, 1),
+        bandwidth: (0.10, 0.30, 0.10),
+    };
+
+    let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+    let first_valid = data_f32
+        .iter()
+        .position(|value| !value.is_nan())
+        .expect("first valid");
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_prices = runtime.upload_f32(&data_f32).expect("upload prices");
+    let cuda = CudaVoss::new(0).expect("CudaVoss::new");
+
+    let (legacy_voss, legacy_filt, _) =
+        cuda.voss_batch_dev(&data_f32, &sweep).expect("legacy voss");
+    let (device_voss, device_filt, _) = cuda
+        .voss_batch_dev_from_device_prices(d_prices.buffer(), len, first_valid, &sweep)
+        .expect("device voss");
+
+    for (legacy_arr, device_arr, label) in [
+        (&legacy_voss, &device_voss, "voss"),
+        (&legacy_filt, &device_filt, "filt"),
+    ] {
+        let mut legacy_host = vec![0f32; legacy_arr.len()];
+        let mut device_host = vec![0f32; device_arr.len()];
+        legacy_arr.buf.copy_to(&mut legacy_host)?;
+        device_arr.buf.copy_to(&mut device_host)?;
+        for idx in 0..legacy_host.len() {
+            assert!(
+                approx_eq(legacy_host[idx] as f64, device_host[idx] as f64, 1e-2),
+                "{label} mismatch at {idx}: legacy={} device={}",
+                legacy_host[idx],
+                device_host[idx]
+            );
+        }
+    }
+
     Ok(())
 }

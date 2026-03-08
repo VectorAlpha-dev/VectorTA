@@ -44,6 +44,18 @@ __device__ __forceinline__ float clampf(float x, float lo, float hi) {
     return fminf(fmaxf(x, lo), hi);
 }
 
+extern "C" __global__ void fisher_build_hl2_f32(
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    int len,
+    float* __restrict__ hl)
+{
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < len) {
+        hl[idx] = 0.5f * (high[idx] + low[idx]);
+    }
+}
+
 
 __device__ __forceinline__ int rb_dec(int x, int cap) { return (x == 0) ? (cap - 1) : (x - 1); }
 __device__ __forceinline__ int rb_inc(int x, int cap) { return (x + 1 == cap) ? 0 : (x + 1); }

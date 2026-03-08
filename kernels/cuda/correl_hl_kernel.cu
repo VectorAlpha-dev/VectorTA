@@ -20,6 +20,125 @@
 
 
 
+extern "C" __global__ void correl_hl_build_prefix_ds_f32(
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    int len,
+    int first_valid,
+    float2* __restrict__ ps_h,
+    float2* __restrict__ ps_h2,
+    float2* __restrict__ ps_l,
+    float2* __restrict__ ps_l2,
+    float2* __restrict__ ps_hl,
+    int* __restrict__ ps_nan)
+{
+    if (blockIdx.x != 0 || blockIdx.y != 0 || blockIdx.z != 0 ||
+        threadIdx.x != 0 || threadIdx.y != 0 || threadIdx.z != 0) {
+        return;
+    }
+
+    double sum_h = 0.0;
+    double sum_h2 = 0.0;
+    double sum_l = 0.0;
+    double sum_l2 = 0.0;
+    double sum_hl = 0.0;
+    int nan_count = 0;
+
+    ps_h[0] = make_float2(0.0f, 0.0f);
+    ps_h2[0] = make_float2(0.0f, 0.0f);
+    ps_l[0] = make_float2(0.0f, 0.0f);
+    ps_l2[0] = make_float2(0.0f, 0.0f);
+    ps_hl[0] = make_float2(0.0f, 0.0f);
+    ps_nan[0] = 0;
+
+    for (int i = 0; i < len; ++i) {
+        if (i >= first_valid) {
+            const float h = high[i];
+            const float l = low[i];
+            if (isnan(h) || isnan(l)) {
+                nan_count += 1;
+            } else {
+                const double hd = (double)h;
+                const double ld = (double)l;
+                sum_h += hd;
+                sum_h2 += hd * hd;
+                sum_l += ld;
+                sum_l2 += ld * ld;
+                sum_hl += hd * ld;
+            }
+        }
+
+        const float sum_h_hi = (float)sum_h;
+        const float sum_h2_hi = (float)sum_h2;
+        const float sum_l_hi = (float)sum_l;
+        const float sum_l2_hi = (float)sum_l2;
+        const float sum_hl_hi = (float)sum_hl;
+        ps_h[i + 1] = make_float2((float)(sum_h - (double)sum_h_hi), sum_h_hi);
+        ps_h2[i + 1] = make_float2((float)(sum_h2 - (double)sum_h2_hi), sum_h2_hi);
+        ps_l[i + 1] = make_float2((float)(sum_l - (double)sum_l_hi), sum_l_hi);
+        ps_l2[i + 1] = make_float2((float)(sum_l2 - (double)sum_l2_hi), sum_l2_hi);
+        ps_hl[i + 1] = make_float2((float)(sum_hl - (double)sum_hl_hi), sum_hl_hi);
+        ps_nan[i + 1] = nan_count;
+    }
+}
+
+extern "C" __global__ void correl_hl_build_prefix_f64(
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    int len,
+    int first_valid,
+    double* __restrict__ ps_h,
+    double* __restrict__ ps_h2,
+    double* __restrict__ ps_l,
+    double* __restrict__ ps_l2,
+    double* __restrict__ ps_hl,
+    int* __restrict__ ps_nan)
+{
+    if (blockIdx.x != 0 || blockIdx.y != 0 || blockIdx.z != 0 ||
+        threadIdx.x != 0 || threadIdx.y != 0 || threadIdx.z != 0) {
+        return;
+    }
+
+    double sum_h = 0.0;
+    double sum_h2 = 0.0;
+    double sum_l = 0.0;
+    double sum_l2 = 0.0;
+    double sum_hl = 0.0;
+    int nan_count = 0;
+
+    ps_h[0] = 0.0;
+    ps_h2[0] = 0.0;
+    ps_l[0] = 0.0;
+    ps_l2[0] = 0.0;
+    ps_hl[0] = 0.0;
+    ps_nan[0] = 0;
+
+    for (int i = 0; i < len; ++i) {
+        if (i >= first_valid) {
+            const float h = high[i];
+            const float l = low[i];
+            if (isnan(h) || isnan(l)) {
+                nan_count += 1;
+            } else {
+                const double hd = (double)h;
+                const double ld = (double)l;
+                sum_h += hd;
+                sum_h2 += hd * hd;
+                sum_l += ld;
+                sum_l2 += ld * ld;
+                sum_hl += hd * ld;
+            }
+        }
+
+        ps_h[i + 1] = sum_h;
+        ps_h2[i + 1] = sum_h2;
+        ps_l[i + 1] = sum_l;
+        ps_l2[i + 1] = sum_l2;
+        ps_hl[i + 1] = sum_hl;
+        ps_nan[i + 1] = nan_count;
+    }
+}
+
 extern "C" __global__ void correl_hl_batch_f32(
     const double* __restrict__ ps_h,
     const double* __restrict__ ps_h2,

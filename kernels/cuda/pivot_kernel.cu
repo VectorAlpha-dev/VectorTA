@@ -101,6 +101,23 @@ FORCE_INLINE void pivot_compute_levels_core(
     }
 }
 
+extern "C" __global__ void pivot_extract_output_rows_f32(
+    const float* __restrict__ packed,
+    int num_combos,
+    int series_len,
+    int output_index,
+    float* __restrict__ out)
+{
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int total = num_combos * series_len;
+    if (idx >= total) return;
+
+    const int row = idx / series_len;
+    const int col = idx - row * series_len;
+    const int packed_row = row * LEVELS + output_index;
+    out[idx] = packed[packed_row * series_len + col];
+}
+
 
 
 

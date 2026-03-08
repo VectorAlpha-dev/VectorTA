@@ -37,6 +37,22 @@ static __device__ __forceinline__ double ema_step_d(double prev, double x, doubl
     return fma(a, x - prev, prev);
 }
 
+extern "C" __global__
+void trix_build_logs_f32(const float* __restrict__ prices,
+                         int series_len,
+                         int first_valid,
+                         float* __restrict__ logs)
+{
+    const int idx = (int)blockIdx.x * (int)blockDim.x + (int)threadIdx.x;
+    const int stride = (int)gridDim.x * (int)blockDim.x;
+    for (int i = idx; i < series_len; i += stride) {
+        if (i < first_valid) {
+            logs[i] = 0.0f;
+        } else {
+            logs[i] = logf(prices[i]);
+        }
+    }
+}
 
 
 

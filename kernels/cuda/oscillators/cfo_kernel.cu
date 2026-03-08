@@ -16,6 +16,33 @@
 
 __device__ __forceinline__ float f32_nan() { return __int_as_float(0x7fffffff); }
 
+extern "C" __global__ void cfo_build_prefixes_serial_f64(
+    const float* __restrict__ data,
+    int len,
+    int first_valid,
+    double* __restrict__ prefix_sum,
+    double* __restrict__ prefix_weighted)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (len < 0) return;
+
+    prefix_sum[0] = 0.0;
+    prefix_weighted[0] = 0.0;
+
+    double acc_s = 0.0;
+    double acc_w = 0.0;
+    double weight = 0.0;
+    for (int i = 0; i < len; ++i) {
+        if (i >= first_valid) {
+            const double v = (double)data[i];
+            weight += 1.0;
+            acc_s += v;
+            acc_w += v * weight;
+        }
+        prefix_sum[i + 1] = acc_s;
+        prefix_weighted[i + 1] = acc_w;
+    }
+}
 
 
 

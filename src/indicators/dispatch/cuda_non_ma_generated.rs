@@ -4245,14 +4245,14 @@ pub(super) fn try_dispatch_non_ma_cuda(
                     .map_err(|e| map_non_ma_compute_error(indicator, e.to_string()))?;
                 let owner = match output_index {
                     0 => crate::cuda::moving_averages::DeviceArrayF32 {
-                        buf: result.0.buf,
-                        rows: result.0.rows,
-                        cols: result.0.cols,
-                    },
-                    1 => crate::cuda::moving_averages::DeviceArrayF32 {
                         buf: result.1.buf,
                         rows: result.1.rows,
                         cols: result.1.cols,
+                    },
+                    1 => crate::cuda::moving_averages::DeviceArrayF32 {
+                        buf: result.0.buf,
+                        rows: result.0.rows,
+                        cols: result.0.cols,
                     },
                     2 => crate::cuda::moving_averages::DeviceArrayF32 {
                         buf: result.2.buf,

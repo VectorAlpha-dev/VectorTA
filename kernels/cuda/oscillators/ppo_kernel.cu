@@ -109,6 +109,25 @@ __device__ __forceinline__ int warp_min_i(int v, unsigned mask) {
     return v;
 }
 
+extern "C" __global__ void ppo_build_prefix_one_series_f64(
+    const float* __restrict__ data,
+    int len,
+    int first_valid,
+    double* __restrict__ prefix_sum)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (len < 0) return;
+
+    prefix_sum[0] = 0.0;
+    double acc = 0.0;
+    for (int i = 0; i < len; ++i) {
+        if (i >= first_valid) {
+            acc += (double)data[i];
+        }
+        prefix_sum[i + 1] = acc;
+    }
+}
+
 
 
 

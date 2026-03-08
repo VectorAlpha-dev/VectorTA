@@ -9,6 +9,8 @@ use cust::memory::CopyDestination;
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::vi_wrapper::CudaVi;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -164,5 +166,86 @@ fn vi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
             idx
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn vi_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[vi_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 2048usize;
+    let mut high = vec![f64::NAN; len];
+    let mut low = vec![f64::NAN; len];
+    let mut close = vec![f64::NAN; len];
+    for i in 2..len {
+        let x = i as f64 * 0.0037;
+        let base = 100.0 + x.sin() * 0.7 + 0.0002 * i as f64;
+        high[i] = base + 0.08 + (x * 0.41).cos().abs() * 0.02;
+        low[i] = base - 0.08 - (x * 0.17).sin().abs() * 0.02;
+        close[i] = base + (x * 0.53).sin() * 0.03;
+    }
+    let sweep = ViBatchRange { period: (7, 21, 7) };
+
+    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+    let first_valid = high_f32
+        .iter()
+        .zip(low_f32.iter())
+        .zip(close_f32.iter())
+        .position(|((high, low), close)| high.is_finite() && low.is_finite() && close.is_finite())
+        .expect("first valid");
+
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+    let d_close = runtime.upload_f32(&close_f32).expect("upload close");
+    let cuda = CudaVi::new(0).expect("CudaVi::new");
+
+    let (legacy, _) = cuda
+        .vi_batch_dev(&high_f32, &low_f32, &close_f32, &sweep)
+        .expect("legacy vi");
+    let (device, _) = cuda
+        .vi_batch_dev_from_device_inputs(
+            d_high.buffer(),
+            d_low.buffer(),
+            d_close.buffer(),
+            len,
+            first_valid,
+            &sweep,
+        )
+        .expect("device vi");
+
+    let mut legacy_plus = vec![0f32; legacy.a.len()];
+    let mut legacy_minus = vec![0f32; legacy.b.len()];
+    let mut device_plus = vec![0f32; device.a.len()];
+    let mut device_minus = vec![0f32; device.b.len()];
+    legacy.a.buf.copy_to(&mut legacy_plus)?;
+    legacy.b.buf.copy_to(&mut legacy_minus)?;
+    device.a.buf.copy_to(&mut device_plus)?;
+    device.b.buf.copy_to(&mut device_minus)?;
+
+    let tol = 5e-4;
+    for idx in 0..legacy_plus.len() {
+        assert!(
+            approx_eq(legacy_plus[idx] as f64, device_plus[idx] as f64, tol),
+            "plus mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_plus[idx],
+            device_plus[idx]
+        );
+        assert!(
+            approx_eq(legacy_minus[idx] as f64, device_minus[idx] as f64, tol),
+            "minus mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_minus[idx],
+            device_minus[idx]
+        );
+    }
+
     Ok(())
 }

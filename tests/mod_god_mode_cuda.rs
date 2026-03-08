@@ -11,6 +11,8 @@ use cust::memory::CopyDestination;
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::mod_god_mode_wrapper::CudaModGodMode;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
 
 fn gen_candles(len: usize) -> Candles {
     let mut h = vec![f64::NAN; len];
@@ -235,5 +237,87 @@ fn mod_god_mode_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
             (cpu_hist - gpu_hist).abs()
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn mod_god_mode_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[mod_god_mode_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let candles = gen_candles(2048);
+    let h: Vec<f32> = candles.high.iter().map(|&x| x as f32).collect();
+    let l: Vec<f32> = candles.low.iter().map(|&x| x as f32).collect();
+    let c: Vec<f32> = candles.close.iter().map(|&x| x as f32).collect();
+    let first_valid = c
+        .iter()
+        .position(|value| value.is_finite())
+        .expect("first valid");
+    let sweep = ModGodModeBatchRange {
+        n1: (10, 14, 2),
+        n2: (6, 6, 0),
+        n3: (4, 4, 0),
+        mode: ModGodModeMode::TraditionMg,
+    };
+
+    let cuda = CudaModGodMode::new(0).expect("CudaModGodMode");
+    let legacy = cuda
+        .mod_god_mode_batch_dev(&h, &l, &c, None, &sweep)
+        .expect("legacy mod_god_mode");
+
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let d_high = runtime.upload_f32(&h).expect("upload high");
+    let d_low = runtime.upload_f32(&l).expect("upload low");
+    let d_close = runtime.upload_f32(&c).expect("upload close");
+    let device = cuda
+        .mod_god_mode_batch_dev_from_device_inputs(
+            d_high.buffer(),
+            d_low.buffer(),
+            d_close.buffer(),
+            None,
+            c.len(),
+            first_valid,
+            &sweep,
+            false,
+        )
+        .expect("device mod_god_mode");
+    cuda.synchronize().expect("mod_god_mode sync");
+
+    let mut legacy_wt = vec![0f32; legacy.outputs.wt1.len()];
+    let mut legacy_sig = vec![0f32; legacy.outputs.wt2.len()];
+    let mut legacy_hist = vec![0f32; legacy.outputs.hist.len()];
+    legacy.outputs.wt1.buf.copy_to(&mut legacy_wt)?;
+    legacy.outputs.wt2.buf.copy_to(&mut legacy_sig)?;
+    legacy.outputs.hist.buf.copy_to(&mut legacy_hist)?;
+
+    let mut device_wt = vec![0f32; device.outputs.wt1.len()];
+    let mut device_sig = vec![0f32; device.outputs.wt2.len()];
+    let mut device_hist = vec![0f32; device.outputs.hist.len()];
+    device.outputs.wt1.buf.copy_to(&mut device_wt)?;
+    device.outputs.wt2.buf.copy_to(&mut device_sig)?;
+    device.outputs.hist.buf.copy_to(&mut device_hist)?;
+
+    for (lhs, rhs) in legacy_wt.iter().zip(device_wt.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!((lhs - rhs).abs() <= 1e-6, "wt lhs={lhs} rhs={rhs}");
+    }
+    for (lhs, rhs) in legacy_sig.iter().zip(device_sig.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!((lhs - rhs).abs() <= 1e-6, "sig lhs={lhs} rhs={rhs}");
+    }
+    for (lhs, rhs) in legacy_hist.iter().zip(device_hist.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!((lhs - rhs).abs() <= 1e-6, "hist lhs={lhs} rhs={rhs}");
+    }
+
     Ok(())
 }

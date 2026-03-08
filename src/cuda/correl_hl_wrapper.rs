@@ -163,6 +163,11 @@ impl CudaCorrelHl {
     }
 
     #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaCorrelHlError> {
+        self.stream.synchronize().map_err(Into::into)
+    }
+
+    #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
             Ok(v) => v != "0" && v.to_lowercase() != "false",
@@ -331,6 +336,40 @@ impl CudaCorrelHl {
             }
         }
         Ok((combos, first_valid, len))
+    }
+
+    fn prepare_device_batch_inputs(
+        len: usize,
+        first_valid: usize,
+        sweep: &CorrelHlBatchRange,
+    ) -> Result<Vec<CorrelHlParams>, CudaCorrelHlError> {
+        if len == 0 {
+            return Err(CudaCorrelHlError::InvalidInput("empty input".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaCorrelHlError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = Self::expand_grid(sweep)?;
+        for c in &combos {
+            let p = c.period.unwrap_or(0);
+            if p == 0 {
+                return Err(CudaCorrelHlError::InvalidInput("period must be > 0".into()));
+            }
+            if p > len {
+                return Err(CudaCorrelHlError::InvalidInput(
+                    "period exceeds data length".into(),
+                ));
+            }
+            if len - first_valid < p {
+                return Err(CudaCorrelHlError::InvalidInput(
+                    "not enough valid data".into(),
+                ));
+            }
+        }
+        Ok(combos)
     }
 
     fn build_prefixes_ds_pinned(
@@ -531,6 +570,108 @@ impl CudaCorrelHl {
             launched += chunk;
         }
         self.maybe_log_batch_debug();
+        Ok(())
+    }
+
+    fn launch_prefix_builder_ds_device_raw(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_ps_h: &mut DeviceBuffer<Float2>,
+        d_ps_h2: &mut DeviceBuffer<Float2>,
+        d_ps_l: &mut DeviceBuffer<Float2>,
+        d_ps_l2: &mut DeviceBuffer<Float2>,
+        d_ps_hl: &mut DeviceBuffer<Float2>,
+        d_ps_nan: &mut DeviceBuffer<i32>,
+    ) -> Result<(), CudaCorrelHlError> {
+        let func = self
+            .module
+            .get_function("correl_hl_build_prefix_ds_f32")
+            .map_err(|_| CudaCorrelHlError::MissingKernelSymbol {
+                name: "correl_hl_build_prefix_ds_f32",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+
+        unsafe {
+            let mut high_ptr = d_high.as_device_ptr().as_raw();
+            let mut low_ptr = d_low.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let mut ps_h_ptr = d_ps_h.as_device_ptr().as_raw();
+            let mut ps_h2_ptr = d_ps_h2.as_device_ptr().as_raw();
+            let mut ps_l_ptr = d_ps_l.as_device_ptr().as_raw();
+            let mut ps_l2_ptr = d_ps_l2.as_device_ptr().as_raw();
+            let mut ps_hl_ptr = d_ps_hl.as_device_ptr().as_raw();
+            let mut ps_nan_ptr = d_ps_nan.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut high_ptr as *mut _ as *mut c_void,
+                &mut low_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut ps_h_ptr as *mut _ as *mut c_void,
+                &mut ps_h2_ptr as *mut _ as *mut c_void,
+                &mut ps_l_ptr as *mut _ as *mut c_void,
+                &mut ps_l2_ptr as *mut _ as *mut c_void,
+                &mut ps_hl_ptr as *mut _ as *mut c_void,
+                &mut ps_nan_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
+    fn launch_prefix_builder_dp_device_raw(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_ps_h: &mut DeviceBuffer<f64>,
+        d_ps_h2: &mut DeviceBuffer<f64>,
+        d_ps_l: &mut DeviceBuffer<f64>,
+        d_ps_l2: &mut DeviceBuffer<f64>,
+        d_ps_hl: &mut DeviceBuffer<f64>,
+        d_ps_nan: &mut DeviceBuffer<i32>,
+    ) -> Result<(), CudaCorrelHlError> {
+        let func = self
+            .module
+            .get_function("correl_hl_build_prefix_f64")
+            .map_err(|_| CudaCorrelHlError::MissingKernelSymbol {
+                name: "correl_hl_build_prefix_f64",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+
+        unsafe {
+            let mut high_ptr = d_high.as_device_ptr().as_raw();
+            let mut low_ptr = d_low.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let mut ps_h_ptr = d_ps_h.as_device_ptr().as_raw();
+            let mut ps_h2_ptr = d_ps_h2.as_device_ptr().as_raw();
+            let mut ps_l_ptr = d_ps_l.as_device_ptr().as_raw();
+            let mut ps_l2_ptr = d_ps_l2.as_device_ptr().as_raw();
+            let mut ps_hl_ptr = d_ps_hl.as_device_ptr().as_raw();
+            let mut ps_nan_ptr = d_ps_nan.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut high_ptr as *mut _ as *mut c_void,
+                &mut low_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut ps_h_ptr as *mut _ as *mut c_void,
+                &mut ps_h2_ptr as *mut _ as *mut c_void,
+                &mut ps_l_ptr as *mut _ as *mut c_void,
+                &mut ps_l2_ptr as *mut _ as *mut c_void,
+                &mut ps_hl_ptr as *mut _ as *mut c_void,
+                &mut ps_nan_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+
         Ok(())
     }
 
@@ -749,6 +890,105 @@ impl CudaCorrelHl {
         }
 
         self.stream.synchronize()?;
+
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: combos.len(),
+                cols: len,
+            },
+            combos,
+        ))
+    }
+
+    pub fn correl_hl_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &CorrelHlBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<CorrelHlParams>), CudaCorrelHlError> {
+        if d_high.len() != len || d_low.len() != len || len == 0 {
+            return Err(CudaCorrelHlError::InvalidInput(
+                "device input length mismatch".into(),
+            ));
+        }
+
+        let combos = Self::prepare_device_batch_inputs(len, first_valid, sweep)?;
+        let len1 = len
+            .checked_add(1)
+            .ok_or_else(|| CudaCorrelHlError::InvalidInput("len+1 overflow".into()))?;
+        let bytes_prefix = 5usize
+            .checked_mul(len1)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f64>()))
+            .and_then(|x| {
+                len1.checked_mul(std::mem::size_of::<i32>())
+                    .and_then(|y| x.checked_add(y))
+            })
+            .ok_or_else(|| CudaCorrelHlError::InvalidInput("size overflow".into()))?;
+        let bytes_periods = combos
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaCorrelHlError::InvalidInput("size overflow".into()))?;
+        let bytes_out = combos
+            .len()
+            .checked_mul(len)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaCorrelHlError::InvalidInput("rows*cols overflow".into()))?;
+        let required = bytes_prefix
+            .checked_add(bytes_periods)
+            .and_then(|x| x.checked_add(bytes_out))
+            .ok_or_else(|| CudaCorrelHlError::InvalidInput("size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        Self::will_fit(required, headroom)?;
+
+        let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods, &self.stream) }?;
+        let elems = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaCorrelHlError::InvalidInput("rows*cols overflow".into()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
+        let mut d_ps_h: DeviceBuffer<f64> =
+            unsafe { DeviceBuffer::uninitialized_async(len1, &self.stream) }?;
+        let mut d_ps_h2: DeviceBuffer<f64> =
+            unsafe { DeviceBuffer::uninitialized_async(len1, &self.stream) }?;
+        let mut d_ps_l: DeviceBuffer<f64> =
+            unsafe { DeviceBuffer::uninitialized_async(len1, &self.stream) }?;
+        let mut d_ps_l2: DeviceBuffer<f64> =
+            unsafe { DeviceBuffer::uninitialized_async(len1, &self.stream) }?;
+        let mut d_ps_hl: DeviceBuffer<f64> =
+            unsafe { DeviceBuffer::uninitialized_async(len1, &self.stream) }?;
+        let mut d_ps_nan: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::uninitialized_async(len1, &self.stream) }?;
+
+        self.launch_prefix_builder_dp_device_raw(
+            d_high,
+            d_low,
+            len,
+            first_valid,
+            &mut d_ps_h,
+            &mut d_ps_h2,
+            &mut d_ps_l,
+            &mut d_ps_l2,
+            &mut d_ps_hl,
+            &mut d_ps_nan,
+        )?;
+        self.launch_batch_dp(
+            &d_ps_h,
+            &d_ps_h2,
+            &d_ps_l,
+            &d_ps_l2,
+            &d_ps_hl,
+            &d_ps_nan,
+            len,
+            first_valid,
+            &d_periods,
+            combos.len(),
+            &mut d_out,
+        )?;
 
         Ok((
             DeviceArrayF32 {

@@ -232,10 +232,6 @@ impl CudaOtto {
             .series_len
             .checked_mul(elem_size)
             .ok_or_else(|| CudaOttoError::InvalidInput("series_len overflow".into()))?;
-        let cabs_bytes = inputs
-            .series_len
-            .checked_mul(elem_size)
-            .ok_or_else(|| CudaOttoError::InvalidInput("series_len overflow".into()))?;
         let params_scalars = 5usize;
         let params_bytes = inputs
             .combos
@@ -252,15 +248,13 @@ impl CudaOtto {
             .checked_mul(elem_size)
             .ok_or_else(|| CudaOttoError::InvalidInput("output bytes overflow".into()))?;
         let required = prices_bytes
-            .checked_add(cabs_bytes)
-            .and_then(|v| v.checked_add(params_bytes))
+            .checked_add(params_bytes)
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or_else(|| CudaOttoError::InvalidInput("total bytes overflow".into()))?;
         let headroom = 64 * 1024 * 1024usize;
         Self::will_fit(required, headroom)?;
 
         let d_prices = self.htod_copy_f32(prices_f32)?;
-        let d_cabs = self.htod_copy_f32(inputs.cabs.as_slice())?;
         let d_ott_periods =
             DeviceBuffer::from_slice(&inputs.ott_periods).map_err(CudaOttoError::Cuda)?;
         let d_ott_percents =
@@ -282,7 +276,6 @@ impl CudaOtto {
 
         self.launch_batch_kernel(
             &d_prices,
-            &d_cabs,
             &d_ott_periods,
             &d_ott_percents,
             &d_fast,
@@ -312,10 +305,87 @@ impl CudaOtto {
         ))
     }
 
+    pub fn otto_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &OttoBatchRange,
+    ) -> Result<(DeviceArrayF32, DeviceArrayF32, Vec<OttoParams>), CudaOttoError> {
+        let inputs = Self::prepare_batch_params(series_len, first_valid, sweep)?;
+
+        let elem_size = std::mem::size_of::<f32>();
+        let params_scalars = 5usize;
+        let params_bytes = inputs
+            .combos
+            .len()
+            .checked_mul(params_scalars)
+            .and_then(|v| v.checked_mul(elem_size))
+            .ok_or_else(|| CudaOttoError::InvalidInput("params_bytes overflow".into()))?;
+        let elems = inputs
+            .series_len
+            .checked_mul(inputs.combos.len())
+            .and_then(|v| v.checked_mul(2))
+            .ok_or_else(|| CudaOttoError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = elems
+            .checked_mul(elem_size)
+            .ok_or_else(|| CudaOttoError::InvalidInput("output bytes overflow".into()))?;
+        let required = params_bytes
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaOttoError::InvalidInput("total bytes overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024usize)?;
+
+        let d_ott_periods =
+            DeviceBuffer::from_slice(&inputs.ott_periods).map_err(CudaOttoError::Cuda)?;
+        let d_ott_percents =
+            DeviceBuffer::from_slice(&inputs.ott_percents).map_err(CudaOttoError::Cuda)?;
+        let d_fast = DeviceBuffer::from_slice(&inputs.fast).map_err(CudaOttoError::Cuda)?;
+        let d_slow = DeviceBuffer::from_slice(&inputs.slow).map_err(CudaOttoError::Cuda)?;
+        let d_coco = DeviceBuffer::from_slice(&inputs.coco).map_err(CudaOttoError::Cuda)?;
+
+        let out_elems = inputs
+            .series_len
+            .checked_mul(inputs.combos.len())
+            .ok_or_else(|| CudaOttoError::InvalidInput("rows*cols overflow".into()))?;
+        let mut d_hott: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }
+                .map_err(CudaOttoError::Cuda)?;
+        let mut d_lott: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }
+                .map_err(CudaOttoError::Cuda)?;
+
+        self.launch_batch_kernel(
+            d_prices,
+            &d_ott_periods,
+            &d_ott_percents,
+            &d_fast,
+            &d_slow,
+            &d_coco,
+            inputs.series_len,
+            inputs.combos.len(),
+            inputs.first_valid,
+            &mut d_hott,
+            &mut d_lott,
+        )?;
+
+        Ok((
+            DeviceArrayF32 {
+                buf: d_hott,
+                rows: inputs.combos.len(),
+                cols: inputs.series_len,
+            },
+            DeviceArrayF32 {
+                buf: d_lott,
+                rows: inputs.combos.len(),
+                cols: inputs.series_len,
+            },
+            inputs.combos,
+        ))
+    }
+
     fn launch_batch_kernel(
         &self,
         d_prices: &DeviceBuffer<f32>,
-        d_cabs: &DeviceBuffer<f32>,
         d_ott_periods: &DeviceBuffer<i32>,
         d_ott_percents: &DeviceBuffer<f32>,
         d_fast: &DeviceBuffer<i32>,
@@ -348,7 +418,6 @@ impl CudaOtto {
             let grid: GridSize = (chunk as u32, 1, 1).into();
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-                let mut cabs_ptr = d_cabs.as_device_ptr().as_raw();
                 let mut ottp_ptr = d_ott_periods.as_device_ptr().add(start).as_raw();
                 let mut ottk_ptr = d_ott_percents.as_device_ptr().add(start).as_raw();
                 let mut fast_ptr = d_fast.as_device_ptr().add(start).as_raw();
@@ -361,7 +430,6 @@ impl CudaOtto {
                 let mut lott_ptr = d_lott.as_device_ptr().add(start * series_len).as_raw();
                 let args: &mut [*mut c_void] = &mut [
                     &mut prices_ptr as *mut _ as *mut c_void,
-                    &mut cabs_ptr as *mut _ as *mut c_void,
                     &mut ottp_ptr as *mut _ as *mut c_void,
                     &mut ottk_ptr as *mut _ as *mut c_void,
                     &mut fast_ptr as *mut _ as *mut c_void,
@@ -579,10 +647,33 @@ impl CudaOtto {
             .iter()
             .position(|v| v.is_finite())
             .ok_or_else(|| CudaOttoError::InvalidInput("all values are NaN".into()))?;
+        Self::prepare_batch_params(prices_f32.len(), first_valid, sweep)
+    }
 
-        let cabs = build_cmo_abs9(prices_f32);
+    fn prepare_batch_params(
+        series_len: usize,
+        first_valid: usize,
+        sweep: &OttoBatchRange,
+    ) -> Result<BatchInputs, CudaOttoError> {
+        if series_len == 0 {
+            return Err(CudaOttoError::InvalidInput("empty price input".into()));
+        }
+        if first_valid >= series_len {
+            return Err(CudaOttoError::InvalidInput(format!(
+                "invalid first_valid {} for series length {}",
+                first_valid, series_len
+            )));
+        }
+        let combos = {
+            let v = expand_grid_otto(sweep);
+            if v.is_empty() {
+                return Err(CudaOttoError::InvalidInput(
+                    "no parameter combinations".into(),
+                ));
+            }
+            v
+        };
 
-        let series_len = prices_f32.len();
         let mut ott_periods = Vec::with_capacity(combos.len());
         let mut ott_percents = Vec::with_capacity(combos.len());
         let mut fast = Vec::with_capacity(combos.len());
@@ -600,7 +691,6 @@ impl CudaOtto {
             combos,
             series_len,
             first_valid,
-            cabs,
             ott_periods,
             ott_percents,
             fast,
@@ -735,7 +825,6 @@ struct BatchInputs {
     combos: Vec<OttoParams>,
     series_len: usize,
     first_valid: usize,
-    cabs: Vec<f32>,
     ott_periods: Vec<i32>,
     ott_percents: Vec<f32>,
     fast: Vec<i32>,
@@ -772,7 +861,6 @@ pub mod benches {
     struct OttoBatchState {
         cuda: CudaOtto,
         d_prices: DeviceBuffer<f32>,
-        d_cabs: DeviceBuffer<f32>,
         d_ottp: DeviceBuffer<i32>,
         d_ottk: DeviceBuffer<f32>,
         d_fast: DeviceBuffer<i32>,
@@ -788,7 +876,6 @@ pub mod benches {
             self.cuda
                 .launch_batch_kernel(
                     &self.d_prices,
-                    &self.d_cabs,
                     &self.d_ottp,
                     &self.d_ottk,
                     &self.d_fast,
@@ -831,7 +918,6 @@ pub mod benches {
         let rows = inputs.combos.len();
 
         let d_prices = DeviceBuffer::from_slice(&price).expect("prices");
-        let d_cabs = DeviceBuffer::from_slice(&inputs.cabs).expect("cabs");
         let d_ottp = DeviceBuffer::from_slice(&inputs.ott_periods).expect("ottp");
         let d_ottk = DeviceBuffer::from_slice(&inputs.ott_percents).expect("ottk");
         let d_fast = DeviceBuffer::from_slice(&inputs.fast).expect("fast");
@@ -845,7 +931,6 @@ pub mod benches {
         OttoBatchState {
             cuda,
             d_prices,
-            d_cabs,
             d_ottp,
             d_ottk,
             d_fast,

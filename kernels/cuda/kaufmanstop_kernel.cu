@@ -11,6 +11,19 @@
 
 extern "C" {
 
+__global__ void kaufmanstop_build_range_f32(
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    int len,
+    float* __restrict__ out_range
+) {
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < len; i += blockDim.x * gridDim.x) {
+        const float h = high[i];
+        const float l = low[i];
+        out_range[i] = (isnan(h) || isnan(l)) ? CUDART_NAN_F : (h - l);
+    }
+}
+
 
 __global__ void kaufmanstop_axpy_row_f32(
     const float* __restrict__ high,

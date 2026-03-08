@@ -255,6 +255,44 @@ impl CudaRsx {
         })
     }
 
+    pub fn rsx_batch_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        periods: &[i32],
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaRsxError> {
+        if len == 0 {
+            return Err(CudaRsxError::InvalidInput("empty prices".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaRsxError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+        if d_prices.len() != len {
+            return Err(CudaRsxError::InvalidInput(
+                "device price buffer length mismatch".into(),
+            ));
+        }
+        if periods.is_empty() {
+            return Err(CudaRsxError::InvalidInput("empty period sweep".into()));
+        }
+        let out_elems = periods
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaRsxError::InvalidInput("rows*cols overflow".into()))?;
+        if d_out.len() != out_elems {
+            return Err(CudaRsxError::InvalidInput(
+                "output buffer length mismatch".into(),
+            ));
+        }
+
+        let d_periods = DeviceBuffer::from_slice(periods)?;
+        self.launch_batch(d_prices, &d_periods, len, first_valid, periods.len(), d_out)
+    }
+
     fn launch_batch(
         &self,
         d_prices: &DeviceBuffer<f32>,

@@ -8,7 +8,7 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::oscillators::coppock_wrapper::CudaCoppock;
+use vector_ta::cuda::{CudaCoppock, CudaRuntime};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -123,6 +123,63 @@ fn coppock_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
             approx_eq(cpu[idx], got[idx] as f64, tol),
             "mismatch at {}",
             idx
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn coppock_cuda_device_prices_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[coppock_cuda_device_prices_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 8192usize;
+    let mut price_f32 = vec![f32::NAN; len];
+    let first_valid = 50usize;
+    for (i, value) in price_f32.iter_mut().enumerate().skip(first_valid) {
+        let x = i as f32;
+        *value = 100.0 + (x * 0.001).sin() * 2.0 + 0.001 * x;
+    }
+
+    let sweep = CoppockBatchRange {
+        short: (8, 16, 4),
+        long: (14, 28, 7),
+        ma: (8, 12, 2),
+    };
+
+    let cuda = CudaCoppock::new(0).expect("CudaCoppock::new");
+    let legacy_dev = cuda
+        .coppock_batch_dev(&price_f32, &sweep)
+        .expect("coppock_batch_dev");
+
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let device_prices = runtime.upload_f32(&price_f32).expect("upload");
+    let (device_dev, device_combos) = cuda
+        .coppock_batch_dev_from_device_prices(device_prices.buffer(), len, first_valid, &sweep)
+        .expect("device prices");
+
+    assert_eq!(legacy_dev.rows, device_dev.rows);
+    assert_eq!(legacy_dev.cols, device_dev.cols);
+    assert_eq!(legacy_dev.rows, device_combos.len());
+    for params in &device_combos {
+        assert_eq!(params.ma_type.as_deref(), Some("wma"));
+    }
+
+    let mut legacy = vec![0.0f32; legacy_dev.len()];
+    legacy_dev.buf.copy_to(legacy.as_mut_slice())?;
+    let mut device = vec![0.0f32; device_dev.buf.len()];
+    device_dev.buf.copy_to(device.as_mut_slice())?;
+
+    for (idx, (lhs, rhs)) in legacy.iter().zip(device.iter()).enumerate() {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!(
+            (lhs - rhs).abs() < 5e-4,
+            "mismatch at {idx}: lhs={lhs} rhs={rhs}"
         );
     }
     Ok(())

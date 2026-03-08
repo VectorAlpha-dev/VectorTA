@@ -481,6 +481,63 @@ impl CudaCci {
         }
     }
 
+    pub fn cci_batch_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        periods: &[i32],
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaCciError> {
+        if len == 0 {
+            return Err(CudaCciError::InvalidInput("empty data".into()));
+        }
+        if d_prices.len() != len {
+            return Err(CudaCciError::InvalidInput(
+                "device price buffer length mismatch".into(),
+            ));
+        }
+        if periods.is_empty() {
+            return Err(CudaCciError::InvalidInput("empty period sweep".into()));
+        }
+        let rows = periods.len();
+        let out_elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaCciError::InvalidInput("rows*len overflow".into()))?;
+        if d_out.len() != out_elems {
+            return Err(CudaCciError::InvalidInput(
+                "output buffer length mismatch".into(),
+            ));
+        }
+
+        let d_periods = DeviceBuffer::from_slice(periods).map_err(CudaCciError::Cuda)?;
+        let periods_u: Vec<usize> = periods.iter().map(|&p| p as usize).collect();
+        let max_blocks: usize = 65_535;
+        let mut launched = 0usize;
+        while launched < rows {
+            let n_this = std::cmp::min(max_blocks, rows - launched);
+            let max_p_this = periods_u[launched..launched + n_this]
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0);
+            let dyn_smem_bytes = max_p_this * std::mem::size_of::<f32>();
+            self.launch_batch_kernel(
+                d_prices,
+                &d_periods,
+                len,
+                n_this,
+                first_valid,
+                d_out,
+                launched,
+                launched * len,
+                dyn_smem_bytes,
+            )?;
+            launched += n_this;
+        }
+        Ok(())
+    }
+
     fn prepare_many_series(
         data_tm_f32: &[f32],
         cols: usize,

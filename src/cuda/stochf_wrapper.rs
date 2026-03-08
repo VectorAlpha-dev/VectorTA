@@ -1,6 +1,7 @@
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
+use crate::cuda::oscillators::CudaWillr;
 use crate::indicators::stochf::{StochfBatchRange, StochfParams};
 use crate::indicators::willr::build_willr_gpu_tables;
 use cust::context::{CacheConfig, Context};
@@ -99,6 +100,18 @@ pub struct CudaStochf {
     policy: CudaStochfPolicy,
 }
 
+struct PreparedStochfDeviceBatch {
+    combos: Vec<StochfParams>,
+    first_valid: usize,
+    series_len: usize,
+    log2: Vec<i32>,
+    level_offsets: Vec<i32>,
+    total_sparse_len: usize,
+    fk: Vec<i32>,
+    fd: Vec<i32>,
+    mt: Vec<i32>,
+}
+
 impl CudaStochf {
     pub fn new(device_id: usize) -> Result<Self, CudaStochfError> {
         Self::new_with_policy(device_id, CudaStochfPolicy::default())
@@ -172,64 +185,67 @@ impl CudaStochf {
     pub fn device_id(&self) -> u32 {
         self.device_id
     }
+    pub fn synchronize(&self) -> Result<(), CudaStochfError> {
+        self.stream.synchronize().map_err(Into::into)
+    }
 
-    pub fn stochf_batch_dev(
-        &self,
-        high_f32: &[f32],
-        low_f32: &[f32],
-        close_f32: &[f32],
-        sweep: &StochfBatchRange,
-    ) -> Result<(DeviceArrayF32Pair, Vec<StochfParams>), CudaStochfError> {
-        if high_f32.len() != low_f32.len() || high_f32.len() != close_f32.len() {
-            return Err(CudaStochfError::InvalidInput("length mismatch".into()));
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, CudaStochfError> {
+        if step == 0 || start == end {
+            return Ok(vec![start]);
         }
-        let len = high_f32.len();
-        if len == 0 {
-            return Err(CudaStochfError::InvalidInput("empty input".into()));
-        }
-
-        fn axis_usize(
-            (start, end, step): (usize, usize, usize),
-        ) -> Result<Vec<usize>, CudaStochfError> {
-            if step == 0 || start == end {
-                return Ok(vec![start]);
-            }
-            if start < end {
-                let mut v = Vec::new();
-                let st = step.max(1);
-                let mut x = start;
-                while x <= end {
-                    v.push(x);
-                    x = match x.checked_add(st) {
-                        Some(next) => next,
-                        None => break,
-                    };
-                }
-                if v.is_empty() {
-                    return Err(CudaStochfError::InvalidInput(format!(
-                        "invalid fastk/fastd range: start={start}, end={end}, step={step}"
-                    )));
-                }
-                return Ok(v);
-            }
-
+        if start < end {
             let mut v = Vec::new();
-            let st = step.max(1) as isize;
-            let mut x = start as isize;
-            let end_i = end as isize;
-            while x >= end_i {
-                v.push(x as usize);
-                x -= st;
+            let st = step.max(1);
+            let mut x = start;
+            while x <= end {
+                v.push(x);
+                x = match x.checked_add(st) {
+                    Some(next) => next,
+                    None => break,
+                };
             }
             if v.is_empty() {
                 return Err(CudaStochfError::InvalidInput(format!(
                     "invalid fastk/fastd range: start={start}, end={end}, step={step}"
                 )));
             }
-            Ok(v)
+            return Ok(v);
         }
-        let fastks = axis_usize(sweep.fastk_period).unwrap_or_else(|_| Vec::new());
-        let fastds = axis_usize(sweep.fastd_period).unwrap_or_else(|_| Vec::new());
+
+        let mut v = Vec::new();
+        let st = step.max(1) as isize;
+        let mut x = start as isize;
+        let end_i = end as isize;
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(CudaStochfError::InvalidInput(format!(
+                "invalid fastk/fastd range: start={start}, end={end}, step={step}"
+            )));
+        }
+        Ok(v)
+    }
+
+    fn prepare_device_batch_inputs(
+        len: usize,
+        first_valid: usize,
+        sweep: &StochfBatchRange,
+    ) -> Result<PreparedStochfDeviceBatch, CudaStochfError> {
+        if len == 0 {
+            return Err(CudaStochfError::InvalidInput("empty input".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaStochfError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let fastks = Self::axis_usize(sweep.fastk_period)?;
+        let fastds = Self::axis_usize(sweep.fastd_period)?;
         let mut combos =
             Vec::<StochfParams>::with_capacity(fastks.len().saturating_mul(fastds.len()));
         for &k in &fastks {
@@ -247,22 +263,6 @@ impl CudaStochf {
             ));
         }
 
-        let first_valid = (0..len)
-            .find(|&i| {
-                high_f32[i].is_finite() && low_f32[i].is_finite() && close_f32[i].is_finite()
-            })
-            .ok_or_else(|| CudaStochfError::InvalidInput("all values NaN".into()))?;
-
-        let max_fk = combos
-            .iter()
-            .map(|p| p.fastk_period.unwrap())
-            .max()
-            .unwrap();
-        if len - first_valid < max_fk {
-            return Err(CudaStochfError::InvalidInput(
-                "insufficient data after first_valid".into(),
-            ));
-        }
         let max_fk = combos
             .iter()
             .map(|p| p.fastk_period.unwrap())
@@ -274,91 +274,68 @@ impl CudaStochf {
             ));
         }
 
-        let rows = combos.len();
-        let sz_f32 = std::mem::size_of::<f32>();
-        let sz_i32 = std::mem::size_of::<i32>();
-        let in_bytes_close = len
-            .checked_mul(sz_f32)
-            .ok_or_else(|| CudaStochfError::InvalidInput("len*4 overflow".into()))?;
-        let params_elems = 3usize
-            .checked_mul(rows)
-            .ok_or_else(|| CudaStochfError::InvalidInput("rows*3 overflow".into()))?;
-        let params_bytes = params_elems
-            .checked_mul(sz_i32)
-            .ok_or_else(|| CudaStochfError::InvalidInput("params_bytes overflow".into()))?;
-        let out_elems = rows
-            .checked_mul(len)
-            .and_then(|n| n.checked_mul(2))
-            .ok_or_else(|| CudaStochfError::InvalidInput("rows*len*2 overflow".into()))?;
-        let out_bytes = out_elems
-            .checked_mul(sz_f32)
-            .ok_or_else(|| CudaStochfError::InvalidInput("out_bytes overflow".into()))?;
+        let mut log2 = vec![0i32; len + 1];
+        for i in 2..=len {
+            log2[i] = log2[i / 2] + 1;
+        }
+        let mut level_offsets = Vec::new();
+        level_offsets.push(0i32);
+        let mut total = len;
+        let mut window = 2usize;
+        while window <= len {
+            level_offsets.push(i32::try_from(total).unwrap_or(i32::MAX));
+            total = total.checked_add(len + 1 - window).ok_or_else(|| {
+                CudaStochfError::InvalidInput("sparse table size overflow".into())
+            })?;
+            window <<= 1;
+        }
+        level_offsets.push(i32::try_from(total).unwrap_or(i32::MAX));
 
-        let tables_overhead = len
-            .checked_mul(8)
-            .and_then(|n| n.checked_mul(sz_f32))
-            .ok_or_else(|| CudaStochfError::InvalidInput("tables_overhead overflow".into()))?;
-        let required = in_bytes_close
-            .checked_add(tables_overhead)
-            .and_then(|v| v.checked_add(params_bytes))
-            .and_then(|v| v.checked_add(out_bytes))
-            .ok_or_else(|| CudaStochfError::InvalidInput("required bytes overflow".into()))?;
-        Self::will_fit(required, 64 * 1024 * 1024)?;
-
-        let tables = build_willr_gpu_tables(high_f32, low_f32);
-
-        let tables_bytes = tables.log2.len().saturating_mul(sz_i32)
-            + tables.level_offsets.len().saturating_mul(sz_i32)
-            + tables.st_max.len().saturating_mul(sz_f32)
-            + tables.st_min.len().saturating_mul(sz_f32)
-            + tables.nan_psum.len().saturating_mul(sz_i32);
-        let required_exact = in_bytes_close
-            .saturating_add(tables_bytes)
-            .saturating_add(params_bytes)
-            .saturating_add(out_bytes);
-        let _ = Self::will_fit(required_exact, 64 * 1024 * 1024);
-
-        let use_pinned = len >= 131_072;
-        let mut pinned_close: Option<LockedBuffer<f32>> = None;
-        let d_close = if use_pinned {
-            let host = LockedBuffer::from_slice(close_f32)?;
-            let mut dc = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }?;
-            unsafe { dc.async_copy_from(&host, &self.stream) }?;
-            pinned_close = Some(host);
-            dc
-        } else {
-            DeviceBuffer::from_slice(close_f32)?
-        };
-
-        let d_log2 = DeviceBuffer::from_slice(&tables.log2)?;
-        let d_offs = DeviceBuffer::from_slice(&tables.level_offsets)?;
-        let d_st_max = DeviceBuffer::from_slice(&tables.st_max)?;
-        let d_st_min = DeviceBuffer::from_slice(&tables.st_min)?;
-        let d_nan_ps = DeviceBuffer::from_slice(&tables.nan_psum)?;
-
-        let out_len = rows
-            .checked_mul(len)
-            .ok_or_else(|| CudaStochfError::InvalidInput("rows*len overflow".into()))?;
-        let mut d_k = unsafe { DeviceBuffer::<f32>::uninitialized(out_len) }?;
-        let mut d_d = unsafe { DeviceBuffer::<f32>::uninitialized(out_len) }?;
-
-        let fk_host: Vec<i32> = combos
+        let fk: Vec<i32> = combos
             .iter()
             .map(|p| p.fastk_period.unwrap() as i32)
             .collect();
-        let fd_host: Vec<i32> = combos
+        let fd: Vec<i32> = combos
             .iter()
             .map(|p| p.fastd_period.unwrap() as i32)
             .collect();
-        let mt_host: Vec<i32> = combos
+        let mt: Vec<i32> = combos
             .iter()
             .map(|p| p.fastd_matype.unwrap_or(0) as i32)
             .collect();
 
-        let d_fk_all = DeviceBuffer::from_slice(&fk_host)?;
-        let d_fd_all = DeviceBuffer::from_slice(&fd_host)?;
-        let d_mt_all = DeviceBuffer::from_slice(&mt_host)?;
+        Ok(PreparedStochfDeviceBatch {
+            combos,
+            first_valid,
+            series_len: len,
+            log2,
+            level_offsets,
+            total_sparse_len: total,
+            fk,
+            fd,
+            mt,
+        })
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    fn launch_batch_kernel_raw(
+        &self,
+        d_close: &DeviceBuffer<f32>,
+        d_log2: &DeviceBuffer<i32>,
+        d_offs: &DeviceBuffer<i32>,
+        d_st_max: &DeviceBuffer<f32>,
+        d_st_min: &DeviceBuffer<f32>,
+        d_nan_ps: &DeviceBuffer<i32>,
+        d_fk_all: &DeviceBuffer<i32>,
+        d_fd_all: &DeviceBuffer<i32>,
+        d_mt_all: &DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        levels_len: usize,
+        rows: usize,
+        d_k: &mut DeviceBuffer<f32>,
+        d_d: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaStochfError> {
         let mut func: Function = self.module.get_function("stochf_batch_f32").map_err(|_| {
             CudaStochfError::MissingKernelSymbol {
                 name: "stochf_batch_f32",
@@ -401,7 +378,7 @@ impl CudaStochf {
                 let mut mt_ptr = d_mt_all.as_device_ptr().offset(row0 as isize).as_raw();
                 let mut len_i = len as i32;
                 let mut first_i = first_valid as i32;
-                let mut levels_i = (tables.level_offsets.len() as i32);
+                let mut levels_i = levels_len as i32;
                 let mut n_i = n as i32;
                 let mut k_out_ptr = d_k.as_device_ptr().offset((row0 * len) as isize).as_raw();
                 let mut d_out_ptr = d_d.as_device_ptr().offset((row0 * len) as isize).as_raw();
@@ -429,8 +406,120 @@ impl CudaStochf {
             }
             row0 += n;
         }
+        Ok(())
+    }
 
+    pub fn stochf_batch_dev(
+        &self,
+        high_f32: &[f32],
+        low_f32: &[f32],
+        close_f32: &[f32],
+        sweep: &StochfBatchRange,
+    ) -> Result<(DeviceArrayF32Pair, Vec<StochfParams>), CudaStochfError> {
+        if high_f32.len() != low_f32.len() || high_f32.len() != close_f32.len() {
+            return Err(CudaStochfError::InvalidInput("length mismatch".into()));
+        }
+        let len = high_f32.len();
+        if len == 0 {
+            return Err(CudaStochfError::InvalidInput("empty input".into()));
+        }
+        let first_valid = (0..len)
+            .find(|&i| {
+                high_f32[i].is_finite() && low_f32[i].is_finite() && close_f32[i].is_finite()
+            })
+            .ok_or_else(|| CudaStochfError::InvalidInput("all values NaN".into()))?;
+        let d_high = DeviceBuffer::from_slice(high_f32)?;
+        let d_low = DeviceBuffer::from_slice(low_f32)?;
+        let d_close = DeviceBuffer::from_slice(close_f32)?;
+        let out = self.stochf_batch_dev_from_device_inputs(
+            &d_high,
+            &d_low,
+            &d_close,
+            len,
+            first_valid,
+            sweep,
+        )?;
         self.stream.synchronize()?;
+        Ok(out)
+    }
+
+    pub fn stochf_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &StochfBatchRange,
+    ) -> Result<(DeviceArrayF32Pair, Vec<StochfParams>), CudaStochfError> {
+        if d_high.len() != len || d_low.len() != len || d_close.len() != len {
+            return Err(CudaStochfError::InvalidInput(
+                "device input length mismatch".into(),
+            ));
+        }
+        let prepared = Self::prepare_device_batch_inputs(len, first_valid, sweep)?;
+        let rows = prepared.combos.len();
+        let sz_f32 = std::mem::size_of::<f32>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let params_bytes = rows
+            .checked_mul(3usize)
+            .and_then(|n| n.checked_mul(sz_i32))
+            .ok_or_else(|| CudaStochfError::InvalidInput("params_bytes overflow".into()))?;
+        let table_bytes = prepared.log2.len().saturating_mul(sz_i32)
+            + prepared.level_offsets.len().saturating_mul(sz_i32)
+            + prepared.total_sparse_len.saturating_mul(2 * sz_f32)
+            + (len + 1).saturating_mul(sz_i32);
+        let out_len = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaStochfError::InvalidInput("rows*len overflow".into()))?;
+        let out_bytes = out_len
+            .checked_mul(2)
+            .and_then(|n| n.checked_mul(sz_f32))
+            .ok_or_else(|| CudaStochfError::InvalidInput("out_bytes overflow".into()))?;
+        let required = params_bytes
+            .checked_add(table_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaStochfError::InvalidInput("required bytes overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
+
+        let d_log2 = DeviceBuffer::from_slice(&prepared.log2)?;
+        let d_offs = DeviceBuffer::from_slice(&prepared.level_offsets)?;
+        let d_fk_all = DeviceBuffer::from_slice(&prepared.fk)?;
+        let d_fd_all = DeviceBuffer::from_slice(&prepared.fd)?;
+        let d_mt_all = DeviceBuffer::from_slice(&prepared.mt)?;
+
+        let cuda_willr = CudaWillr::new(self.device_id as usize)
+            .map_err(|e| CudaStochfError::InvalidInput(format!("willr: {}", e)))?;
+        let (d_st_max, d_st_min, d_nan_ps) = cuda_willr
+            .build_tables_device_from_inputs(
+                &self.stream,
+                d_high,
+                d_low,
+                prepared.series_len,
+                &prepared.level_offsets,
+                prepared.total_sparse_len,
+            )
+            .map_err(|e| CudaStochfError::InvalidInput(format!("willr: {}", e)))?;
+
+        let mut d_k = unsafe { DeviceBuffer::<f32>::uninitialized(out_len) }?;
+        let mut d_d = unsafe { DeviceBuffer::<f32>::uninitialized(out_len) }?;
+        self.launch_batch_kernel_raw(
+            d_close,
+            &d_log2,
+            &d_offs,
+            &d_st_max,
+            &d_st_min,
+            &d_nan_ps,
+            &d_fk_all,
+            &d_fd_all,
+            &d_mt_all,
+            len,
+            prepared.first_valid,
+            prepared.level_offsets.len(),
+            rows,
+            &mut d_k,
+            &mut d_d,
+        )?;
 
         Ok((
             DeviceArrayF32Pair {
@@ -445,7 +534,7 @@ impl CudaStochf {
                     cols: len,
                 },
             },
-            combos,
+            prepared.combos,
         ))
     }
 

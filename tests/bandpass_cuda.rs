@@ -9,7 +9,7 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::bandpass_wrapper::CudaBandpass;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::cuda_available;
+use vector_ta::cuda::{cuda_available, CudaRuntime};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -185,6 +185,74 @@ fn bandpass_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
             "trg mismatch at {}",
             idx
         );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn bandpass_cuda_device_prices_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[bandpass_cuda_device_prices_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 2048usize;
+    let mut price = vec![f64::NAN; len];
+    for i in 4..len {
+        let x = i as f64 * 0.0031;
+        price[i] = x.sin() + 0.00013 * i as f64;
+    }
+    let sweep = BandPassBatchRange {
+        period: (12, 24, 3),
+        bandwidth: (0.2, 0.4, 0.1),
+    };
+
+    let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
+    let first_valid = price_f32
+        .iter()
+        .position(|value| !value.is_nan())
+        .expect("first valid");
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_price = runtime.upload_f32(&price_f32).expect("upload price");
+    let cuda = CudaBandpass::new(0).expect("CudaBandpass::new");
+
+    let legacy = cuda
+        .bandpass_batch_dev(&price_f32, &sweep)
+        .expect("legacy bandpass");
+    let device = cuda
+        .bandpass_batch_dev_from_device_prices(d_price.buffer(), len, first_valid, &sweep)
+        .expect("device bandpass");
+
+    for (legacy_arr, device_arr, label, tol) in [
+        (&legacy.outputs.first, &device.outputs.first, "bp", 5e-4),
+        (
+            &legacy.outputs.second,
+            &device.outputs.second,
+            "bp_normalized",
+            5e-4,
+        ),
+        (&legacy.outputs.third, &device.outputs.third, "signal", 1e-3),
+        (
+            &legacy.outputs.fourth,
+            &device.outputs.fourth,
+            "trigger",
+            5e-4,
+        ),
+    ] {
+        let mut legacy_host = vec![0f32; legacy_arr.len()];
+        let mut device_host = vec![0f32; device_arr.len()];
+        legacy_arr.buf.copy_to(&mut legacy_host)?;
+        device_arr.buf.copy_to(&mut device_host)?;
+        for idx in 0..legacy_host.len() {
+            assert!(
+                approx_eq(legacy_host[idx] as f64, device_host[idx] as f64, tol),
+                "{label} mismatch at {idx}: legacy={} device={}",
+                legacy_host[idx],
+                device_host[idx]
+            );
+        }
     }
 
     Ok(())

@@ -436,6 +436,43 @@ impl CudaEmd {
         for i in first_valid..len {
             prices[i] = 0.5f32 * (high[i] + low[i]);
         }
+        let d_prices = DeviceBuffer::from_slice(&prices).map_err(CudaEmdError::Cuda)?;
+        let result = self.emd_batch_dev_from_device_prices(&d_prices, len, first_valid, sweep)?;
+        self.synchronize()?;
+        Ok(result)
+    }
+
+    pub fn emd_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &EmdBatchRange,
+    ) -> Result<CudaEmdBatchResult, CudaEmdError> {
+        if len == 0 || d_prices.len() != len {
+            return Err(CudaEmdError::InvalidInput(
+                "device prices must be non-empty and match len".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaEmdError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = Self::expand_combos(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaEmdError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        let max_p = combos.iter().map(|c| c.period.unwrap_or(20)).max().unwrap();
+
+        if len - first_valid < (2 * max_p).max(50) {
+            return Err(CudaEmdError::InvalidInput(
+                "not enough valid data for warmup".into(),
+            ));
+        }
 
         let n = combos.len();
         let mut periods_i32 = Vec::with_capacity(n);
@@ -449,9 +486,6 @@ impl CudaEmd {
 
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
-        let in_bytes = len
-            .checked_mul(sz_f32)
-            .ok_or_else(|| CudaEmdError::InvalidInput("byte size overflow".into()))?;
         let params_each = sz_i32
             .checked_add(2 * sz_f32)
             .ok_or_else(|| CudaEmdError::InvalidInput("byte size overflow".into()))?;
@@ -467,19 +501,15 @@ impl CudaEmd {
         let out_bytes = out_elems
             .checked_mul(sz_f32)
             .ok_or_else(|| CudaEmdError::InvalidInput("byte size overflow".into()))?;
-        let required = in_bytes
-            .checked_add(params_bytes)
-            .and_then(|v| v.checked_add(out_bytes))
+        let required = params_bytes
+            .checked_add(out_bytes)
             .ok_or_else(|| CudaEmdError::InvalidInput("byte size overflow".into()))?;
         Self::ensure_fit(required, 64 * 1024 * 1024)?;
 
-        let h_prices = LockedBuffer::from_slice(&prices).map_err(CudaEmdError::Cuda)?;
         let h_p = LockedBuffer::from_slice(&periods_i32).map_err(CudaEmdError::Cuda)?;
         let h_d = LockedBuffer::from_slice(&deltas_f32).map_err(CudaEmdError::Cuda)?;
         let h_f = LockedBuffer::from_slice(&fracs_f32).map_err(CudaEmdError::Cuda)?;
 
-        let mut d_prices: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaEmdError::Cuda)?;
         let mut d_p: DeviceBuffer<i32> =
             unsafe { DeviceBuffer::uninitialized(n) }.map_err(CudaEmdError::Cuda)?;
         let mut d_d: DeviceBuffer<f32> =
@@ -487,9 +517,6 @@ impl CudaEmd {
         let mut d_f: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(n) }.map_err(CudaEmdError::Cuda)?;
         unsafe {
-            d_prices
-                .async_copy_from(h_prices.as_slice(), &self.stream)
-                .map_err(CudaEmdError::Cuda)?;
             d_p.async_copy_from(h_p.as_slice(), &self.stream)
                 .map_err(CudaEmdError::Cuda)?;
             d_d.async_copy_from(h_d.as_slice(), &self.stream)
@@ -565,8 +592,6 @@ impl CudaEmd {
                 .launch(&func, grid, block, dyn_smem_bytes as u32, args)
                 .map_err(CudaEmdError::Cuda)?;
         }
-
-        self.stream.synchronize().map_err(CudaEmdError::Cuda)?;
 
         let outputs = DeviceArrayF32Triple {
             upper: DeviceArrayF32 {

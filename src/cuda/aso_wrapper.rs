@@ -1,6 +1,7 @@
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
+use crate::cuda::oscillators::CudaWillr;
 use crate::indicators::aso::{AsoBatchRange, AsoParams};
 use crate::indicators::willr::build_willr_gpu_tables;
 use cust::context::{CacheConfig, Context};
@@ -107,6 +108,18 @@ pub struct CudaAso {
     many_policy: ManySeriesKernelPolicy,
 }
 
+struct PreparedAsoDeviceBatch {
+    combos: Vec<AsoParams>,
+    first_valid: usize,
+    series_len: usize,
+    max_period: usize,
+    periods: Vec<i32>,
+    modes: Vec<i32>,
+    log2: Vec<i32>,
+    level_offsets: Vec<i32>,
+    total_sparse_len: usize,
+}
+
 impl CudaAso {
     pub fn new(device_id: usize) -> Result<Self, CudaAsoError> {
         cust::init(CudaFlags::empty()).map_err(CudaAsoError::Cuda)?;
@@ -139,6 +152,10 @@ impl CudaAso {
     #[inline]
     pub fn device_id(&self) -> u32 {
         self.device_id
+    }
+    #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaAsoError> {
+        self.stream.synchronize().map_err(CudaAsoError::Cuda)
     }
 
     #[inline]
@@ -218,59 +235,85 @@ impl CudaAso {
     ) -> Result<(DeviceArrayF32, DeviceArrayF32), CudaAsoError> {
         let (combos, first_valid, series_len, max_period) =
             prepare_batch_inputs(open_f32, high_f32, low_f32, close_f32, sweep)?;
-        let n_combos = combos.len();
-        let periods: Vec<i32> = combos.iter().map(|p| p.period.unwrap() as i32).collect();
-        let modes: Vec<i32> = combos.iter().map(|p| p.mode.unwrap() as i32).collect();
-
-        let tables = build_willr_gpu_tables(high_f32, low_f32);
-
-        let in_bytes = 4usize
-            .checked_mul(series_len)
-            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
-            .ok_or(CudaAsoError::InvalidInput("size overflow".into()))?;
-        let param_bytes = 2usize
-            .checked_mul(n_combos)
-            .and_then(|x| x.checked_mul(std::mem::size_of::<i32>()))
-            .ok_or(CudaAsoError::InvalidInput("size overflow".into()))?;
-        let table_bytes = tables
-            .st_max
-            .len()
-            .checked_mul(4)
-            .and_then(|a| a.checked_add(tables.st_min.len().checked_mul(4).unwrap_or(usize::MAX)))
-            .and_then(|a| {
-                a.checked_add(
-                    tables
-                        .level_offsets
-                        .len()
-                        .checked_mul(4)
-                        .unwrap_or(usize::MAX),
-                )
-            })
-            .and_then(|a| a.checked_add(tables.log2.len().checked_mul(4).unwrap_or(usize::MAX)))
-            .ok_or(CudaAsoError::InvalidInput("size overflow".into()))?;
-        let out_bytes = 2usize
-            .checked_mul(n_combos)
-            .and_then(|x| x.checked_mul(series_len))
-            .and_then(|x| x.checked_mul(4))
-            .ok_or(CudaAsoError::InvalidInput("size overflow".into()))?;
-        let required = in_bytes
-            .checked_add(param_bytes)
-            .and_then(|a| a.checked_add(table_bytes))
-            .and_then(|a| a.checked_add(out_bytes))
-            .ok_or(CudaAsoError::InvalidInput("size overflow".into()))?;
-        Self::will_fit(required, 64 * 1024 * 1024)?;
 
         let d_open = DeviceBuffer::from_slice(open_f32).map_err(CudaAsoError::Cuda)?;
         let d_high = DeviceBuffer::from_slice(high_f32).map_err(CudaAsoError::Cuda)?;
         let d_low = DeviceBuffer::from_slice(low_f32).map_err(CudaAsoError::Cuda)?;
         let d_close = DeviceBuffer::from_slice(close_f32).map_err(CudaAsoError::Cuda)?;
-        let d_periods = DeviceBuffer::from_slice(&periods).map_err(CudaAsoError::Cuda)?;
-        let d_modes = DeviceBuffer::from_slice(&modes).map_err(CudaAsoError::Cuda)?;
-        let d_log2 = DeviceBuffer::from_slice(&tables.log2).map_err(CudaAsoError::Cuda)?;
+        let out = self.aso_batch_dev_from_device_inputs(
+            &d_open,
+            &d_high,
+            &d_low,
+            &d_close,
+            series_len,
+            first_valid,
+            sweep,
+        )?;
+        self.stream.synchronize().map_err(CudaAsoError::Cuda)?;
+        Ok(out)
+    }
+
+    pub fn aso_batch_dev_from_device_inputs(
+        &self,
+        d_open: &DeviceBuffer<f32>,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &AsoBatchRange,
+    ) -> Result<(DeviceArrayF32, DeviceArrayF32), CudaAsoError> {
+        if series_len == 0
+            || d_open.len() != series_len
+            || d_high.len() != series_len
+            || d_low.len() != series_len
+            || d_close.len() != series_len
+        {
+            return Err(CudaAsoError::InvalidInput(
+                "device input buffers must match non-zero length".into(),
+            ));
+        }
+
+        let prepared = prepare_device_batch_inputs(series_len, first_valid, sweep)?;
+        let n_combos = prepared.combos.len();
+        let sz_f32 = std::mem::size_of::<f32>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let param_bytes = n_combos
+            .checked_mul(2usize)
+            .and_then(|n| n.checked_mul(sz_i32))
+            .ok_or(CudaAsoError::InvalidInput("size overflow".into()))?;
+        let table_bytes = prepared.log2.len().saturating_mul(sz_i32)
+            + prepared.level_offsets.len().saturating_mul(sz_i32)
+            + prepared.total_sparse_len.saturating_mul(2 * sz_f32);
+        let out_bytes = 2usize
+            .checked_mul(n_combos)
+            .and_then(|x| x.checked_mul(series_len))
+            .and_then(|x| x.checked_mul(sz_f32))
+            .ok_or(CudaAsoError::InvalidInput("size overflow".into()))?;
+        let required = param_bytes
+            .checked_add(table_bytes)
+            .and_then(|a| a.checked_add(out_bytes))
+            .ok_or(CudaAsoError::InvalidInput("size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
+
+        let d_periods = DeviceBuffer::from_slice(&prepared.periods).map_err(CudaAsoError::Cuda)?;
+        let d_modes = DeviceBuffer::from_slice(&prepared.modes).map_err(CudaAsoError::Cuda)?;
+        let d_log2 = DeviceBuffer::from_slice(&prepared.log2).map_err(CudaAsoError::Cuda)?;
         let d_offsets =
-            DeviceBuffer::from_slice(&tables.level_offsets).map_err(CudaAsoError::Cuda)?;
-        let d_st_max = DeviceBuffer::from_slice(&tables.st_max).map_err(CudaAsoError::Cuda)?;
-        let d_st_min = DeviceBuffer::from_slice(&tables.st_min).map_err(CudaAsoError::Cuda)?;
+            DeviceBuffer::from_slice(&prepared.level_offsets).map_err(CudaAsoError::Cuda)?;
+
+        let cuda_willr =
+            CudaWillr::new(self.device_id as usize).map_err(|e| CudaAsoError::InvalidInput(e.to_string()))?;
+        let (d_st_max, d_st_min, _d_nan_psum) = cuda_willr
+            .build_tables_device_from_inputs(
+                &self.stream,
+                d_high,
+                d_low,
+                prepared.series_len,
+                &prepared.level_offsets,
+                prepared.total_sparse_len,
+            )
+            .map_err(|e| CudaAsoError::InvalidInput(format!("willr: {}", e)))?;
 
         let mut d_bulls: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }
@@ -280,10 +323,10 @@ impl CudaAso {
                 .map_err(CudaAsoError::Cuda)?;
 
         self.launch_batch_kernel(
-            &d_open,
-            &d_high,
-            &d_low,
-            &d_close,
+            d_open,
+            d_high,
+            d_low,
+            d_close,
             &d_periods,
             &d_modes,
             &d_log2,
@@ -291,14 +334,13 @@ impl CudaAso {
             &d_st_max,
             &d_st_min,
             series_len,
-            first_valid,
-            combos.len(),
-            max_period,
+            prepared.first_valid,
+            prepared.combos.len(),
+            prepared.max_period,
             &mut d_bulls,
             &mut d_bears,
         )?;
 
-        self.stream.synchronize().map_err(CudaAsoError::Cuda)?;
         Ok((
             DeviceArrayF32 {
                 buf: d_bulls,
@@ -681,6 +723,58 @@ fn prepare_batch_inputs(
         return Err(CudaAsoError::InvalidInput("not enough valid data".into()));
     }
     Ok((combos, first_valid, len, max_period))
+}
+
+fn prepare_device_batch_inputs(
+    len: usize,
+    first_valid: usize,
+    sweep: &AsoBatchRange,
+) -> Result<PreparedAsoDeviceBatch, CudaAsoError> {
+    if len == 0 {
+        return Err(CudaAsoError::InvalidInput("empty input".into()));
+    }
+    if first_valid >= len {
+        return Err(CudaAsoError::InvalidInput(
+            "first_valid out of range".into(),
+        ));
+    }
+    let combos = expand_params(sweep)?;
+    let max_period = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+    if len - first_valid < max_period {
+        return Err(CudaAsoError::InvalidInput("not enough valid data".into()));
+    }
+
+    let mut log2 = vec![0i32; len + 1];
+    for i in 2..=len {
+        log2[i] = log2[i / 2] + 1;
+    }
+    let mut level_offsets = Vec::new();
+    level_offsets.push(0i32);
+    let mut total = len;
+    let mut window = 2usize;
+    while window <= len {
+        level_offsets.push(i32::try_from(total).unwrap_or(i32::MAX));
+        total = total
+            .checked_add(len + 1 - window)
+            .ok_or(CudaAsoError::InvalidInput("sparse table size overflow".into()))?;
+        window <<= 1;
+    }
+    level_offsets.push(i32::try_from(total).unwrap_or(i32::MAX));
+
+    let periods = combos.iter().map(|p| p.period.unwrap() as i32).collect();
+    let modes = combos.iter().map(|p| p.mode.unwrap() as i32).collect();
+
+    Ok(PreparedAsoDeviceBatch {
+        combos,
+        first_valid,
+        series_len: len,
+        max_period,
+        periods,
+        modes,
+        log2,
+        level_offsets,
+        total_sparse_len: total,
+    })
 }
 
 pub mod benches {

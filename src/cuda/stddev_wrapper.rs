@@ -371,6 +371,48 @@ impl CudaStddev {
         Ok((out, first_valid, len))
     }
 
+    fn prepare_device_batch_inputs(
+        len: usize,
+        first_valid: usize,
+        sweep: &StdDevBatchRange,
+    ) -> Result<Vec<(usize, f32)>, CudaStddevError> {
+        if len == 0 {
+            return Err(CudaStddevError::InvalidInput("empty data".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaStddevError::InvalidInput(
+                "first_valid must be within the input length".into(),
+            ));
+        }
+
+        let combos = Self::expand_grid_checked(sweep)?;
+        let mut out = Vec::with_capacity(combos.len());
+        for c in combos {
+            let p = c.period.unwrap_or(0);
+            if p == 0 {
+                return Err(CudaStddevError::InvalidInput("period must be > 0".into()));
+            }
+            if p > len {
+                return Err(CudaStddevError::InvalidInput(
+                    "period exceeds data length".into(),
+                ));
+            }
+            if len - first_valid < p {
+                return Err(CudaStddevError::InvalidInput(
+                    "not enough valid data after first_valid".into(),
+                ));
+            }
+            let nb = c.nbdev.unwrap_or(1.0) as f32;
+            if !nb.is_finite() || nb < 0.0 {
+                return Err(CudaStddevError::InvalidInput(
+                    "nbdev must be non-negative and finite".into(),
+                ));
+            }
+            out.push((p, nb));
+        }
+        Ok(out)
+    }
+
     #[inline(always)]
     fn f64_to_float2(v: f64) -> Float2 {
         let hi = v as f32;
@@ -414,6 +456,45 @@ impl CudaStddev {
         }
 
         Ok((ps1, ps2, psn))
+    }
+
+    fn launch_prefix_builder_device_raw(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_ps1: &mut DeviceBuffer<Float2>,
+        d_ps2: &mut DeviceBuffer<Float2>,
+        d_psn: &mut DeviceBuffer<i32>,
+    ) -> Result<(), CudaStddevError> {
+        let func = self
+            .module
+            .get_function("stddev_build_prefix_f32")
+            .map_err(|_| CudaStddevError::MissingKernelSymbol {
+                name: "stddev_build_prefix_f32",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+        Self::validate_launch(grid, block)?;
+
+        unsafe {
+            let mut data_ptr = d_data.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let mut ps1_ptr = d_ps1.as_device_ptr().as_raw();
+            let mut ps2_ptr = d_ps2.as_device_ptr().as_raw();
+            let mut psn_ptr = d_psn.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut data_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut ps1_ptr as *mut _ as *mut c_void,
+                &mut ps2_ptr as *mut _ as *mut c_void,
+                &mut psn_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
     }
 
     fn launch_batch(
@@ -603,6 +684,111 @@ impl CudaStddev {
         ))
     }
 
+    pub fn stddev_batch_dev_from_device_prices(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &StdDevBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<StdDevParams>), CudaStddevError> {
+        if d_data.len() != len {
+            return Err(CudaStddevError::InvalidInput(format!(
+                "device input length mismatch (buffer={}, len={})",
+                d_data.len(),
+                len
+            )));
+        }
+
+        let combos = Self::prepare_device_batch_inputs(len, first_valid, sweep)?;
+        let periods: Vec<i32> = combos.iter().map(|c| c.0 as i32).collect();
+        let nbdevs: Vec<f32> = combos.iter().map(|c| c.1).collect();
+
+        let item_f2 = std::mem::size_of::<Float2>();
+        let item_i32 = std::mem::size_of::<i32>();
+        let item_f32 = std::mem::size_of::<f32>();
+        let prefix_elems = len
+            .checked_add(1)
+            .ok_or_else(|| CudaStddevError::InvalidInput("prefix length overflow".into()))?;
+        let bytes_prefix_f2 = prefix_elems
+            .checked_mul(item_f2)
+            .and_then(|v| v.checked_mul(2))
+            .ok_or_else(|| CudaStddevError::InvalidInput("prefix bytes overflow".into()))?;
+        let bytes_prefix = bytes_prefix_f2
+            .checked_add(
+                prefix_elems.checked_mul(item_i32).ok_or_else(|| {
+                    CudaStddevError::InvalidInput("nan-count bytes overflow".into())
+                })?,
+            )
+            .ok_or_else(|| CudaStddevError::InvalidInput("prefix total bytes overflow".into()))?;
+        let bytes_params = periods
+            .len()
+            .checked_mul(item_i32)
+            .and_then(|v| v.checked_add(nbdevs.len().checked_mul(item_f32)?))
+            .ok_or_else(|| CudaStddevError::InvalidInput("param bytes overflow".into()))?;
+        let bytes_out = combos
+            .len()
+            .checked_mul(len)
+            .and_then(|v| v.checked_mul(item_f32))
+            .ok_or_else(|| CudaStddevError::InvalidInput("output bytes overflow".into()))?;
+        let required = bytes_prefix
+            .checked_add(bytes_params)
+            .and_then(|v| v.checked_add(bytes_out))
+            .ok_or_else(|| CudaStddevError::InvalidInput("total bytes overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
+
+        let mut d_ps1: DeviceBuffer<Float2> =
+            unsafe { DeviceBuffer::uninitialized_async(prefix_elems, &self.stream) }?;
+        let mut d_ps2: DeviceBuffer<Float2> =
+            unsafe { DeviceBuffer::uninitialized_async(prefix_elems, &self.stream) }?;
+        let mut d_psn: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::uninitialized_async(prefix_elems, &self.stream) }?;
+        self.launch_prefix_builder_device_raw(
+            d_data,
+            len,
+            first_valid,
+            &mut d_ps1,
+            &mut d_ps2,
+            &mut d_psn,
+        )?;
+
+        let d_periods = DeviceBuffer::from_slice(&periods)?;
+        let d_nbdevs = DeviceBuffer::from_slice(&nbdevs)?;
+        let out_len = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaStddevError::InvalidInput("output length overflow".into()))?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_len, &self.stream) }?;
+
+        self.launch_batch(
+            &d_ps1,
+            &d_ps2,
+            &d_psn,
+            len,
+            first_valid,
+            &d_periods,
+            &d_nbdevs,
+            combos.len(),
+            &mut d_out,
+        )?;
+
+        let params: Vec<StdDevParams> = combos
+            .iter()
+            .map(|(p, nb)| StdDevParams {
+                period: Some(*p),
+                nbdev: Some(*nb as f64),
+            })
+            .collect();
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: params.len(),
+                cols: len,
+            },
+            params,
+        ))
+    }
+
     pub fn stddev_batch_into_host_f32(
         &self,
         data_f32: &[f32],
@@ -745,6 +931,11 @@ impl CudaStddev {
             rows,
             cols,
         })
+    }
+
+    pub fn synchronize(&self) -> Result<(), CudaStddevError> {
+        self.stream.synchronize()?;
+        Ok(())
     }
 }
 

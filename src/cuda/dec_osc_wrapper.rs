@@ -494,6 +494,87 @@ impl CudaDecOsc {
         })
     }
 
+    pub fn dec_osc_batch_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        periods: &[i32],
+        ks: &[f32],
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaDecOscError> {
+        if len == 0 {
+            return Err(CudaDecOscError::InvalidInput("empty data".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaDecOscError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+        if d_prices.len() != len {
+            return Err(CudaDecOscError::InvalidInput(
+                "device price buffer length mismatch".into(),
+            ));
+        }
+        if periods.is_empty() || ks.is_empty() {
+            return Err(CudaDecOscError::InvalidInput(
+                "empty parameter sweep".into(),
+            ));
+        }
+        if periods.len() != ks.len() {
+            return Err(CudaDecOscError::InvalidInput(
+                "period and k sweep length mismatch".into(),
+            ));
+        }
+        let rows = periods.len();
+        let out_elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaDecOscError::InvalidInput("rows*len overflow".into()))?;
+        if d_out.len() != out_elems {
+            return Err(CudaDecOscError::InvalidInput(
+                "output buffer length mismatch".into(),
+            ));
+        }
+
+        let d_periods = DeviceBuffer::from_slice(periods)?;
+        let d_ks = DeviceBuffer::from_slice(ks)?;
+
+        let func = self.module.get_function("dec_osc_batch_f32").map_err(|_| {
+            CudaDecOscError::MissingKernelSymbol {
+                name: "dec_osc_batch_f32",
+            }
+        })?;
+        let (suggested_block_x, _min_grid) =
+            func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Auto => suggested_block_x.max(128),
+            BatchKernelPolicy::Plain { block_x } => block_x.max(64),
+        } as usize;
+
+        const MAX_GRID_X: usize = 65_535;
+        let max_combos_per_launch = MAX_GRID_X.saturating_mul(block_x);
+
+        let mut launched = 0usize;
+        while launched < rows {
+            let n = (rows - launched).min(max_combos_per_launch);
+            self.launch_batch_kernel(
+                d_prices,
+                &d_periods,
+                &d_ks,
+                len,
+                n,
+                first_valid,
+                d_out,
+                launched,
+                launched * len,
+            )?;
+            launched += n;
+        }
+
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
     fn prepare_many_series(
         data_tm_f32: &[f32],
         cols: usize,

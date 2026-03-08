@@ -69,6 +69,51 @@ __device__ __forceinline__ ds_t ds_mul(ds_t x, ds_t y) {
     float hi, lo; quick_two_sum(s, err, hi, lo); return ds_t{hi, lo};
 }
 
+extern "C" __global__ void devstop_build_range_prefixes_f32(
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    int len,
+    int first_valid,
+    float2* __restrict__ p1,
+    float2* __restrict__ p2,
+    int* __restrict__ pc
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (len < 0) return;
+
+    ds_t s1{0.0f, 0.0f};
+    ds_t s2{0.0f, 0.0f};
+    int accc = 0;
+    float prev_h = (first_valid >= 0 && first_valid < len) ? high[first_valid] : qnan32();
+    float prev_l = (first_valid >= 0 && first_valid < len) ? low[first_valid] : qnan32();
+
+    if (len >= 0) {
+        p1[0] = make_float2(0.0f, 0.0f);
+        p2[0] = make_float2(0.0f, 0.0f);
+        pc[0] = 0;
+    }
+
+    for (int i = 0; i < len; ++i) {
+        if (i >= first_valid + 1) {
+            const float h = high[i];
+            const float l = low[i];
+            if (!isnan(h) && !isnan(l) && !isnan(prev_h) && !isnan(prev_l)) {
+                const float hi2 = (h > prev_h) ? h : prev_h;
+                const float lo2 = (l < prev_l) ? l : prev_l;
+                const float r = hi2 - lo2;
+                s1 = ds_add(s1, ds_t{r, 0.0f});
+                s2 = ds_add(s2, ds_t{r * r, 0.0f});
+                accc += 1;
+            }
+            prev_h = h;
+            prev_l = l;
+        }
+        p1[i + 1] = make_float2(s1.hi, s1.lo);
+        p2[i + 1] = make_float2(s2.hi, s2.lo);
+        pc[i + 1] = accc;
+    }
+}
+
 
 
 

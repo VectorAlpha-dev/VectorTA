@@ -331,14 +331,51 @@ impl CudaPpo {
         &self.policy
     }
 
-    pub fn ppo_batch_dev(
+    fn launch_build_prefix_sum_one_series_f64(
         &self,
-        data_f32: &[f32],
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: i32,
+        d_prefix: &mut DeviceBuffer<f64>,
+    ) -> Result<(), CudaPpoError> {
+        let func = self
+            .module
+            .get_function("ppo_build_prefix_one_series_f64")
+            .map_err(|_| CudaPpoError::MissingKernelSymbol {
+                name: "ppo_build_prefix_one_series_f64",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+        let stream = &self.stream;
+        unsafe {
+            launch!(
+                func<<<grid, block, 0, stream>>>(
+                    d_prices.as_device_ptr(),
+                    len as i32,
+                    first_valid,
+                    d_prefix.as_device_ptr()
+                )
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn ppo_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
         sweep: &PpoBatchRange,
     ) -> Result<(DeviceArrayF32Ppo, Vec<PpoParams>), CudaPpoError> {
-        let len = data_f32.len();
-        if len == 0 {
-            return Err(CudaPpoError::InvalidInput("empty data".into()));
+        if len == 0 || d_prices.len() != len {
+            return Err(CudaPpoError::InvalidInput(
+                "device prices must have non-zero input length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaPpoError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
         }
 
         let (fs, fe, fstep) = sweep.fast_period;
@@ -408,7 +445,6 @@ impl CudaPpo {
             slows_i32.push(p.slow_period.unwrap() as i32);
         }
 
-        let d_prices: DeviceBuffer<f32> = DeviceBuffer::from_slice(data_f32)?;
         let d_fasts: DeviceBuffer<i32> = DeviceBuffer::from_slice(&fasts_i32)?;
         let d_slows: DeviceBuffer<i32> = DeviceBuffer::from_slice(&slows_i32)?;
 
@@ -416,13 +452,18 @@ impl CudaPpo {
             .checked_mul(len)
             .ok_or_else(|| CudaPpoError::InvalidInput("rows*len overflow for d_out".into()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
-
-        let first_valid = data_f32.iter().position(|v| v.is_finite()).unwrap_or(0) as i32;
+        let first_valid = first_valid as i32;
 
         match ma_mode {
             0 => {
-                let prefix = prefix_sum_one_series_f64(data_f32, first_valid);
-                let d_prefix: DeviceBuffer<f64> = DeviceBuffer::from_slice(&prefix)?;
+                let mut d_prefix: DeviceBuffer<f64> =
+                    unsafe { DeviceBuffer::uninitialized(len + 1) }?;
+                self.launch_build_prefix_sum_one_series_f64(
+                    d_prices,
+                    len,
+                    first_valid,
+                    &mut d_prefix,
+                )?;
 
                 self.launch_batch_kernel(
                     &d_prices,
@@ -522,8 +563,6 @@ impl CudaPpo {
             _ => unreachable!(),
         }
 
-        self.synchronize()?;
-
         Ok((
             DeviceArrayF32Ppo {
                 buf: d_out,
@@ -534,6 +573,22 @@ impl CudaPpo {
             },
             combos,
         ))
+    }
+
+    pub fn ppo_batch_dev(
+        &self,
+        data_f32: &[f32],
+        sweep: &PpoBatchRange,
+    ) -> Result<(DeviceArrayF32Ppo, Vec<PpoParams>), CudaPpoError> {
+        let len = data_f32.len();
+        if len == 0 {
+            return Err(CudaPpoError::InvalidInput("empty data".into()));
+        }
+        let d_prices: DeviceBuffer<f32> = DeviceBuffer::from_slice(data_f32)?;
+        let first_valid = data_f32.iter().position(|v| v.is_finite()).unwrap_or(0);
+        let result = self.ppo_batch_dev_from_device_prices(&d_prices, len, first_valid, sweep)?;
+        self.synchronize()?;
+        Ok(result)
     }
 
     #[allow(clippy::too_many_arguments)]

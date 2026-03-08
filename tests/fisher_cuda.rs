@@ -1,6 +1,5 @@
 use vector_ta::indicators::fisher::{
-    fisher_batch_with_kernel, fisher_with_kernel, FisherBatchBuilder, FisherBatchRange,
-    FisherInput, FisherParams,
+    fisher_with_kernel, FisherBatchBuilder, FisherBatchRange, FisherInput, FisherParams,
 };
 use vector_ta::utilities::enums::Kernel;
 
@@ -10,6 +9,8 @@ use cust::memory::CopyDestination;
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::oscillators::CudaFisher;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -161,6 +162,63 @@ fn fisher_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
             approx_eq(cpu_sig_tm[idx], g_sig[idx] as f64, tol),
             "signal mismatch at {}",
             idx
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn fisher_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[fisher_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 1024usize;
+    let mut high = vec![f64::NAN; len];
+    let mut low = vec![f64::NAN; len];
+    for i in 0..len {
+        let x = i as f64;
+        high[i] = 100.0 + (x * 0.01).sin() + 0.001 * x;
+        low[i] = high[i] - 0.8 - 0.05 * (x * 0.07).cos();
+    }
+
+    let sweep = FisherBatchRange { period: (9, 21, 4) };
+    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+
+    let cuda = CudaFisher::new(0).expect("CudaFisher::new");
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+
+    let (legacy, _) = cuda.fisher_batch_dev(&high_f32, &low_f32, &sweep)?;
+    let (device, _) =
+        cuda.fisher_batch_dev_from_device_inputs(d_high.buffer(), d_low.buffer(), len, 0, &sweep)?;
+
+    let mut legacy_fish = vec![0f32; legacy.fisher.len()];
+    let mut legacy_sig = vec![0f32; legacy.signal.len()];
+    let mut device_fish = vec![0f32; device.fisher.len()];
+    let mut device_sig = vec![0f32; device.signal.len()];
+    legacy.fisher.buf.copy_to(&mut legacy_fish)?;
+    legacy.signal.buf.copy_to(&mut legacy_sig)?;
+    device.fisher.buf.copy_to(&mut device_fish)?;
+    device.signal.buf.copy_to(&mut device_sig)?;
+
+    for idx in 0..legacy_fish.len() {
+        assert!(
+            approx_eq(legacy_fish[idx] as f64, device_fish[idx] as f64, 1e-3),
+            "fisher mismatch at {idx}: legacy={} device={}",
+            legacy_fish[idx],
+            device_fish[idx]
+        );
+        assert!(
+            approx_eq(legacy_sig[idx] as f64, device_sig[idx] as f64, 1e-3),
+            "signal mismatch at {idx}: legacy={} device={}",
+            legacy_sig[idx],
+            device_sig[idx]
         );
     }
 

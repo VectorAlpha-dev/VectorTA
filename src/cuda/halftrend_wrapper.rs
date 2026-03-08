@@ -150,6 +150,9 @@ impl CudaHalftrend {
     pub fn device_id(&self) -> u32 {
         self.device_id
     }
+    pub fn synchronize(&self) -> Result<(), CudaHalftrendError> {
+        self.stream.synchronize().map_err(CudaHalftrendError::from)
+    }
 
     pub fn set_batch_policy(&mut self, p: BatchKernelPolicy) {
         self.batch_policy = p;
@@ -1041,6 +1044,212 @@ impl CudaHalftrend {
                 buf: d_ss,
                 rows,
                 cols: n,
+            },
+            combos,
+        })
+    }
+
+    pub fn halftrend_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &HalfTrendBatchRange,
+    ) -> Result<CudaHalftrendBatch, CudaHalftrendError> {
+        if len == 0 {
+            return Err(CudaHalftrendError::InvalidInput("empty input".into()));
+        }
+        if d_high.len() != len || d_low.len() != len || d_close.len() != len {
+            return Err(CudaHalftrendError::InvalidInput(
+                "device input lengths are inconsistent".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaHalftrendError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = Self::expand_grid(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaHalftrendError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        let rows = combos.len();
+        let max_amp = combos
+            .iter()
+            .map(|p| p.amplitude.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        if max_amp > HALF_TREND_FUSED_MAX_AMP {
+            return Err(CudaHalftrendError::InvalidInput(
+                "borrowed-device halftrend currently supports amplitude <= 64".into(),
+            ));
+        }
+
+        for prm in &combos {
+            let amplitude = prm.amplitude.unwrap_or(2);
+            let atr_period = prm.atr_period.unwrap_or(14);
+            if amplitude == 0 || atr_period == 0 {
+                return Err(CudaHalftrendError::InvalidInput(
+                    "amplitude and atr_period must be > 0".into(),
+                ));
+            }
+            if len - first_valid < amplitude.max(atr_period) {
+                return Err(CudaHalftrendError::InvalidInput(
+                    "not enough valid data".into(),
+                ));
+            }
+        }
+
+        let f32_elems = (3usize
+            .checked_mul(len)
+            .and_then(|x| x.checked_add(6usize.checked_mul(rows).and_then(|y| y.checked_mul(len))?))
+            .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?)
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?;
+        let param_bytes = rows
+            .checked_mul(2 * std::mem::size_of::<i32>() + std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?;
+        let req_bytes = f32_elems
+            .checked_add(param_bytes)
+            .and_then(|x| x.checked_add(64 * 1024 * 1024))
+            .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?;
+        if let Ok((free, _)) = mem_get_info() {
+            if !Self::will_fit(req_bytes, 0) {
+                return Err(CudaHalftrendError::OutOfMemory {
+                    required: req_bytes,
+                    free,
+                    headroom: 0,
+                });
+            }
+        }
+
+        let mut amps = Vec::<i32>::with_capacity(rows);
+        let mut atr_periods = Vec::<i32>::with_capacity(rows);
+        let mut chdevs = Vec::<f32>::with_capacity(rows);
+        for prm in &combos {
+            amps.push(prm.amplitude.unwrap_or(2) as i32);
+            atr_periods.push(prm.atr_period.unwrap_or(14) as i32);
+            chdevs.push(prm.channel_deviation.unwrap_or(2.0) as f32);
+        }
+        let d_amps = unsafe { DeviceBuffer::from_slice_async(&amps, &self.stream) }
+            .map_err(CudaHalftrendError::from)?;
+        let d_atr_periods = unsafe { DeviceBuffer::from_slice_async(&atr_periods, &self.stream) }
+            .map_err(CudaHalftrendError::from)?;
+        let d_chdevs = unsafe { DeviceBuffer::from_slice_async(&chdevs, &self.stream) }
+            .map_err(CudaHalftrendError::from)?;
+
+        let elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?;
+        let mut d_ht: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+        let mut d_tr: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+        let mut d_ah: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+        let mut d_al: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+        let mut d_bs: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+        let mut d_ss: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+
+        let use_time_major =
+            matches!(self.batch_policy, BatchKernelPolicy::Auto) && (rows >= 16) && (len >= 8192);
+        let kernel = if use_time_major {
+            "halftrend_batch_fused_time_major_f32"
+        } else {
+            "halftrend_batch_fused_f32"
+        };
+        let func = self
+            .module
+            .get_function(kernel)
+            .map_err(|_| CudaHalftrendError::MissingKernelSymbol { name: kernel })?;
+        unsafe {
+            let block_x = 256u32;
+            let grid_x = (((rows as u32) + block_x - 1) / block_x).max(1);
+            self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
+            let grid: GridSize = (grid_x, 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+
+            let mut h = d_high.as_device_ptr().as_raw();
+            let mut l = d_low.as_device_ptr().as_raw();
+            let mut c = d_close.as_device_ptr().as_raw();
+            let mut a = d_amps.as_device_ptr().as_raw();
+            let mut ap = d_atr_periods.as_device_ptr().as_raw();
+            let mut cd = d_chdevs.as_device_ptr().as_raw();
+            let mut first_i = first_valid as i32;
+            let mut n_i = len as i32;
+            let mut r_i = rows as i32;
+            let mut oht = d_ht.as_device_ptr().as_raw();
+            let mut otr = d_tr.as_device_ptr().as_raw();
+            let mut oah = d_ah.as_device_ptr().as_raw();
+            let mut oal = d_al.as_device_ptr().as_raw();
+            let mut obs = d_bs.as_device_ptr().as_raw();
+            let mut oss = d_ss.as_device_ptr().as_raw();
+            let mut args: [*mut c_void; 15] = [
+                &mut h as *mut _ as *mut c_void,
+                &mut l as *mut _ as *mut c_void,
+                &mut c as *mut _ as *mut c_void,
+                &mut a as *mut _ as *mut c_void,
+                &mut ap as *mut _ as *mut c_void,
+                &mut cd as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut n_i as *mut _ as *mut c_void,
+                &mut r_i as *mut _ as *mut c_void,
+                &mut oht as *mut _ as *mut c_void,
+                &mut otr as *mut _ as *mut c_void,
+                &mut oah as *mut _ as *mut c_void,
+                &mut oal as *mut _ as *mut c_void,
+                &mut obs as *mut _ as *mut c_void,
+                &mut oss as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, &mut args)
+                .map_err(CudaHalftrendError::from)?;
+        }
+
+        Ok(CudaHalftrendBatch {
+            halftrend: DeviceArrayF32 {
+                buf: d_ht,
+                rows,
+                cols: len,
+            },
+            trend: DeviceArrayF32 {
+                buf: d_tr,
+                rows,
+                cols: len,
+            },
+            atr_high: DeviceArrayF32 {
+                buf: d_ah,
+                rows,
+                cols: len,
+            },
+            atr_low: DeviceArrayF32 {
+                buf: d_al,
+                rows,
+                cols: len,
+            },
+            buy: DeviceArrayF32 {
+                buf: d_bs,
+                rows,
+                cols: len,
+            },
+            sell: DeviceArrayF32 {
+                buf: d_ss,
+                rows,
+                cols: len,
             },
             combos,
         })

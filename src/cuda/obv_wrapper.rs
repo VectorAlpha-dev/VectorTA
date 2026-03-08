@@ -260,6 +260,26 @@ impl CudaObv {
         })
     }
 
+    pub fn obv_batch_device(
+        &self,
+        d_close: &DeviceBuffer<f32>,
+        d_volume: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaObvError> {
+        if series_len == 0 {
+            return Err(CudaObvError::InvalidInput("empty input".into()));
+        }
+        if d_close.len() != series_len || d_volume.len() != series_len || d_out.len() != series_len
+        {
+            return Err(CudaObvError::InvalidInput(
+                "device buffer length mismatch".into(),
+            ));
+        }
+        self.launch_obv_batch(d_close, d_volume, series_len, 1, first_valid, d_out)
+    }
+
     fn launch_obv_batch(
         &self,
         d_close: &DeviceBuffer<f32>,

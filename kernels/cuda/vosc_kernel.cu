@@ -70,6 +70,24 @@ __device__ __forceinline__ ds ds_mul_f(ds a, float k) {
 
 __device__ __forceinline__ float ds_to_float(ds a) { return a.hi + a.lo; }
 
+extern "C" __global__ void vosc_build_prefix_f32_ds(
+    const float* __restrict__ data,
+    int len,
+    float2* __restrict__ prefix_f2)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (len < 0) return;
+
+    prefix_f2[0] = make_float2(0.0f, 0.0f);
+    double acc = 0.0;
+    for (int i = 0; i < len; ++i) {
+        acc += (double)data[i];
+        float hi = (float)acc;
+        float lo = (float)(acc - (double)hi);
+        prefix_f2[i + 1] = make_float2(hi, lo);
+    }
+}
+
 
 extern "C" __global__ void vosc_batch_prefix_f32(
     const double* __restrict__ prefix_sum,

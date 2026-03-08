@@ -174,6 +174,52 @@ impl CudaVpt {
         })
     }
 
+    pub fn vpt_batch_device(
+        &self,
+        d_price: &DeviceBuffer<f32>,
+        d_volume: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaVptError> {
+        if len == 0 {
+            return Err(CudaVptError::InvalidInput("empty input".into()));
+        }
+        if d_price.len() != len || d_volume.len() != len {
+            return Err(CudaVptError::InvalidInput(
+                "device input length mismatch".into(),
+            ));
+        }
+        if first_valid == 0 || first_valid >= len {
+            return Err(CudaVptError::InvalidInput(format!(
+                "first_valid out of range: {} (len {})",
+                first_valid, len
+            )));
+        }
+        if d_out.len() != len {
+            return Err(CudaVptError::InvalidInput(
+                "output buffer length mismatch".into(),
+            ));
+        }
+
+        let func = self.module.get_function("vpt_batch_f32").map_err(|_| {
+            CudaVptError::MissingKernelSymbol {
+                name: "vpt_batch_f32",
+            }
+        })?;
+        let stream = &self.stream;
+        unsafe {
+            launch!(func<<<(1, 1, 1), (1, 1, 1), 0, stream>>>(
+                d_price.as_device_ptr(),
+                d_volume.as_device_ptr(),
+                len as i32,
+                first_valid as i32,
+                d_out.as_device_ptr()
+            ))?
+        }
+        Ok(())
+    }
+
     pub fn vpt_many_series_one_param_time_major_dev(
         &self,
         price_tm: &[f32],

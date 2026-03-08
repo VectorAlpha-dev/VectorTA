@@ -9,7 +9,7 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::oscillators::gatorosc_wrapper::CudaGatorOsc;
+use vector_ta::cuda::{CudaGatorOsc, CudaRuntime};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -190,5 +190,67 @@ fn gatorosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
             idx
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn gatorosc_cuda_device_prices_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[gatorosc_cuda_device_prices_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 2048usize;
+    let mut close = vec![f64::NAN; len];
+    for i in 10..len {
+        let x = i as f64 * 0.0017;
+        close[i] = x.sin() * 2.5 + 0.0002 * i as f64;
+    }
+    let sweep = GatorOscBatchRange {
+        jaws_length: (10, 14, 2),
+        jaws_shift: (4, 8, 2),
+        teeth_length: (7, 9, 1),
+        teeth_shift: (3, 5, 1),
+        lips_length: (4, 6, 1),
+        lips_shift: (1, 3, 1),
+    };
+
+    let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+    let first_valid = close_f32
+        .iter()
+        .position(|value| !value.is_nan())
+        .expect("first valid");
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_prices = runtime.upload_f32(&close_f32).expect("upload prices");
+    let cuda = CudaGatorOsc::new(0).expect("CudaGatorOsc::new");
+
+    let legacy = cuda
+        .gatorosc_batch_dev(&close_f32, &sweep)
+        .expect("legacy gatorosc");
+    let device = cuda
+        .gatorosc_batch_dev_from_device_prices(d_prices.buffer(), len, first_valid, &sweep)
+        .expect("device gatorosc");
+
+    for (legacy_arr, device_arr, label) in [
+        (&legacy.upper, &device.upper, "upper"),
+        (&legacy.lower, &device.lower, "lower"),
+        (&legacy.upper_change, &device.upper_change, "upper_change"),
+        (&legacy.lower_change, &device.lower_change, "lower_change"),
+    ] {
+        let mut legacy_host = vec![0f32; legacy_arr.len()];
+        let mut device_host = vec![0f32; device_arr.len()];
+        legacy_arr.buf.copy_to(&mut legacy_host)?;
+        device_arr.buf.copy_to(&mut device_host)?;
+        for idx in 0..legacy_host.len() {
+            assert!(
+                approx_eq(legacy_host[idx] as f64, device_host[idx] as f64, 5e-4),
+                "{label} mismatch at {idx}: legacy={} device={}",
+                legacy_host[idx],
+                device_host[idx]
+            );
+        }
+    }
+
     Ok(())
 }

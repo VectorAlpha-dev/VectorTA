@@ -1,6 +1,7 @@
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
+use crate::cuda::oscillators::CudaWillr;
 use crate::cuda::DeviceArrayF32Triplet;
 use crate::indicators::kdj::{KdjBatchRange, KdjParams};
 use crate::indicators::willr::build_willr_gpu_tables;
@@ -94,6 +95,21 @@ pub struct CudaKdj {
     policy: CudaKdjPolicy,
 }
 
+struct PreparedKdjDeviceBatch {
+    combos: Vec<KdjParams>,
+    first_valid: usize,
+    series_len: usize,
+    max_fast_k_period: usize,
+    fk: Vec<i32>,
+    sk: Vec<i32>,
+    sd: Vec<i32>,
+    kma: Vec<i32>,
+    dma: Vec<i32>,
+    log2: Vec<i32>,
+    level_offsets: Vec<i32>,
+    total_sparse_len: usize,
+}
+
 impl CudaKdj {
     pub fn new(device_id: usize) -> Result<Self, CudaKdjError> {
         Self::new_with_policy(device_id, CudaKdjPolicy::default())
@@ -123,6 +139,11 @@ impl CudaKdj {
             device_id: device_id as u32,
             policy,
         })
+    }
+
+    #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaKdjError> {
+        self.stream.synchronize().map_err(CudaKdjError::Cuda)
     }
 
     fn mem_check_enabled() -> bool {
@@ -242,6 +263,89 @@ impl CudaKdj {
         Ok(out)
     }
 
+    fn prepare_device_batch_inputs(
+        len: usize,
+        first_valid: usize,
+        sweep: &KdjBatchRange,
+    ) -> Result<PreparedKdjDeviceBatch, CudaKdjError> {
+        if len == 0 {
+            return Err(CudaKdjError::InvalidInput("empty input".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaKdjError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = Self::expand_grid(sweep)?;
+        let mut fk = Vec::with_capacity(combos.len());
+        let mut sk = Vec::with_capacity(combos.len());
+        let mut sd = Vec::with_capacity(combos.len());
+        let mut kma = Vec::with_capacity(combos.len());
+        let mut dma = Vec::with_capacity(combos.len());
+        let mut max_fast_k_period = 0usize;
+        for params in &combos {
+            let fast_k = params.fast_k_period.unwrap_or(0);
+            let slow_k = params.slow_k_period.unwrap_or(0);
+            let slow_d = params.slow_d_period.unwrap_or(0);
+            if fast_k == 0 || slow_k == 0 || slow_d == 0 {
+                return Err(CudaKdjError::InvalidInput(
+                    "periods must be positive".into(),
+                ));
+            }
+            fk.push(fast_k as i32);
+            sk.push(slow_k as i32);
+            sd.push(slow_d as i32);
+            kma.push(Self::ma_to_code(
+                params.slow_k_ma_type.as_deref().unwrap_or("sma"),
+            )?);
+            dma.push(Self::ma_to_code(
+                params.slow_d_ma_type.as_deref().unwrap_or("sma"),
+            )?);
+            max_fast_k_period = max_fast_k_period.max(fast_k);
+        }
+        if len - first_valid < max_fast_k_period {
+            return Err(CudaKdjError::InvalidInput(format!(
+                "not enough valid data: need >= {}, have {}",
+                max_fast_k_period,
+                len - first_valid
+            )));
+        }
+
+        let mut log2 = vec![0i32; len + 1];
+        for i in 2..=len {
+            log2[i] = log2[i / 2] + 1;
+        }
+
+        let mut level_offsets = Vec::new();
+        level_offsets.push(0i32);
+        let mut total = len;
+        let mut window = 2usize;
+        while window <= len {
+            level_offsets.push(i32::try_from(total).unwrap_or(i32::MAX));
+            total = total
+                .checked_add(len + 1 - window)
+                .ok_or_else(|| CudaKdjError::InvalidInput("sparse table size overflow".into()))?;
+            window <<= 1;
+        }
+        level_offsets.push(i32::try_from(total).unwrap_or(i32::MAX));
+
+        Ok(PreparedKdjDeviceBatch {
+            combos,
+            first_valid,
+            series_len: len,
+            max_fast_k_period,
+            fk,
+            sk,
+            sd,
+            kma,
+            dma,
+            log2,
+            level_offsets,
+            total_sparse_len: total,
+        })
+    }
+
     pub fn kdj_batch_dev(
         &self,
         high_f32: &[f32],
@@ -261,156 +365,95 @@ impl CudaKdj {
                 high_f32[i].is_finite() && low_f32[i].is_finite() && close_f32[i].is_finite()
             })
             .ok_or_else(|| CudaKdjError::InvalidInput("all values are NaN".into()))?
-            as i32;
+            as usize;
 
-        let combos = Self::expand_grid(sweep)?;
+        let d_high = DeviceBuffer::from_slice(high_f32).map_err(CudaKdjError::Cuda)?;
+        let d_low = DeviceBuffer::from_slice(low_f32).map_err(CudaKdjError::Cuda)?;
+        let d_close = DeviceBuffer::from_slice(close_f32).map_err(CudaKdjError::Cuda)?;
+        let out = self.kdj_batch_dev_from_device_inputs(
+            &d_high,
+            &d_low,
+            &d_close,
+            len,
+            first_valid,
+            sweep,
+        )?;
+        self.synchronize()?;
+        Ok(out)
+    }
 
-        let mut fk: Vec<i32> = Vec::with_capacity(combos.len());
-        let mut sk: Vec<i32> = Vec::with_capacity(combos.len());
-        let mut sd: Vec<i32> = Vec::with_capacity(combos.len());
-        let mut kma: Vec<i32> = Vec::with_capacity(combos.len());
-        let mut dma: Vec<i32> = Vec::with_capacity(combos.len());
-        let mut max_fk = 0usize;
-        for p in &combos {
-            let fkv = p.fast_k_period.unwrap_or(0);
-            let skv = p.slow_k_period.unwrap_or(0);
-            let sdv = p.slow_d_period.unwrap_or(0);
-            if fkv == 0 || skv == 0 || sdv == 0 {
-                return Err(CudaKdjError::InvalidInput(
-                    "periods must be positive".into(),
-                ));
-            }
-            fk.push(fkv as i32);
-            sk.push(skv as i32);
-            sd.push(sdv as i32);
-            kma.push(Self::ma_to_code(
-                p.slow_k_ma_type.as_deref().unwrap_or("sma"),
-            )?);
-            dma.push(Self::ma_to_code(
-                p.slow_d_ma_type.as_deref().unwrap_or("sma"),
-            )?);
-            max_fk = max_fk.max(fkv);
-        }
-        let valid_tail = len as i32 - first_valid;
-        if valid_tail < max_fk as i32 {
-            return Err(CudaKdjError::InvalidInput(format!(
-                "not enough valid data: need >= {}, have {}",
-                max_fk, valid_tail
-            )));
+    pub fn kdj_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &KdjBatchRange,
+    ) -> Result<(DeviceArrayF32, DeviceArrayF32, DeviceArrayF32), CudaKdjError> {
+        if series_len == 0
+            || d_high.len() != series_len
+            || d_low.len() != series_len
+            || d_close.len() != series_len
+        {
+            return Err(CudaKdjError::InvalidInput(
+                "device input buffers must match non-zero length".into(),
+            ));
         }
 
-        let tables = build_willr_gpu_tables(high_f32, low_f32);
-        let level_count = tables.level_offsets.len() as i32;
-
-        let nrows = combos.len();
+        let prepared = Self::prepare_device_batch_inputs(series_len, first_valid, sweep)?;
+        let level_count = prepared.level_offsets.len();
+        let nrows = prepared.combos.len();
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
-        let bytes_inputs = close_f32
+        let table_bytes = prepared.log2.len().saturating_mul(sz_i32)
+            + prepared.level_offsets.len().saturating_mul(sz_i32)
+            + (series_len + 1).saturating_mul(sz_i32)
+            + prepared.total_sparse_len.saturating_mul(2 * sz_f32);
+        let params_bytes = prepared
+            .fk
             .len()
-            .checked_mul(sz_f32)
-            .ok_or_else(|| CudaKdjError::InvalidInput("size overflow (inputs)".into()))?;
-        let tables_i32 = tables
-            .log2
-            .len()
-            .checked_add(tables.level_offsets.len())
-            .and_then(|e| e.checked_add(tables.nan_psum.len()))
-            .ok_or_else(|| CudaKdjError::InvalidInput("size overflow (tables i32)".into()))?;
-        let bytes_tables_i32 = tables_i32
-            .checked_mul(sz_i32)
-            .ok_or_else(|| CudaKdjError::InvalidInput("size overflow (tables i32 bytes)".into()))?;
-        let tables_f32 = tables
-            .st_max
-            .len()
-            .checked_add(tables.st_min.len())
-            .ok_or_else(|| CudaKdjError::InvalidInput("size overflow (tables f32)".into()))?;
-        let bytes_tables_f32 = tables_f32
-            .checked_mul(sz_f32)
-            .ok_or_else(|| CudaKdjError::InvalidInput("size overflow (tables f32 bytes)".into()))?;
-        let bytes_tables = bytes_tables_i32
-            .checked_add(bytes_tables_f32)
-            .ok_or_else(|| CudaKdjError::InvalidInput("size overflow (tables total)".into()))?;
-        let params_len = fk
-            .len()
-            .checked_add(sk.len())
-            .and_then(|e| e.checked_add(sd.len()))
-            .and_then(|e| e.checked_add(kma.len()))
-            .and_then(|e| e.checked_add(dma.len()))
-            .ok_or_else(|| CudaKdjError::InvalidInput("size overflow (params)".into()))?;
-        let bytes_params = params_len
-            .checked_mul(sz_i32)
+            .checked_mul(5usize)
+            .and_then(|n| n.checked_mul(sz_i32))
             .ok_or_else(|| CudaKdjError::InvalidInput("size overflow (params bytes)".into()))?;
         let rows_cols = nrows
-            .checked_mul(len)
+            .checked_mul(series_len)
             .ok_or_else(|| CudaKdjError::InvalidInput("size overflow (rows*len)".into()))?;
-        let bytes_outputs = rows_cols
-            .checked_mul(3)
-            .and_then(|e| e.checked_mul(sz_f32))
+        let output_bytes = rows_cols
+            .checked_mul(3usize)
+            .and_then(|n| n.checked_mul(sz_f32))
             .ok_or_else(|| CudaKdjError::InvalidInput("size overflow (outputs bytes)".into()))?;
-        let required = bytes_inputs
-            .checked_add(bytes_tables)
-            .and_then(|e| e.checked_add(bytes_params))
-            .and_then(|e| e.checked_add(bytes_outputs))
-            .ok_or_else(|| CudaKdjError::InvalidInput("size overflow (required bytes)".into()))?;
-        let headroom = 64 * 1024 * 1024;
-        Self::will_fit(required, headroom)?;
+        Self::will_fit(
+            table_bytes
+                .checked_add(params_bytes)
+                .and_then(|n| n.checked_add(output_bytes))
+                .ok_or_else(|| {
+                    CudaKdjError::InvalidInput("size overflow (required bytes)".into())
+                })?,
+            64 * 1024 * 1024,
+        )?;
 
-        let combos_per_launch = nrows;
+        let d_log2 = DeviceBuffer::from_slice(&prepared.log2).map_err(CudaKdjError::Cuda)?;
+        let d_offsets =
+            DeviceBuffer::from_slice(&prepared.level_offsets).map_err(CudaKdjError::Cuda)?;
+        let d_fk = DeviceBuffer::from_slice(&prepared.fk).map_err(CudaKdjError::Cuda)?;
+        let d_sk = DeviceBuffer::from_slice(&prepared.sk).map_err(CudaKdjError::Cuda)?;
+        let d_sd = DeviceBuffer::from_slice(&prepared.sd).map_err(CudaKdjError::Cuda)?;
+        let d_kma = DeviceBuffer::from_slice(&prepared.kma).map_err(CudaKdjError::Cuda)?;
+        let d_dma = DeviceBuffer::from_slice(&prepared.dma).map_err(CudaKdjError::Cuda)?;
 
-        let use_async = required > (64 * 1024 * 1024);
-
-        let (d_close, d_log2, d_offsets, d_st_max, d_st_min, d_nan_psum) = if use_async {
-            let h_close = LockedBuffer::from_slice(close_f32).map_err(CudaKdjError::Cuda)?;
-            let h_log2 = LockedBuffer::from_slice(&tables.log2).map_err(CudaKdjError::Cuda)?;
-            let h_offs =
-                LockedBuffer::from_slice(&tables.level_offsets).map_err(CudaKdjError::Cuda)?;
-            let h_max = LockedBuffer::from_slice(&tables.st_max).map_err(CudaKdjError::Cuda)?;
-            let h_min = LockedBuffer::from_slice(&tables.st_min).map_err(CudaKdjError::Cuda)?;
-            let h_nps = LockedBuffer::from_slice(&tables.nan_psum).map_err(CudaKdjError::Cuda)?;
-            let mut dc = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
-                .map_err(CudaKdjError::Cuda)?;
-            let mut dl = unsafe {
-                DeviceBuffer::<i32>::uninitialized_async(tables.log2.len(), &self.stream)
-            }
-            .map_err(CudaKdjError::Cuda)?;
-            let mut dof = unsafe {
-                DeviceBuffer::<i32>::uninitialized_async(tables.level_offsets.len(), &self.stream)
-            }
-            .map_err(CudaKdjError::Cuda)?;
-            let mut dmx = unsafe {
-                DeviceBuffer::<f32>::uninitialized_async(tables.st_max.len(), &self.stream)
-            }
-            .map_err(CudaKdjError::Cuda)?;
-            let mut dmn = unsafe {
-                DeviceBuffer::<f32>::uninitialized_async(tables.st_min.len(), &self.stream)
-            }
-            .map_err(CudaKdjError::Cuda)?;
-            let mut dnp = unsafe {
-                DeviceBuffer::<i32>::uninitialized_async(tables.nan_psum.len(), &self.stream)
-            }
-            .map_err(CudaKdjError::Cuda)?;
-            unsafe { dc.async_copy_from(&h_close, &self.stream) }.map_err(CudaKdjError::Cuda)?;
-            unsafe { dl.async_copy_from(&h_log2, &self.stream) }.map_err(CudaKdjError::Cuda)?;
-            unsafe { dof.async_copy_from(&h_offs, &self.stream) }.map_err(CudaKdjError::Cuda)?;
-            unsafe { dmx.async_copy_from(&h_max, &self.stream) }.map_err(CudaKdjError::Cuda)?;
-            unsafe { dmn.async_copy_from(&h_min, &self.stream) }.map_err(CudaKdjError::Cuda)?;
-            unsafe { dnp.async_copy_from(&h_nps, &self.stream) }.map_err(CudaKdjError::Cuda)?;
-            (dc, dl, dof, dmx, dmn, dnp)
-        } else {
-            (
-                DeviceBuffer::from_slice(close_f32).map_err(CudaKdjError::Cuda)?,
-                DeviceBuffer::from_slice(&tables.log2).map_err(CudaKdjError::Cuda)?,
-                DeviceBuffer::from_slice(&tables.level_offsets).map_err(CudaKdjError::Cuda)?,
-                DeviceBuffer::from_slice(&tables.st_max).map_err(CudaKdjError::Cuda)?,
-                DeviceBuffer::from_slice(&tables.st_min).map_err(CudaKdjError::Cuda)?,
-                DeviceBuffer::from_slice(&tables.nan_psum).map_err(CudaKdjError::Cuda)?,
+        let cuda_willr = CudaWillr::new(self.device_id as usize)
+            .map_err(|e| CudaKdjError::InvalidInput(format!("willr: {}", e)))?;
+        let (d_st_max, d_st_min, d_nan_psum) = cuda_willr
+            .build_tables_device_from_inputs(
+                &self.stream,
+                d_high,
+                d_low,
+                prepared.series_len,
+                &prepared.level_offsets,
+                prepared.total_sparse_len,
             )
-        };
-
-        let d_fk_all = DeviceBuffer::from_slice(&fk).map_err(CudaKdjError::Cuda)?;
-        let d_sk_all = DeviceBuffer::from_slice(&sk).map_err(CudaKdjError::Cuda)?;
-        let d_sd_all = DeviceBuffer::from_slice(&sd).map_err(CudaKdjError::Cuda)?;
-        let d_km_all = DeviceBuffer::from_slice(&kma).map_err(CudaKdjError::Cuda)?;
-        let d_dm_all = DeviceBuffer::from_slice(&dma).map_err(CudaKdjError::Cuda)?;
+            .map_err(|e| CudaKdjError::InvalidInput(format!("willr: {}", e)))?;
 
         let mut d_k =
             unsafe { DeviceBuffer::<f32>::uninitialized(rows_cols) }.map_err(CudaKdjError::Cuda)?;
@@ -419,6 +462,72 @@ impl CudaKdj {
         let mut d_j =
             unsafe { DeviceBuffer::<f32>::uninitialized(rows_cols) }.map_err(CudaKdjError::Cuda)?;
 
+        self.launch_batch_kernel(
+            d_close,
+            &d_log2,
+            &d_offsets,
+            &d_st_max,
+            &d_st_min,
+            &d_nan_psum,
+            &d_fk,
+            &d_sk,
+            &d_sd,
+            &d_kma,
+            &d_dma,
+            prepared.series_len,
+            prepared.first_valid,
+            level_count,
+            &mut d_k,
+            &mut d_d,
+            &mut d_j,
+        )?;
+
+        Ok((
+            DeviceArrayF32 {
+                buf: d_k,
+                rows: nrows,
+                cols: series_len,
+            },
+            DeviceArrayF32 {
+                buf: d_d,
+                rows: nrows,
+                cols: series_len,
+            },
+            DeviceArrayF32 {
+                buf: d_j,
+                rows: nrows,
+                cols: series_len,
+            },
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_batch_kernel(
+        &self,
+        d_close: &DeviceBuffer<f32>,
+        d_log2: &DeviceBuffer<i32>,
+        d_offsets: &DeviceBuffer<i32>,
+        d_st_max: &DeviceBuffer<f32>,
+        d_st_min: &DeviceBuffer<f32>,
+        d_nan_psum: &DeviceBuffer<i32>,
+        d_fk_all: &DeviceBuffer<i32>,
+        d_sk_all: &DeviceBuffer<i32>,
+        d_sd_all: &DeviceBuffer<i32>,
+        d_km_all: &DeviceBuffer<i32>,
+        d_dm_all: &DeviceBuffer<i32>,
+        series_len: usize,
+        first_valid: usize,
+        level_count: usize,
+        d_k: &mut DeviceBuffer<f32>,
+        d_d: &mut DeviceBuffer<f32>,
+        d_j: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaKdjError> {
+        let nrows = d_fk_all.len();
+        if nrows == 0 || series_len == 0 {
+            return Ok(());
+        }
+
+        let combos_per_launch = nrows;
         let mut func: Function = self.module.get_function("kdj_batch_f32").map_err(|_| {
             CudaKdjError::MissingKernelSymbol {
                 name: "kdj_batch_f32",
@@ -459,25 +568,29 @@ impl CudaKdj {
                 let mut stmax_ptr = d_st_max.as_device_ptr().as_raw();
                 let mut stmin_ptr = d_st_min.as_device_ptr().as_raw();
                 let mut nanp_ptr = d_nan_psum.as_device_ptr().as_raw();
-
                 let mut high_ptr = close_ptr;
                 let mut low_ptr = close_ptr;
-
                 let mut fk_ptr = d_fk_all.as_device_ptr().offset(row0 as isize).as_raw();
                 let mut sk_ptr = d_sk_all.as_device_ptr().offset(row0 as isize).as_raw();
                 let mut sd_ptr = d_sd_all.as_device_ptr().offset(row0 as isize).as_raw();
                 let mut kma_ptr = d_km_all.as_device_ptr().offset(row0 as isize).as_raw();
                 let mut dma_ptr = d_dm_all.as_device_ptr().offset(row0 as isize).as_raw();
-                let mut series_len_i = len as i32;
+                let mut series_len_i = series_len as i32;
                 let mut first_i = first_valid as i32;
                 let mut level_cnt_i = level_count as i32;
                 let mut nrows_i = rows as i32;
-                let mut outk_ptr =
-                    unsafe { d_k.as_device_ptr().offset((row0 * len) as isize).as_raw() };
-                let mut outd_ptr =
-                    unsafe { d_d.as_device_ptr().offset((row0 * len) as isize).as_raw() };
-                let mut outj_ptr =
-                    unsafe { d_j.as_device_ptr().offset((row0 * len) as isize).as_raw() };
+                let mut outk_ptr = d_k
+                    .as_device_ptr()
+                    .offset((row0 * series_len) as isize)
+                    .as_raw();
+                let mut outd_ptr = d_d
+                    .as_device_ptr()
+                    .offset((row0 * series_len) as isize)
+                    .as_raw();
+                let mut outj_ptr = d_j
+                    .as_device_ptr()
+                    .offset((row0 * series_len) as isize)
+                    .as_raw();
 
                 let args: &mut [*mut c_void] = &mut [
                     &mut high_ptr as *mut _ as *mut c_void,
@@ -509,25 +622,7 @@ impl CudaKdj {
             row0 += rows;
         }
 
-        self.stream.synchronize().map_err(CudaKdjError::Cuda)?;
-
-        Ok((
-            DeviceArrayF32 {
-                buf: d_k,
-                rows: nrows,
-                cols: len,
-            },
-            DeviceArrayF32 {
-                buf: d_d,
-                rows: nrows,
-                cols: len,
-            },
-            DeviceArrayF32 {
-                buf: d_j,
-                rows: nrows,
-                cols: len,
-            },
-        ))
+        Ok(())
     }
 
     pub fn kdj_many_series_one_param_time_major_dev(

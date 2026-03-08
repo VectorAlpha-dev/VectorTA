@@ -35,6 +35,20 @@ static __device__ __forceinline__ float warp_broadcast_ldg(const float* addr) {
     return __shfl_sync(mask, v, leader);
 }
 
+extern "C" __global__
+void lrsi_build_hl2_f32(const float* __restrict__ high,
+                        const float* __restrict__ low,
+                        int len,
+                        float* __restrict__ out_prices) {
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < len;
+         idx += blockDim.x * gridDim.x) {
+        const float h = high[idx];
+        const float l = low[idx];
+        out_prices[idx] = 0.5f * (h + l);
+    }
+}
+
 
 static __device__ __forceinline__
 void laguerre4_step(float p, float alpha, float gamma, float mgamma,

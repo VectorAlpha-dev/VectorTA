@@ -3,11 +3,10 @@
 use vector_ta::indicators::dvdiqqe::{
     dvdiqqe_batch_with_kernel, dvdiqqe_with_kernel, DvdiqqeBatchRange, DvdiqqeInput, DvdiqqeParams,
 };
-use vector_ta::utilities::data_loader::Candles;
 use vector_ta::utilities::enums::Kernel;
 
 use cust::memory::CopyDestination;
-use vector_ta::cuda::{cuda_available, CudaDvdiqqe};
+use vector_ta::cuda::{cuda_available, CudaDvdiqqe, CudaRuntime};
 
 fn approx(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -32,7 +31,6 @@ fn dvdiqqe_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let len = 8192usize;
-    let ts: Vec<i64> = (0..len as i64).collect();
     let mut close = vec![f64::NAN; len];
     let mut open = vec![f64::NAN; len];
     let mut high = vec![f64::NAN; len];
@@ -96,8 +94,6 @@ fn dvdiqqe_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     gpu.slow.buf.copy_to(&mut g_slow)?;
     gpu.center.buf.copy_to(&mut g_cent)?;
 
-    let tol = 2e-2;
-
     for r in 0..cpu.rows {
         let period = cpu.combos[r].period.unwrap();
         let warm = close.iter().position(|x| x.is_finite()).unwrap() + (2 * period - 1);
@@ -130,6 +126,120 @@ fn dvdiqqe_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn dvdiqqe_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[dvdiqqe_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 2048usize;
+    let mut open = vec![f64::NAN; len];
+    let mut close = vec![f64::NAN; len];
+    let mut volume = vec![f64::NAN; len];
+    for i in 6..len {
+        let x = i as f64 * 0.0024;
+        let base = 100.0 + (x * 0.73).sin() * 0.8 + 0.0004 * i as f64;
+        close[i] = base + (x * 0.41).cos() * 0.03;
+        open[i] = base - 0.12 + (x * 0.17).sin() * 0.05;
+        volume[i] = ((x * 0.91).cos().abs() + 1.0) * 750.0;
+    }
+    let sweep = DvdiqqeBatchRange {
+        period: (10, 22, 4),
+        smoothing_period: (4, 8, 2),
+        fast_multiplier: (1.5, 2.5, 0.5),
+        slow_multiplier: (3.0, 5.0, 1.0),
+    };
+
+    let open_f32: Vec<f32> = open.iter().map(|&v| v as f32).collect();
+    let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+    let volume_f32: Vec<f32> = volume.iter().map(|&v| v as f32).collect();
+    let first_valid = close_f32
+        .iter()
+        .position(|value| value.is_finite())
+        .expect("first valid");
+
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_open = runtime.upload_f32(&open_f32).expect("upload open");
+    let d_close = runtime.upload_f32(&close_f32).expect("upload close");
+    let d_volume = runtime.upload_f32(&volume_f32).expect("upload volume");
+    let cuda = CudaDvdiqqe::new(0).expect("CudaDvdiqqe::new");
+
+    let legacy = cuda
+        .dvdiqqe_batch_dev(
+            &open_f32,
+            &close_f32,
+            Some(&volume_f32),
+            &sweep,
+            "default",
+            "dynamic",
+            0.01,
+        )
+        .expect("legacy dvdiqqe");
+    let device = cuda
+        .dvdiqqe_batch_dev_from_device_inputs(
+            d_open.buffer(),
+            d_close.buffer(),
+            Some(d_volume.buffer()),
+            len,
+            first_valid,
+            &sweep,
+            "default",
+            "dynamic",
+            0.01,
+        )
+        .expect("device dvdiqqe");
+    cuda.synchronize().expect("dvdiqqe sync");
+
+    assert_eq!(legacy.dvdi.rows, device.dvdi.rows);
+    assert_eq!(legacy.dvdi.cols, device.dvdi.cols);
+
+    let mut legacy_dvdi = vec![0f32; legacy.dvdi.len()];
+    let mut legacy_fast = vec![0f32; legacy.fast.len()];
+    let mut legacy_slow = vec![0f32; legacy.slow.len()];
+    let mut legacy_center = vec![0f32; legacy.center.len()];
+    legacy.dvdi.buf.copy_to(&mut legacy_dvdi)?;
+    legacy.fast.buf.copy_to(&mut legacy_fast)?;
+    legacy.slow.buf.copy_to(&mut legacy_slow)?;
+    legacy.center.buf.copy_to(&mut legacy_center)?;
+
+    let mut device_dvdi = vec![0f32; device.dvdi.len()];
+    let mut device_fast = vec![0f32; device.fast.len()];
+    let mut device_slow = vec![0f32; device.slow.len()];
+    let mut device_center = vec![0f32; device.center.len()];
+    device.dvdi.buf.copy_to(&mut device_dvdi)?;
+    device.fast.buf.copy_to(&mut device_fast)?;
+    device.slow.buf.copy_to(&mut device_slow)?;
+    device.center.buf.copy_to(&mut device_center)?;
+
+    for (lhs, rhs) in legacy_dvdi.iter().zip(device_dvdi.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!((lhs - rhs).abs() <= 1e-6, "dvdi lhs={lhs} rhs={rhs}");
+    }
+    for (lhs, rhs) in legacy_fast.iter().zip(device_fast.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!((lhs - rhs).abs() <= 1e-6, "fast lhs={lhs} rhs={rhs}");
+    }
+    for (lhs, rhs) in legacy_slow.iter().zip(device_slow.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!((lhs - rhs).abs() <= 1e-6, "slow lhs={lhs} rhs={rhs}");
+    }
+    for (lhs, rhs) in legacy_center.iter().zip(device_center.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!((lhs - rhs).abs() <= 1e-6, "center lhs={lhs} rhs={rhs}");
+    }
+
     Ok(())
 }
 

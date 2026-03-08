@@ -5,7 +5,7 @@ use crate::indicators::moving_averages::sma::{expand_grid_sma, SmaBatchRange, Sm
 use cust::context::{CacheConfig, Context};
 use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, Function, GridSize};
-use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, DevicePointer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -208,7 +208,7 @@ impl CudaSma {
 
     fn launch_batch_kernel(
         &self,
-        d_prices: &DeviceBuffer<f32>,
+        d_prices: DevicePointer<f32>,
         series_len: usize,
         first_valid: usize,
         d_prefix: &mut DeviceBuffer<f64>,
@@ -298,7 +298,7 @@ impl CudaSma {
         };
 
         unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut prices_ptr = d_prices.as_raw();
             let mut series_len_i = series_len as i32;
             let mut first_valid_i = first_valid as i32;
             let mut prefix_ptr = d_prefix.as_device_ptr().as_raw();
@@ -629,7 +629,7 @@ impl CudaSma {
                 d_periods.async_copy_from(&h_periods, &self.stream)?;
             }
 
-            self.launch_batch_kernel(&d_prices, len, first_valid, &mut d_prefix)?;
+            self.launch_batch_kernel(d_prices.as_device_ptr(), len, first_valid, &mut d_prefix)?;
             self.launch_batch_from_prefix_kernel(
                 &d_prefix,
                 &d_periods,
@@ -654,7 +654,7 @@ impl CudaSma {
             let mut d_prefix = unsafe { DeviceBuffer::<f64>::uninitialized(len + 1) }?;
             let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
 
-            self.launch_batch_kernel(&d_prices, len, first_valid, &mut d_prefix)?;
+            self.launch_batch_kernel(d_prices.as_device_ptr(), len, first_valid, &mut d_prefix)?;
             self.launch_batch_from_prefix_kernel(
                 &d_prefix,
                 &d_periods,
@@ -963,6 +963,46 @@ impl CudaSma {
         combos: &[SmaParams],
         first_valid: usize,
     ) -> Result<DeviceArrayF32, CudaSmaError> {
+        self.sma_batch_dev_from_device_ptr(d_prices.as_device_ptr(), len, combos, first_valid)
+    }
+
+    pub fn sma_batch_dev_from_device_ptr(
+        &self,
+        d_prices: DevicePointer<f32>,
+        len: usize,
+        combos: &[SmaParams],
+        first_valid: usize,
+    ) -> Result<DeviceArrayF32, CudaSmaError> {
+        if len == 0 {
+            return Err(CudaSmaError::InvalidInput("len must be positive".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaSmaError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, len
+            )));
+        }
+        if combos.is_empty() {
+            return Err(CudaSmaError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        for combo in combos {
+            let period = combo.period.unwrap_or(0);
+            if period == 0 {
+                return Err(CudaSmaError::InvalidInput(
+                    "period must be at least 1".into(),
+                ));
+            }
+            if len - first_valid < period {
+                return Err(CudaSmaError::InvalidInput(format!(
+                    "not enough valid data for period {} (have {} after first valid)",
+                    period,
+                    len - first_valid
+                )));
+            }
+        }
+
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let d_periods = DeviceBuffer::from_slice(&periods)?;
         let mut d_prefix = unsafe { DeviceBuffer::<f64>::uninitialized(len + 1) }?;
@@ -977,12 +1017,23 @@ impl CudaSma {
             first_valid,
             &mut d_out,
         )?;
-        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: combos.len(),
             cols: len,
         })
+    }
+
+    pub fn sma_batch_from_device_ptr(
+        &self,
+        d_prices: DevicePointer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &SmaBatchRange,
+    ) -> Result<DeviceArrayF32, CudaSmaError> {
+        let combos =
+            expand_grid_sma(sweep).map_err(|e| CudaSmaError::InvalidInput(e.to_string()))?;
+        self.sma_batch_dev_from_device_ptr(d_prices, len, &combos, first_valid)
     }
 
     pub fn sma_prefix_f64_device_into(
@@ -1013,7 +1064,7 @@ impl CudaSma {
             )));
         }
 
-        self.launch_batch_kernel(d_prices, len, first_valid, d_prefix)?;
+        self.launch_batch_kernel(d_prices.as_device_ptr(), len, first_valid, d_prefix)?;
         Ok(())
     }
 
@@ -1181,7 +1232,7 @@ pub mod benches {
         fn launch(&mut self) {
             self.cuda
                 .launch_batch_kernel(
-                    &self.d_prices,
+                    self.d_prices.as_device_ptr(),
                     self.len,
                     self.first_valid,
                     &mut self.d_prefix,

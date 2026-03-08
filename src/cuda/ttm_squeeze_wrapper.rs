@@ -326,6 +326,35 @@ impl CudaTtmSqueeze {
         Ok((combos, first_valid, len))
     }
 
+    fn prepare_device_batch_inputs(
+        len: usize,
+        first_valid: usize,
+        sweep: &TtmSqueezeBatchRange,
+    ) -> Result<Vec<Combo>, CudaTtmSqueezeError> {
+        if len == 0 {
+            return Err(CudaTtmSqueezeError::InvalidInput("empty series".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaTtmSqueezeError::InvalidInput(
+                "first_valid must be within the input length".into(),
+            ));
+        }
+        let combos = Self::expand_grid(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaTtmSqueezeError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        for c in &combos {
+            if c.length <= 0 || (len - first_valid) < (c.length as usize) {
+                return Err(CudaTtmSqueezeError::InvalidInput(
+                    "invalid length or insufficient data".into(),
+                ));
+            }
+        }
+        Ok(combos)
+    }
+
     fn launch_batch_kernel(
         &self,
         d_high: &DeviceBuffer<f32>,
@@ -531,6 +560,124 @@ impl CudaTtmSqueeze {
         self.stream
             .synchronize()
             .map_err(CudaTtmSqueezeError::from)?;
+
+        Ok((
+            DeviceArrayF32 {
+                buf: d_mo,
+                rows: combos.len(),
+                cols: len,
+            },
+            DeviceArrayF32 {
+                buf: d_sq,
+                rows: combos.len(),
+                cols: len,
+            },
+        ))
+    }
+
+    pub fn ttm_squeeze_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &TtmSqueezeBatchRange,
+    ) -> Result<(DeviceArrayF32, DeviceArrayF32), CudaTtmSqueezeError> {
+        if d_high.len() != len || d_low.len() != len || d_close.len() != len {
+            return Err(CudaTtmSqueezeError::InvalidInput(
+                "device input length mismatch".into(),
+            ));
+        }
+
+        let combos = Self::prepare_device_batch_inputs(len, first_valid, sweep)?;
+        let elem = std::mem::size_of::<f32>();
+        let per_combo_bytes = std::mem::size_of::<i32>() + 4 * elem;
+        let params_bytes = combos.len().checked_mul(per_combo_bytes).ok_or_else(|| {
+            CudaTtmSqueezeError::InvalidInput("size overflow in params bytes".into())
+        })?;
+        let out_elems = combos
+            .len()
+            .checked_mul(len)
+            .and_then(|v| v.checked_mul(2))
+            .ok_or_else(|| {
+                CudaTtmSqueezeError::InvalidInput("size overflow in output elements".into())
+            })?;
+        let out_bytes = out_elems.checked_mul(elem).ok_or_else(|| {
+            CudaTtmSqueezeError::InvalidInput("size overflow in output bytes".into())
+        })?;
+        let required = params_bytes.checked_add(out_bytes).ok_or_else(|| {
+            CudaTtmSqueezeError::InvalidInput("size overflow in total bytes".into())
+        })?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaTtmSqueezeError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaTtmSqueezeError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
+        }
+
+        let v_len: Vec<i32> = combos.iter().map(|c| c.length).collect();
+        let v_bb: Vec<f32> = combos.iter().map(|c| c.bb_mult).collect();
+        let v_kh: Vec<f32> = combos.iter().map(|c| c.kc_high).collect();
+        let v_km: Vec<f32> = combos.iter().map(|c| c.kc_mid).collect();
+        let v_kl: Vec<f32> = combos.iter().map(|c| c.kc_low).collect();
+
+        let mut d_len: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(v_len.len()) }
+            .map_err(CudaTtmSqueezeError::from)?;
+        let mut d_bb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(v_bb.len()) }
+            .map_err(CudaTtmSqueezeError::from)?;
+        let mut d_kh: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(v_kh.len()) }
+            .map_err(CudaTtmSqueezeError::from)?;
+        let mut d_km: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(v_km.len()) }
+            .map_err(CudaTtmSqueezeError::from)?;
+        let mut d_kl: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(v_kl.len()) }
+            .map_err(CudaTtmSqueezeError::from)?;
+        unsafe {
+            d_len
+                .async_copy_from(&v_len, &self.stream)
+                .map_err(CudaTtmSqueezeError::from)?;
+            d_bb.async_copy_from(&v_bb, &self.stream)
+                .map_err(CudaTtmSqueezeError::from)?;
+            d_kh.async_copy_from(&v_kh, &self.stream)
+                .map_err(CudaTtmSqueezeError::from)?;
+            d_km.async_copy_from(&v_km, &self.stream)
+                .map_err(CudaTtmSqueezeError::from)?;
+            d_kl.async_copy_from(&v_kl, &self.stream)
+                .map_err(CudaTtmSqueezeError::from)?;
+        }
+
+        let elems = combos.len().checked_mul(len).ok_or_else(|| {
+            CudaTtmSqueezeError::InvalidInput("size overflow in output elems".into())
+        })?;
+        let mut d_mo: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaTtmSqueezeError::from)?;
+        let mut d_sq: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaTtmSqueezeError::from)?;
+
+        self.launch_batch_kernel(
+            d_high,
+            d_low,
+            d_close,
+            &d_len,
+            &d_bb,
+            &d_kh,
+            &d_km,
+            &d_kl,
+            len,
+            combos.len(),
+            first_valid,
+            combos.iter().map(|c| c.length as usize).max().unwrap_or(0),
+            &mut d_mo,
+            &mut d_sq,
+        )?;
 
         Ok((
             DeviceArrayF32 {

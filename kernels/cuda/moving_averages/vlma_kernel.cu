@@ -25,6 +25,38 @@ __device__ __forceinline__ float fmaf_safe(float a, float b, float c) {
     return __fmaf_rn(a, b, c);
 }
 
+extern "C" __global__ void vlma_build_prefixes_f32(
+    const float* __restrict__ data,
+    int len,
+    double* __restrict__ prefix_sum,
+    double* __restrict__ prefix_sum_sq,
+    int* __restrict__ prefix_nan
+) {
+    if (blockIdx.x != 0 || blockIdx.y != 0 || threadIdx.x != 0) return;
+    if (len < 0) return;
+
+    prefix_sum[0] = 0.0;
+    prefix_sum_sq[0] = 0.0;
+    prefix_nan[0] = 0;
+
+    double sum = 0.0;
+    double sum_sq = 0.0;
+    int nan_count = 0;
+    for (int t = 0; t < len; ++t) {
+        const float v = data[t];
+        if (isnan(v)) {
+            ++nan_count;
+        } else {
+            const double dv = static_cast<double>(v);
+            sum += dv;
+            sum_sq += dv * dv;
+        }
+        prefix_sum[t + 1] = sum;
+        prefix_sum_sq[t + 1] = sum_sq;
+        prefix_nan[t + 1] = nan_count;
+    }
+}
+
 
 
 

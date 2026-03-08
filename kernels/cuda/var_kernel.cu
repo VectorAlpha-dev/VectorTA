@@ -16,6 +16,12 @@ __device__ __forceinline__ float dev_nan() { return __int_as_float(0x7fffffff); 
 struct df32 { float hi, lo; };
 __device__ __forceinline__ df32 make_df32(float2 a) { return {a.x, a.y}; }
 
+__device__ __forceinline__ float2 split_f64_to_float2(double x) {
+    float hi = (float)x;
+    float lo = (float)(x - (double)hi);
+    return make_float2(hi, lo);
+}
+
 
 __device__ __forceinline__ void two_diff(float a, float b, float &s, float &e) {
     s = a - b;
@@ -42,6 +48,44 @@ __device__ __forceinline__ df32 df_sub(df32 a, df32 b) {
 #ifndef VAR_COMBO_TILE
 #define VAR_COMBO_TILE 4
 #endif
+
+extern "C" __global__ void var_build_prefix_f32(
+    const float* __restrict__ data,
+    int len,
+    int first_valid,
+    float2* __restrict__ prefix_sum,
+    float2* __restrict__ prefix_sum_sq,
+    int* __restrict__ prefix_nan)
+{
+    if (blockIdx.x != 0 || blockIdx.y != 0 || blockIdx.z != 0 ||
+        threadIdx.x != 0 || threadIdx.y != 0 || threadIdx.z != 0) {
+        return;
+    }
+
+    double sum = 0.0;
+    double sum_sq = 0.0;
+    int nan_count = 0;
+
+    prefix_sum[0] = make_float2(0.0f, 0.0f);
+    prefix_sum_sq[0] = make_float2(0.0f, 0.0f);
+    prefix_nan[0] = 0;
+
+    for (int i = 0; i < len; ++i) {
+        if (i >= first_valid) {
+            const float v = data[i];
+            if (isnan(v)) {
+                nan_count += 1;
+            } else {
+                const double dv = (double)v;
+                sum += dv;
+                sum_sq += dv * dv;
+            }
+        }
+        prefix_sum[i + 1] = split_f64_to_float2(sum);
+        prefix_sum_sq[i + 1] = split_f64_to_float2(sum_sq);
+        prefix_nan[i + 1] = nan_count;
+    }
+}
 
 
 extern "C" __global__ void var_batch_f32(

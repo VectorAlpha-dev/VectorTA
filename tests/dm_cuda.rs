@@ -8,7 +8,7 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::dm_wrapper::CudaDm;
+use vector_ta::cuda::{dm_wrapper::CudaDm, CudaRuntime};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -150,5 +150,76 @@ fn dm_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
             idx
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn dm_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[dm_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 4096usize;
+    let mut high = vec![f64::NAN; len];
+    let mut low = vec![f64::NAN; len];
+    for i in 6..len {
+        let x = i as f64;
+        let base = (x * 0.0015).sin() + 0.0002 * x;
+        let off = (0.001 * x.cos()).abs() + 0.11;
+        high[i] = base + off;
+        low[i] = base - off;
+    }
+    let sweep = DmBatchRange { period: (5, 17, 6) };
+
+    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let first_valid = high_f32
+        .iter()
+        .zip(low_f32.iter())
+        .position(|(h, l)| h.is_finite() && l.is_finite())
+        .expect("first_valid");
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let d_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+
+    let cuda = CudaDm::new(0).expect("CudaDm::new");
+    let (legacy_pair, legacy_combos) = cuda.dm_batch_dev(&high_f32, &low_f32, &sweep)?;
+    let (device_pair, device_combos) = cuda.dm_batch_dev_from_device_inputs(
+        d_high.buffer(),
+        d_low.buffer(),
+        high_f32.len(),
+        first_valid,
+        &sweep,
+    )?;
+
+    assert_eq!(legacy_pair.rows(), device_pair.rows());
+    assert_eq!(legacy_pair.cols(), device_pair.cols());
+    assert_eq!(legacy_combos.len(), device_combos.len());
+
+    let mut legacy_plus = vec![0f32; legacy_pair.plus.len()];
+    let mut legacy_minus = vec![0f32; legacy_pair.minus.len()];
+    legacy_pair.plus.buf.copy_to(&mut legacy_plus)?;
+    legacy_pair.minus.buf.copy_to(&mut legacy_minus)?;
+    let mut device_plus = vec![0f32; device_pair.plus.len()];
+    let mut device_minus = vec![0f32; device_pair.minus.len()];
+    device_pair.plus.buf.copy_to(&mut device_plus)?;
+    device_pair.minus.buf.copy_to(&mut device_minus)?;
+
+    let tol = 5e-4;
+    for idx in 0..legacy_plus.len() {
+        assert!(
+            approx_eq(legacy_plus[idx] as f64, device_plus[idx] as f64, tol),
+            "plus mismatch at {}",
+            idx
+        );
+        assert!(
+            approx_eq(legacy_minus[idx] as f64, device_minus[idx] as f64, tol),
+            "minus mismatch at {}",
+            idx
+        );
+    }
+
     Ok(())
 }

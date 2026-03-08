@@ -465,6 +465,190 @@ impl CudaAlligator {
         Ok(CudaAlligatorBatchResult { outputs, combos })
     }
 
+    pub fn alligator_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &AlligatorBatchRange,
+    ) -> Result<CudaAlligatorBatchResult, CudaAlligatorError> {
+        if len == 0 {
+            return Err(CudaAlligatorError::InvalidInput("empty data".into()));
+        }
+        if d_prices.len() != len {
+            return Err(CudaAlligatorError::InvalidInput(
+                "device prices length mismatch".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaAlligatorError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        fn axis(
+            (start, end, step): (usize, usize, usize),
+        ) -> Result<Vec<usize>, CudaAlligatorError> {
+            if step == 0 || start == end {
+                return Ok(vec![start]);
+            }
+            if start < end {
+                return Ok((start..=end).step_by(step.max(1)).collect());
+            }
+            let mut out = Vec::new();
+            let mut x = start as isize;
+            let end_i = end as isize;
+            let st = (step as isize).max(1);
+            while x >= end_i {
+                out.push(x as usize);
+                x -= st;
+            }
+            if out.is_empty() {
+                return Err(CudaAlligatorError::InvalidInput("invalid range".into()));
+            }
+            Ok(out)
+        }
+
+        let jaws_p = axis(sweep.jaw_period)?;
+        let jaws_o = axis(sweep.jaw_offset)?;
+        let teeth_p = axis(sweep.teeth_period)?;
+        let teeth_o = axis(sweep.teeth_offset)?;
+        let lips_p = axis(sweep.lips_period)?;
+        let lips_o = axis(sweep.lips_offset)?;
+        let mut combos = Vec::new();
+        for &jp in &jaws_p {
+            for &jo in &jaws_o {
+                for &tp in &teeth_p {
+                    for &to in &teeth_o {
+                        for &lp in &lips_p {
+                            for &lo in &lips_o {
+                                if jp == 0 || tp == 0 || lp == 0 {
+                                    return Err(CudaAlligatorError::InvalidInput(
+                                        "period must be > 0".into(),
+                                    ));
+                                }
+                                let need = jp.max(tp).max(lp);
+                                if len - first_valid < need {
+                                    return Err(CudaAlligatorError::InvalidInput(
+                                        "not enough valid data".into(),
+                                    ));
+                                }
+                                combos.push(AlligatorParams {
+                                    jaw_period: Some(jp),
+                                    jaw_offset: Some(jo),
+                                    teeth_period: Some(tp),
+                                    teeth_offset: Some(to),
+                                    lips_period: Some(lp),
+                                    lips_offset: Some(lo),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let n = combos.len();
+        let prices_bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("prices_bytes overflow".into()))?;
+        let params_elems = n
+            .checked_mul(6)
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("params_elems overflow".into()))?;
+        let params_bytes = params_elems
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("params_bytes overflow".into()))?;
+        let out_elems = n
+            .checked_mul(len)
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("output elements overflow".into()))?;
+        let out_bytes_single = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("out_bytes overflow".into()))?;
+        let out_bytes = out_bytes_single
+            .checked_mul(3)
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("out_bytes overflow".into()))?;
+        let required = prices_bytes
+            .checked_add(params_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaAlligatorError::InvalidInput("total VRAM size overflow".into()))?;
+        let headroom = 64usize * 1024 * 1024;
+        Self::will_fit(required, headroom)?;
+
+        let jaw_p: Vec<i32> = combos
+            .iter()
+            .map(|c| c.jaw_period.unwrap() as i32)
+            .collect();
+        let jaw_o: Vec<i32> = combos
+            .iter()
+            .map(|c| c.jaw_offset.unwrap() as i32)
+            .collect();
+        let tee_p: Vec<i32> = combos
+            .iter()
+            .map(|c| c.teeth_period.unwrap() as i32)
+            .collect();
+        let tee_o: Vec<i32> = combos
+            .iter()
+            .map(|c| c.teeth_offset.unwrap() as i32)
+            .collect();
+        let lip_p: Vec<i32> = combos
+            .iter()
+            .map(|c| c.lips_period.unwrap() as i32)
+            .collect();
+        let lip_o: Vec<i32> = combos
+            .iter()
+            .map(|c| c.lips_offset.unwrap() as i32)
+            .collect();
+
+        let d_jp = DeviceBuffer::from_slice(&jaw_p)?;
+        let d_jo = DeviceBuffer::from_slice(&jaw_o)?;
+        let d_tp = DeviceBuffer::from_slice(&tee_p)?;
+        let d_to = DeviceBuffer::from_slice(&tee_o)?;
+        let d_lp = DeviceBuffer::from_slice(&lip_p)?;
+        let d_lo = DeviceBuffer::from_slice(&lip_o)?;
+
+        let out_len = out_elems;
+        let mut d_jaw: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_len) }?;
+        let mut d_teeth: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_len) }?;
+        let mut d_lips: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_len) }?;
+
+        self.launch_batch_kernel(
+            d_prices,
+            &d_jp,
+            &d_jo,
+            &d_tp,
+            &d_to,
+            &d_lp,
+            &d_lo,
+            first_valid,
+            len,
+            n,
+            &mut d_jaw,
+            &mut d_teeth,
+            &mut d_lips,
+        )?;
+
+        let outputs = DeviceArrayF32Trio {
+            jaw: DeviceArrayF32 {
+                buf: d_jaw,
+                rows: n,
+                cols: len,
+            },
+            teeth: DeviceArrayF32 {
+                buf: d_teeth,
+                rows: n,
+                cols: len,
+            },
+            lips: DeviceArrayF32 {
+                buf: d_lips,
+                rows: n,
+                cols: len,
+            },
+            device_id: self.device_id,
+            _ctx: self.context.clone(),
+        };
+        Ok(CudaAlligatorBatchResult { outputs, combos })
+    }
+
     fn prepare_many_series_inputs(
         data_tm_f32: &[f32],
         cols: usize,

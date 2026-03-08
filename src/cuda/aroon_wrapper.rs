@@ -203,6 +203,34 @@ impl CudaAroon {
         None
     }
 
+    fn prepare_batch_meta(
+        len: usize,
+        first_valid: usize,
+        sweep: &AroonBatchRange,
+    ) -> Result<(Vec<AroonParams>, usize), CudaAroonError> {
+        if len == 0 {
+            return Err(CudaAroonError::InvalidInput("empty input".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaAroonError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+        let combos = Self::expand_lengths(sweep)?;
+        let max_len = combos.iter().map(|c| c.length.unwrap()).max().unwrap_or(0);
+        if max_len == 0 {
+            return Err(CudaAroonError::InvalidInput("no parameter combos".into()));
+        }
+        if len - first_valid < max_len + 1 {
+            return Err(CudaAroonError::InvalidInput(format!(
+                "not enough valid data: need >= {}, have {}",
+                max_len + 1,
+                len - first_valid
+            )));
+        }
+        Ok((combos, max_len))
+    }
+
     pub fn aroon_batch_dev(
         &self,
         high_f32: &[f32],
@@ -281,6 +309,74 @@ impl CudaAroon {
                 buf: d_down,
                 rows: combos.len(),
                 cols: n,
+            },
+        };
+        Ok(CudaAroonBatchResult { outputs, combos })
+    }
+
+    pub fn aroon_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &AroonBatchRange,
+    ) -> Result<CudaAroonBatchResult, CudaAroonError> {
+        if len == 0 || d_high.len() != len || d_low.len() != len {
+            return Err(CudaAroonError::InvalidInput(
+                "device input buffers must match non-zero length".into(),
+            ));
+        }
+        let (combos, max_len) = Self::prepare_batch_meta(len, first_valid, sweep)?;
+
+        let lengths_i32: Vec<i32> = combos.iter().map(|c| c.length.unwrap() as i32).collect();
+        let out_elems = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaAroonError::InvalidInput("rows*cols overflow".into()))?;
+        let headroom = env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
+        let param_bytes = lengths_i32.len().saturating_mul(4);
+        let out_bytes = out_elems
+            .checked_mul(4)
+            .and_then(|x| x.checked_mul(2))
+            .ok_or_else(|| CudaAroonError::InvalidInput("byte size overflow".into()))?;
+        let bytes = param_bytes
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaAroonError::InvalidInput("byte size overflow".into()))?;
+        Self::will_fit(bytes, headroom)?;
+
+        let d_lengths = unsafe { DeviceBuffer::from_slice_async(&lengths_i32, &self.stream) }?;
+        let mut d_up: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
+        let mut d_down: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
+
+        let _ = self.launch_batch_kernel(
+            d_high,
+            d_low,
+            &d_lengths,
+            len,
+            first_valid,
+            max_len,
+            combos.len(),
+            &mut d_up,
+            &mut d_down,
+            0,
+        )?;
+
+        let outputs = DeviceArrayF32Pair {
+            first: DeviceArrayF32 {
+                buf: d_up,
+                rows: combos.len(),
+                cols: len,
+            },
+            second: DeviceArrayF32 {
+                buf: d_down,
+                rows: combos.len(),
+                cols: len,
             },
         };
         Ok(CudaAroonBatchResult { outputs, combos })

@@ -121,6 +121,11 @@ impl CudaDvdiqqe {
     }
 
     #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaDvdiqqeError> {
+        self.stream.synchronize().map_err(CudaDvdiqqeError::Cuda)
+    }
+
+    #[inline]
     fn align_to_warp(x: u32) -> u32 {
         let w = 32u32;
         ((x + (w - 1)) / w).max(1) * w
@@ -198,10 +203,61 @@ impl CudaDvdiqqe {
             None => return Err(CudaDvdiqqeError::InvalidInput("all NaN close".into())),
         };
 
-        let (p_start, p_end, p_step) = sweep.period;
-        let (s_start, s_end, s_step) = sweep.smoothing_period;
-        let (f_start, f_end, f_step) = sweep.fast_multiplier;
-        let (sl_start, sl_end, sl_step) = sweep.slow_multiplier;
+        let d_open: DeviceBuffer<f32> = DeviceBuffer::from_slice(open)?;
+        let d_close: DeviceBuffer<f32> = DeviceBuffer::from_slice(close)?;
+        let d_vol: Option<DeviceBuffer<f32>> = if let Some(v) = volume {
+            Some(DeviceBuffer::from_slice(v)?)
+        } else {
+            None
+        };
+        let out = self.dvdiqqe_batch_dev_from_device_inputs(
+            &d_open,
+            &d_close,
+            d_vol.as_ref(),
+            len,
+            first_valid,
+            sweep,
+            volume_type,
+            center_type,
+            tick_size,
+        )?;
+        self.synchronize()?;
+        Ok(out)
+    }
+
+    pub fn dvdiqqe_batch_dev_from_device_inputs(
+        &self,
+        d_open: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        d_vol: Option<&DeviceBuffer<f32>>,
+        len: usize,
+        first_valid: usize,
+        sweep: &DvdiqqeBatchRange,
+        volume_type: &str,
+        center_type: &str,
+        tick_size: f32,
+    ) -> Result<DeviceDvdiqqeQuad, CudaDvdiqqeError> {
+        if len == 0 {
+            return Err(CudaDvdiqqeError::InvalidInput("empty series".into()));
+        }
+        if d_open.len() != len || d_close.len() != len {
+            return Err(CudaDvdiqqeError::InvalidInput(
+                "device open/close length mismatch".into(),
+            ));
+        }
+        if let Some(volume) = d_vol {
+            if volume.len() != len {
+                return Err(CudaDvdiqqeError::InvalidInput(
+                    "device volume length mismatch".into(),
+                ));
+            }
+        }
+        if first_valid >= len {
+            return Err(CudaDvdiqqeError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
         let mut periods = Vec::<i32>::new();
         let mut smoothings = Vec::<i32>::new();
         let mut fasts = Vec::<f32>::new();
@@ -298,13 +354,6 @@ impl CudaDvdiqqe {
             .saturating_add(slows.len() * std::mem::size_of::<f32>());
         self.will_fit(required, 64usize << 20)?;
 
-        let d_open: DeviceBuffer<f32> = DeviceBuffer::from_slice(open)?;
-        let d_close: DeviceBuffer<f32> = DeviceBuffer::from_slice(close)?;
-        let d_vol: Option<DeviceBuffer<f32>> = if let Some(v) = volume {
-            Some(DeviceBuffer::from_slice(v)?)
-        } else {
-            None
-        };
         let has_volume = d_vol.is_some() as i32;
         let d_periods: DeviceBuffer<i32> = DeviceBuffer::from_slice(&periods)?;
         let d_smooths: DeviceBuffer<i32> = DeviceBuffer::from_slice(&smoothings)?;
@@ -353,7 +402,7 @@ impl CudaDvdiqqe {
                     || volume_type.eq_ignore_ascii_case("tick");
                 let mut vol_ptr: u64 = if use_tick_only {
                     0u64
-                } else if let Some(ref dv) = d_vol {
+                } else if let Some(dv) = d_vol {
                     dv.as_device_ptr().as_raw()
                 } else {
                     0u64
@@ -405,27 +454,6 @@ impl CudaDvdiqqe {
                     .as_device_ptr()
                     .as_raw()
                     .wrapping_add((launched * len * std::mem::size_of::<f32>()) as u64);
-                let mut center_dyn = if center_type.eq_ignore_ascii_case("dynamic") {
-                    1i32
-                } else {
-                    0i32
-                };
-                let mut dvdi_ptr = d_dvdi
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add((launched * len * std::mem::size_of::<f32>()) as u64);
-                let mut fast_ptr = d_fast
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add((launched * len * std::mem::size_of::<f32>()) as u64);
-                let mut slow_ptr = d_slow
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add((launched * len * std::mem::size_of::<f32>()) as u64);
-                let mut cent_ptr = d_cent
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add((launched * len * std::mem::size_of::<f32>()) as u64);
                 let args: &mut [*mut c_void] = &mut [
                     &mut open_ptr as *mut _ as *mut c_void,
                     &mut close_ptr as *mut _ as *mut c_void,
@@ -451,7 +479,6 @@ impl CudaDvdiqqe {
             }
             launched += cur;
         }
-        self.stream.synchronize().map_err(CudaDvdiqqeError::Cuda)?;
 
         Ok(DeviceDvdiqqeQuad {
             dvdi: DeviceArrayF32 {

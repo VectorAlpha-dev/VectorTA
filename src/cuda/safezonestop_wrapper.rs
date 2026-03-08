@@ -325,6 +325,47 @@ impl CudaSafeZoneStop {
         dm
     }
 
+    fn launch_dm_raw_kernel(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        len: usize,
+        first: usize,
+        dir_long: bool,
+        d_dm: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaSafeZoneStopError> {
+        let func = self
+            .module
+            .get_function("safezonestop_build_dm_raw_f32")
+            .map_err(|_| CudaSafeZoneStopError::MissingKernelSymbol {
+                name: "safezonestop_build_dm_raw_f32",
+            })?;
+        const TB: u32 = 256;
+        let block: BlockSize = (TB, 1, 1).into();
+        let grid_x = ((len as u32) + TB - 1) / TB;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        self.validate_launch(grid_x.max(1), 1, 1, TB, 1, 1)?;
+        let dir_i32 = if dir_long { 1i32 } else { 0i32 };
+        unsafe {
+            let mut high_ptr = d_high.as_device_ptr().as_raw();
+            let mut low_ptr = d_low.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_i = first as i32;
+            let mut dir_ptr = dir_i32;
+            let mut dm_ptr = d_dm.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut high_ptr as *mut _ as *mut c_void,
+                &mut low_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut dir_ptr as *mut _ as *mut c_void,
+                &mut dm_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
     pub fn safezonestop_batch_dev(
         &self,
         high_f32: &[f32],
@@ -346,6 +387,42 @@ impl CudaSafeZoneStop {
         let first = Self::find_first_valid_pair(high_f32, low_f32)
             .ok_or_else(|| CudaSafeZoneStopError::InvalidInput("all values are NaN".into()))?;
 
+        let (d_high, h_high_pin) = self.upload_pinned_f32(high_f32)?;
+        let (d_low, h_low_pin) = self.upload_pinned_f32(low_f32)?;
+        let result = self.safezonestop_batch_dev_from_device_inputs(
+            &d_high, &d_low, n, first, direction, sweep,
+        )?;
+        self.stream.synchronize()?;
+        drop(h_high_pin);
+        drop(h_low_pin);
+        Ok(result)
+    }
+
+    pub fn safezonestop_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        len: usize,
+        first: usize,
+        direction: &str,
+        sweep: &SafeZoneStopBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<SafeZoneStopParams>), CudaSafeZoneStopError> {
+        if len == 0 || d_high.len() != len || d_low.len() != len {
+            return Err(CudaSafeZoneStopError::InvalidInput(
+                "device high/low buffers must match non-zero length".into(),
+            ));
+        }
+        if first >= len {
+            return Err(CudaSafeZoneStopError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let dir_long = match direction.as_bytes().get(0) {
+            Some(b'l') => true,
+            Some(b's') => false,
+            _ => true,
+        };
         let combos = Self::expand_grid(sweep)?;
 
         let mut periods_i32 = Vec::with_capacity(combos.len());
@@ -361,18 +438,18 @@ impl CudaSafeZoneStop {
                     "period/lookback must be > 0".into(),
                 ));
             }
-            if p > n || lb > n {
+            if p > len || lb > len {
                 return Err(CudaSafeZoneStopError::InvalidInput(
                     "period/lookback exceed length".into(),
                 ));
             }
-            if n - first < (p + 1).max(lb) {
+            if len - first < (p + 1).max(lb) {
                 return Err(CudaSafeZoneStopError::InvalidInput(format!(
                     "not enough valid data for period={}, lb={} (valid after first={} is {})",
                     p,
                     lb,
                     first,
-                    n - first
+                    len - first
                 )));
             }
             periods_i32.push(p as i32);
@@ -381,22 +458,16 @@ impl CudaSafeZoneStop {
             max_look = max_look.max(lb);
         }
 
-        let dm_raw = Self::compute_dm_raw_f32(high_f32, low_f32, first, dir_long);
-
         let need_deque = max_look > 4;
-
         let out_elems = combos
             .len()
-            .checked_mul(n)
+            .checked_mul(len)
             .ok_or_else(|| CudaSafeZoneStopError::InvalidInput("rows*cols overflow".into()))?;
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
-        let inputs_bytes = high_f32
-            .len()
-            .checked_add(low_f32.len())
-            .and_then(|v| v.checked_add(dm_raw.len()))
-            .and_then(|v| v.checked_mul(sz_f32))
-            .ok_or_else(|| CudaSafeZoneStopError::InvalidInput("input bytes overflow".into()))?;
+        let dm_bytes = len
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaSafeZoneStopError::InvalidInput("dm bytes overflow".into()))?;
         let params_bytes = periods_i32
             .len()
             .checked_mul(sz_i32)
@@ -416,7 +487,7 @@ impl CudaSafeZoneStop {
         let out_bytes = out_elems
             .checked_mul(sz_f32)
             .ok_or_else(|| CudaSafeZoneStopError::InvalidInput("output bytes overflow".into()))?;
-        let mut required = inputs_bytes
+        let mut required = dm_bytes
             .checked_add(params_bytes)
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or_else(|| CudaSafeZoneStopError::InvalidInput("total bytes overflow".into()))?;
@@ -451,9 +522,9 @@ impl CudaSafeZoneStop {
             }
         }
 
-        let (d_high, h_high_pin) = self.upload_pinned_f32(high_f32)?;
-        let (d_low, h_low_pin) = self.upload_pinned_f32(low_f32)?;
-        let (d_dm, h_dm_pin) = self.upload_pinned_f32(&dm_raw)?;
+        let mut d_dm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
+        self.launch_dm_raw_kernel(d_high, d_low, len, first, dir_long, &mut d_dm)?;
 
         let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
         let d_mults = DeviceBuffer::from_slice(&mults_f32)?;
@@ -499,7 +570,7 @@ impl CudaSafeZoneStop {
                         d_high.as_device_ptr().as_raw(),
                         d_low.as_device_ptr().as_raw(),
                         d_dm.as_device_ptr().as_raw(),
-                        n as i32,
+                        len as i32,
                         first as i32,
                         d_periods.as_device_ptr().as_raw(),
                         d_mults.as_device_ptr().as_raw(),
@@ -518,7 +589,7 @@ impl CudaSafeZoneStop {
                         d_high.as_device_ptr().as_raw(),
                         d_low.as_device_ptr().as_raw(),
                         d_dm.as_device_ptr().as_raw(),
-                        n as i32,
+                        len as i32,
                         first as i32,
                         d_periods.as_device_ptr().as_raw(),
                         d_mults.as_device_ptr().as_raw(),
@@ -537,17 +608,11 @@ impl CudaSafeZoneStop {
         drop(opt_q_idx);
         drop(opt_q_val);
 
-        self.stream.synchronize()?;
-
-        drop(h_high_pin);
-        drop(h_low_pin);
-        drop(h_dm_pin);
-
         Ok((
             DeviceArrayF32 {
                 buf: d_out,
                 rows: combos.len(),
-                cols: n,
+                cols: len,
             },
             combos,
         ))

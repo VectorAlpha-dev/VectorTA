@@ -6,6 +6,8 @@ use cust::memory::CopyDestination;
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::CudaRangeFilter;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
 
 use vector_ta::indicators::range_filter::{
     range_filter_batch_with_kernel, range_filter_with_kernel, RangeFilterBatchRange,
@@ -176,6 +178,62 @@ fn range_filter_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
             "low mismatch at {}",
             idx
         );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn range_filter_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[range_filter_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 4096usize;
+    let mut data = vec![f64::NAN; len];
+    for i in 3..len {
+        let x = i as f64;
+        data[i] = (x * 0.0019).sin() + 0.00023 * x;
+    }
+    let sweep = RangeFilterBatchRange {
+        range_size: (2.0, 3.0, 0.2),
+        range_period: (8, 16, 4),
+        smooth_range: Some(true),
+        smooth_period: Some(27),
+    };
+
+    let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_prices = runtime.upload_f32(&data_f32).expect("upload");
+    let cuda = CudaRangeFilter::new(0).expect("CudaRangeFilter::new");
+
+    let (legacy, _) = cuda
+        .range_filter_batch_dev(&data_f32, &sweep)
+        .expect("legacy range_filter");
+    let (device, _) = cuda
+        .range_filter_batch_dev_from_device_prices(d_prices.buffer(), len, 3, &sweep)
+        .expect("device range_filter");
+
+    for (legacy_buf, device_buf, label) in [
+        (&legacy.filter, &device.filter, "filter"),
+        (&legacy.high, &device.high, "high"),
+        (&legacy.low, &device.low, "low"),
+    ] {
+        let mut legacy_vals = vec![0f32; legacy.len()];
+        let mut device_vals = vec![0f32; device.len()];
+        legacy_buf.copy_to(&mut legacy_vals)?;
+        device_buf.copy_to(&mut device_vals)?;
+        for idx in 0..legacy_vals.len() {
+            assert!(
+                approx_eq(legacy_vals[idx] as f64, device_vals[idx] as f64, 1e-4),
+                "{label} mismatch at {}: legacy={} device={}",
+                idx,
+                legacy_vals[idx],
+                device_vals[idx]
+            );
+        }
     }
 
     Ok(())

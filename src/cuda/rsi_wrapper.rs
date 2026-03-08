@@ -211,6 +211,40 @@ impl CudaRsi {
         })
     }
 
+    pub fn rsi_batch_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        periods: &[i32],
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaRsiError> {
+        if len == 0 {
+            return Err(CudaRsiError::InvalidInput("empty data".into()));
+        }
+        if d_prices.len() != len {
+            return Err(CudaRsiError::InvalidInput(
+                "device price buffer length mismatch".into(),
+            ));
+        }
+        if periods.is_empty() {
+            return Err(CudaRsiError::InvalidInput("empty period sweep".into()));
+        }
+        let n_combos = periods.len();
+        let out_elems = n_combos
+            .checked_mul(len)
+            .ok_or_else(|| CudaRsiError::InvalidInput("rows*cols overflow".into()))?;
+        if d_out.len() != out_elems {
+            return Err(CudaRsiError::InvalidInput(
+                "output buffer length mismatch".into(),
+            ));
+        }
+        let d_periods = DeviceBuffer::from_slice(periods)?;
+        self.launch_batch(d_prices, &d_periods, len, first_valid, n_combos, d_out)?;
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
     fn launch_batch(
         &self,
         d_prices: &DeviceBuffer<f32>,

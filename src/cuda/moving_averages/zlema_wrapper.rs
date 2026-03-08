@@ -6,7 +6,7 @@ use cust::context::{CacheConfig, Context};
 use cust::device::Device;
 use cust::device::DeviceAttribute as DevAttr;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{AsyncCopyDestination, DeviceBuffer, LockedBuffer};
+use cust::memory::{AsyncCopyDestination, DeviceBuffer, DevicePointer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -233,9 +233,59 @@ impl CudaZlema {
         Ok((combos, first_valid, len))
     }
 
+    fn prepare_batch_inputs_device(
+        len: usize,
+        first_valid: usize,
+        sweep: &ZlemaBatchRange,
+    ) -> Result<Vec<ZlemaParams>, CudaZlemaError> {
+        if len == 0 {
+            return Err(CudaZlemaError::InvalidInput("empty data".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaZlemaError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, len
+            )));
+        }
+
+        let combos = expand_grid_zlema(sweep);
+        if combos.is_empty() {
+            return Err(CudaZlemaError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+
+        let mut max_period = 0usize;
+        for combo in &combos {
+            let period = combo.period.unwrap_or(0);
+            if period == 0 {
+                return Err(CudaZlemaError::InvalidInput(
+                    "period must be at least 1 in CUDA path".into(),
+                ));
+            }
+            if period > len {
+                return Err(CudaZlemaError::InvalidInput(format!(
+                    "period {} exceeds data length {}",
+                    period, len
+                )));
+            }
+            max_period = max_period.max(period);
+        }
+
+        if len - first_valid < max_period {
+            return Err(CudaZlemaError::InvalidInput(format!(
+                "not enough valid data (need >= {}, have {} after first valid)",
+                max_period,
+                len - first_valid
+            )));
+        }
+
+        Ok(combos)
+    }
+
     fn launch_batch_kernel(
         &self,
-        d_prices: &DeviceBuffer<f32>,
+        d_prices: DevicePointer<f32>,
         d_periods: &DeviceBuffer<i32>,
         d_lags: &DeviceBuffer<i32>,
         d_alphas: &DeviceBuffer<f32>,
@@ -274,7 +324,7 @@ impl CudaZlema {
         self.validate_launch(grid, block)?;
 
         unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut prices_ptr = d_prices.as_raw();
             let mut periods_ptr = d_periods.as_device_ptr().as_raw();
             let mut lags_ptr = d_lags.as_device_ptr().as_raw();
             let mut alphas_ptr = d_alphas.as_device_ptr().as_raw();
@@ -302,7 +352,7 @@ impl CudaZlema {
 
     fn launch_batch_kernel_tiled(
         &self,
-        d_prices: &DeviceBuffer<f32>,
+        d_prices: DevicePointer<f32>,
         d_periods: &DeviceBuffer<i32>,
         d_lags: &DeviceBuffer<i32>,
         d_alphas: &DeviceBuffer<f32>,
@@ -349,7 +399,7 @@ impl CudaZlema {
         self.validate_launch(grid, block)?;
 
         unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut prices_ptr = d_prices.as_raw();
             let mut periods_ptr = d_periods.as_device_ptr().as_raw();
             let mut lags_ptr = d_lags.as_device_ptr().as_raw();
             let mut alphas_ptr = d_alphas.as_device_ptr().as_raw();
@@ -380,7 +430,7 @@ impl CudaZlema {
 
     fn launch_batch_kernel_warp_scan(
         &self,
-        d_prices: &DeviceBuffer<f32>,
+        d_prices: DevicePointer<f32>,
         d_periods: &DeviceBuffer<i32>,
         len: usize,
         first_valid: usize,
@@ -421,7 +471,7 @@ impl CudaZlema {
         self.validate_launch(grid, block)?;
 
         unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut prices_ptr = d_prices.as_raw();
             let mut periods_ptr = d_periods.as_device_ptr().as_raw();
             let mut len_i = len as i32;
             let mut combos_i = n_combos as i32;
@@ -508,7 +558,7 @@ impl CudaZlema {
 
         if use_warp_scan {
             self.launch_batch_kernel_warp_scan(
-                &d_prices,
+                d_prices.as_device_ptr(),
                 &d_periods,
                 len,
                 first_valid,
@@ -532,7 +582,7 @@ impl CudaZlema {
 
             if use_tiled {
                 self.launch_batch_kernel_tiled(
-                    &d_prices,
+                    d_prices.as_device_ptr(),
                     &d_periods,
                     &d_lags,
                     &d_alphas,
@@ -544,7 +594,7 @@ impl CudaZlema {
                 )?;
             } else {
                 self.launch_batch_kernel(
-                    &d_prices,
+                    d_prices.as_device_ptr(),
                     &d_periods,
                     &d_lags,
                     &d_alphas,
@@ -611,7 +661,7 @@ impl CudaZlema {
 
         if use_warp_scan {
             self.launch_batch_kernel_warp_scan(
-                d_prices,
+                d_prices.as_device_ptr(),
                 d_periods,
                 len,
                 first_valid,
@@ -630,7 +680,7 @@ impl CudaZlema {
         let use_tiled = (n_combos >= 64) && (len >= 4096);
         if use_tiled {
             self.launch_batch_kernel_tiled(
-                d_prices,
+                d_prices.as_device_ptr(),
                 d_periods,
                 d_lags,
                 d_alphas,
@@ -642,7 +692,7 @@ impl CudaZlema {
             )?;
         } else {
             self.launch_batch_kernel(
-                d_prices,
+                d_prices.as_device_ptr(),
                 d_periods,
                 d_lags,
                 d_alphas,
@@ -654,6 +704,125 @@ impl CudaZlema {
         }
 
         Ok(())
+    }
+
+    pub fn zlema_batch_from_device_ptr(
+        &self,
+        d_prices: DevicePointer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &ZlemaBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<ZlemaParams>), CudaZlemaError> {
+        let combos = Self::prepare_batch_inputs_device(len, first_valid, sweep)?;
+        let rows = combos.len();
+        let sz_f32 = std::mem::size_of::<f32>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let periods_b = rows
+            .checked_mul(sz_i32)
+            .ok_or_else(|| CudaZlemaError::InvalidInput("byte size overflow".into()))?;
+        let out_b = rows
+            .checked_mul(len)
+            .and_then(|v| v.checked_mul(sz_f32))
+            .ok_or_else(|| CudaZlemaError::InvalidInput("byte size overflow".into()))?;
+
+        let n_combos = combos.len();
+        let has_warp_scan = self
+            .module
+            .get_function("zlema_batch_warp_scan_f32")
+            .is_ok();
+        let use_warp_scan = has_warp_scan && Self::env_flag("ZLEMA_BATCH_WARP_SCAN", true);
+
+        let lags_b = if use_warp_scan {
+            0
+        } else {
+            rows.checked_mul(sz_i32)
+                .ok_or_else(|| CudaZlemaError::InvalidInput("byte size overflow".into()))?
+        };
+        let alphas_b = if use_warp_scan {
+            0
+        } else {
+            rows.checked_mul(sz_f32)
+                .ok_or_else(|| CudaZlemaError::InvalidInput("byte size overflow".into()))?
+        };
+
+        let bytes_required = periods_b
+            .checked_add(lags_b)
+            .and_then(|v| v.checked_add(alphas_b))
+            .and_then(|v| v.checked_add(out_b))
+            .ok_or_else(|| CudaZlemaError::InvalidInput("byte size overflow".into()))?;
+        let headroom = env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
+        Self::ensure_fit(bytes_required, headroom)?;
+
+        let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let d_periods = DeviceBuffer::from_slice(&periods)?;
+
+        let elems = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaZlemaError::InvalidInput("rows*cols overflow".into()))?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
+
+        if use_warp_scan {
+            self.launch_batch_kernel_warp_scan(
+                d_prices,
+                &d_periods,
+                len,
+                first_valid,
+                n_combos,
+                &mut d_out,
+            )?;
+        } else {
+            let lags: Vec<i32> = combos
+                .iter()
+                .map(|c| ((c.period.unwrap() - 1) / 2) as i32)
+                .collect();
+            let alphas: Vec<f32> = combos
+                .iter()
+                .map(|c| 2.0f32 / (c.period.unwrap() as f32 + 1.0f32))
+                .collect();
+            let d_lags = DeviceBuffer::from_slice(&lags)?;
+            let d_alphas = DeviceBuffer::from_slice(&alphas)?;
+
+            let max_lag = *lags.iter().max().unwrap_or(&0);
+            let use_tiled = (n_combos >= 64) && (len >= 4096);
+
+            if use_tiled {
+                self.launch_batch_kernel_tiled(
+                    d_prices,
+                    &d_periods,
+                    &d_lags,
+                    &d_alphas,
+                    len,
+                    first_valid,
+                    n_combos,
+                    max_lag,
+                    &mut d_out,
+                )?;
+            } else {
+                self.launch_batch_kernel(
+                    d_prices,
+                    &d_periods,
+                    &d_lags,
+                    &d_alphas,
+                    len,
+                    first_valid,
+                    n_combos,
+                    &mut d_out,
+                )?;
+            }
+        }
+
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: combos.len(),
+                cols: len,
+            },
+            combos,
+        ))
     }
 
     pub fn zlema_batch_dev(
@@ -955,7 +1124,7 @@ pub mod benches {
             if self.use_warp_scan {
                 self.cuda
                     .launch_batch_kernel_warp_scan(
-                        &self.d_prices,
+                        self.d_prices.as_device_ptr(),
                         &self.d_periods,
                         self.len,
                         self.first_valid,
@@ -968,7 +1137,7 @@ pub mod benches {
                 let d_alphas = self.d_alphas.as_ref().expect("d_alphas");
                 self.cuda
                     .launch_batch_kernel_tiled(
-                        &self.d_prices,
+                        self.d_prices.as_device_ptr(),
                         &self.d_periods,
                         d_lags,
                         d_alphas,

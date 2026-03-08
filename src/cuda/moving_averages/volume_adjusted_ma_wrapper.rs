@@ -370,6 +370,44 @@ impl CudaVama {
         (prefix_vol, prefix_price_vol)
     }
 
+    fn build_prefix_sums_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_volumes: &DeviceBuffer<f32>,
+        series_len: usize,
+    ) -> Result<(DeviceBuffer<f32>, DeviceBuffer<f32>), CudaVamaError> {
+        let func = self
+            .module
+            .get_function("volume_adjusted_ma_build_prefix_f32")
+            .map_err(|_| CudaVamaError::MissingKernelSymbol {
+                name: "volume_adjusted_ma_build_prefix_f32",
+            })?;
+        let mut d_prefix_volumes = unsafe { DeviceBuffer::<f32>::uninitialized(series_len) }
+            .map_err(CudaVamaError::Cuda)?;
+        let mut d_prefix_price_volumes = unsafe { DeviceBuffer::<f32>::uninitialized(series_len) }
+            .map_err(CudaVamaError::Cuda)?;
+        let block: BlockSize = (1, 1, 1).into();
+        let grid: GridSize = (1, 1, 1).into();
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut volumes_ptr = d_volumes.as_device_ptr().as_raw();
+            let mut len_i = series_len as i32;
+            let mut prefix_vol_ptr = d_prefix_volumes.as_device_ptr().as_raw();
+            let mut prefix_price_vol_ptr = d_prefix_price_volumes.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut volumes_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut prefix_vol_ptr as *mut _ as *mut c_void,
+                &mut prefix_price_vol_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(CudaVamaError::Cuda)?;
+        }
+        Ok((d_prefix_volumes, d_prefix_price_volumes))
+    }
+
     fn launch_batch_kernel(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -557,6 +595,131 @@ impl CudaVama {
             series_len,
             max_length,
         )
+    }
+
+    pub fn volume_adjusted_ma_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_volumes: &DeviceBuffer<f32>,
+        first_valid: usize,
+        sweep: &VolumeAdjustedMaBatchRange,
+    ) -> Result<DeviceArrayF32, CudaVamaError> {
+        let series_len = d_prices.len();
+        if series_len == 0 {
+            return Err(CudaVamaError::InvalidInput("empty price data".into()));
+        }
+        if d_volumes.len() != series_len {
+            return Err(CudaVamaError::InvalidInput(format!(
+                "price/volume length mismatch: {} vs {}",
+                series_len,
+                d_volumes.len()
+            )));
+        }
+
+        let combos = Self::expand_range(sweep);
+        if combos.is_empty() {
+            return Err(CudaVamaError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        if first_valid >= series_len {
+            return Err(CudaVamaError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, series_len
+            )));
+        }
+
+        let mut max_length = 0usize;
+        for prm in &combos {
+            let length = prm.length.unwrap_or(0);
+            let vi_factor = prm.vi_factor.unwrap_or(0.0);
+            if length == 0 || length > series_len {
+                return Err(CudaVamaError::InvalidInput(format!(
+                    "invalid length {} (series len {})",
+                    length, series_len
+                )));
+            }
+            if !vi_factor.is_finite() || vi_factor <= 0.0 {
+                return Err(CudaVamaError::InvalidInput(format!(
+                    "invalid vi_factor {}",
+                    vi_factor
+                )));
+            }
+            let valid = series_len - first_valid;
+            if valid < length {
+                return Err(CudaVamaError::InvalidInput(format!(
+                    "not enough valid data: need >= {}, valid = {}",
+                    length, valid
+                )));
+            }
+            max_length = max_length.max(length);
+        }
+
+        let lengths_i32: Vec<i32> = combos.iter().map(|p| p.length.unwrap() as i32).collect();
+        let vi_factors_f32: Vec<f32> = combos.iter().map(|p| p.vi_factor.unwrap() as f32).collect();
+        let sample_periods_i32: Vec<i32> = combos
+            .iter()
+            .map(|p| p.sample_period.unwrap_or(0) as i32)
+            .collect();
+        let strict_flags: Vec<u8> = combos
+            .iter()
+            .map(|p| if p.strict.unwrap_or(true) { 1 } else { 0 })
+            .collect();
+        let item = std::mem::size_of::<f32>();
+        let prefix_bytes = 2usize
+            .checked_mul(series_len)
+            .and_then(|x| x.checked_mul(item))
+            .ok_or_else(|| CudaVamaError::InvalidInput("byte size overflow".into()))?;
+        let param_each = (std::mem::size_of::<i32>() * 2)
+            + std::mem::size_of::<f32>()
+            + std::mem::size_of::<u8>();
+        let param_bytes = combos
+            .len()
+            .checked_mul(param_each)
+            .ok_or_else(|| CudaVamaError::InvalidInput("byte size overflow".into()))?;
+        let out_bytes = combos
+            .len()
+            .checked_mul(series_len)
+            .and_then(|x| x.checked_mul(item))
+            .ok_or_else(|| CudaVamaError::InvalidInput("byte size overflow".into()))?;
+        let required = prefix_bytes
+            .checked_add(param_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
+            .ok_or_else(|| CudaVamaError::InvalidInput("byte size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
+
+        let (d_prefix_volumes, d_prefix_price_volumes) =
+            self.build_prefix_sums_device(d_prices, d_volumes, series_len)?;
+        let d_lengths = DeviceBuffer::from_slice(&lengths_i32).map_err(CudaVamaError::Cuda)?;
+        let d_vi_factors =
+            DeviceBuffer::from_slice(&vi_factors_f32).map_err(CudaVamaError::Cuda)?;
+        let d_sample_periods =
+            DeviceBuffer::from_slice(&sample_periods_i32).map_err(CudaVamaError::Cuda)?;
+        let d_strict_flags =
+            DeviceBuffer::from_slice(&strict_flags).map_err(CudaVamaError::Cuda)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(combos.len() * series_len) }
+                .map_err(CudaVamaError::Cuda)?;
+        self.vama_batch_device(
+            d_prices,
+            d_volumes,
+            &d_prefix_volumes,
+            &d_prefix_price_volumes,
+            &d_lengths,
+            &d_vi_factors,
+            &d_sample_periods,
+            &d_strict_flags,
+            series_len as i32,
+            combos.len() as i32,
+            first_valid as i32,
+            &mut d_out,
+        )?;
+        let _ = max_length;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combos.len(),
+            cols: series_len,
+        })
     }
 
     fn prepare_many_series_inputs(

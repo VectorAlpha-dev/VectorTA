@@ -47,10 +47,24 @@ dsf dsf_sub(dsf a, dsf b) {
 static __forceinline__ __device__
 float dsf_to_float(dsf x) { return x.hi + x.lo; }
 
+extern "C" __global__ void er_build_prefix_absdiff_dsf_serial_f32(
+    const float* __restrict__ data,
+    int len,
+    int first_valid,
+    float2* __restrict__ prefix_ds) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    for (int i = 0; i < len; ++i) {
+        prefix_ds[i] = make_float2(0.0f, 0.0f);
+    }
+    if (first_valid < 0 || first_valid >= len) return;
 
-
-
-
+    dsf acc{0.0f, 0.0f};
+    for (int j = first_valid; j + 1 < len; ++j) {
+        const float d = fabsf(data[j + 1] - data[j]);
+        acc = dsf_add_scalar(acc, d);
+        prefix_ds[j + 1] = make_float2(acc.hi, acc.lo);
+    }
+}
 
 extern "C" __global__ void er_batch_prefix_f32(
     const float* __restrict__ data,

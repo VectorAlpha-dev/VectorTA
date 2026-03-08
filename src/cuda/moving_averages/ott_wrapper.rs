@@ -6,7 +6,10 @@ use super::{BatchKernelPolicy, ManySeriesKernelPolicy};
 use crate::cuda::moving_averages::{
     CudaEma, CudaKama, CudaNama, CudaSma, CudaVpwma, CudaVwma, CudaWilders, CudaZlema,
 };
-use crate::cuda::moving_averages::{CudaMaData, CudaMaSelector};
+use crate::cuda::moving_averages::{
+    CudaMaData, CudaMaDeviceDataRef, CudaMaSelector, CudaMaSelectorError,
+};
+use crate::cuda::CudaDeviceSliceF32Ref;
 use crate::indicators::ott::{OttBatchRange, OttParams};
 use cust::context::Context;
 use cust::device::Device;
@@ -267,6 +270,7 @@ impl CudaOtt {
         if !any_finite {
             return Err(CudaOttError::InvalidInput("all values are NaN".into()));
         }
+        let first_valid = prices_f32.iter().position(|v| v.is_finite()).unwrap_or(0);
 
         let combos = expand_combos(sweep)?;
         let rows = combos.len();
@@ -462,6 +466,29 @@ impl CudaOtt {
             .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
 
         let selector = CudaMaSelector::new(self.device_id as usize);
+        let prices_view = unsafe {
+            CudaDeviceSliceF32Ref::from_raw_parts(
+                d_prices.as_device_ptr().as_raw(),
+                cols,
+                self.device_id,
+            )
+            .map_err(|e| CudaOttError::InvalidInput(e.to_string()))?
+        };
+
+        let selector_dev = |ma_type: &str, period: usize| -> Result<DeviceArrayF32, CudaOttError> {
+            match selector.ma_to_device_ref(
+                ma_type,
+                CudaMaDeviceDataRef::Slice(prices_view),
+                first_valid,
+                period,
+            ) {
+                Ok(dev) => Ok(dev),
+                Err(CudaMaSelectorError::Unsupported(_)) => selector
+                    .ma_to_device(ma_type, CudaMaData::SliceF32(prices_f32), period)
+                    .map_err(|e| CudaOttError::Cuda(e.to_string())),
+                Err(e) => Err(CudaOttError::Cuda(e.to_string())),
+            }
+        };
 
         for (row_idx, p) in combos.iter().enumerate() {
             let period = p.period.unwrap_or(2);
@@ -501,9 +528,7 @@ impl CudaOtt {
                             .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
                     }
                 } else {
-                    let dev = selector
-                        .ma_to_device("VAR", CudaMaData::SliceF32(prices_f32), period)
-                        .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+                    let dev = selector_dev("VAR", period)?;
                     self.launch_apply_single(
                         &mut f_apply,
                         &dev.buf,
@@ -515,9 +540,7 @@ impl CudaOtt {
                     self.stream.synchronize()?;
                 }
             } else {
-                let dev = selector
-                    .ma_to_device(ma_type, CudaMaData::SliceF32(prices_f32), period)
-                    .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+                let dev = selector_dev(ma_type, period)?;
                 self.launch_apply_single(
                     &mut f_apply,
                     &dev.buf,
@@ -534,6 +557,241 @@ impl CudaOtt {
             buf: d_out,
             rows,
             cols,
+        })
+    }
+
+    pub fn ott_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &OttBatchRange,
+    ) -> Result<DeviceArrayF32, CudaOttError> {
+        if series_len == 0 {
+            return Err(CudaOttError::InvalidInput("empty price input".into()));
+        }
+        if first_valid >= series_len {
+            return Err(CudaOttError::InvalidInput(format!(
+                "invalid first_valid {} for series length {}",
+                first_valid, series_len
+            )));
+        }
+        if series_len > i32::MAX as usize {
+            return Err(CudaOttError::InvalidInput(
+                "series length exceeds kernel limits".into(),
+            ));
+        }
+
+        let combos = expand_combos(sweep)?;
+        let rows = combos.len();
+        if rows == 0 {
+            return Err(CudaOttError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        if rows > u32::MAX as usize {
+            return Err(CudaOttError::InvalidInput(
+                "combo count exceeds kernel launch limits".into(),
+            ));
+        }
+
+        let max_period = combos
+            .iter()
+            .map(|combo| combo.period.unwrap_or(2))
+            .max()
+            .unwrap_or(0);
+        if max_period == 0 || max_period > series_len {
+            return Err(CudaOttError::InvalidInput(format!(
+                "invalid max period {} for series length {}",
+                max_period, series_len
+            )));
+        }
+        if series_len.saturating_sub(first_valid) < max_period {
+            return Err(CudaOttError::InvalidInput(format!(
+                "not enough valid data after first_valid {} for max period {}",
+                first_valid, max_period
+            )));
+        }
+
+        let out_elems = rows
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaOttError::InvalidInput("rows * cols overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaOttError::InvalidInput("byte size overflow".into()))?;
+        let headroom = env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
+        Self::will_fit(out_bytes, headroom)?;
+
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
+        self.memset_nan32_async(d_out.as_device_ptr().as_raw() as u64, out_elems)?;
+
+        let mut f_var: Option<Function> = self.module.get_function("ott_from_var_batch_f32").ok();
+        let mut f_apply = self
+            .module
+            .get_function("ott_apply_single_f32")
+            .map_err(|_| CudaOttError::MissingKernelSymbol {
+                name: "ott_apply_single_f32",
+            })?;
+
+        let all_var = combos.iter().all(|p| {
+            p.ma_type
+                .as_deref()
+                .unwrap_or("VAR")
+                .eq_ignore_ascii_case("VAR")
+        });
+        if all_var {
+            let mut periods_host: Vec<i32> = Vec::with_capacity(rows);
+            let mut percents_host: Vec<f32> = Vec::with_capacity(rows);
+            for p in &combos {
+                let period = p.period.unwrap_or(2);
+                let percent = p.percent.unwrap_or(1.4) as f32;
+                if period == 0 {
+                    return Err(CudaOttError::InvalidInput("period must be positive".into()));
+                }
+                if !percent.is_finite() {
+                    return Err(CudaOttError::InvalidInput("percent must be finite".into()));
+                }
+                if period > i32::MAX as usize {
+                    return Err(CudaOttError::InvalidInput(
+                        "period exceeds CUDA i32 range".into(),
+                    ));
+                }
+                periods_host.push(period as i32);
+                percents_host.push(percent);
+            }
+
+            if let Some(func) = f_var.as_mut() {
+                let mut d_periods: DeviceBuffer<i32> =
+                    unsafe { DeviceBuffer::uninitialized(rows) }?;
+                let mut d_percents: DeviceBuffer<f32> =
+                    unsafe { DeviceBuffer::uninitialized(rows) }?;
+                unsafe { d_periods.async_copy_from(&periods_host, &self.stream) }?;
+                unsafe { d_percents.async_copy_from(&percents_host, &self.stream) }?;
+
+                unsafe {
+                    let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                    let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+                    let mut percents_ptr = d_percents.as_device_ptr().as_raw();
+                    let mut series_len_i = series_len as i32;
+                    let mut n_combos_i = rows as i32;
+                    let mut out_ptr = d_out.as_device_ptr().as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut prices_ptr as *mut _ as *mut c_void,
+                        &mut periods_ptr as *mut _ as *mut c_void,
+                        &mut percents_ptr as *mut _ as *mut c_void,
+                        &mut series_len_i as *mut _ as *mut c_void,
+                        &mut n_combos_i as *mut _ as *mut c_void,
+                        &mut out_ptr as *mut _ as *mut c_void,
+                    ];
+                    let block_x = ott_batch_var_block_x();
+                    let grid_x = ((rows as u32).saturating_add(block_x - 1)) / block_x;
+                    let grid: GridSize = (grid_x.max(1), 1, 1).into();
+                    let block: BlockSize = (block_x, 1, 1).into();
+                    self.stream
+                        .launch(func, grid, block, 0, args)
+                        .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+                }
+
+                return Ok(DeviceArrayF32 {
+                    buf: d_out,
+                    rows,
+                    cols: series_len,
+                });
+            }
+        }
+
+        let selector = CudaMaSelector::new(self.device_id as usize);
+        let prices_view = unsafe {
+            CudaDeviceSliceF32Ref::from_raw_parts(
+                d_prices.as_device_ptr().as_raw(),
+                series_len,
+                self.device_id,
+            )
+            .map_err(|e| CudaOttError::InvalidInput(e.to_string()))?
+        };
+        let selector_dev = |ma_type: &str, period: usize| -> Result<DeviceArrayF32, CudaOttError> {
+            selector
+                .ma_to_device_ref(
+                    ma_type,
+                    CudaMaDeviceDataRef::Slice(prices_view),
+                    first_valid,
+                    period,
+                )
+                .map_err(|e| match e {
+                    CudaMaSelectorError::Unsupported(reason) => CudaOttError::InvalidInput(
+                        format!(
+                            "ott device path does not support ma_type '{}' without host fallback: {}",
+                            ma_type, reason
+                        ),
+                    ),
+                    other => CudaOttError::Cuda(other.to_string()),
+                })
+        };
+
+        let mut d_period = unsafe { DeviceBuffer::<i32>::uninitialized(1) }
+            .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+        let mut d_percent = unsafe { DeviceBuffer::<f32>::uninitialized(1) }
+            .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+
+        for (row_idx, combo) in combos.iter().enumerate() {
+            let period = combo.period.unwrap_or(2);
+            let percent = combo.percent.unwrap_or(1.4) as f32;
+            let ma_type = combo.ma_type.as_deref().unwrap_or("VAR");
+            let row_offset = row_idx
+                .checked_mul(series_len)
+                .ok_or_else(|| CudaOttError::InvalidInput("row offset overflow".into()))?;
+            let out_row_ptr = unsafe { d_out.as_device_ptr().offset(row_offset as isize) };
+
+            if ma_type.eq_ignore_ascii_case("VAR") {
+                let func = f_var.as_mut().ok_or_else(|| {
+                    CudaOttError::InvalidInput(
+                        "ott VAR device path requires ott_from_var_batch_f32 kernel".into(),
+                    )
+                })?;
+                unsafe { d_period.async_copy_from(&[period as i32], &self.stream) }
+                    .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+                unsafe { d_percent.async_copy_from(&[percent], &self.stream) }
+                    .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+                unsafe {
+                    let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                    let mut periods_ptr = d_period.as_device_ptr().as_raw();
+                    let mut percents_ptr = d_percent.as_device_ptr().as_raw();
+                    let mut series_len_i = series_len as i32;
+                    let mut n_combos_i = 1i32;
+                    let mut out_ptr = out_row_ptr.as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut prices_ptr as *mut _ as *mut c_void,
+                        &mut periods_ptr as *mut _ as *mut c_void,
+                        &mut percents_ptr as *mut _ as *mut c_void,
+                        &mut series_len_i as *mut _ as *mut c_void,
+                        &mut n_combos_i as *mut _ as *mut c_void,
+                        &mut out_ptr as *mut _ as *mut c_void,
+                    ];
+                    let grid: GridSize = (1, 1, 1).into();
+                    let block: BlockSize = (1, 1, 1).into();
+                    self.stream
+                        .launch(func, grid, block, 0, args)
+                        .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+                }
+            } else {
+                let dev = selector_dev(ma_type, period)?;
+                self.launch_apply_single(
+                    &mut f_apply,
+                    &dev.buf,
+                    series_len,
+                    percent,
+                    out_row_ptr.as_raw(),
+                )?;
+            }
+        }
+
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols: series_len,
         })
     }
 

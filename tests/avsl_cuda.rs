@@ -3,11 +3,12 @@ use vector_ta::utilities::enums::Kernel;
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
+#[cfg(feature = "cuda")]
 use vector_ta::cuda::{cuda_available, CudaAvsl};
 use vector_ta::indicators::avsl::{
     avsl_batch_with_kernel, avsl_with_kernel, AvslBatchRange, AvslData, AvslInput, AvslParams,
 };
-use vector_ta::utilities::data_loader::Candles;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -159,6 +160,71 @@ fn avsl_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
             approx_eq(cpu_tm[idx], gpu_tm[idx] as f64, tol),
             "mismatch at {}",
             idx
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn avsl_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[avsl_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 4096usize;
+    let mut close = vec![f64::NAN; len];
+    let mut low = vec![f64::NAN; len];
+    let mut volume = vec![f64::NAN; len];
+    for i in 64..len {
+        let x = i as f64;
+        close[i] = (x * 0.00123).sin() + 0.00017 * x;
+        low[i] = close[i] - 0.25 * (0.5 + (x * 0.01).cos().abs());
+        volume[i] = (x * 0.00077).cos().abs() + 0.5;
+    }
+    let sweep = AvslBatchRange {
+        fast_period: (4, 12, 4),
+        slow_period: (32, 64, 16),
+        multiplier: (2.0, 2.0, 0.0),
+    };
+
+    let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let volume_f32: Vec<f32> = volume.iter().map(|&v| v as f32).collect();
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_close = runtime.upload_f32(&close_f32).expect("upload close");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+    let d_volume = runtime.upload_f32(&volume_f32).expect("upload volume");
+    let cuda = CudaAvsl::new(0).expect("CudaAvsl::new");
+
+    let (legacy, _) = cuda
+        .avsl_batch_dev(&close_f32, &low_f32, &volume_f32, &sweep)
+        .expect("legacy avsl");
+    let (device, _) = cuda
+        .avsl_batch_dev_from_device_inputs(
+            d_close.buffer(),
+            d_low.buffer(),
+            d_volume.buffer(),
+            len,
+            64,
+            &sweep,
+        )
+        .expect("device avsl");
+
+    let mut legacy_vals = vec![0f32; legacy.len()];
+    let mut device_vals = vec![0f32; device.len()];
+    legacy.buf.copy_to(&mut legacy_vals)?;
+    device.buf.copy_to(&mut device_vals)?;
+
+    for idx in 0..legacy_vals.len() {
+        assert!(
+            approx_eq(legacy_vals[idx] as f64, device_vals[idx] as f64, 1e-4),
+            "mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_vals[idx],
+            device_vals[idx]
         );
     }
 

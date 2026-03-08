@@ -326,6 +326,34 @@ impl CudaPma {
         })
     }
 
+    fn prepare_batch_inputs_from_device(
+        series_len: usize,
+        first_valid: usize,
+        _sweep: &PmaBatchRange,
+    ) -> Result<BatchInputs, CudaPmaError> {
+        if series_len == 0 {
+            return Err(CudaPmaError::InvalidInput("empty price series".into()));
+        }
+        if first_valid >= series_len {
+            return Err(CudaPmaError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, series_len
+            )));
+        }
+        const MIN_REQUIRED: usize = 7;
+        if series_len - first_valid < MIN_REQUIRED {
+            return Err(CudaPmaError::InvalidInput(format!(
+                "not enough valid data (needed >= {MIN_REQUIRED}, valid = {})",
+                series_len - first_valid
+            )));
+        }
+        Ok(BatchInputs {
+            combos: 1,
+            first_valid,
+            series_len,
+        })
+    }
+
     fn run_batch_kernel(
         &self,
         prices: &[f32],
@@ -480,6 +508,60 @@ impl CudaPma {
     ) -> Result<DevicePmaPair, CudaPmaError> {
         let inputs = Self::prepare_batch_inputs(prices, sweep)?;
         self.run_batch_kernel(prices, &inputs)
+    }
+
+    pub fn pma_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &PmaBatchRange,
+    ) -> Result<DevicePmaPair, CudaPmaError> {
+        let inputs = Self::prepare_batch_inputs_from_device(series_len, first_valid, sweep)?;
+        let elem = core::mem::size_of::<f32>();
+        let prices_bytes = inputs.series_len.checked_mul(elem).ok_or_else(|| {
+            CudaPmaError::InvalidInput("series_len * sizeof(f32) overflow".into())
+        })?;
+        let out_elems = inputs
+            .combos
+            .checked_mul(inputs.series_len)
+            .ok_or_else(|| CudaPmaError::InvalidInput("combos * series_len overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(elem)
+            .ok_or_else(|| CudaPmaError::InvalidInput("out_elems * sizeof(f32) overflow".into()))?;
+        let two_out = out_bytes
+            .checked_mul(2)
+            .ok_or_else(|| CudaPmaError::InvalidInput("2 * out_bytes overflow".into()))?;
+        let required = prices_bytes.checked_add(two_out).ok_or_else(|| {
+            CudaPmaError::InvalidInput("prices_bytes + 2*out_bytes overflow".into())
+        })?;
+        let headroom = 64 * 1024 * 1024;
+        Self::will_fit(required, headroom)?;
+
+        let mut d_predict = unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
+        let mut d_trigger = unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
+
+        self.launch_batch_kernel_select(
+            d_prices,
+            inputs.series_len,
+            inputs.combos,
+            inputs.first_valid,
+            &mut d_predict,
+            &mut d_trigger,
+        )?;
+
+        Ok(DevicePmaPair {
+            predict: DeviceArrayF32 {
+                buf: d_predict,
+                rows: inputs.combos,
+                cols: inputs.series_len,
+            },
+            trigger: DeviceArrayF32 {
+                buf: d_trigger,
+                rows: inputs.combos,
+                cols: inputs.series_len,
+            },
+        })
     }
 
     pub fn pma_batch_into_host_f32(

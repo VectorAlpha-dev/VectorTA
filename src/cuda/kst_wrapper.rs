@@ -379,50 +379,53 @@ impl CudaKst {
         out
     }
 
-    pub fn kst_batch_dev(
-        &self,
-        prices: &[f32],
+    fn prepare_batch_combos(
+        series_len: usize,
+        first_valid: usize,
         sweep: &KstBatchRange,
-    ) -> Result<(DeviceKstPair, Vec<KstParams>), CudaKstError> {
-        if prices.is_empty() {
+    ) -> Result<Vec<KstParams>, CudaKstError> {
+        if series_len == 0 {
             return Err(CudaKstError::InvalidInput("empty price input".into()));
         }
+        if first_valid >= series_len {
+            return Err(CudaKstError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, series_len
+            )));
+        }
+
         let combos = Self::expand_grid(sweep);
         if combos.is_empty() {
             return Err(CudaKstError::InvalidInput("empty parameter sweep".into()));
         }
-        let len = prices.len();
-        let first_valid = (0..len)
-            .find(|&i| !prices[i].is_nan())
-            .ok_or_else(|| CudaKstError::InvalidInput("all values are NaN".into()))?;
 
         let mut max_warm_line = 0usize;
-        let mut max_sig = 0usize;
         for c in &combos {
             let wl = (c.roc_period1.unwrap() + c.sma_period1.unwrap() - 1)
                 .max(c.roc_period2.unwrap() + c.sma_period2.unwrap() - 1)
                 .max(c.roc_period3.unwrap() + c.sma_period3.unwrap() - 1)
                 .max(c.roc_period4.unwrap() + c.sma_period4.unwrap() - 1);
-            let ws = wl + c.signal_period.unwrap() - 1;
             if wl > max_warm_line {
                 max_warm_line = wl;
             }
-            if ws > max_sig {
-                max_sig = ws;
-            }
         }
-        if len - first_valid <= max_warm_line {
+        if series_len - first_valid <= max_warm_line {
             return Err(CudaKstError::InvalidInput(
                 "not enough valid data for KST warmup".into(),
             ));
         }
 
+        Ok(combos)
+    }
+
+    fn run_batch_kernel_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        combos: &[KstParams],
+    ) -> Result<DeviceKstPair, CudaKstError> {
         let rows = combos.len();
-        let prices_bytes =
-            len.checked_mul(std::mem::size_of::<f32>())
-                .ok_or(CudaKstError::InvalidInput(
-                    "size overflow in prices_bytes".into(),
-                ))?;
         let params_bytes = rows
             .checked_mul(9)
             .and_then(|x| x.checked_mul(std::mem::size_of::<i32>()))
@@ -430,34 +433,32 @@ impl CudaKst {
                 "size overflow in params_bytes".into(),
             ))?;
         let out_bytes = rows
-            .checked_mul(len)
+            .checked_mul(series_len)
             .and_then(|x| x.checked_mul(2))
             .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
             .ok_or(CudaKstError::InvalidInput(
                 "size overflow in output bytes".into(),
             ))?;
-        let required = prices_bytes
-            .checked_add(params_bytes)
-            .and_then(|x| x.checked_add(out_bytes))
+        let required = params_bytes
+            .checked_add(out_bytes)
             .ok_or(CudaKstError::InvalidInput(
                 "size overflow in total VRAM estimate".into(),
             ))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        let d_prices: DeviceBuffer<f32> = self.copy_f32_to_device_async(prices)?;
-
-        let packed = self.pack_params_async(&combos)?;
-
-        let out_len = rows.checked_mul(len).ok_or(CudaKstError::InvalidInput(
-            "size overflow in device output buffers".into(),
-        ))?;
+        let packed = self.pack_params_async(combos)?;
+        let out_len = rows
+            .checked_mul(series_len)
+            .ok_or(CudaKstError::InvalidInput(
+                "size overflow in device output buffers".into(),
+            ))?;
         let mut d_line: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(out_len, &self.stream) }?;
         let mut d_signal: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(out_len, &self.stream) }?;
 
         self.launch_batch_packed(
-            &d_prices,
+            d_prices,
             packed.s1,
             packed.s2,
             packed.s3,
@@ -467,27 +468,53 @@ impl CudaKst {
             packed.r3,
             packed.r4,
             packed.sg,
-            len,
+            series_len,
             rows,
             first_valid,
             &mut d_line,
             &mut d_signal,
         )?;
-        self.synchronize()?;
 
-        let pair = DeviceKstPair {
+        Ok(DeviceKstPair {
             line: DeviceArrayF32 {
                 buf: d_line,
                 rows,
-                cols: len,
+                cols: series_len,
             },
             signal: DeviceArrayF32 {
                 buf: d_signal,
                 rows,
-                cols: len,
+                cols: series_len,
             },
-        };
+        })
+    }
+
+    pub fn kst_batch_dev(
+        &self,
+        prices: &[f32],
+        sweep: &KstBatchRange,
+    ) -> Result<(DeviceKstPair, Vec<KstParams>), CudaKstError> {
+        let len = prices.len();
+        let first_valid = (0..len)
+            .find(|&i| !prices[i].is_nan())
+            .ok_or_else(|| CudaKstError::InvalidInput("all values are NaN".into()))?;
+        let combos = Self::prepare_batch_combos(len, first_valid, sweep)?;
+        let d_prices: DeviceBuffer<f32> = self.copy_f32_to_device_async(prices)?;
+        let pair =
+            self.run_batch_kernel_from_device_prices(&d_prices, len, first_valid, &combos)?;
+        self.synchronize()?;
         Ok((pair, combos))
+    }
+
+    pub fn kst_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &KstBatchRange,
+    ) -> Result<DeviceKstPair, CudaKstError> {
+        let combos = Self::prepare_batch_combos(series_len, first_valid, sweep)?;
+        self.run_batch_kernel_from_device_prices(d_prices, series_len, first_valid, &combos)
     }
 
     #[allow(clippy::too_many_arguments)]

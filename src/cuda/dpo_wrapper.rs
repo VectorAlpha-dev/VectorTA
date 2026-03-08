@@ -166,14 +166,31 @@ impl CudaDpo {
     ) -> Result<DeviceArrayF32, CudaDpoError> {
         let (periods, first_valid) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let len = data_f32.len();
+        let d_data = self.upload_slice(data_f32)?;
+        let out = self.dpo_batch_dev_from_device_prices(&d_data, len, first_valid, sweep)?;
+        self.stream.synchronize()?;
+        Ok(out)
+    }
+
+    pub fn dpo_batch_dev_from_device_prices(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &DpoBatchRange,
+    ) -> Result<DeviceArrayF32, CudaDpoError> {
+        if len == 0 || d_data.len() != len {
+            return Err(CudaDpoError::InvalidInput(
+                "device input buffer must match non-zero length".into(),
+            ));
+        }
+
+        let periods = Self::prepare_device_batch_periods(len, first_valid, sweep)?;
         let n_combos = periods.len();
 
-        let ps = build_prefixes_from_first(data_f32, first_valid);
-
         let headroom = 64 * 1024 * 1024;
-        let bytes = len
-            .checked_mul(std::mem::size_of::<f32>())
-            .and_then(|b| b.checked_add((len + 1).checked_mul(std::mem::size_of::<Float2>())?))
+        let bytes = (len + 1)
+            .checked_mul(std::mem::size_of::<Float2>())
             .and_then(|b| b.checked_add(n_combos.checked_mul(std::mem::size_of::<i32>())?))
             .and_then(|b| {
                 b.checked_add(
@@ -195,16 +212,18 @@ impl CudaDpo {
             }
         }
 
-        let d_data = self.upload_slice(data_f32)?;
-        let d_ps = self.upload_slice(&ps)?;
+        let mut d_ps: DeviceBuffer<Float2> =
+            unsafe { DeviceBuffer::uninitialized_async(len + 1, &self.stream) }
+                .map_err(CudaDpoError::Cuda)?;
         let d_periods = self.upload_slice(&periods)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(len * n_combos, &self.stream)
                 .map_err(CudaDpoError::Cuda)?
         };
 
+        self.launch_prefix_builder_device_raw(d_data, len as i32, first_valid as i32, &mut d_ps)?;
         self.launch_batch_kernel(
-            &d_data,
+            d_data,
             &d_ps,
             len as i32,
             first_valid as i32,
@@ -212,8 +231,6 @@ impl CudaDpo {
             n_combos as i32,
             &mut d_out,
         )?;
-
-        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -392,6 +409,37 @@ impl CudaDpo {
         Ok(())
     }
 
+    fn launch_prefix_builder_device_raw(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: i32,
+        first_valid: i32,
+        d_ps: &mut DeviceBuffer<Float2>,
+    ) -> Result<(), CudaDpoError> {
+        let func = self
+            .module
+            .get_function("dpo_build_prefix_ds_f32")
+            .map_err(|_| CudaDpoError::MissingKernelSymbol {
+                name: "dpo_build_prefix_ds_f32",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+        unsafe {
+            let mut p_data = d_data.as_device_ptr().as_raw();
+            let mut p_len = len;
+            let mut p_first = first_valid;
+            let mut p_ps = d_ps.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut p_data as *mut _ as *mut c_void,
+                &mut p_len as *mut _ as *mut c_void,
+                &mut p_first as *mut _ as *mut c_void,
+                &mut p_ps as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
     #[inline]
     fn validate_launch(
         &self,
@@ -534,6 +582,41 @@ impl CudaDpo {
             first_valids[s] = fv as i32;
         }
         Ok((first_valids, period))
+    }
+
+    fn prepare_device_batch_periods(
+        len: usize,
+        first_valid: usize,
+        sweep: &DpoBatchRange,
+    ) -> Result<Vec<i32>, CudaDpoError> {
+        if first_valid >= len {
+            return Err(CudaDpoError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+        let combos = expand_grid(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaDpoError::InvalidInput(
+                "no parameter combinations resolved".into(),
+            ));
+        }
+
+        let mut periods = Vec::with_capacity(combos.len());
+        for combo in combos {
+            let p = combo.period.unwrap_or(0);
+            if p == 0 || p > len {
+                return Err(CudaDpoError::InvalidInput("invalid period".into()));
+            }
+            if len - first_valid < p {
+                return Err(CudaDpoError::InvalidInput(format!(
+                    "not enough valid data: needed {}, have {}",
+                    p,
+                    len - first_valid
+                )));
+            }
+            periods.push(p as i32);
+        }
+        Ok(periods)
     }
 }
 

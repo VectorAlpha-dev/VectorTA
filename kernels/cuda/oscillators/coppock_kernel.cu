@@ -41,6 +41,17 @@ __device__ __forceinline__ void comp_sub(float x, float &sum, float &comp) {
     comp_add(-x, sum, comp);
 }
 
+extern "C" __global__ void coppock_build_inverse_f32(
+    const float* __restrict__ price,
+    int len,
+    float* __restrict__ inv
+)
+{
+    const int idx = (int)blockIdx.x * (int)blockDim.x + (int)threadIdx.x;
+    if (idx >= len) return;
+    inv[idx] = 1.0f / price[idx];
+}
+
 
 
 

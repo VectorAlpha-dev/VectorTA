@@ -9,6 +9,8 @@ use cust::memory::CopyDestination;
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::oscillators::CudaUltosc;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -154,5 +156,84 @@ fn ultosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
             idx
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn ultosc_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[ultosc_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 2048usize;
+    let mut high = vec![f64::NAN; len];
+    let mut low = vec![f64::NAN; len];
+    let mut close = vec![f64::NAN; len];
+    for i in 3..len {
+        let x = i as f64 * 0.0041;
+        let base = 100.0 + x.sin() * 0.8 + 0.0002 * i as f64;
+        let spread = 0.06 + (x * 0.37).cos().abs() * 0.03;
+        close[i] = base + (x * 0.5).sin() * 0.02;
+        high[i] = base + spread;
+        low[i] = base - spread;
+    }
+    let sweep = UltOscBatchRange {
+        timeperiod1: (4, 12, 4),
+        timeperiod2: (8, 20, 6),
+        timeperiod3: (16, 28, 6),
+    };
+
+    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+    let first_valid = (1..len)
+        .find(|&i| {
+            high_f32[i - 1].is_finite()
+                && low_f32[i - 1].is_finite()
+                && close_f32[i - 1].is_finite()
+                && high_f32[i].is_finite()
+                && low_f32[i].is_finite()
+                && close_f32[i].is_finite()
+        })
+        .expect("first valid");
+
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+    let d_close = runtime.upload_f32(&close_f32).expect("upload close");
+    let cuda = CudaUltosc::new(0).expect("CudaUltosc::new");
+
+    let legacy = cuda
+        .ultosc_batch_dev(&high_f32, &low_f32, &close_f32, &sweep)
+        .expect("legacy ultosc");
+    let device = cuda
+        .ultosc_batch_dev_from_device_inputs(
+            d_high.buffer(),
+            d_low.buffer(),
+            d_close.buffer(),
+            len,
+            first_valid,
+            &sweep,
+        )
+        .expect("device ultosc");
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    let mut device_host = vec![0f32; device.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    device.buf.copy_to(&mut device_host)?;
+
+    let tol = 5e-4;
+    for idx in 0..legacy_host.len() {
+        assert!(
+            approx_eq(legacy_host[idx] as f64, device_host[idx] as f64, tol),
+            "mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_host[idx],
+            device_host[idx]
+        );
+    }
+
     Ok(())
 }

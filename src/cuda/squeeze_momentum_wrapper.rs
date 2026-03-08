@@ -340,6 +340,35 @@ impl CudaSqueezeMomentum {
         Ok((combos, first_valid, len))
     }
 
+    fn prepare_device_batch_inputs(
+        len: usize,
+        first_valid: usize,
+        sweep: &SqueezeMomentumBatchRange,
+    ) -> Result<Vec<SmCombo>, CudaSmiError> {
+        if len == 0 {
+            return Err(CudaSmiError::InvalidInput("empty data".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaSmiError::InvalidInput(
+                "first_valid exceeds input length".into(),
+            ));
+        }
+        let combos = Self::expand_grid(sweep)?;
+
+        let mut need = 0usize;
+        for c in &combos {
+            need = need.max(c.lbb.max(c.lkc));
+        }
+        let tail = len - first_valid;
+        if tail < need {
+            return Err(CudaSmiError::InvalidInput(format!(
+                "not enough valid data: needed {}, valid {}",
+                need, tail
+            )));
+        }
+        Ok(combos)
+    }
+
     fn launch_batch_kernel(
         &self,
         d_high: &DeviceBuffer<f32>,
@@ -571,10 +600,37 @@ impl CudaSqueezeMomentum {
     ) -> Result<(DeviceArrayF32, DeviceArrayF32, DeviceArrayF32), CudaSmiError> {
         let (combos, first_valid, len) =
             Self::prepare_batch_inputs(high_f32, low_f32, close_f32, sweep)?;
+        let d_h = DeviceBuffer::from_slice(high_f32)?;
+        let d_l = DeviceBuffer::from_slice(low_f32)?;
+        let d_c = DeviceBuffer::from_slice(close_f32)?;
+        let result = self.squeeze_momentum_batch_dev_from_device_inputs(
+            &d_h,
+            &d_l,
+            &d_c,
+            len,
+            first_valid,
+            sweep,
+        )?;
+        self.stream.synchronize()?;
+        Ok(result)
+    }
 
-        let in_bytes = 3usize
-            .saturating_mul(len)
-            .saturating_mul(std::mem::size_of::<f32>());
+    pub fn squeeze_momentum_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &SqueezeMomentumBatchRange,
+    ) -> Result<(DeviceArrayF32, DeviceArrayF32, DeviceArrayF32), CudaSmiError> {
+        if d_high.len() != len || d_low.len() != len || d_close.len() != len {
+            return Err(CudaSmiError::InvalidInput(
+                "device inputs must match the provided input length".into(),
+            ));
+        }
+        let combos = Self::prepare_device_batch_inputs(len, first_valid, sweep)?;
+
         let params_bytes = combos
             .len()
             .saturating_mul(2 * std::mem::size_of::<i32>() + 2 * std::mem::size_of::<f32>());
@@ -584,8 +640,7 @@ impl CudaSqueezeMomentum {
             .saturating_mul(std::mem::size_of::<f32>());
         let k_levels_us = Self::sparse_k(len) as usize;
         let pre_bytes = Self::precompute_bytes(len, k_levels_us);
-        let required = in_bytes
-            .saturating_add(params_bytes)
+        let required = params_bytes
             .saturating_add(out_bytes)
             .saturating_add(pre_bytes);
         let headroom = 64 * 1024 * 1024;
@@ -602,10 +657,6 @@ impl CudaSqueezeMomentum {
                 ));
             }
         }
-
-        let d_h = DeviceBuffer::from_slice(high_f32)?;
-        let d_l = DeviceBuffer::from_slice(low_f32)?;
-        let d_c = DeviceBuffer::from_slice(close_f32)?;
 
         let v_lbb: Vec<i32> = combos.iter().map(|c| c.lbb as i32).collect();
         let v_mbb: Vec<f32> = combos.iter().map(|c| c.mbb).collect();
@@ -624,20 +675,19 @@ impl CudaSqueezeMomentum {
         let mut d_mo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
         let mut d_si: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
 
-        let n = len;
-        let mut d_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }?;
-        let mut d_ps_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }?;
-        let mut d_ps_close2: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }?;
-        let mut d_ps_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }?;
-        let mut d_log2: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(n + 1) }?;
-        let st_size = k_levels_us * n;
+        let mut d_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
+        let mut d_ps_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
+        let mut d_ps_close2: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
+        let mut d_ps_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
+        let mut d_log2: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(len + 1) }?;
+        let st_size = k_levels_us * len;
         let mut d_st_max: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(st_size) }?;
         let mut d_st_min: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(st_size) }?;
 
         self.launch_precompute(
-            &d_h,
-            &d_l,
-            &d_c,
+            d_high,
+            d_low,
+            d_close,
             len,
             &mut d_tr,
             &mut d_ps_close,
@@ -651,9 +701,9 @@ impl CudaSqueezeMomentum {
 
         let max_lkc = combos.iter().map(|c| c.lkc).max().unwrap_or(1);
         self.launch_batch_kernel_opt(
-            &d_h,
-            &d_l,
-            &d_c,
+            d_high,
+            d_low,
+            d_close,
             &d_lbb,
             &d_mbb,
             &d_lkc,
@@ -674,7 +724,6 @@ impl CudaSqueezeMomentum {
             &mut d_mo,
             &mut d_si,
         )?;
-        self.stream.synchronize()?;
 
         Ok((
             DeviceArrayF32 {

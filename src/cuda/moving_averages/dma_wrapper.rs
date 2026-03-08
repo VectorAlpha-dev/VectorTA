@@ -561,7 +561,6 @@ impl CudaDma {
             max_sqrt_len,
             &mut d_out,
         )?;
-        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: n_combos,
@@ -641,7 +640,6 @@ impl CudaDma {
             max_sqrt_len,
             &mut d_out,
         )?;
-        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: n_combos,

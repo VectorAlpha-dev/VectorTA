@@ -184,6 +184,29 @@ impl CudaGatorOsc {
             .iter()
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaGatorOscError::InvalidInput("all values are NaN".into()))?;
+        let d_prices = DeviceBuffer::from_slice(data_f32)?;
+        let dev = self.gatorosc_batch_dev_from_device_prices(&d_prices, len, first_valid, sweep)?;
+        self.stream.synchronize()?;
+        Ok(dev)
+    }
+
+    pub fn gatorosc_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &GatorOscBatchRange,
+    ) -> Result<DeviceGatorOscQuad, CudaGatorOscError> {
+        if len == 0 || d_prices.len() != len {
+            return Err(CudaGatorOscError::InvalidInput(
+                "device prices must have non-zero input length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaGatorOscError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
 
         let combos = expand_grid(sweep)?;
 
@@ -248,44 +271,50 @@ impl CudaGatorOsc {
             .ok_or_else(|| CudaGatorOscError::InvalidInput("bytes overflow".into()))?;
         CudaGatorOsc::will_fit(required, headroom)?;
 
-        let d_prices = DeviceBuffer::from_slice(data_f32)?;
-
         let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
         let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
         let mut d_uchn: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
         let mut d_lchn: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
+        let d_jl = DeviceBuffer::from_slice(&jl)?;
+        let d_js = DeviceBuffer::from_slice(&js)?;
+        let d_tl = DeviceBuffer::from_slice(&tl)?;
+        let d_ts = DeviceBuffer::from_slice(&ts_)?;
+        let d_ll = DeviceBuffer::from_slice(&ll)?;
+        let d_ls = DeviceBuffer::from_slice(&ls)?;
+        let func = self
+            .module
+            .get_function("gatorosc_batch_f32")
+            .map_err(|_| CudaGatorOscError::MissingKernelSymbol {
+                name: "gatorosc_batch_f32",
+            })?;
+        let block_x = if warp_scan_enabled {
+            let mut bx = self.policy.batch_block_x.unwrap_or(32).max(32);
+            bx -= bx % 32;
+            if bx == 0 {
+                bx = 32;
+            }
+            bx
+        } else {
+            1
+        };
+        unsafe {
+            (*(self as *const _ as *mut CudaGatorOsc)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
 
-        let launch_chunk = |this: &CudaGatorOsc,
-                            start: usize,
-                            chunk: usize,
-                            ring_len_i: i32|
-         -> Result<(), CudaGatorOscError> {
-            let d_jl = DeviceBuffer::from_slice(&jl[start..start + chunk])?;
-            let d_js = DeviceBuffer::from_slice(&js[start..start + chunk])?;
-            let d_tl = DeviceBuffer::from_slice(&tl[start..start + chunk])?;
-            let d_ts = DeviceBuffer::from_slice(&ts_[start..start + chunk])?;
-            let d_ll = DeviceBuffer::from_slice(&ll[start..start + chunk])?;
-            let d_ls = DeviceBuffer::from_slice(&ls[start..start + chunk])?;
-
-            let func = this
-                .module
-                .get_function("gatorosc_batch_f32")
-                .map_err(|_| CudaGatorOscError::MissingKernelSymbol {
-                    name: "gatorosc_batch_f32",
-                })?;
-            let block_x = if warp_scan_enabled {
-                let mut bx = this.policy.batch_block_x.unwrap_or(32).max(32);
-                bx -= bx % 32;
-                if bx == 0 {
-                    bx = 32;
-                }
-                bx
+        let mut launched = 0usize;
+        while launched < rows {
+            let chunk = (rows - launched).min(self.max_grid_x);
+            let chunk_max_shift = max_shift_in_range(&js, &ts_, &ls, launched, chunk);
+            let ring_len_i = if warp_scan_enabled {
+                let min_ring = (chunk_max_shift + 1).max(64);
+                ((min_ring + 31) / 32 * 32) as i32
             } else {
-                1
+                (chunk_max_shift + 1) as i32
             };
             let grid: GridSize = (chunk as u32, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
-            if (chunk as u32) as usize > this.max_grid_x {
+            if (chunk as u32) as usize > self.max_grid_x {
                 return Err(CudaGatorOscError::LaunchConfigTooLarge {
                     gx: chunk as u32,
                     gy: 1,
@@ -296,32 +325,25 @@ impl CudaGatorOsc {
                 });
             }
             unsafe {
-                (*(this as *const _ as *mut CudaGatorOsc)).last_batch =
-                    Some(BatchKernelSelected::Plain { block_x });
                 let mut p_ptr = d_prices.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
                 let mut first_i = first_valid as i32;
-                let mut jl_ptr = d_jl.as_device_ptr().as_raw();
-                let mut js_ptr = d_js.as_device_ptr().as_raw();
-                let mut tl_ptr = d_tl.as_device_ptr().as_raw();
-                let mut ts_ptr = d_ts.as_device_ptr().as_raw();
-                let mut ll_ptr = d_ll.as_device_ptr().as_raw();
-                let mut ls_ptr = d_ls.as_device_ptr().as_raw();
+                let mut jl_ptr = d_jl.as_device_ptr().add(launched).as_raw();
+                let mut js_ptr = d_js.as_device_ptr().add(launched).as_raw();
+                let mut tl_ptr = d_tl.as_device_ptr().add(launched).as_raw();
+                let mut ts_ptr = d_ts.as_device_ptr().add(launched).as_raw();
+                let mut ll_ptr = d_ll.as_device_ptr().add(launched).as_raw();
+                let mut ls_ptr = d_ls.as_device_ptr().add(launched).as_raw();
                 let mut ncomb_i = chunk as i32;
                 let mut ring_len_param = ring_len_i;
 
-                let row_off_elems = start
+                let row_off_elems = launched
                     .checked_mul(len)
                     .ok_or_else(|| CudaGatorOscError::InvalidInput("row offset overflow".into()))?;
-                let row_off_bytes = row_off_elems
-                    .checked_mul(std::mem::size_of::<f32>())
-                    .ok_or_else(|| {
-                        CudaGatorOscError::InvalidInput("row offset bytes overflow".into())
-                    })? as u64;
-                let mut u_ptr = d_upper.as_device_ptr().as_raw().wrapping_add(row_off_bytes);
-                let mut l_ptr = d_lower.as_device_ptr().as_raw().wrapping_add(row_off_bytes);
-                let mut uc_ptr = d_uchn.as_device_ptr().as_raw().wrapping_add(row_off_bytes);
-                let mut lc_ptr = d_lchn.as_device_ptr().as_raw().wrapping_add(row_off_bytes);
+                let mut u_ptr = d_upper.as_device_ptr().add(row_off_elems).as_raw();
+                let mut l_ptr = d_lower.as_device_ptr().add(row_off_elems).as_raw();
+                let mut uc_ptr = d_uchn.as_device_ptr().add(row_off_elems).as_raw();
+                let mut lc_ptr = d_lchn.as_device_ptr().add(row_off_elems).as_raw();
 
                 let mut args: [*mut c_void; 15] = [
                     &mut p_ptr as *mut _ as *mut c_void,
@@ -341,24 +363,9 @@ impl CudaGatorOsc {
                     &mut lc_ptr as *mut _ as *mut c_void,
                 ];
                 let dyn_shmem = (ring_len_i as usize) * 3 * std::mem::size_of::<f32>();
-                this.stream
+                self.stream
                     .launch(&func, grid, block, dyn_shmem.try_into().unwrap(), &mut args)?;
             }
-            this.stream.synchronize()?;
-            Ok(())
-        };
-
-        let mut launched = 0usize;
-        while launched < rows {
-            let chunk = (rows - launched).min(self.max_grid_x);
-            let chunk_max_shift = max_shift_in_range(&js, &ts_, &ls, launched, chunk);
-            let ring_len_i = if warp_scan_enabled {
-                let min_ring = (chunk_max_shift + 1).max(64);
-                ((min_ring + 31) / 32 * 32) as i32
-            } else {
-                (chunk_max_shift + 1) as i32
-            };
-            launch_chunk(self, launched, chunk, ring_len_i)?;
             launched += chunk;
         }
         self.maybe_log_batch_debug();

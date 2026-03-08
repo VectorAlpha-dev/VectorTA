@@ -347,6 +347,53 @@ impl CudaAdosc {
         })
     }
 
+    pub fn adosc_batch_device(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        d_volume: &DeviceBuffer<f32>,
+        len: usize,
+        shorts: &[i32],
+        longs: &[i32],
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaAdoscError> {
+        if len == 0 {
+            return Err(CudaAdoscError::InvalidInput("empty input".into()));
+        }
+        if d_high.len() != len
+            || d_low.len() != len
+            || d_close.len() != len
+            || d_volume.len() != len
+        {
+            return Err(CudaAdoscError::InvalidInput(
+                "device input buffer length mismatch".into(),
+            ));
+        }
+        if shorts.is_empty() || longs.is_empty() || shorts.len() != longs.len() {
+            return Err(CudaAdoscError::InvalidInput(
+                "invalid short/long parameter buffers".into(),
+            ));
+        }
+        let rows = shorts.len();
+        let total = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaAdoscError::InvalidInput("rows*cols overflow".into()))?;
+        if d_out.len() != total {
+            return Err(CudaAdoscError::InvalidInput(
+                "output buffer length mismatch".into(),
+            ));
+        }
+        let d_shorts = DeviceBuffer::from_slice(shorts)?;
+        let d_longs = DeviceBuffer::from_slice(longs)?;
+        let mut d_adl: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream)? };
+        self.launch_adl(d_high, d_low, d_close, d_volume, len, &mut d_adl)?;
+        self.launch_batch_from_adl(&d_adl, &d_shorts, &d_longs, len, rows, d_out)?;
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
     pub fn adosc_many_series_one_param_time_major_dev(
         &self,
         high_tm: &[f32],

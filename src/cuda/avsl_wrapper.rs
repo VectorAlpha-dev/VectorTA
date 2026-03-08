@@ -222,6 +222,40 @@ impl CudaAvsl {
         Ok((combos, first_valid, len))
     }
 
+    fn prepare_batch_meta(
+        len: usize,
+        first_valid: usize,
+        sweep: &AvslBatchRange,
+    ) -> Result<Vec<AvslParams>, CudaAvslError> {
+        if len == 0 {
+            return Err(CudaAvslError::InvalidInput("empty input".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaAvslError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+        let combos = Self::expand_grid(sweep);
+        if combos.is_empty() {
+            return Err(CudaAvslError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        for c in &combos {
+            let f = c.fast_period.unwrap_or(12);
+            let s = c.slow_period.unwrap_or(26);
+            if f == 0 || s == 0 {
+                return Err(CudaAvslError::InvalidInput("period must be >=1".into()));
+            }
+            if len - first_valid < s {
+                return Err(CudaAvslError::InvalidInput(
+                    "insufficient valid data for slow period".into(),
+                ));
+            }
+        }
+        Ok(combos)
+    }
+
     fn launch_batch(
         &self,
         d_close: &DeviceBuffer<f32>,
@@ -383,6 +417,92 @@ impl CudaAvsl {
         )?;
 
         self.stream.synchronize()?;
+
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols: len,
+            },
+            combos,
+        ))
+    }
+
+    pub fn avsl_batch_dev_from_device_inputs(
+        &self,
+        d_close: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_vol: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &AvslBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<AvslParams>), CudaAvslError> {
+        if len == 0 || d_close.len() != len || d_low.len() != len || d_vol.len() != len {
+            return Err(CudaAvslError::InvalidInput(
+                "device input buffers must match non-zero length".into(),
+            ));
+        }
+        let combos = Self::prepare_batch_meta(len, first_valid, sweep)?;
+        let rows = combos.len();
+
+        let el_f32 = std::mem::size_of::<f32>();
+        let el_i32 = std::mem::size_of::<i32>();
+        let bytes_required = rows
+            .checked_mul(el_i32 * 2 + el_f32)
+            .and_then(|x| {
+                rows.checked_mul(len)
+                    .and_then(|z| z.checked_mul(el_f32))
+                    .and_then(|z| x.checked_add(z))
+            })
+            .ok_or_else(|| CudaAvslError::InvalidInput("size overflow".into()))?;
+        let headroom = std::env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
+        Self::will_fit(bytes_required, headroom)?;
+
+        let fast: Vec<i32> = combos
+            .iter()
+            .map(|c| c.fast_period.unwrap() as i32)
+            .collect();
+        let slow: Vec<i32> = combos
+            .iter()
+            .map(|c| c.slow_period.unwrap() as i32)
+            .collect();
+        let mult: Vec<f32> = combos
+            .iter()
+            .map(|c| c.multiplier.unwrap() as f32)
+            .collect();
+
+        let mut d_fast = unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }?;
+        let mut d_slow = unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }?;
+        let mut d_mult = unsafe { DeviceBuffer::<f32>::uninitialized_async(rows, &self.stream) }?;
+        let elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaAvslError::InvalidInput("rows*cols overflow".into()))?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
+
+        let h_fast = LockedBuffer::from_slice(&fast).map_err(CudaAvslError::Cuda)?;
+        let h_slow = LockedBuffer::from_slice(&slow).map_err(CudaAvslError::Cuda)?;
+        let h_mult = LockedBuffer::from_slice(&mult).map_err(CudaAvslError::Cuda)?;
+        unsafe {
+            d_fast.async_copy_from(&h_fast, &self.stream)?;
+            d_slow.async_copy_from(&h_slow, &self.stream)?;
+            d_mult.async_copy_from(&h_mult, &self.stream)?;
+        }
+
+        self.launch_batch(
+            d_close,
+            d_low,
+            d_vol,
+            &d_fast,
+            &d_slow,
+            &d_mult,
+            len,
+            first_valid,
+            rows,
+            &mut d_out,
+        )?;
 
         Ok((
             DeviceArrayF32 {

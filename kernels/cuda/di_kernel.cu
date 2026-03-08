@@ -40,6 +40,49 @@ static __forceinline__ __device__ float block_reduce_sum(float v) {
     return block_sum;
 }
 
+extern "C" __global__
+void di_build_up_dn_tr_f32(const float* __restrict__ high,
+                           const float* __restrict__ low,
+                           const float* __restrict__ close,
+                           int len,
+                           int first_valid,
+                           float* __restrict__ up,
+                           float* __restrict__ dn,
+                           float* __restrict__ tr)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (len <= 0) return;
+
+    for (int i = 0; i < len; ++i) {
+        up[i] = 0.0f;
+        dn[i] = 0.0f;
+        tr[i] = 0.0f;
+    }
+
+    if (first_valid < 0 || first_valid >= len) return;
+
+    float prev_h = high[first_valid];
+    float prev_l = low[first_valid];
+    float prev_c = close[first_valid];
+    for (int i = first_valid + 1; i < len; ++i) {
+        const float ch = high[i];
+        const float cl = low[i];
+        const float dp = ch - prev_h;
+        const float dm = prev_l - cl;
+        if (dp > dm && dp > 0.0f) up[i] = dp;
+        if (dm > dp && dm > 0.0f) dn[i] = dm;
+        float t = ch - cl;
+        const float t2 = fabsf(ch - prev_c);
+        if (t2 > t) t = t2;
+        const float t3 = fabsf(cl - prev_c);
+        if (t3 > t) t = t3;
+        tr[i] = t;
+        prev_h = ch;
+        prev_l = cl;
+        prev_c = close[i];
+    }
+}
+
 
 
 

@@ -1,11 +1,10 @@
 use vector_ta::indicators::lpc::{
     lpc_batch_with_kernel, lpc_with_kernel, LpcBatchRange, LpcInput, LpcParams,
 };
-use vector_ta::utilities::data_loader::Candles;
 use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
-use cust::memory::CopyDestination;
+use cust::memory::{CopyDestination, DeviceBuffer};
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
@@ -17,6 +16,19 @@ fn approx(a: f64, b: f64, tol: f64) -> bool {
     } else {
         (a - b).abs() <= tol
     }
+}
+
+#[cfg(feature = "cuda")]
+fn copy_triplet(
+    triplet: &vector_ta::cuda::wto_wrapper::DeviceArrayF32Triplet,
+) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), Box<dyn std::error::Error>> {
+    let mut filter = vec![0f32; triplet.wt1.len()];
+    triplet.wt1.buf.copy_to(&mut filter)?;
+    let mut high = vec![0f32; triplet.wt2.len()];
+    triplet.wt2.buf.copy_to(&mut high)?;
+    let mut low = vec![0f32; triplet.hist.len()];
+    triplet.hist.buf.copy_to(&mut low)?;
+    Ok((filter, high, low))
 }
 
 #[test]
@@ -207,6 +219,88 @@ fn lpc_cuda_many_series_one_param_matches_cpu_fixed() -> Result<(), Box<dyn std:
         );
         assert!(
             approx(cpu_lo_tm[i], glo[i] as f64, tol),
+            "low mismatch at {}",
+            i
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn lpc_cuda_borrowed_device_path_matches_legacy_wrapper(
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[lpc_cuda_borrowed_device_path_matches_legacy_wrapper] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let n = 4096usize;
+    let first_valid = 6usize;
+    let mut h = vec![f32::NAN; n];
+    let mut l = vec![f32::NAN; n];
+    let mut c = vec![f32::NAN; n];
+    let mut s = vec![f32::NAN; n];
+    for i in first_valid..n {
+        let x = i as f32;
+        let base = (x * 0.017).sin() + 0.0009 * x + (x * 0.0031).cos() * 0.2;
+        s[i] = base;
+        c[i] = base + (x * 0.011).sin() * 0.03;
+        h[i] = c[i] + 0.35 + (x * 0.005).cos().abs() * 0.04;
+        l[i] = c[i] - 0.35 - (x * 0.007).sin().abs() * 0.04;
+    }
+
+    let sweep = LpcBatchRange {
+        fixed_period: (10, 22, 6),
+        cycle_mult: (0.8, 1.2, 0.2),
+        tr_mult: (0.75, 1.25, 0.5),
+        cutoff_type: "adaptive".to_string(),
+        max_cycle_limit: 48,
+    };
+
+    let cuda = CudaLpc::new(0).expect("CudaLpc::new");
+    let (legacy_triplet, legacy_combos) = cuda
+        .lpc_batch_dev(&h, &l, &c, &s, &sweep)
+        .expect("legacy lpc_batch_dev");
+
+    let d_h = DeviceBuffer::from_slice(&h)?;
+    let d_l = DeviceBuffer::from_slice(&l)?;
+    let d_c = DeviceBuffer::from_slice(&c)?;
+    let d_s = DeviceBuffer::from_slice(&s)?;
+    let (borrowed_triplet, borrowed_combos) = cuda
+        .lpc_batch_dev_from_device_inputs(&d_h, &d_l, &d_c, &d_s, n, first_valid, &sweep)
+        .expect("borrowed-device lpc_batch_dev_from_device_inputs");
+    cuda.synchronize()?;
+
+    assert_eq!(legacy_combos.len(), borrowed_combos.len());
+    for (legacy, borrowed) in legacy_combos.iter().zip(borrowed_combos.iter()) {
+        assert_eq!(legacy.cutoff_type.as_deref(), borrowed.cutoff_type.as_deref());
+        assert_eq!(legacy.fixed_period, borrowed.fixed_period);
+        assert_eq!(legacy.max_cycle_limit, borrowed.max_cycle_limit);
+        assert_eq!(legacy.cycle_mult, borrowed.cycle_mult);
+        assert_eq!(legacy.tr_mult, borrowed.tr_mult);
+    }
+
+    assert_eq!(legacy_triplet.rows(), borrowed_triplet.rows());
+    assert_eq!(legacy_triplet.cols(), borrowed_triplet.cols());
+
+    let (legacy_f, legacy_hi, legacy_lo) = copy_triplet(&legacy_triplet)?;
+    let (borrowed_f, borrowed_hi, borrowed_lo) = copy_triplet(&borrowed_triplet)?;
+    let tol = 1e-4;
+    for i in 0..legacy_f.len() {
+        assert!(
+            approx(legacy_f[i] as f64, borrowed_f[i] as f64, tol),
+            "filter mismatch at {}",
+            i
+        );
+        assert!(
+            approx(legacy_hi[i] as f64, borrowed_hi[i] as f64, tol),
+            "high mismatch at {}",
+            i
+        );
+        assert!(
+            approx(legacy_lo[i] as f64, borrowed_lo[i] as f64, tol),
             "low mismatch at {}",
             i
         );

@@ -367,7 +367,59 @@ impl CudaNetMyrsi {
         data_f32: &[f32],
         sweep: &NetMyrsiBatchRange,
     ) -> Result<(DeviceArrayF32, Vec<NetMyrsiParams>), CudaNetMyrsiError> {
-        let (combos, first_valid, series_len, max_p) = Self::prepare_batch_inputs(data_f32, sweep)?;
+        let (_, first_valid, series_len, _) = Self::prepare_batch_inputs(data_f32, sweep)?;
+
+        let prices_bytes = series_len
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or_else(|| CudaNetMyrsiError::InvalidInput("prices_bytes overflow".into()))?;
+
+        let d_prices: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? };
+        let result =
+            self.net_myrsi_batch_dev_from_device_prices(&d_prices, series_len, first_valid, sweep)?;
+        self.synchronize()?;
+        Ok(result)
+    }
+
+    pub fn net_myrsi_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &NetMyrsiBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<NetMyrsiParams>), CudaNetMyrsiError> {
+        if series_len == 0 || d_prices.len() != series_len {
+            return Err(CudaNetMyrsiError::InvalidInput(
+                "device prices must have non-zero input length".into(),
+            ));
+        }
+
+        let periods = Self::expand_periods(sweep.period)?;
+        let mut combos = Vec::with_capacity(periods.len());
+        let mut max_p = 1usize;
+        for p in periods {
+            if p == 0 || p > series_len {
+                return Err(CudaNetMyrsiError::InvalidInput(format!(
+                    "invalid period {} for length {}",
+                    p, series_len
+                )));
+            }
+            if first_valid >= series_len || series_len - first_valid < p + 1 {
+                return Err(CudaNetMyrsiError::InvalidInput(format!(
+                    "not enough valid data (need {} after first {}, have {})",
+                    p + 1,
+                    first_valid,
+                    series_len.saturating_sub(first_valid)
+                )));
+            }
+            max_p = max_p.max(p);
+            combos.push(NetMyrsiParams { period: Some(p) });
+        }
+        if combos.is_empty() {
+            return Err(CudaNetMyrsiError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
 
         let prices_bytes = series_len
             .checked_mul(core::mem::size_of::<f32>())
@@ -397,8 +449,6 @@ impl CudaNetMyrsi {
             }
         }
 
-        let d_prices: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? };
         let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let d_periods: DeviceBuffer<i32> =
             unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream)? };
@@ -478,8 +528,6 @@ impl CudaNetMyrsi {
                     shmem_bytes: shmem_bytes as u32,
                 });
         }
-
-        self.synchronize()?;
 
         Ok((
             DeviceArrayF32 {

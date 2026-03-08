@@ -1,5 +1,5 @@
 use vector_ta::indicators::cfo::{
-    cfo_batch_with_kernel, cfo_with_kernel, CfoBatchRange, CfoBuilder, CfoInput, CfoParams,
+    cfo_batch_with_kernel, cfo_with_kernel, CfoBatchRange, CfoInput, CfoParams,
 };
 use vector_ta::utilities::enums::Kernel;
 
@@ -9,6 +9,8 @@ use cust::memory::CopyDestination;
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::oscillators::cfo_wrapper::CudaCfo;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -137,5 +139,60 @@ fn cfo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             idx
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn cfo_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[cfo_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 4096usize;
+    let mut price = vec![f64::NAN; len];
+    for i in 5..len {
+        let x = i as f64;
+        price[i] = (x * 0.00123).sin() + 0.00011 * x;
+    }
+    let sweep = CfoBatchRange {
+        period: (8, 40, 8),
+        scalar: (100.0, 100.0, 0.0),
+    };
+
+    let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
+    let first_valid = price_f32
+        .iter()
+        .position(|v| v.is_finite())
+        .expect("first_valid");
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let d_price = runtime.upload_f32(&price_f32).expect("upload");
+
+    let cuda = CudaCfo::new(0).expect("CudaCfo::new");
+    let legacy = cuda.cfo_batch_dev(&price_f32, &sweep).expect("legacy cfo");
+    let device = cuda
+        .cfo_batch_dev_from_device_prices(d_price.buffer(), price_f32.len(), first_valid, &sweep)
+        .expect("device cfo");
+
+    assert_eq!(legacy.rows, device.rows);
+    assert_eq!(legacy.cols, device.cols);
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    let mut device_host = vec![0f32; device.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    device.buf.copy_to(&mut device_host)?;
+
+    let tol = 1e-5;
+    for idx in 0..legacy_host.len() {
+        assert!(
+            approx_eq(legacy_host[idx] as f64, device_host[idx] as f64, tol),
+            "mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_host[idx],
+            device_host[idx]
+        );
+    }
+
     Ok(())
 }

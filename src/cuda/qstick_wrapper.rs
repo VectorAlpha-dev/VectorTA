@@ -610,6 +610,167 @@ impl CudaQstick {
         })
     }
 
+    fn launch_prefix_builder_raw(
+        &self,
+        d_open: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_prefix: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaQstickError> {
+        let func = self
+            .module
+            .get_function("qstick_build_prefix_serial_f32")
+            .map_err(|_| CudaQstickError::MissingKernelSymbol {
+                name: "qstick_build_prefix_serial_f32",
+            })?;
+        let grid: GridSize = (1u32, 1u32, 1u32).into();
+        let block: BlockSize = (1u32, 1u32, 1u32).into();
+        unsafe {
+            let mut open_ptr = d_open.as_device_ptr().as_raw();
+            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let mut prefix_ptr = d_prefix.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut open_ptr as *mut _ as *mut c_void,
+                &mut close_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut prefix_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(CudaQstickError::from)?;
+        }
+        Ok(())
+    }
+
+    pub fn qstick_batch_dev_from_device_inputs(
+        &self,
+        d_open: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &QstickBatchRange,
+    ) -> Result<DeviceArrayF32, CudaQstickError> {
+        if len == 0 || d_open.len() != len || d_close.len() != len {
+            return Err(CudaQstickError::InvalidInput(
+                "device input buffers must match non-zero length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaQstickError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+        let (start, end, step) = sweep.period;
+        let periods = {
+            fn axis_usize(
+                (start, end, step): (usize, usize, usize),
+            ) -> Result<Vec<usize>, CudaQstickError> {
+                if step == 0 || start == end {
+                    return Ok(vec![start]);
+                }
+                let mut v = Vec::new();
+                if start < end {
+                    let mut cur = start;
+                    while cur <= end {
+                        v.push(cur);
+                        let next = cur.saturating_add(step);
+                        if next == cur {
+                            break;
+                        }
+                        cur = next;
+                    }
+                } else {
+                    let mut cur = start;
+                    while cur >= end {
+                        v.push(cur);
+                        let next = cur.saturating_sub(step);
+                        if next == cur {
+                            break;
+                        }
+                        cur = next;
+                        if cur == 0 && end > 0 {
+                            break;
+                        }
+                    }
+                }
+                if v.is_empty() {
+                    return Err(CudaQstickError::InvalidInput("empty period range".into()));
+                }
+                Ok(v)
+            }
+            axis_usize((start, end, step))?
+        };
+        let combos: Vec<QstickParams> = periods
+            .iter()
+            .copied()
+            .map(|p| QstickParams { period: Some(p) })
+            .collect();
+        for combo in &combos {
+            let period = combo.period.unwrap_or(0);
+            if period == 0 || period > len {
+                return Err(CudaQstickError::InvalidInput(format!(
+                    "invalid period {}",
+                    period
+                )));
+            }
+            if len - first_valid < period {
+                return Err(CudaQstickError::InvalidInput(format!(
+                    "not enough valid data: need {}, have {} after first_valid {}",
+                    period,
+                    len - first_valid,
+                    first_valid
+                )));
+            }
+        }
+
+        let bytes_prefix = (len + 1)
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaQstickError::InvalidInput("size overflow".into()))?;
+        let bytes_periods = combos
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaQstickError::InvalidInput("size overflow".into()))?;
+        let bytes_out = combos
+            .len()
+            .checked_mul(len)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaQstickError::InvalidInput("size overflow".into()))?;
+        let bytes_required = bytes_prefix
+            .checked_add(bytes_periods)
+            .and_then(|v| v.checked_add(bytes_out))
+            .ok_or_else(|| CudaQstickError::InvalidInput("size overflow".into()))?;
+        let headroom = env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
+        Self::will_fit(bytes_required, headroom)?;
+
+        let mut d_prefix: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len + 1) }?;
+        self.launch_prefix_builder_raw(d_open, d_close, len, first_valid, &mut d_prefix)?;
+        let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(combos.len() * len) }?;
+        self.launch_batch_kernel(
+            &d_prefix,
+            &d_periods,
+            len,
+            first_valid,
+            combos.len(),
+            &mut d_out,
+        )?;
+
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combos.len(),
+            cols: len,
+        })
+    }
+
     pub fn prepare_many_series_inputs(
         open_tm_f32: &[f32],
         close_tm_f32: &[f32],

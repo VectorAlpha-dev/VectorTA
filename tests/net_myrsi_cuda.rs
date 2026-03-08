@@ -9,7 +9,7 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::CudaNetMyrsi;
+use vector_ta::cuda::{CudaNetMyrsi, CudaRuntime};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -138,6 +138,62 @@ fn net_myrsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
             c,
             g,
             (c - g).abs()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn net_myrsi_cuda_device_prices_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[net_myrsi_cuda_device_prices_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 4096usize;
+    let mut data = vec![f32::NAN; len];
+    let first_valid = 6usize;
+    for (i, value) in data.iter_mut().enumerate().skip(first_valid) {
+        let x = i as f32;
+        *value = (x * 0.00071).sin() + 0.0003 * (i % 11) as f32;
+        if i % 997 == 0 {
+            *value = f32::NAN;
+        }
+    }
+
+    let sweep = NetMyrsiBatchRange {
+        period: (10, 50, 10),
+    };
+
+    let cuda = CudaNetMyrsi::new(0).expect("CudaNetMyrsi::new");
+    let (legacy_dev, legacy_combos) = cuda.net_myrsi_batch_dev(&data, &sweep).expect("legacy");
+
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let device_prices = runtime.upload_f32(&data).expect("upload prices");
+    let (device_dev, device_combos) = cuda
+        .net_myrsi_batch_dev_from_device_prices(device_prices.buffer(), len, first_valid, &sweep)
+        .expect("device inputs");
+
+    assert_eq!(legacy_combos.len(), device_combos.len());
+    for (legacy, device) in legacy_combos.iter().zip(device_combos.iter()) {
+        assert_eq!(legacy.period, device.period);
+    }
+    assert_eq!(legacy_dev.rows, device_dev.rows);
+    assert_eq!(legacy_dev.cols, device_dev.cols);
+
+    let mut legacy = vec![0.0f32; legacy_dev.len()];
+    legacy_dev.buf.copy_to(legacy.as_mut_slice())?;
+    let mut device = vec![0.0f32; device_dev.len()];
+    device_dev.buf.copy_to(device.as_mut_slice())?;
+
+    for (idx, (lhs, rhs)) in legacy.iter().zip(device.iter()).enumerate() {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!(
+            (lhs - rhs).abs() < 1e-6,
+            "mismatch at {idx}: lhs={lhs} rhs={rhs}"
         );
     }
     Ok(())

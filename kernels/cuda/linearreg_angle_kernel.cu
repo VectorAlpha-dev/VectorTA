@@ -116,6 +116,38 @@ static __device__ __forceinline__ float df32_to_float(df32 a) {
     return a.hi + a.lo;
 }
 
+extern "C" __global__ void linearreg_angle_build_prefixes_f32(
+    const float* __restrict__ prices,
+    int len,
+    float2* __restrict__ prefix_sum2,
+    float2* __restrict__ prefix_kd2,
+    int* __restrict__ prefix_nan)
+{
+    if (blockIdx.x != 0 || blockIdx.y != 0 || threadIdx.x != 0) return;
+    if (len < 0) return;
+
+    prefix_sum2[0] = make_float2(0.0f, 0.0f);
+    prefix_kd2[0] = make_float2(0.0f, 0.0f);
+    prefix_nan[0] = 0;
+
+    df32 sum = df32_make(0.0f);
+    df32 kd = df32_make(0.0f);
+    int nan_count = 0;
+
+    for (int t = 0; t < len; ++t) {
+        const float v = prices[t];
+        if (isnan(v)) {
+            ++nan_count;
+        } else {
+            sum = df32_add_f(sum, v);
+            kd = df32_add_prod(kd, static_cast<float>(t), v);
+        }
+        prefix_sum2[t + 1] = float2_from_df32(sum);
+        prefix_kd2[t + 1] = float2_from_df32(kd);
+        prefix_nan[t + 1] = nan_count;
+    }
+}
+
 
 
 

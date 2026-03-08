@@ -21,6 +21,30 @@
 
 __device__ __forceinline__ float f32_nan() { return __int_as_float(0x7fffffff); }
 
+extern "C" __global__ void dpo_build_prefix_ds_f32(
+    const float* __restrict__ data,
+    int len,
+    int first_valid,
+    float2* __restrict__ prefix_sum_ds)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (len < 0) return;
+
+    prefix_sum_ds[0] = make_float2(0.0f, 0.0f);
+
+    float hi = 0.0f;
+    float lo = 0.0f;
+    for (int i = 0; i < len; ++i) {
+        if (i >= first_valid) {
+            const float v = data[i];
+            const float y = v - lo;
+            const float t = hi + y;
+            lo = (t - hi) - y;
+            hi = t;
+        }
+        prefix_sum_ds[i + 1] = make_float2(hi, lo);
+    }
+}
 
 
 

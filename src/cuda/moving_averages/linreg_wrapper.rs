@@ -290,6 +290,35 @@ impl CudaLinreg {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaLinregError::InvalidInput("all values are NaN".into()))?;
 
+        let (combos, periods_i32, x_sums, denom_invs, inv_periods) =
+            Self::prepare_batch_params(len, first_valid, sweep)?;
+
+        Ok((
+            combos,
+            first_valid,
+            len,
+            periods_i32,
+            x_sums,
+            denom_invs,
+            inv_periods,
+        ))
+    }
+
+    fn prepare_batch_params(
+        len: usize,
+        first_valid: usize,
+        sweep: &LinRegBatchRange,
+    ) -> Result<(Vec<LinRegParams>, Vec<i32>, Vec<f32>, Vec<f32>, Vec<f32>), CudaLinregError> {
+        if len == 0 {
+            return Err(CudaLinregError::InvalidInput("empty data".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaLinregError::InvalidInput(format!(
+                "invalid first_valid {} for series length {}",
+                first_valid, len
+            )));
+        }
+
         let combos = expand_grid_linreg(sweep);
         if combos.is_empty() {
             let (s, e, t) = sweep.period;
@@ -338,15 +367,7 @@ impl CudaLinreg {
             inv_periods.push(inv_period as f32);
         }
 
-        Ok((
-            combos,
-            first_valid,
-            len,
-            periods_i32,
-            x_sums,
-            denom_invs,
-            inv_periods,
-        ))
+        Ok((combos, periods_i32, x_sums, denom_invs, inv_periods))
     }
 
     fn launch_batch_kernel(
@@ -707,6 +728,117 @@ impl CudaLinreg {
         })
     }
 
+    fn run_batch_kernel_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        periods_i32: &[i32],
+        x_sums: &[f32],
+        denom_invs: &[f32],
+        inv_periods: &[f32],
+        combos_len: usize,
+        first_valid: usize,
+        len: usize,
+    ) -> Result<DeviceArrayF32, CudaLinregError> {
+        let per_combo = std::mem::size_of::<i32>()
+            .checked_add(std::mem::size_of::<f32>() * 3)
+            .ok_or(CudaLinregError::ArithmeticOverflow {
+                what: "per_combo bytes",
+            })?;
+        let params_bytes =
+            combos_len
+                .checked_mul(per_combo)
+                .ok_or(CudaLinregError::ArithmeticOverflow {
+                    what: "combos_len * per_combo",
+                })?;
+        let out_elems = combos_len
+            .checked_mul(len)
+            .ok_or(CudaLinregError::ArithmeticOverflow {
+                what: "combos_len * len",
+            })?;
+        let out_bytes = out_elems.checked_mul(std::mem::size_of::<f32>()).ok_or(
+            CudaLinregError::ArithmeticOverflow {
+                what: "out_elems * sizeof(f32)",
+            },
+        )?;
+
+        let required = if matches!(self.policy.batch, BatchKernelPolicy::Plain { .. }) {
+            params_bytes
+                .checked_add(out_bytes)
+                .ok_or(CudaLinregError::ArithmeticOverflow {
+                    what: "total required bytes",
+                })?
+        } else {
+            let prefix_elems = len
+                .checked_add(1)
+                .ok_or(CudaLinregError::ArithmeticOverflow { what: "len + 1" })?;
+            let prefix_bytes = prefix_elems
+                .checked_mul(std::mem::size_of::<f64>())
+                .and_then(|x| x.checked_mul(2))
+                .ok_or(CudaLinregError::ArithmeticOverflow {
+                    what: "(len+1) * sizeof(f64) * 2",
+                })?;
+            params_bytes
+                .checked_add(prefix_bytes)
+                .and_then(|x| x.checked_add(out_bytes))
+                .ok_or(CudaLinregError::ArithmeticOverflow {
+                    what: "total required bytes",
+                })?
+        };
+        let headroom = 64 * 1024 * 1024;
+        Self::will_fit_checked(required, headroom)?;
+
+        let d_periods = DeviceBuffer::from_slice(periods_i32)?;
+        let d_x_sums = DeviceBuffer::from_slice(x_sums)?;
+        let d_denom_invs = DeviceBuffer::from_slice(denom_invs)?;
+        let d_inv_periods = DeviceBuffer::from_slice(inv_periods)?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
+
+        match self.policy.batch {
+            BatchKernelPolicy::Plain { .. } => {
+                self.launch_batch_kernel(
+                    d_prices,
+                    &d_periods,
+                    &d_x_sums,
+                    &d_denom_invs,
+                    &d_inv_periods,
+                    len,
+                    combos_len,
+                    first_valid,
+                    &mut d_out,
+                )?;
+            }
+            BatchKernelPolicy::Auto | BatchKernelPolicy::Prefix { .. } => {
+                let mut d_prefix_y = unsafe { DeviceBuffer::<f64>::uninitialized(len + 1) }?;
+                let mut d_prefix_yi = unsafe { DeviceBuffer::<f64>::uninitialized(len + 1) }?;
+                self.launch_prefix_kernel(
+                    d_prices,
+                    len,
+                    first_valid,
+                    &mut d_prefix_y,
+                    &mut d_prefix_yi,
+                )?;
+                self.launch_batch_from_prefix_kernel(
+                    &d_prefix_y,
+                    &d_prefix_yi,
+                    &d_periods,
+                    &d_x_sums,
+                    &d_denom_invs,
+                    &d_inv_periods,
+                    len,
+                    combos_len,
+                    first_valid,
+                    &mut d_out,
+                )?;
+            }
+        }
+
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combos_len,
+            cols: len,
+        })
+    }
+
     pub fn linreg_batch_dev(
         &self,
         data_f32: &[f32],
@@ -727,6 +859,27 @@ impl CudaLinreg {
 
         self.stream.synchronize()?;
         Ok((dev, combos))
+    }
+
+    pub fn linreg_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &LinRegBatchRange,
+    ) -> Result<DeviceArrayF32, CudaLinregError> {
+        let (combos, periods_i32, x_sums, denom_invs, inv_periods) =
+            Self::prepare_batch_params(series_len, first_valid, sweep)?;
+        self.run_batch_kernel_from_device_prices(
+            d_prices,
+            &periods_i32,
+            &x_sums,
+            &denom_invs,
+            &inv_periods,
+            combos.len(),
+            first_valid,
+            series_len,
+        )
     }
 
     pub fn linreg_batch_into_host_f32(

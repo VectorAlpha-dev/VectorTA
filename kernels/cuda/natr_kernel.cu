@@ -77,6 +77,33 @@ __device__ __forceinline__ void ema_update_kahan(float& atr, float& c, float alp
     atr = t;
 }
 
+extern "C" __global__ void natr_tr_from_hlc_f32(
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    const float* __restrict__ close,
+    int len,
+    int first_valid,
+    float* __restrict__ tr_out)
+{
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= len) return;
+    if (t < first_valid) {
+        tr_out[t] = 0.0f;
+        return;
+    }
+    const float hi = high[t];
+    const float lo = low[t];
+    if (t == first_valid) {
+        tr_out[t] = hi - lo;
+        return;
+    }
+    const float pc = close[t - 1];
+    const float hl = hi - lo;
+    const float hc = fabsf(hi - pc);
+    const float lc = fabsf(lo - pc);
+    tr_out[t] = fmaxf(hl, fmaxf(hc, lc));
+}
+
 
 
 extern "C" __global__ void natr_make_inv_close100(

@@ -79,6 +79,56 @@ struct Kahan {
     __device__ __forceinline__ float value() const { return s; }
 };
 
+extern "C" __global__
+void srsi_build_rsi_f32(const float* __restrict__ prices,
+                        int series_len,
+                        int first_valid,
+                        int period,
+                        float* __restrict__ out) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+
+    for (int i = 0; i < series_len; ++i) out[i] = NAN;
+    if (period <= 0 || period > series_len || first_valid < 0 || first_valid >= series_len) {
+        return;
+    }
+
+    const int warm = first_valid + period;
+    if (warm >= series_len) return;
+
+    double avg_gain = 0.0;
+    double avg_loss = 0.0;
+    double prev = (double)LDG(&prices[first_valid]);
+    for (int i = first_valid + 1; i <= warm; ++i) {
+        const double cur = (double)LDG(&prices[i]);
+        const double ch = cur - prev;
+        prev = cur;
+        if (!isfinite(ch)) return;
+        if (ch > 0.0) avg_gain += ch;
+        else avg_loss += -ch;
+    }
+
+    const double inv_p = 1.0 / (double)period;
+    avg_gain *= inv_p;
+    avg_loss *= inv_p;
+    double denom = avg_gain + avg_loss;
+    out[warm] = (denom == 0.0) ? 50.0f : (float)(100.0 * avg_gain / denom);
+
+    const double beta = 1.0 - inv_p;
+    prev = LDG(&prices[warm]);
+    for (int i = warm + 1; i < series_len; ++i) {
+        const double cur = (double)LDG(&prices[i]);
+        const double ch = cur - prev;
+        prev = cur;
+        if (!isfinite(ch)) return;
+        const double gain = (ch > 0.0) ? ch : 0.0;
+        const double loss = (ch < 0.0) ? -ch : 0.0;
+        avg_gain = fma(avg_gain, beta, inv_p * gain);
+        avg_loss = fma(avg_loss, beta, inv_p * loss);
+        denom = avg_gain + avg_loss;
+        out[i] = (denom == 0.0) ? 50.0f : (float)(100.0 * avg_gain / denom);
+    }
+}
+
 
 
 

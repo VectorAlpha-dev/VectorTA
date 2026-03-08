@@ -1,7 +1,6 @@
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
-use crate::indicators::rsi::{rsi, RsiInput, RsiParams};
 use crate::indicators::srsi::{expand_grid_srsi, SrsiBatchRange, SrsiParams};
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
@@ -191,6 +190,52 @@ impl CudaSrsi {
             .find(|&i| !prices_f32[i].is_nan())
             .ok_or_else(|| CudaSrsiError::InvalidInput("all values are NaN".into()))?;
 
+        let combos = Self::prepare_device_batch_inputs(len, first_valid, sweep)?;
+        let elem_f32 = std::mem::size_of::<f32>();
+        let elem_i32 = std::mem::size_of::<i32>();
+        let in_bytes = len
+            .checked_mul(elem_f32)
+            .ok_or_else(|| CudaSrsiError::InvalidInput("size overflow in input bytes".into()))?;
+        let params_bytes = combos
+            .len()
+            .checked_mul(3)
+            .and_then(|v| v.checked_mul(elem_i32))
+            .ok_or_else(|| CudaSrsiError::InvalidInput("size overflow in params bytes".into()))?;
+        let out_bytes = combos
+            .len()
+            .checked_mul(len)
+            .and_then(|v| v.checked_mul(elem_f32 * 2))
+            .ok_or_else(|| CudaSrsiError::InvalidInput("size overflow in output bytes".into()))?;
+        let rsi_bytes = len
+            .checked_mul(elem_f32)
+            .ok_or_else(|| CudaSrsiError::InvalidInput("size overflow in rsi bytes".into()))?;
+        let required = in_bytes
+            .checked_add(params_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .and_then(|v| v.checked_add(rsi_bytes))
+            .ok_or_else(|| CudaSrsiError::InvalidInput("total VRAM size overflow".into()))?;
+        Self::will_fit(required, 64usize * 1024 * 1024)?;
+
+        let d_prices = DeviceBuffer::from_slice(prices_f32)?;
+        let out = self.srsi_batch_dev_from_device_prices(&d_prices, len, first_valid, sweep)?;
+        self.stream.synchronize()?;
+        Ok(out)
+    }
+
+    fn prepare_device_batch_inputs(
+        len: usize,
+        first_valid: usize,
+        sweep: &SrsiBatchRange,
+    ) -> Result<Vec<SrsiParams>, CudaSrsiError> {
+        if len == 0 {
+            return Err(CudaSrsiError::InvalidInput("empty series".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaSrsiError::InvalidInput(
+                "first_valid must be within the input length".into(),
+            ));
+        }
+
         let combos =
             expand_grid_srsi(sweep).map_err(|e| CudaSrsiError::InvalidInput(e.to_string()))?;
         if combos.is_empty() {
@@ -212,33 +257,78 @@ impl CudaSrsi {
         if len - first_valid < max_need {
             return Err(CudaSrsiError::InvalidInput("not enough valid data".into()));
         }
+        Ok(combos)
+    }
 
+    fn launch_rsi_builder_raw(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        period: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaSrsiError> {
+        let func = self
+            .module
+            .get_function("srsi_build_rsi_f32")
+            .map_err(|_| CudaSrsiError::MissingKernelSymbol {
+                name: "srsi_build_rsi_f32",
+            })?;
+        self.validate_launch_dims((1, 1, 1), (32, 1, 1))?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (32, 1, 1).into();
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw() as u64;
+            let mut len_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let mut period_i = period as i32;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let mut args: [*mut c_void; 5] = [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut period_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, &mut args)?;
+        }
+        Ok(())
+    }
+
+    pub fn srsi_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &SrsiBatchRange,
+    ) -> Result<(DeviceSrsiPair, Vec<SrsiParams>), CudaSrsiError> {
+        if d_prices.len() != len {
+            return Err(CudaSrsiError::InvalidInput(
+                "device price buffer length mismatch".into(),
+            ));
+        }
+
+        let combos = Self::prepare_device_batch_inputs(len, first_valid, sweep)?;
         let elem_f32 = std::mem::size_of::<f32>();
         let elem_i32 = std::mem::size_of::<i32>();
-        let in_bytes = len
-            .checked_mul(elem_f32)
-            .ok_or_else(|| CudaSrsiError::InvalidInput("size overflow in input bytes".into()))?;
-        let params_elems = combos
+        let params_bytes = combos
             .len()
             .checked_mul(3)
-            .ok_or_else(|| CudaSrsiError::InvalidInput("size overflow in params elems".into()))?;
-        let params_bytes = params_elems
-            .checked_mul(elem_i32)
+            .and_then(|v| v.checked_mul(elem_i32))
             .ok_or_else(|| CudaSrsiError::InvalidInput("size overflow in params bytes".into()))?;
-        let out_elems = combos
+        let out_bytes = combos
             .len()
             .checked_mul(len)
-            .ok_or_else(|| CudaSrsiError::InvalidInput("rows*cols overflow".into()))?;
-        let out_bytes = out_elems
-            .checked_mul(elem_f32 * 2)
+            .and_then(|v| v.checked_mul(elem_f32 * 2))
             .ok_or_else(|| CudaSrsiError::InvalidInput("size overflow in output bytes".into()))?;
-        let logical = in_bytes
-            .checked_add(params_bytes)
-            .and_then(|x| x.checked_add(out_bytes))
+        let rsi_bytes = len
+            .checked_mul(elem_f32)
+            .ok_or_else(|| CudaSrsiError::InvalidInput("size overflow in rsi bytes".into()))?;
+        let required = params_bytes
+            .checked_add(out_bytes)
+            .and_then(|v| v.checked_add(rsi_bytes))
             .ok_or_else(|| CudaSrsiError::InvalidInput("total VRAM size overflow".into()))?;
-        let headroom = 64usize * 1024 * 1024;
-        let required = logical;
-        Self::will_fit(required, headroom)?;
+        Self::will_fit(required, 64usize * 1024 * 1024)?;
 
         let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (i, p) in combos.iter().enumerate() {
@@ -250,8 +340,6 @@ impl CudaSrsi {
             .ok_or_else(|| CudaSrsiError::InvalidInput("rows*cols overflow".into()))?;
         let mut d_k: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total)? };
         let mut d_d: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total)? };
-
-        let prices_f64: Vec<f64> = prices_f32.iter().map(|&v| v as f64).collect();
 
         let fk_func = self.module.get_function("srsi_fk_batch_f32").map_err(|_| {
             CudaSrsiError::MissingKernelSymbol {
@@ -286,26 +374,17 @@ impl CudaSrsi {
         )> = Vec::new();
 
         for (rp, idxs) in groups {
-            let rsi_out = rsi(&RsiInput::from_slice(
-                &prices_f64,
-                RsiParams { period: Some(rp) },
-            ))
-            .map_err(|e| CudaSrsiError::InvalidInput(e.to_string()))?;
-            let rsi_f32: Vec<f32> = rsi_out.values.into_iter().map(|v| v as f32).collect();
-            let d_rsi = DeviceBuffer::from_slice(&rsi_f32)?;
+            let mut d_rsi: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len)? };
+            self.launch_rsi_builder_raw(d_prices, len, first_valid, rp, &mut d_rsi)?;
 
             let mut sp: Vec<i32> = Vec::with_capacity(idxs.len());
             let mut kp: Vec<i32> = Vec::with_capacity(idxs.len());
             let mut dp: Vec<i32> = Vec::with_capacity(idxs.len());
             for &row in &idxs {
                 let p = &combos[row];
-
-                let s = p.stoch_period.unwrap();
-                let k = p.k.unwrap();
-                let d = p.d.unwrap();
-                sp.push(s as i32);
-                kp.push(k as i32);
-                dp.push(d as i32);
+                sp.push(p.stoch_period.unwrap() as i32);
+                kp.push(p.k.unwrap() as i32);
+                dp.push(p.d.unwrap() as i32);
             }
             let d_sp = DeviceBuffer::from_slice(&sp)?;
             let d_kp = DeviceBuffer::from_slice(&kp)?;
@@ -364,8 +443,6 @@ impl CudaSrsi {
 
             keep_alive.push((d_rsi, d_sp, d_kp, d_dp));
         }
-
-        self.stream.synchronize()?;
 
         Ok((
             DeviceSrsiPair {
@@ -532,6 +609,7 @@ pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::rsi::{rsi, RsiInput, RsiParams};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
     const MANY_COLS: usize = 1024;

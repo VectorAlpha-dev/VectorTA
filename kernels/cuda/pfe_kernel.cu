@@ -47,6 +47,20 @@ static __device__ __forceinline__ float sqrt1p_squaref(float d) {
     return sqrtf(fmaf(d, d, 1.0f));
 }
 
+extern "C" __global__
+void pfe_prepare_data_f32(const float* __restrict__ data,
+                          int len,
+                          int first_valid,
+                          float* __restrict__ out) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= len) return;
+    if (first_valid > 0 && i <= first_valid) {
+        out[i] = data[first_valid];
+    } else {
+        out[i] = data[i];
+    }
+}
+
 
 
 extern "C" __global__

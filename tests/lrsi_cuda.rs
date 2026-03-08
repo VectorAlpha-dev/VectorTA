@@ -137,3 +137,69 @@ fn lrsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     }
     Ok(())
 }
+
+#[cfg(feature = "cuda")]
+#[test]
+fn lrsi_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[lrsi_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 4096usize;
+    let mut high = vec![f64::NAN; len];
+    let mut low = vec![f64::NAN; len];
+    for i in 6..len {
+        let x = i as f64;
+        let mid = (x * 0.00123).sin() + 0.00013 * x;
+        let off = (x * 0.00077).cos().abs() + 0.2;
+        high[i] = mid + off;
+        low[i] = mid - off;
+    }
+    let sweep = LrsiBatchRange {
+        alpha: (0.1, 0.5, 0.2),
+    };
+
+    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let first_valid = (0..len)
+        .find(|&i| high_f32[i].is_finite() && low_f32[i].is_finite())
+        .expect("first_valid");
+    let runtime = vector_ta::cuda::CudaRuntime::new(0).expect("runtime");
+    let d_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+
+    let mut cuda = CudaLrsi::new(0).expect("CudaLrsi::new");
+    let legacy = cuda
+        .lrsi_batch_dev(&high_f32, &low_f32, &sweep)
+        .expect("legacy lrsi");
+    let device = cuda
+        .lrsi_batch_dev_from_device_inputs(
+            d_high.buffer(),
+            d_low.buffer(),
+            len,
+            first_valid,
+            &sweep,
+        )
+        .expect("device lrsi");
+
+    assert_eq!(legacy.rows, device.rows);
+    assert_eq!(legacy.cols, device.cols);
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    let mut device_host = vec![0f32; device.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    device.buf.copy_to(&mut device_host)?;
+
+    let tol = 1e-5;
+    for idx in 0..legacy_host.len() {
+        assert!(
+            approx_eq(legacy_host[idx] as f64, device_host[idx] as f64, tol),
+            "mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_host[idx],
+            device_host[idx]
+        );
+    }
+    Ok(())
+}

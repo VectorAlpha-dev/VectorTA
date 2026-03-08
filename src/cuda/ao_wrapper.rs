@@ -179,6 +179,37 @@ impl CudaAo {
         self.policy = p;
     }
 
+    fn launch_prefix_builder_device_raw(
+        &self,
+        d_hl2: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_prefix: &mut DeviceBuffer<Float2>,
+    ) -> Result<(), CudaAoError> {
+        let func = self
+            .module
+            .get_function("ao_build_prefix_dsf_serial_f32")
+            .map_err(|_| CudaAoError::MissingKernelSymbol {
+                name: "ao_build_prefix_dsf_serial_f32",
+            })?;
+        let grid: GridSize = (1u32, 1u32, 1u32).into();
+        let block: BlockSize = (1u32, 1u32, 1u32).into();
+        unsafe {
+            let mut prices_ptr = d_hl2.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let mut prefix_ptr = d_prefix.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut prefix_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
     pub fn ao_batch_dev(
         &self,
         hl2: &[f32],
@@ -308,6 +339,137 @@ impl CudaAo {
         })
     }
 
+    pub fn ao_batch_dev_from_device_prices(
+        &self,
+        d_hl2: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &AoBatchRange,
+    ) -> Result<DeviceArrayF32Ao, CudaAoError> {
+        if len == 0 {
+            return Err(CudaAoError::InvalidInput("empty series".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaAoError::InvalidInput("first_valid out of range".into()));
+        }
+
+        let combos = expand_grid_checked_cuda(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaAoError::InvalidInput("no parameter combos".into()));
+        }
+
+        let mut shorts: Vec<i32> = Vec::with_capacity(combos.len());
+        let mut longs: Vec<i32> = Vec::with_capacity(combos.len());
+        for prm in &combos {
+            let s = prm.short_period.unwrap_or(5) as i32;
+            let l = prm.long_period.unwrap_or(34) as i32;
+            if s <= 0 || l <= 0 || s >= l {
+                return Err(CudaAoError::InvalidInput(format!(
+                    "invalid params: short={} long={}",
+                    s, l
+                )));
+            }
+            if len - first_valid < (l as usize) {
+                return Err(CudaAoError::InvalidInput(format!(
+                    "not enough valid data for long={}, tail={} (first_valid={})",
+                    l,
+                    len - first_valid,
+                    first_valid
+                )));
+            }
+            shorts.push(s);
+            longs.push(l);
+        }
+
+        let rows = combos.len();
+        let prefix_elems = len
+            .checked_add(1)
+            .ok_or_else(|| CudaAoError::InvalidInput("len+1 overflow".into()))?;
+        let bytes_prefix = prefix_elems
+            .checked_mul(std::mem::size_of::<Float2>())
+            .ok_or_else(|| CudaAoError::InvalidInput("prefix size overflow".into()))?;
+        let bytes_periods = rows
+            .checked_mul(2)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<i32>()))
+            .ok_or_else(|| CudaAoError::InvalidInput("periods size overflow".into()))?;
+        let elems_out = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaAoError::InvalidInput("rows*len overflow".into()))?;
+        let bytes_out_total = elems_out
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaAoError::InvalidInput("output size overflow".into()))?;
+        let required = bytes_prefix
+            .checked_add(bytes_periods)
+            .and_then(|v| v.checked_add(bytes_out_total))
+            .ok_or_else(|| CudaAoError::InvalidInput("total VRAM size overflow".into()))?;
+        let headroom = 64usize * 1024 * 1024;
+        self.will_fit(required, headroom)?;
+
+        let mut d_prefix: DeviceBuffer<Float2> =
+            unsafe { DeviceBuffer::uninitialized(prefix_elems) }?;
+        self.launch_prefix_builder_device_raw(d_hl2, len, first_valid, &mut d_prefix)?;
+
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems_out) }?;
+
+        if rows <= 65_535 {
+            let d_shorts_full = DeviceBuffer::from_slice(&shorts)?;
+            let d_longs_full = DeviceBuffer::from_slice(&longs)?;
+            unsafe {
+                (*(self as *const _ as *mut CudaAo)).last_batch =
+                    Some(BatchKernelSelected::Plain { block_x: 256 });
+            }
+            self.launch_batch_into(
+                &d_prefix,
+                len,
+                first_valid,
+                &d_shorts_full,
+                &d_longs_full,
+                rows,
+                &d_out,
+                0,
+            )?;
+            self.maybe_log_batch_debug();
+            return Ok(DeviceArrayF32Ao {
+                buf: d_out,
+                rows,
+                cols: len,
+                ctx: self._context.clone(),
+                device_id: self.device_id,
+            });
+        }
+
+        unsafe {
+            (*(self as *const _ as *mut CudaAo)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x: 256 });
+        }
+        self.maybe_log_batch_debug();
+        let max_grid = 65_535usize;
+        let mut start = 0usize;
+        while start < rows {
+            let chunk = (rows - start).min(max_grid);
+            let d_shorts = DeviceBuffer::from_slice(&shorts[start..start + chunk])?;
+            let d_longs = DeviceBuffer::from_slice(&longs[start..start + chunk])?;
+            self.launch_batch_into(
+                &d_prefix,
+                len,
+                first_valid,
+                &d_shorts,
+                &d_longs,
+                chunk,
+                &d_out,
+                start,
+            )?;
+            start += chunk;
+        }
+        Ok(DeviceArrayF32Ao {
+            buf: d_out,
+            rows,
+            cols: len,
+            ctx: self._context.clone(),
+            device_id: self.device_id,
+        })
+    }
+
     fn launch_batch_into(
         &self,
         d_prefix: &DeviceBuffer<Float2>,
@@ -369,7 +531,6 @@ impl CudaAo {
             ];
             self.stream.launch(&func, grid, block, 0, args)?;
         }
-        self.stream.synchronize()?;
         Ok(())
     }
 

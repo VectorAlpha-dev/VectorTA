@@ -1,10 +1,11 @@
 #![cfg(feature = "cuda")]
 
-use crate::indicators::coppock::CoppockBatchRange;
+use crate::cuda::moving_averages::DeviceArrayF32 as GenericDeviceArrayF32;
+use crate::indicators::coppock::{CoppockBatchRange, CoppockParams};
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -211,12 +212,43 @@ impl CudaCoppock {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaCoppockError::InvalidInput("all values are NaN".into()))?;
 
+        let host = LockedBuffer::from_slice(price)?;
+        let mut d_price = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }?;
+        unsafe {
+            d_price.async_copy_from(&host, &self.stream)?;
+        }
+        let (dev, _) =
+            self.coppock_batch_dev_from_device_prices(&d_price, len, first_valid, sweep)?;
+        self.stream.synchronize().map_err(CudaCoppockError::from)?;
+        Ok(DeviceArrayF32Coppock {
+            buf: dev.buf,
+            rows: dev.rows,
+            cols: dev.cols,
+            ctx: Arc::clone(&self.context),
+            device_id: self.device_id,
+        })
+    }
+
+    pub fn coppock_batch_dev_from_device_prices(
+        &self,
+        d_price: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &CoppockBatchRange,
+    ) -> Result<(GenericDeviceArrayF32, Vec<CoppockParams>), CudaCoppockError> {
+        if len == 0 || d_price.len() != len {
+            return Err(CudaCoppockError::InvalidInput(
+                "device prices must have non-zero input length".into(),
+            ));
+        }
+
         let (shorts, longs, ma_periods) = expand_grid(sweep)?;
         let rows = ma_periods.len();
         if rows == 0 {
             return Err(CudaCoppockError::InvalidInput("no parameter combos".into()));
         }
 
+        let mut combos = Vec::with_capacity(rows);
         for ((&s, &l), &m) in shorts.iter().zip(longs.iter()).zip(ma_periods.iter()) {
             let (s_u, l_u, m_u) = (s as usize, l as usize, m as usize);
             if s_u == 0 || l_u == 0 || m_u == 0 || s_u > len || l_u > len || m_u > len {
@@ -226,18 +258,21 @@ impl CudaCoppock {
                 )));
             }
             let largest = s_u.max(l_u);
-            if len - first_valid < largest {
+            if first_valid >= len || len - first_valid < largest {
                 return Err(CudaCoppockError::InvalidInput(
                     "not enough valid data".into(),
                 ));
             }
+            combos.push(CoppockParams {
+                short_roc_period: Some(s_u),
+                long_roc_period: Some(l_u),
+                ma_period: Some(m_u),
+                ma_type: Some("wma".to_string()),
+            });
         }
 
         let elem_f32 = std::mem::size_of::<f32>();
         let elem_i32 = std::mem::size_of::<i32>();
-        let prices_bytes = len
-            .checked_mul(elem_f32)
-            .ok_or_else(|| CudaCoppockError::InvalidInput("price bytes overflow".into()))?;
         let inv_bytes = len
             .checked_mul(elem_f32)
             .ok_or_else(|| CudaCoppockError::InvalidInput("inv bytes overflow".into()))?;
@@ -251,27 +286,21 @@ impl CudaCoppock {
         let out_bytes = out_elems
             .checked_mul(elem_f32)
             .ok_or_else(|| CudaCoppockError::InvalidInput("output bytes overflow".into()))?;
-        let required = prices_bytes
-            .checked_add(inv_bytes)
-            .and_then(|v| v.checked_add(params_bytes))
+        let required = inv_bytes
+            .checked_add(params_bytes)
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or_else(|| CudaCoppockError::InvalidInput("total bytes overflow".into()))?;
         let headroom = 64usize * 1024 * 1024;
         self.will_fit(required, headroom)?;
 
-        let d_price = DeviceBuffer::from_slice(price)?;
-        let mut inv = vec![0f32; len];
-        for i in 0..len {
-            inv[i] = 1.0f32 / price[i];
-        }
-        let d_inv = DeviceBuffer::from_slice(&inv)?;
+        let mut d_inv = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }?;
+        self.launch_build_inverse_async(d_price, len, &mut d_inv)?;
 
         let bytes_params = rows
             .checked_mul(3usize)
             .and_then(|v| v.checked_mul(elem_i32))
             .unwrap_or(0);
         let bytes_out_total = out_elems.checked_mul(elem_f32).unwrap_or(0);
-        let headroom = 64usize * 1024 * 1024;
         let fits_single = match mem_get_info() {
             Ok((free, _)) => {
                 bytes_params
@@ -283,12 +312,13 @@ impl CudaCoppock {
         };
 
         if fits_single {
-            let d_s = DeviceBuffer::from_slice(&shorts)?;
-            let d_l = DeviceBuffer::from_slice(&longs)?;
-            let d_m = DeviceBuffer::from_slice(&ma_periods)?;
-            let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }?;
-            self.launch_batch(
-                &d_price,
+            let d_s = self.upload_i32_async(shorts.as_slice())?;
+            let d_l = self.upload_i32_async(longs.as_slice())?;
+            let d_m = self.upload_i32_async(ma_periods.as_slice())?;
+            let mut d_out =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(rows * len, &self.stream) }?;
+            self.launch_batch_async(
+                d_price,
                 &d_inv,
                 len,
                 first_valid,
@@ -300,64 +330,28 @@ impl CudaCoppock {
                 0,
             )?;
             self.maybe_log_batch_debug();
-            return Ok(DeviceArrayF32Coppock {
-                buf: d_out,
-                rows,
-                cols: len,
-                ctx: Arc::clone(&self.context),
-                device_id: self.device_id,
-            });
+            return Ok((
+                GenericDeviceArrayF32 {
+                    buf: d_out,
+                    rows,
+                    cols: len,
+                },
+                combos,
+            ));
         }
 
-        let try_out: Result<DeviceBuffer<f32>, _> =
-            unsafe { DeviceBuffer::uninitialized(rows * len) };
-        if let Ok(mut d_out_full) = try_out {
-            let mut start = 0usize;
-            let max_chunk = 65_535usize;
-            while start < rows {
-                let remain = rows - start;
-                let chunk = remain.min(max_chunk);
-                let d_s = DeviceBuffer::from_slice(&shorts[start..start + chunk])
-                    .map_err(CudaCoppockError::Cuda)?;
-                let d_l = DeviceBuffer::from_slice(&longs[start..start + chunk])
-                    .map_err(CudaCoppockError::Cuda)?;
-                let d_m = DeviceBuffer::from_slice(&ma_periods[start..start + chunk])
-                    .map_err(CudaCoppockError::Cuda)?;
-                self.launch_batch(
-                    &d_price,
-                    &d_inv,
-                    len,
-                    first_valid,
-                    &d_s,
-                    &d_l,
-                    &d_m,
-                    chunk,
-                    &mut d_out_full,
-                    start * len,
-                )?;
-                start += chunk;
-            }
-            self.maybe_log_batch_debug();
-            return Ok(DeviceArrayF32Coppock {
-                buf: d_out_full,
-                rows,
-                cols: len,
-                ctx: Arc::clone(&self.context),
-                device_id: self.device_id,
-            });
-        }
-
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }?;
+        let mut d_out =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(rows * len, &self.stream) }?;
         let mut start = 0usize;
         let max_chunk = 65_535usize;
         while start < rows {
             let remain = rows - start;
             let chunk = remain.min(max_chunk);
-            let d_s = DeviceBuffer::from_slice(&shorts[start..start + chunk])?;
-            let d_l = DeviceBuffer::from_slice(&longs[start..start + chunk])?;
-            let d_m = DeviceBuffer::from_slice(&ma_periods[start..start + chunk])?;
-            self.launch_batch(
-                &d_price,
+            let d_s = self.upload_i32_async(&shorts[start..start + chunk])?;
+            let d_l = self.upload_i32_async(&longs[start..start + chunk])?;
+            let d_m = self.upload_i32_async(&ma_periods[start..start + chunk])?;
+            self.launch_batch_async(
+                d_price,
                 &d_inv,
                 len,
                 first_valid,
@@ -368,19 +362,61 @@ impl CudaCoppock {
                 &mut d_out,
                 start * len,
             )?;
-
             start += chunk;
         }
-        Ok(DeviceArrayF32Coppock {
-            buf: d_out,
-            rows,
-            cols: len,
-            ctx: Arc::clone(&self.context),
-            device_id: self.device_id,
-        })
+        self.maybe_log_batch_debug();
+        Ok((
+            GenericDeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols: len,
+            },
+            combos,
+        ))
     }
 
-    fn launch_batch(
+    fn upload_i32_async(&self, values: &[i32]) -> Result<DeviceBuffer<i32>, CudaCoppockError> {
+        let host = LockedBuffer::from_slice(values)?;
+        let mut device =
+            unsafe { DeviceBuffer::<i32>::uninitialized_async(values.len(), &self.stream) }?;
+        unsafe {
+            device.async_copy_from(&host, &self.stream)?;
+        }
+        Ok(device)
+    }
+
+    fn launch_build_inverse_async(
+        &self,
+        d_price: &DeviceBuffer<f32>,
+        len: usize,
+        d_inv: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaCoppockError> {
+        let func = self
+            .module
+            .get_function("coppock_build_inverse_f32")
+            .map_err(|_| CudaCoppockError::MissingKernelSymbol {
+                name: "coppock_build_inverse_f32",
+            })?;
+        let block_x = 256u32;
+        let grid_x = ((len as u32) + block_x - 1) / block_x;
+        self.validate_launch(grid_x.max(1), 1, 1, block_x, 1, 1)?;
+        let grid: GridSize = (grid_x.max(1), 1u32, 1u32).into();
+        let block: BlockSize = (block_x, 1u32, 1u32).into();
+        unsafe {
+            let mut price_ptr = d_price.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut inv_ptr = d_inv.as_device_ptr().as_raw();
+            let mut args: [*mut c_void; 3] = [
+                &mut price_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut inv_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, &mut args)?;
+        }
+        Ok(())
+    }
+
+    fn launch_batch_async(
         &self,
         d_price: &DeviceBuffer<f32>,
         d_inv: &DeviceBuffer<f32>,
@@ -438,6 +474,34 @@ impl CudaCoppock {
             ];
             self.stream.launch(&func, grid, block, 0, &mut args)?;
         }
+        Ok(())
+    }
+
+    fn launch_batch(
+        &self,
+        d_price: &DeviceBuffer<f32>,
+        d_inv: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_short: &DeviceBuffer<i32>,
+        d_long: &DeviceBuffer<i32>,
+        d_ma: &DeviceBuffer<i32>,
+        n_combos: usize,
+        d_out: &mut DeviceBuffer<f32>,
+        out_offset_elems: usize,
+    ) -> Result<(), CudaCoppockError> {
+        self.launch_batch_async(
+            d_price,
+            d_inv,
+            len,
+            first_valid,
+            d_short,
+            d_long,
+            d_ma,
+            n_combos,
+            d_out,
+            out_offset_elems,
+        )?;
         self.stream.synchronize().map_err(Into::into)
     }
 

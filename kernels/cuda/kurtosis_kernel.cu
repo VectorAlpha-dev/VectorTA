@@ -79,6 +79,55 @@ __device__ __forceinline__ float qnan_f32() { return __int_as_float(0x7fffffff);
 
 
 
+extern "C" __global__ void kurtosis_build_prefix_f32(
+    const float* __restrict__ data,
+    int len,
+    int first_valid,
+    float2* __restrict__ ps_x,
+    float2* __restrict__ ps_x2,
+    float2* __restrict__ ps_x3,
+    float2* __restrict__ ps_x4,
+    int* __restrict__ ps_nan
+) {
+    if (blockIdx.x != 0 || blockIdx.y != 0 || blockIdx.z != 0 ||
+        threadIdx.x != 0 || threadIdx.y != 0 || threadIdx.z != 0) {
+        return;
+    }
+
+    dsf s1 = ds_from_float(0.0f);
+    dsf s2 = ds_from_float(0.0f);
+    dsf s3 = ds_from_float(0.0f);
+    dsf s4 = ds_from_float(0.0f);
+    int nan_count = 0;
+
+    ps_x[0] = make_float2(0.0f, 0.0f);
+    ps_x2[0] = make_float2(0.0f, 0.0f);
+    ps_x3[0] = make_float2(0.0f, 0.0f);
+    ps_x4[0] = make_float2(0.0f, 0.0f);
+    ps_nan[0] = 0;
+
+    for (int i = 0; i < len; ++i) {
+        if (i >= first_valid) {
+            const float v = data[i];
+            if (isnan(v)) {
+                nan_count += 1;
+            } else {
+                const float d2 = fmaf(v, v, 0.0f);
+                s1 = ds_add(s1, ds_from_float(v));
+                s2 = ds_add(s2, ds_from_float(d2));
+                s3 = ds_add(s3, ds_from_float(d2 * v));
+                s4 = ds_add(s4, ds_from_float(d2 * d2));
+            }
+        }
+
+        ps_x[i + 1] = make_float2(s1.hi, s1.lo);
+        ps_x2[i + 1] = make_float2(s2.hi, s2.lo);
+        ps_x3[i + 1] = make_float2(s3.hi, s3.lo);
+        ps_x4[i + 1] = make_float2(s4.hi, s4.lo);
+        ps_nan[i + 1] = nan_count;
+    }
+}
+
 extern "C" __global__ void kurtosis_batch_f32(
     const float2* __restrict__ ps_x,
     const float2* __restrict__ ps_x2,

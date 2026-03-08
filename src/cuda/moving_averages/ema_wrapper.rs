@@ -7,7 +7,7 @@ use cust::device::Device;
 use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::launch;
-use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, DevicePointer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -234,7 +234,7 @@ impl CudaEma {
         };
 
         self.launch_batch_kernel(
-            &d_prices,
+            d_prices.as_device_ptr(),
             &d_periods,
             &d_alphas,
             prepared.series_len,
@@ -296,7 +296,7 @@ impl CudaEma {
         }
 
         self.launch_batch_kernel(
-            d_prices,
+            d_prices.as_device_ptr(),
             d_periods,
             d_alphas,
             series_len,
@@ -304,6 +304,57 @@ impl CudaEma {
             n_combos,
             d_out,
         )
+    }
+
+    pub fn ema_batch_from_device_ptr(
+        &self,
+        d_prices: DevicePointer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &EmaBatchRange,
+    ) -> Result<DeviceArrayF32, CudaEmaError> {
+        let prepared = Self::prepare_batch_inputs_device(series_len, first_valid, sweep)?;
+        let n_combos = prepared.combos.len();
+
+        let params_count = prepared
+            .periods_i32
+            .len()
+            .checked_add(prepared.alphas_f32.len())
+            .ok_or(CudaEmaError::ArithmeticOverflow("params_count"))?;
+        let params_bytes = params_count
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or(CudaEmaError::ArithmeticOverflow("params_bytes"))?;
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or(CudaEmaError::ArithmeticOverflow("out_elems"))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or(CudaEmaError::ArithmeticOverflow("out_bytes"))?;
+        let required = params_bytes
+            .checked_add(out_bytes)
+            .ok_or(CudaEmaError::ArithmeticOverflow("required_bytes"))?;
+        Self::will_fit_checked(required, 64 * 1024 * 1024)?;
+
+        let d_periods = DeviceBuffer::from_slice(&prepared.periods_i32)?;
+        let d_alphas = DeviceBuffer::from_slice(&prepared.alphas_f32)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(series_len * n_combos)? };
+
+        self.launch_batch_kernel(
+            d_prices,
+            &d_periods,
+            &d_alphas,
+            series_len,
+            first_valid,
+            n_combos,
+            &mut d_out,
+        )?;
+
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: series_len,
+        })
     }
 
     pub fn ema_batch_into_host_f32(
@@ -443,7 +494,7 @@ impl CudaEma {
 
     fn launch_batch_kernel(
         &self,
-        d_prices: &DeviceBuffer<f32>,
+        d_prices: DevicePointer<f32>,
         d_periods: &DeviceBuffer<i32>,
         d_alphas: &DeviceBuffer<f32>,
         series_len: usize,
@@ -505,7 +556,7 @@ impl CudaEma {
             unsafe {
                 launch!(
                     func<<<grid, block, 0, stream>>>(
-                        d_prices.as_device_ptr(),
+                        d_prices,
                         periods_ptr,
                         alphas_ptr,
                         series_len_i,
@@ -634,6 +685,52 @@ impl CudaEma {
         })
     }
 
+    fn prepare_batch_inputs_device(
+        series_len: usize,
+        first_valid: usize,
+        sweep: &EmaBatchRange,
+    ) -> Result<PreparedEmaBatch, CudaEmaError> {
+        if series_len == 0 {
+            return Err(CudaEmaError::InvalidInput(
+                "series_len must be positive".into(),
+            ));
+        }
+        if first_valid >= series_len {
+            return Err(CudaEmaError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, series_len
+            )));
+        }
+
+        let combos = expand_grid(sweep)?;
+        let mut periods_i32 = Vec::with_capacity(combos.len());
+        let mut alphas_f32 = Vec::with_capacity(combos.len());
+
+        for params in &combos {
+            let period = params.period.unwrap_or(0);
+            if period == 0 {
+                return Err(CudaEmaError::InvalidInput("period must be positive".into()));
+            }
+            if series_len - first_valid < period {
+                return Err(CudaEmaError::InvalidInput(format!(
+                    "not enough valid data: need {} valid samples, have {}",
+                    period,
+                    series_len - first_valid
+                )));
+            }
+            periods_i32.push(period as i32);
+            alphas_f32.push(2.0f32 / (period as f32 + 1.0f32));
+        }
+
+        Ok(PreparedEmaBatch {
+            combos,
+            first_valid,
+            series_len,
+            periods_i32,
+            alphas_f32,
+        })
+    }
+
     fn prepare_many_series_inputs(
         data_tm_f32: &[f32],
         num_series: usize,
@@ -730,7 +827,7 @@ pub mod benches {
         fn launch(&mut self) {
             self.cuda
                 .launch_batch_kernel(
-                    &self.d_prices,
+                    self.d_prices.as_device_ptr(),
                     &self.d_periods,
                     &self.d_alphas,
                     self.len,

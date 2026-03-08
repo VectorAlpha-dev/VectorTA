@@ -715,6 +715,99 @@ impl CudaYangZhangVolatility {
         })
     }
 
+    pub fn prepare_batch_series_device(
+        &self,
+        d_open: &DeviceBuffer<f32>,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        first_valid: usize,
+    ) -> Result<CudaYangZhangPreparedSeries, CudaYangZhangVolatilityError> {
+        let len = d_close.len();
+        if len == 0 {
+            return Err(CudaYangZhangVolatilityError::InvalidInput(
+                "empty input".to_string(),
+            ));
+        }
+        if d_open.len() != len || d_high.len() != len || d_low.len() != len {
+            return Err(CudaYangZhangVolatilityError::InvalidInput(
+                "OHLC length mismatch".to_string(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaYangZhangVolatilityError::InvalidInput(
+                "first_valid out of range".to_string(),
+            ));
+        }
+
+        Self::will_fit(
+            Self::prepare_series_build_bytes(len)?,
+            Self::default_headroom(),
+        )?;
+
+        let mut d_valid: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
+        let mut d_rs_terms: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
+        let mut d_oret_terms: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
+        let mut d_cret_terms: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
+
+        let prefix_len = len.checked_add(1).ok_or_else(|| {
+            CudaYangZhangVolatilityError::InvalidInput("series len overflow".to_string())
+        })?;
+        let mut d_prefix_valid: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::uninitialized_async(prefix_len, &self.stream) }?;
+        let mut d_prefix_rs: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(prefix_len, &self.stream) }?;
+        let mut d_prefix_o: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(prefix_len, &self.stream) }?;
+        let mut d_prefix_oo: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(prefix_len, &self.stream) }?;
+        let mut d_prefix_c: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(prefix_len, &self.stream) }?;
+        let mut d_prefix_cc: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(prefix_len, &self.stream) }?;
+
+        self.launch_prepare_terms_kernel(
+            d_open,
+            d_high,
+            d_low,
+            d_close,
+            len,
+            &mut d_valid,
+            &mut d_rs_terms,
+            &mut d_oret_terms,
+            &mut d_cret_terms,
+        )?;
+        self.launch_prefix_kernel(
+            &d_valid,
+            &d_rs_terms,
+            &d_oret_terms,
+            &d_cret_terms,
+            len,
+            &mut d_prefix_valid,
+            &mut d_prefix_rs,
+            &mut d_prefix_o,
+            &mut d_prefix_oo,
+            &mut d_prefix_c,
+            &mut d_prefix_cc,
+        )?;
+        self.synchronize()?;
+
+        Ok(CudaYangZhangPreparedSeries {
+            d_prefix_valid,
+            d_prefix_rs,
+            d_prefix_o,
+            d_prefix_oo,
+            d_prefix_c,
+            d_prefix_cc,
+            series_len: len,
+            first_valid,
+        })
+    }
+
     pub fn prepare_batch_run(
         &self,
         prepared_series: &CudaYangZhangPreparedSeries,
@@ -797,6 +890,27 @@ impl CudaYangZhangVolatility {
         sweep: &YangZhangVolatilityBatchRange,
     ) -> Result<CudaYangZhangBatchResult, CudaYangZhangVolatilityError> {
         let prepared_series = self.prepare_batch_series(open, high, low, close)?;
+        let mut prepared_batch = self.prepare_batch_run(&prepared_series, sweep)?;
+        self.launch_prepared_batch(&prepared_series, &mut prepared_batch)?;
+        self.synchronize()?;
+
+        Ok(CudaYangZhangBatchResult {
+            outputs: prepared_batch.outputs,
+            combos: prepared_batch.combos,
+        })
+    }
+
+    pub fn yang_zhang_volatility_batch_from_device(
+        &self,
+        d_open: &DeviceBuffer<f32>,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        first_valid: usize,
+        sweep: &YangZhangVolatilityBatchRange,
+    ) -> Result<CudaYangZhangBatchResult, CudaYangZhangVolatilityError> {
+        let prepared_series =
+            self.prepare_batch_series_device(d_open, d_high, d_low, d_close, first_valid)?;
         let mut prepared_batch = self.prepare_batch_run(&prepared_series, sweep)?;
         self.launch_prepared_batch(&prepared_series, &mut prepared_batch)?;
         self.synchronize()?;

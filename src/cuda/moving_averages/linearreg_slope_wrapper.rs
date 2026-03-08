@@ -323,6 +323,28 @@ impl CudaLinearregSlope {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("all values are NaN".into()))?;
 
+        let (combos, periods_i32, x_sums, denom_invs) =
+            Self::prepare_batch_params(len, first_valid, sweep)?;
+
+        Ok((combos, first_valid, len, periods_i32, x_sums, denom_invs))
+    }
+
+    fn prepare_batch_params(
+        len: usize,
+        first_valid: usize,
+        sweep: &LinearRegSlopeBatchRange,
+    ) -> Result<(Vec<LinearRegSlopeParams>, Vec<i32>, Vec<f32>, Vec<f32>), CudaLinearregSlopeError>
+    {
+        if len == 0 {
+            return Err(CudaLinearregSlopeError::InvalidInput("empty data".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaLinearregSlopeError::InvalidInput(format!(
+                "invalid first_valid {} for series length {}",
+                first_valid, len
+            )));
+        }
+
         let periods = Self::expand_periods(sweep)?;
         if periods.is_empty() {
             return Err(CudaLinearregSlopeError::InvalidInput(
@@ -370,7 +392,7 @@ impl CudaLinearregSlope {
             denom_invs.push(denom_inv as f32);
         }
 
-        Ok((combos, first_valid, len, periods_i32, x_sums, denom_invs))
+        Ok((combos, periods_i32, x_sums, denom_invs))
     }
 
     fn grid_1d_for(&self, work_items: usize, block_x: u32) -> (GridSize, u32) {
@@ -665,6 +687,114 @@ impl CudaLinearregSlope {
         })
     }
 
+    fn run_batch_kernel_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        periods_i32: &[i32],
+        x_sums: &[f32],
+        denom_invs: &[f32],
+        len: usize,
+        first_valid: usize,
+    ) -> Result<DeviceArrayF32, CudaLinearregSlopeError> {
+        let nrows = periods_i32.len();
+        let periods_bytes = nrows
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| {
+                CudaLinearregSlopeError::InvalidInput("size overflow (periods_bytes)".into())
+            })?;
+        let consts_bytes = nrows
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| {
+                CudaLinearregSlopeError::InvalidInput("size overflow (consts_bytes)".into())
+            })?;
+        let consts2_bytes = consts_bytes.checked_mul(2).ok_or_else(|| {
+            CudaLinearregSlopeError::InvalidInput("size overflow (consts_bytes*2)".into())
+        })?;
+        let out_elems = nrows.checked_mul(len).ok_or_else(|| {
+            CudaLinearregSlopeError::InvalidInput("size overflow (rows*len)".into())
+        })?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| {
+                CudaLinearregSlopeError::InvalidInput("size overflow (out_bytes)".into())
+            })?;
+
+        let required = if matches!(self.policy.batch, BatchKernelPolicy::Plain { .. }) {
+            periods_bytes
+                .checked_add(consts2_bytes)
+                .and_then(|v| v.checked_add(out_bytes))
+                .ok_or_else(|| {
+                    CudaLinearregSlopeError::InvalidInput("size overflow (bytes)".into())
+                })?
+        } else {
+            let prefix_elems = len.checked_add(1).ok_or_else(|| {
+                CudaLinearregSlopeError::InvalidInput("size overflow (len+1)".into())
+            })?;
+            let prefix_bytes = prefix_elems
+                .checked_mul(std::mem::size_of::<f64>())
+                .and_then(|v| v.checked_mul(2))
+                .ok_or_else(|| {
+                    CudaLinearregSlopeError::InvalidInput("size overflow (prefix_bytes)".into())
+                })?;
+            periods_bytes
+                .checked_add(consts2_bytes)
+                .and_then(|v| v.checked_add(prefix_bytes))
+                .and_then(|v| v.checked_add(out_bytes))
+                .ok_or_else(|| {
+                    CudaLinearregSlopeError::InvalidInput("size overflow (bytes)".into())
+                })?
+        };
+        let headroom = 64 * 1024 * 1024;
+        Self::will_fit(required, headroom)?;
+
+        let d_periods = DeviceBuffer::from_slice(periods_i32)?;
+        let d_xs = DeviceBuffer::from_slice(x_sums)?;
+        let d_dinv = DeviceBuffer::from_slice(denom_invs)?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
+
+        match self.policy.batch {
+            BatchKernelPolicy::Plain { .. } => {
+                self.launch_batch_kernel(
+                    d_prices,
+                    &d_periods,
+                    &d_xs,
+                    &d_dinv,
+                    len,
+                    nrows,
+                    first_valid,
+                    &mut d_out,
+                )?;
+            }
+            BatchKernelPolicy::Auto | BatchKernelPolicy::Prefix { .. } => {
+                let mut d_prefix_y = unsafe { DeviceBuffer::<f64>::uninitialized(len + 1) }?;
+                let mut d_prefix_yi = unsafe { DeviceBuffer::<f64>::uninitialized(len + 1) }?;
+                self.launch_prefix_kernel(
+                    d_prices,
+                    len,
+                    first_valid,
+                    &mut d_prefix_y,
+                    &mut d_prefix_yi,
+                )?;
+                self.launch_batch_from_prefix_kernel(
+                    &d_prefix_y,
+                    &d_prefix_yi,
+                    &d_periods,
+                    &d_xs,
+                    &d_dinv,
+                    len,
+                    nrows,
+                    first_valid,
+                    &mut d_out,
+                )?;
+            }
+        }
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: nrows,
+            cols: len,
+        })
+    }
+
     pub fn linearreg_slope_batch_dev(
         &self,
         data_f32: &[f32],
@@ -682,6 +812,25 @@ impl CudaLinearregSlope {
         )?;
         self.stream.synchronize()?;
         Ok((dev, combos))
+    }
+
+    pub fn linearreg_slope_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &LinearRegSlopeBatchRange,
+    ) -> Result<DeviceArrayF32, CudaLinearregSlopeError> {
+        let (combos, periods_i32, x_sums, denom_invs) =
+            Self::prepare_batch_params(series_len, first_valid, sweep)?;
+        self.run_batch_kernel_from_device_prices(
+            d_prices,
+            &periods_i32,
+            &x_sums,
+            &denom_invs,
+            series_len,
+            first_valid,
+        )
     }
 
     pub fn linearreg_slope_batch_into_host_f32(

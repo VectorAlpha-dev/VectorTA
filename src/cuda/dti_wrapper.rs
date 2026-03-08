@@ -378,6 +378,49 @@ impl CudaDti {
         }
     }
 
+    fn launch_precompute_x_ax_kernel(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        len: usize,
+        start: usize,
+        d_x: &mut DeviceBuffer<f32>,
+        d_ax: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaDtiError> {
+        let mut func: Function = self
+            .module
+            .get_function("dti_build_x_ax_f32")
+            .map_err(|_| CudaDtiError::MissingKernelSymbol {
+                name: "dti_build_x_ax_f32",
+            })?;
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
+
+        let block_x = 256u32;
+        let grid_x = ((len as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch(grid_x.max(1), 1, 1, block_x, 1, 1)?;
+
+        unsafe {
+            let mut high_ptr = d_high.as_device_ptr().as_raw();
+            let mut low_ptr = d_low.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut start_i = start as i32;
+            let mut x_ptr = d_x.as_device_ptr().as_raw();
+            let mut ax_ptr = d_ax.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut high_ptr as *mut _ as *mut c_void,
+                &mut low_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut start_i as *mut _ as *mut c_void,
+                &mut x_ptr as *mut _ as *mut c_void,
+                &mut ax_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
     fn launch_batch_kernel(
         &self,
         d_x: &DeviceBuffer<f32>,
@@ -482,11 +525,51 @@ impl CudaDti {
                 len - first_valid
             )));
         }
+        let d_high = unsafe { DeviceBuffer::from_slice_async(high_f32, &self.stream) }?;
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low_f32, &self.stream) }?;
+        let (dev, combos) =
+            self.dti_batch_dev_from_device_inputs(&d_high, &d_low, len, first_valid, sweep)?;
+        self.stream.synchronize()?;
+        Ok((dev, combos))
+    }
+
+    pub fn dti_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &DtiBatchRange,
+    ) -> Result<(DeviceArrayF32Dti, Vec<DtiParams>), CudaDtiError> {
+        if len == 0 || d_high.len() != len || d_low.len() != len {
+            return Err(CudaDtiError::InvalidInput(
+                "empty or mismatched device inputs".into(),
+            ));
+        }
+
+        let combos = Self::expand_grid(sweep);
+        if combos.is_empty() {
+            return Err(CudaDtiError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        let max_p = combos
+            .iter()
+            .map(|c| c.r.unwrap().max(c.s.unwrap()).max(c.u.unwrap()))
+            .max()
+            .unwrap();
+        if len - first_valid < max_p {
+            return Err(CudaDtiError::InvalidInput(format!(
+                "not enough valid data (needed {}, valid {})",
+                max_p,
+                len - first_valid
+            )));
+        }
+
         let rows = combos.len();
         let start = first_valid + 1;
-
         let inputs_bytes = len
-            .checked_mul(2)
+            .checked_mul(4)
             .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| CudaDtiError::InvalidInput("size overflow in dti_batch_dev".into()))?;
         let params_bytes = rows
@@ -520,16 +603,6 @@ impl CudaDti {
             }
         }
 
-        let mut hx = unsafe { LockedBuffer::<f32>::uninitialized(len) }?;
-        let mut hax = unsafe { LockedBuffer::<f32>::uninitialized(len) }?;
-        Self::precompute_x_ax_into_locked(
-            high_f32,
-            low_f32,
-            start,
-            hx.as_mut_slice(),
-            hax.as_mut_slice(),
-        );
-
         let mut r_vec = Vec::with_capacity(rows);
         let mut s_vec = Vec::with_capacity(rows);
         let mut u_vec = Vec::with_capacity(rows);
@@ -550,16 +623,13 @@ impl CudaDti {
         let mut d_out =
             unsafe { DeviceBuffer::<f32>::uninitialized_async(rows_len, &self.stream) }?;
 
+        self.launch_precompute_x_ax_kernel(d_high, d_low, len, start, &mut d_x, &mut d_ax)?;
         unsafe {
-            d_x.async_copy_from(&hx, &self.stream)?;
-            d_ax.async_copy_from(&hax, &self.stream)?;
             d_r.async_copy_from(&hr, &self.stream)?;
             d_s.async_copy_from(&hs, &self.stream)?;
             d_u.async_copy_from(&hu, &self.stream)?;
         }
-
         self.launch_batch_kernel(&d_x, &d_ax, &d_r, &d_s, &d_u, len, rows, start, &mut d_out)?;
-        self.stream.synchronize()?;
 
         Ok((
             DeviceArrayF32Dti {

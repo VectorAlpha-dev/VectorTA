@@ -409,15 +409,93 @@ impl CudaVosc {
         Ok(())
     }
 
+    fn launch_build_prefix_kernel(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        d_prefix: &mut DeviceBuffer<Float2>,
+    ) -> Result<(), CudaVoscError> {
+        let func = self
+            .module
+            .get_function("vosc_build_prefix_f32_ds")
+            .map_err(|_| CudaVoscError::MissingKernelSymbol {
+                name: "vosc_build_prefix_f32_ds",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut prefix_ptr = d_prefix.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut prefix_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(CudaVoscError::Cuda)?;
+        }
+        Ok(())
+    }
+
     pub fn vosc_batch_dev(
         &self,
         data_f32: &[f32],
         sweep: &VoscBatchRange,
     ) -> Result<(DeviceArrayF32, Vec<VoscParams>), CudaVoscError> {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(data_f32, sweep)?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }?;
+        let (dev, _combos) =
+            self.vosc_batch_dev_from_device_prices(&d_prices, len, first_valid, sweep)?;
+        self.stream.synchronize()?;
+        Ok((dev, combos))
+    }
+
+    pub fn vosc_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &VoscBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<VoscParams>), CudaVoscError> {
+        if len == 0 || d_prices.len() != len {
+            return Err(CudaVoscError::InvalidInput(
+                "device prices must have non-zero input length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaVoscError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = Self::expand_combos(sweep);
+        if combos.is_empty() {
+            return Err(CudaVoscError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        for c in &combos {
+            let s = c.short_period.unwrap_or(0);
+            let l = c.long_period.unwrap_or(0);
+            if s == 0 || l == 0 || s > l || l > len {
+                return Err(CudaVoscError::InvalidInput(format!(
+                    "invalid (s,l)=({},{}) for len {}",
+                    s, l, len
+                )));
+            }
+            if len - first_valid < l {
+                return Err(CudaVoscError::InvalidInput(format!(
+                    "not enough valid data: need {}, have {} after first_valid {}",
+                    l,
+                    len - first_valid,
+                    first_valid
+                )));
+            }
+        }
+
         let n_combos = combos.len();
-        let prefix = Self::build_prefix_sum_f64_allow_nan(data_f32);
-        let prefix_f2 = pack_f64_to_float2_host(&prefix);
         let shorts: Vec<i32> = combos
             .iter()
             .map(|c| c.short_period.unwrap() as i32)
@@ -437,7 +515,9 @@ impl CudaVosc {
         let headroom = 64 * 1024 * 1024usize;
         Self::will_fit(bytes, headroom)?;
 
-        let d_prefix = unsafe { DeviceBuffer::from_slice_async(&prefix_f2, &self.stream) }?;
+        let mut d_prefix: DeviceBuffer<Float2> =
+            unsafe { DeviceBuffer::uninitialized_async(len + 1, &self.stream) }?;
+        self.launch_build_prefix_kernel(d_prices, len, &mut d_prefix)?;
         let d_short = unsafe { DeviceBuffer::from_slice_async(&shorts, &self.stream) }?;
         let d_long = unsafe { DeviceBuffer::from_slice_async(&longs, &self.stream) }?;
         let mut d_out: DeviceBuffer<f32> =
@@ -452,7 +532,6 @@ impl CudaVosc {
             n_combos,
             &mut d_out,
         )?;
-        self.stream.synchronize()?;
 
         Ok((
             DeviceArrayF32 {

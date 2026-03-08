@@ -10,6 +10,8 @@ use cust::memory::CopyDestination;
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::CudaQstick;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -145,5 +147,55 @@ fn qstick_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
             idx
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn qstick_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[qstick_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 2048usize;
+    let mut open = vec![f64::NAN; len];
+    let mut close = vec![f64::NAN; len];
+    for i in 4..len {
+        let x = i as f64;
+        open[i] = (x * 0.0012).cos() + 0.00021 * x;
+        close[i] = open[i] + 0.09 * (x * 0.0027).sin();
+    }
+
+    let sweep = QstickBatchRange { period: (5, 25, 5) };
+    let open_f32: Vec<f32> = open.iter().map(|&v| v as f32).collect();
+    let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_open = runtime.upload_f32(&open_f32).expect("upload open");
+    let d_close = runtime.upload_f32(&close_f32).expect("upload close");
+    let cuda = CudaQstick::new(0).expect("CudaQstick::new");
+
+    let legacy = cuda
+        .qstick_batch_dev(&open_f32, &close_f32, &sweep)
+        .expect("legacy qstick");
+    let device = cuda
+        .qstick_batch_dev_from_device_inputs(d_open.buffer(), d_close.buffer(), len, 4, &sweep)
+        .expect("device qstick");
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    let mut device_host = vec![0f32; device.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    device.buf.copy_to(&mut device_host)?;
+
+    for idx in 0..legacy_host.len() {
+        assert!(
+            approx_eq(legacy_host[idx] as f64, device_host[idx] as f64, 1e-4),
+            "mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_host[idx],
+            device_host[idx]
+        );
+    }
+
     Ok(())
 }

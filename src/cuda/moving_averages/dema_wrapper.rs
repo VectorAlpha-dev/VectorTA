@@ -6,7 +6,7 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::device::DeviceAttribute;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer};
+use cust::memory::{mem_get_info, DeviceBuffer, DevicePointer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -260,15 +260,13 @@ impl CudaDema {
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_len)? };
 
         self.launch_batch_kernel(
-            &d_prices,
+            d_prices.as_device_ptr(),
             &d_periods,
             series_len,
             first_valid,
             combos.len(),
             &mut d_out,
         )?;
-
-        self.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -292,7 +290,7 @@ impl CudaDema {
             ));
         }
         self.launch_batch_kernel(
-            d_prices,
+            d_prices.as_device_ptr(),
             d_periods,
             series_len as usize,
             first_valid.max(0) as usize,
@@ -305,6 +303,16 @@ impl CudaDema {
     pub fn dema_batch_from_device_prices(
         &self,
         d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &DemaBatchRange,
+    ) -> Result<DeviceArrayF32, CudaDemaError> {
+        self.dema_batch_from_device_ptr(d_prices.as_device_ptr(), series_len, first_valid, sweep)
+    }
+
+    pub fn dema_batch_from_device_ptr(
+        &self,
+        d_prices: DevicePointer<f32>,
         series_len: usize,
         first_valid: usize,
         sweep: &DemaBatchRange,
@@ -367,7 +375,6 @@ impl CudaDema {
             combos.len(),
             &mut d_out,
         )?;
-        self.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -445,7 +452,7 @@ impl CudaDema {
 
     fn launch_batch_kernel(
         &self,
-        d_prices: &DeviceBuffer<f32>,
+        d_prices: DevicePointer<f32>,
         d_periods: &DeviceBuffer<i32>,
         series_len: usize,
         first_valid: usize,
@@ -493,7 +500,7 @@ impl CudaDema {
         }
 
         unsafe {
-            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut prices_ptr = d_prices.as_raw();
             let mut periods_ptr = d_periods.as_device_ptr().as_raw();
             let mut series_len_i = series_len as i32;
             let mut first_valid_i = first_valid as i32;
@@ -828,7 +835,7 @@ pub mod benches {
         fn launch(&mut self) {
             self.cuda
                 .launch_batch_kernel(
-                    &self.d_prices,
+                    self.d_prices.as_device_ptr(),
                     &self.d_periods,
                     self.len,
                     self.first_valid,

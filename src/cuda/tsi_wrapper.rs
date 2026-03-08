@@ -278,6 +278,97 @@ impl CudaTsi {
         }
 
         let d_prices = DeviceBuffer::from_slice(prices_f32)?;
+        let (dev, device_combos) =
+            self.tsi_batch_dev_from_device_prices(&d_prices, len, first_valid, sweep)?;
+        self.synchronize()?;
+        debug_assert_eq!(device_combos.len(), combos.len());
+        Ok((dev, device_combos))
+    }
+
+    pub fn tsi_batch_dev_from_device_prices(
+        &mut self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &TsiBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<TsiParams>), CudaTsiError> {
+        if len == 0 || d_prices.len() != len {
+            return Err(CudaTsiError::InvalidInput(
+                "device prices must match non-zero input length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaTsiError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = expand_grid(sweep)?;
+        let mut longs_i32 = Vec::<i32>::with_capacity(combos.len());
+        let mut shorts_i32 = Vec::<i32>::with_capacity(combos.len());
+        for p in &combos {
+            let l = p.long_period.unwrap_or(25);
+            let s = p.short_period.unwrap_or(13);
+            if l == 0 || s == 0 || l > len || s > len {
+                return Err(CudaTsiError::InvalidInput("invalid period in combo".into()));
+            }
+            let needed = 1 + l + s;
+            if len - first_valid < needed {
+                return Err(CudaTsiError::InvalidInput(format!(
+                    "not enough valid data: need {}, have {}",
+                    needed,
+                    len - first_valid
+                )));
+            }
+            longs_i32.push(l as i32);
+            shorts_i32.push(s as i32);
+        }
+
+        let sz_f32 = std::mem::size_of::<f32>();
+        let sz_i32 = std::mem::size_of::<i32>();
+        let params_elems = combos
+            .len()
+            .checked_mul(2usize)
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let params_bytes = params_elems
+            .checked_mul(sz_i32)
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let out_elems = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let plain_required = params_bytes
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let fast_extra_terms = len
+            .checked_mul(2)
+            .and_then(|v| v.checked_add(out_elems))
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let fast_extra = fast_extra_terms
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let fast_required = plain_required
+            .checked_add(fast_extra)
+            .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
+        let head = 64usize * 1024 * 1024;
+        let free_ok_fast = CudaTsi::will_fit(fast_required, head);
+        if !CudaTsi::will_fit(plain_required, head) {
+            if let Some((free, _)) = CudaTsi::device_mem_info() {
+                return Err(CudaTsiError::OutOfMemory {
+                    required: plain_required,
+                    free,
+                    headroom: head,
+                });
+            } else {
+                return Err(CudaTsiError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
+        }
+
         let d_longs = DeviceBuffer::from_slice(&longs_i32)?;
         let d_shorts = DeviceBuffer::from_slice(&shorts_i32)?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems)? };
@@ -292,9 +383,7 @@ impl CudaTsi {
             self.ensure_scratch(len, combos.len())?;
             if self.scratch.is_some() {
                 let mut s = self.scratch.take().unwrap();
-
-                self.launch_prepare_momentum(&d_prices, len, first_valid, &mut s.mom, &mut s.amom)?;
-
+                self.launch_prepare_momentum(d_prices, len, first_valid, &mut s.mom, &mut s.amom)?;
                 self.launch_param_parallel_tm(
                     &s.mom,
                     &s.amom,
@@ -306,17 +395,14 @@ impl CudaTsi {
                     &mut s.out_tm,
                     block_x,
                 )?;
-
                 self.launch_transpose_tm_to_rm(&s.out_tm, len, combos.len(), &mut d_out)?;
-
                 self.scratch = Some(s);
             }
             self.last_batch = Some(BatchKernelSelected::Plain { block_x });
             self.maybe_log_batch_debug();
-            self.synchronize()?;
         } else {
             self.launch_batch_kernel(
-                &d_prices,
+                d_prices,
                 &d_longs,
                 &d_shorts,
                 len,
@@ -324,8 +410,8 @@ impl CudaTsi {
                 combos.len(),
                 &mut d_out,
             )?;
-            self.synchronize()?;
         }
+
         Ok((
             DeviceArrayF32 {
                 buf: d_out,

@@ -124,6 +124,14 @@ struct PreparedBatch {
     series_len: usize,
 }
 
+struct PreparedBatchParams {
+    combos: Vec<VwapParams>,
+    counts: Vec<i32>,
+    unit_codes: Vec<i32>,
+    divisors: Vec<i64>,
+    needs_months: bool,
+}
+
 impl CudaVwap {
     pub fn new(device_id: usize) -> Result<Self, CudaVwapError> {
         cust::init(CudaFlags::empty())?;
@@ -267,21 +275,7 @@ impl CudaVwap {
         Ok(())
     }
 
-    fn prepare_batch_inputs(
-        timestamps: &[i64],
-        volumes: &[f64],
-        prices: &[f64],
-        sweep: &VwapBatchRange,
-    ) -> Result<PreparedBatch, CudaVwapError> {
-        if timestamps.len() != volumes.len() || volumes.len() != prices.len() {
-            return Err(CudaVwapError::InvalidInput(
-                "timestamps, volumes, and prices must have equal length".into(),
-            ));
-        }
-        if timestamps.is_empty() {
-            return Err(CudaVwapError::InvalidInput("empty input series".into()));
-        }
-
+    fn prepare_batch_params(sweep: &VwapBatchRange) -> Result<PreparedBatchParams, CudaVwapError> {
         let combos = expand_grid_vwap(sweep);
         if combos.is_empty() {
             return Err(CudaVwapError::InvalidInput(
@@ -292,7 +286,6 @@ impl CudaVwap {
         let mut counts = Vec::with_capacity(combos.len());
         let mut unit_codes = Vec::with_capacity(combos.len());
         let mut divisors = Vec::with_capacity(combos.len());
-        let mut first_valids = Vec::with_capacity(combos.len());
         let mut needs_months = false;
 
         for params in &combos {
@@ -331,13 +324,50 @@ impl CudaVwap {
                 )));
             }
 
-            let warm = first_valid_vwap_index(timestamps, volumes, count_u32, unit_char);
-            let warm_i32 = i32::try_from(warm).unwrap_or(i32::MAX);
-
             counts.push(count);
             unit_codes.push(unit_code);
             divisors.push(divisor);
-            first_valids.push(warm_i32);
+        }
+
+        Ok(PreparedBatchParams {
+            combos,
+            counts,
+            unit_codes,
+            divisors,
+            needs_months,
+        })
+    }
+
+    fn prepare_batch_inputs(
+        timestamps: &[i64],
+        volumes: &[f64],
+        prices: &[f64],
+        sweep: &VwapBatchRange,
+    ) -> Result<PreparedBatch, CudaVwapError> {
+        if timestamps.len() != volumes.len() || volumes.len() != prices.len() {
+            return Err(CudaVwapError::InvalidInput(
+                "timestamps, volumes, and prices must have equal length".into(),
+            ));
+        }
+        if timestamps.is_empty() {
+            return Err(CudaVwapError::InvalidInput("empty input series".into()));
+        }
+
+        let PreparedBatchParams {
+            combos,
+            counts,
+            unit_codes,
+            divisors,
+            needs_months,
+        } = Self::prepare_batch_params(sweep)?;
+
+        let mut first_valids = Vec::with_capacity(combos.len());
+        for params in &combos {
+            let anchor = params.anchor.as_deref().unwrap_or("1d");
+            let (count_u32, unit_char) =
+                parse_anchor(anchor).map_err(|e| CudaVwapError::InvalidInput(e.to_string()))?;
+            let warm = first_valid_vwap_index(timestamps, volumes, count_u32, unit_char);
+            first_valids.push(i32::try_from(warm).unwrap_or(i32::MAX));
         }
 
         let month_ids = if needs_months {
@@ -405,62 +435,21 @@ impl CudaVwap {
             return Err(CudaVwapError::InvalidInput("empty input series".into()));
         }
 
-        let combos = expand_grid_vwap(sweep);
-        if combos.is_empty() {
-            return Err(CudaVwapError::InvalidInput(
-                "no parameter combinations after anchor expansion".into(),
-            ));
-        }
+        let PreparedBatchParams {
+            combos,
+            counts,
+            unit_codes,
+            divisors,
+            needs_months,
+        } = Self::prepare_batch_params(sweep)?;
 
-        let mut counts = Vec::with_capacity(combos.len());
-        let mut unit_codes = Vec::with_capacity(combos.len());
-        let mut divisors = Vec::with_capacity(combos.len());
         let mut first_valids = Vec::with_capacity(combos.len());
-        let mut needs_months = false;
-
         for params in &combos {
             let anchor = params.anchor.as_deref().unwrap_or("1d");
             let (count_u32, unit_char) =
                 parse_anchor(anchor).map_err(|e| CudaVwapError::InvalidInput(e.to_string()))?;
-            if count_u32 == 0 {
-                return Err(CudaVwapError::InvalidInput(format!(
-                    "anchor '{}' resolved to zero count",
-                    anchor
-                )));
-            }
-            let count = i32::try_from(count_u32)
-                .map_err(|_| CudaVwapError::InvalidInput("count exceeds i32::MAX".into()))?;
-
-            let (unit_code, divisor) = match unit_char {
-                'm' => (0, (count as i64).saturating_mul(60_000)),
-                'h' => (1, (count as i64).saturating_mul(3_600_000)),
-                'd' => (2, (count as i64).saturating_mul(86_400_000)),
-                'M' => {
-                    needs_months = true;
-                    (3, count as i64)
-                }
-                other => {
-                    return Err(CudaVwapError::InvalidInput(format!(
-                        "unsupported anchor unit '{}'",
-                        other
-                    )))
-                }
-            };
-
-            if divisor <= 0 {
-                return Err(CudaVwapError::InvalidInput(format!(
-                    "non-positive divisor derived from anchor '{}'",
-                    anchor
-                )));
-            }
-
             let warm = Self::first_valid_vwap_index_f32(timestamps, volumes, count_u32, unit_char);
-            let warm_i32 = i32::try_from(warm).unwrap_or(i32::MAX);
-
-            counts.push(count);
-            unit_codes.push(unit_code);
-            divisors.push(divisor);
-            first_valids.push(warm_i32);
+            first_valids.push(i32::try_from(warm).unwrap_or(i32::MAX));
         }
 
         let month_ids = if needs_months {
@@ -493,6 +482,104 @@ impl CudaVwap {
             out.push(clamped);
         }
         Ok(out)
+    }
+
+    fn build_month_ids_device(
+        &self,
+        d_timestamps: &DeviceBuffer<i64>,
+        series_len: usize,
+    ) -> Result<DeviceBuffer<i32>, CudaVwapError> {
+        if series_len > i32::MAX as usize {
+            return Err(CudaVwapError::InvalidInput(
+                "series length exceeds i32::MAX (unsupported by kernel)".into(),
+            ));
+        }
+
+        let func = self
+            .module
+            .get_function("vwap_build_month_ids_i32")
+            .map_err(|_| CudaVwapError::MissingKernelSymbol {
+                name: "vwap_build_month_ids_i32",
+            })?;
+        let block_x = 256u32;
+        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        let mut d_month_ids =
+            unsafe { DeviceBuffer::<i32>::uninitialized_async(series_len, &self.stream) }?;
+
+        unsafe {
+            let mut ts_ptr = d_timestamps.as_device_ptr().as_raw();
+            let mut len_i = series_len as i32;
+            let mut month_ptr = d_month_ids.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut ts_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut month_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+
+        Ok(d_month_ids)
+    }
+
+    fn build_first_valids_device(
+        &self,
+        d_timestamps: &DeviceBuffer<i64>,
+        d_volumes: &DeviceBuffer<f32>,
+        d_counts: &DeviceBuffer<i32>,
+        d_unit_codes: &DeviceBuffer<i32>,
+        d_divisors: &DeviceBuffer<i64>,
+        d_month_ids: Option<&DeviceBuffer<i32>>,
+        series_len: usize,
+        n_combos: usize,
+    ) -> Result<DeviceBuffer<i32>, CudaVwapError> {
+        if series_len > i32::MAX as usize || n_combos > i32::MAX as usize {
+            return Err(CudaVwapError::InvalidInput(
+                "series length or combo count exceeds i32::MAX".into(),
+            ));
+        }
+
+        let func = self
+            .module
+            .get_function("vwap_build_first_valids_i32")
+            .map_err(|_| CudaVwapError::MissingKernelSymbol {
+                name: "vwap_build_first_valids_i32",
+            })?;
+        let block_x = 128u32;
+        let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        let mut d_first_valids =
+            unsafe { DeviceBuffer::<i32>::uninitialized_async(n_combos, &self.stream) }?;
+
+        unsafe {
+            let mut ts_ptr = d_timestamps.as_device_ptr().as_raw();
+            let mut vol_ptr = d_volumes.as_device_ptr().as_raw();
+            let mut count_ptr = d_counts.as_device_ptr().as_raw();
+            let mut unit_ptr = d_unit_codes.as_device_ptr().as_raw();
+            let mut div_ptr = d_divisors.as_device_ptr().as_raw();
+            let mut month_ptr = d_month_ids
+                .map(|buf| buf.as_device_ptr().as_raw())
+                .unwrap_or(0u64);
+            let mut len_i = series_len as i32;
+            let mut combos_i = n_combos as i32;
+            let mut first_ptr = d_first_valids.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut ts_ptr as *mut _ as *mut c_void,
+                &mut vol_ptr as *mut _ as *mut c_void,
+                &mut count_ptr as *mut _ as *mut c_void,
+                &mut unit_ptr as *mut _ as *mut c_void,
+                &mut div_ptr as *mut _ as *mut c_void,
+                &mut month_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut combos_i as *mut _ as *mut c_void,
+                &mut first_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+
+        Ok(d_first_valids)
     }
 
     fn launch_kernel(
@@ -756,6 +843,111 @@ impl CudaVwap {
         )?;
 
         self.stream.synchronize()?;
+        Ok(SharedDeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: series_len,
+        })
+    }
+
+    pub fn vwap_batch_dev_from_device_inputs(
+        &self,
+        d_timestamps: &DeviceBuffer<i64>,
+        d_volumes: &DeviceBuffer<f32>,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        sweep: &VwapBatchRange,
+    ) -> Result<SharedDeviceArrayF32, CudaVwapError> {
+        if series_len == 0 {
+            return Err(CudaVwapError::InvalidInput("empty input series".into()));
+        }
+        if d_timestamps.len() != series_len
+            || d_volumes.len() != series_len
+            || d_prices.len() != series_len
+        {
+            return Err(CudaVwapError::InvalidInput(
+                "device input buffer length mismatch".into(),
+            ));
+        }
+
+        let PreparedBatchParams {
+            combos,
+            counts,
+            unit_codes,
+            divisors,
+            needs_months,
+        } = Self::prepare_batch_params(sweep)?;
+        let n_combos = combos.len();
+        let param_bytes = n_combos
+            .checked_mul(
+                2 * std::mem::size_of::<i32>()
+                    + std::mem::size_of::<i64>()
+                    + std::mem::size_of::<i32>(),
+            )
+            .ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
+        let month_bytes = if needs_months {
+            series_len
+                .checked_mul(std::mem::size_of::<i32>())
+                .ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?
+        } else {
+            0
+        };
+        let out_bytes = n_combos
+            .checked_mul(series_len)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
+        let required = param_bytes
+            .checked_add(month_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            return Err(CudaVwapError::OutOfMemory {
+                required,
+                free: Self::device_mem_info().map(|(f, _)| f).unwrap_or(0),
+                headroom,
+            });
+        }
+
+        let d_counts = unsafe { DeviceBuffer::from_slice_async(&counts, &self.stream) }?;
+        let d_unit_codes = unsafe { DeviceBuffer::from_slice_async(&unit_codes, &self.stream) }?;
+        let d_divisors = unsafe { DeviceBuffer::from_slice_async(&divisors, &self.stream) }?;
+        let d_month_ids = if needs_months {
+            Some(self.build_month_ids_device(d_timestamps, series_len)?)
+        } else {
+            None
+        };
+        let d_first_valids = self.build_first_valids_device(
+            d_timestamps,
+            d_volumes,
+            &d_counts,
+            &d_unit_codes,
+            &d_divisors,
+            d_month_ids.as_ref(),
+            series_len,
+            n_combos,
+        )?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }?;
+
+        let month_ptr = d_month_ids
+            .as_ref()
+            .map(|buf| buf.as_device_ptr().as_raw())
+            .unwrap_or(0);
+        self.launch_kernel(
+            d_timestamps,
+            d_volumes,
+            d_prices,
+            &d_counts,
+            &d_unit_codes,
+            &d_divisors,
+            &d_first_valids,
+            month_ptr,
+            &mut d_out,
+            series_len,
+            n_combos,
+        )?;
+
         Ok(SharedDeviceArrayF32 {
             buf: d_out,
             rows: n_combos,

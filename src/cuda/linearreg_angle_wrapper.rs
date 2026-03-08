@@ -422,6 +422,97 @@ impl CudaLinearregAngle {
         ))
     }
 
+    fn prepare_batch_params(
+        len: usize,
+        first_valid: usize,
+        sweep: &Linearreg_angleBatchRange,
+    ) -> Result<(Vec<Combo>, Vec<i32>, Vec<f32>, Vec<f32>), CudaLinearregAngleError> {
+        if len == 0 {
+            return Err(CudaLinearregAngleError::InvalidInput("empty data".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaLinearregAngleError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, len
+            )));
+        }
+        let combos = Self::expand_combos(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaLinearregAngleError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+
+        let mut periods_i32 = Vec::with_capacity(combos.len());
+        let mut sum_x = Vec::with_capacity(combos.len());
+        let mut inv_div = Vec::with_capacity(combos.len());
+        for c in &combos {
+            let p = c.period;
+            if p < 2 || p > len {
+                return Err(CudaLinearregAngleError::InvalidInput(format!(
+                    "invalid period {} for len {}",
+                    p, len
+                )));
+            }
+            if len - first_valid < p {
+                return Err(CudaLinearregAngleError::InvalidInput(format!(
+                    "not enough valid data for period {} (tail after first {} is {})",
+                    p,
+                    first_valid,
+                    len - first_valid
+                )));
+            }
+
+            let pf = p as f64;
+            let sx = (p * (p - 1)) as f64 * 0.5;
+            let sx2 = (p * (p - 1) * (2 * p - 1)) as f64 / 6.0;
+            let denom = sx * sx - pf * sx2;
+            let invd = 1.0 / denom;
+            periods_i32.push(p as i32);
+            sum_x.push(sx as f32);
+            inv_div.push(invd as f32);
+        }
+        Ok((combos, periods_i32, sum_x, inv_div))
+    }
+
+    fn launch_prefix_builder_kernel(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        d_ps2: &mut DeviceBuffer<Float2>,
+        d_pk2: &mut DeviceBuffer<Float2>,
+        d_pn: &mut DeviceBuffer<i32>,
+    ) -> Result<(), CudaLinearregAngleError> {
+        let func = self
+            .module
+            .get_function("linearreg_angle_build_prefixes_f32")
+            .map_err(|_| CudaLinearregAngleError::MissingKernelSymbol {
+                name: "linearreg_angle_build_prefixes_f32",
+            })?;
+        self.validate_launch((1, 1, 1), (1, 1, 1))?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+
+        unsafe {
+            let mut p_prices = d_prices.as_device_ptr().as_raw();
+            let mut len_i: i32 = len
+                .try_into()
+                .map_err(|_| CudaLinearregAngleError::InvalidInput("length exceeds i32".into()))?;
+            let mut p_ps = d_ps2.as_device_ptr().as_raw();
+            let mut p_pk = d_pk2.as_device_ptr().as_raw();
+            let mut p_pn = d_pn.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut p_prices as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut p_ps as *mut _ as *mut c_void,
+                &mut p_pk as *mut _ as *mut c_void,
+                &mut p_pn as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
     fn launch_batch_kernel(
         &self,
         d_ps2: &DeviceBuffer<Float2>,
@@ -521,10 +612,31 @@ impl CudaLinearregAngle {
         data_f32: &[f32],
         sweep: &Linearreg_angleBatchRange,
     ) -> Result<DeviceArrayF32, CudaLinearregAngleError> {
-        let (combos, first_valid, len, periods_i32, sum_x, inv_div, ps2, pk2, pn) =
-            Self::prepare_batch_inputs(data_f32, sweep)?;
-        let rows = combos.len();
+        let first_valid = data_f32
+            .iter()
+            .position(|v| !v.is_nan())
+            .ok_or_else(|| CudaLinearregAngleError::InvalidInput("all values are NaN".into()))?;
+        let d_prices = DeviceBuffer::from_slice(data_f32)?;
+        let dev = self.linearreg_angle_batch_dev_from_device_prices(
+            &d_prices,
+            data_f32.len(),
+            first_valid,
+            sweep,
+        )?;
+        self.stream.synchronize()?;
+        Ok(dev)
+    }
 
+    fn run_batch_kernel_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        periods_i32: &[i32],
+        sum_x: &[f32],
+        inv_div: &[f32],
+        combos_len: usize,
+        first_valid: usize,
+        len: usize,
+    ) -> Result<DeviceArrayF32, CudaLinearregAngleError> {
         let len_p1 = len
             .checked_add(1)
             .ok_or_else(|| CudaLinearregAngleError::InvalidInput("len+1 overflow".into()))?;
@@ -533,10 +645,10 @@ impl CudaLinearregAngle {
             .checked_mul(prefix_stride)
             .ok_or_else(|| CudaLinearregAngleError::InvalidInput("prefix bytes overflow".into()))?;
         let params_stride = std::mem::size_of::<i32>() + 2 * std::mem::size_of::<f32>();
-        let params_bytes = rows
+        let params_bytes = combos_len
             .checked_mul(params_stride)
             .ok_or_else(|| CudaLinearregAngleError::InvalidInput("params bytes overflow".into()))?;
-        let out_elems = rows
+        let out_elems = combos_len
             .checked_mul(len)
             .ok_or_else(|| CudaLinearregAngleError::InvalidInput("rows*len overflow".into()))?;
         let out_bytes = out_elems
@@ -548,14 +660,15 @@ impl CudaLinearregAngle {
             .ok_or_else(|| CudaLinearregAngleError::InvalidInput("VRAM size overflow".into()))?;
         Self::will_fit(req, 64 * 1024 * 1024)?;
 
-        let d_ps2 = DeviceBuffer::from_slice(&ps2)?;
-        let d_pk2 = DeviceBuffer::from_slice(&pk2)?;
-        let d_pn = DeviceBuffer::from_slice(&pn)?;
-        let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
-        let d_sumx = DeviceBuffer::from_slice(&sum_x)?;
-        let d_invd = DeviceBuffer::from_slice(&inv_div)?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(rows * len) }?;
+        let mut d_ps2 = unsafe { DeviceBuffer::<Float2>::uninitialized(len_p1) }?;
+        let mut d_pk2 = unsafe { DeviceBuffer::<Float2>::uninitialized(len_p1) }?;
+        let mut d_pn = unsafe { DeviceBuffer::<i32>::uninitialized(len_p1) }?;
+        let d_periods = DeviceBuffer::from_slice(periods_i32)?;
+        let d_sumx = DeviceBuffer::from_slice(sum_x)?;
+        let d_invd = DeviceBuffer::from_slice(inv_div)?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
 
+        self.launch_prefix_builder_kernel(d_prices, len, &mut d_ps2, &mut d_pk2, &mut d_pn)?;
         self.launch_batch_kernel(
             &d_ps2,
             &d_pk2,
@@ -565,16 +678,35 @@ impl CudaLinearregAngle {
             &d_invd,
             len,
             first_valid,
-            rows,
+            combos_len,
             &mut d_out,
         )?;
 
-        self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
-            rows,
+            rows: combos_len,
             cols: len,
         })
+    }
+
+    pub fn linearreg_angle_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &Linearreg_angleBatchRange,
+    ) -> Result<DeviceArrayF32, CudaLinearregAngleError> {
+        let (combos, periods_i32, sum_x, inv_div) =
+            Self::prepare_batch_params(series_len, first_valid, sweep)?;
+        self.run_batch_kernel_from_device_prices(
+            d_prices,
+            &periods_i32,
+            &sum_x,
+            &inv_div,
+            combos.len(),
+            first_valid,
+            series_len,
+        )
     }
 
     fn prepare_many_series_inputs(

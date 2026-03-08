@@ -310,6 +310,52 @@ impl CudaDx {
         sweep: &DxBatchRange,
     ) -> Result<(DeviceArrayF32, Vec<DxParams>), CudaDxError> {
         let (combos, first_valid, len) = Self::prepare_batch(high, low, close, sweep)?;
+        let d_high = unsafe { DeviceBuffer::from_slice_async(high, &self.stream) }?;
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low, &self.stream) }?;
+        let d_close = unsafe { DeviceBuffer::from_slice_async(close, &self.stream) }?;
+        let out = self.dx_batch_dev_from_device_inputs(
+            &d_high,
+            &d_low,
+            &d_close,
+            len,
+            first_valid,
+            sweep,
+        )?;
+        self.stream.synchronize()?;
+        Ok(out)
+    }
+
+    pub fn dx_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &DxBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<DxParams>), CudaDxError> {
+        if len == 0 {
+            return Err(CudaDxError::InvalidInput("empty input".into()));
+        }
+        if d_high.len() != len || d_low.len() != len || d_close.len() != len {
+            return Err(CudaDxError::InvalidInput(
+                "device input length mismatch".into(),
+            ));
+        }
+        let periods = Self::expand_periods(sweep)?;
+        let max_p = *periods.iter().max().unwrap();
+        let _ = (periods.len())
+            .checked_mul(max_p)
+            .ok_or(CudaDxError::InvalidInput(
+                "n_combos*max_period overflow".into(),
+            ))?;
+        if len - first_valid < max_p {
+            return Err(CudaDxError::InvalidInput("not enough valid data".into()));
+        }
+        let combos: Vec<DxParams> = periods
+            .iter()
+            .map(|&p| DxParams { period: Some(p) })
+            .collect();
         let rows = combos.len();
 
         let use_fast = match self.policy.batch {
@@ -349,24 +395,24 @@ impl CudaDx {
         })?;
         let req_bytes = req_bytes_terms;
         self.will_fit(req_bytes, 64 * 1024 * 1024)?;
-
-        let (pdm, mdm, carry, tr_opt): (Vec<f64>, Vec<f64>, Vec<u8>, Option<Vec<f64>>) = if use_fast
-        {
-            let (pdm, mdm, carry) = Self::precompute_dm_and_carry(high, low, close);
-            (pdm, mdm, carry, None)
-        } else {
-            let (pdm, mdm, tr, carry) = Self::precompute_terms(high, low, close);
-            (pdm, mdm, carry, Some(tr))
-        };
-
-        let d_pdm = unsafe { DeviceBuffer::from_slice_async(&pdm, &self.stream) }?;
-        let d_mdm = unsafe { DeviceBuffer::from_slice_async(&mdm, &self.stream) }?;
-        let d_tr: DeviceBuffer<f64> = if let Some(tr) = tr_opt {
-            unsafe { DeviceBuffer::from_slice_async(&tr, &self.stream) }?
-        } else {
-            unsafe { DeviceBuffer::uninitialized_async(1, &self.stream) }?
-        };
-        let d_carry = unsafe { DeviceBuffer::from_slice_async(&carry, &self.stream) }?;
+        let mut d_pdm: DeviceBuffer<f64> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
+        let mut d_mdm: DeviceBuffer<f64> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
+        let mut d_tr: DeviceBuffer<f64> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
+        let mut d_carry: DeviceBuffer<u8> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
+        self.launch_precompute_terms_raw(
+            d_high,
+            d_low,
+            d_close,
+            len,
+            &mut d_pdm,
+            &mut d_mdm,
+            &mut d_tr,
+            &mut d_carry,
+        )?;
         let periods_host: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_host, &self.stream) }?;
         let mut d_out: DeviceBuffer<f32> =
@@ -388,7 +434,6 @@ impl CudaDx {
             first_valid,
             &mut d_out,
         )?;
-        self.stream.synchronize()?;
         Ok((
             DeviceArrayF32 {
                 buf: d_out,
@@ -397,6 +442,50 @@ impl CudaDx {
             },
             combos,
         ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_precompute_terms_raw(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        d_pdm: &mut DeviceBuffer<f64>,
+        d_mdm: &mut DeviceBuffer<f64>,
+        d_tr: &mut DeviceBuffer<f64>,
+        d_carry: &mut DeviceBuffer<u8>,
+    ) -> Result<(), CudaDxError> {
+        let func = self
+            .module
+            .get_function("dx_build_terms_f64")
+            .map_err(|_| CudaDxError::MissingKernelSymbol {
+                name: "dx_build_terms_f64",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+        unsafe {
+            let mut high_ptr = d_high.as_device_ptr().as_raw();
+            let mut low_ptr = d_low.as_device_ptr().as_raw();
+            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut pdm_ptr = d_pdm.as_device_ptr().as_raw();
+            let mut mdm_ptr = d_mdm.as_device_ptr().as_raw();
+            let mut tr_ptr = d_tr.as_device_ptr().as_raw();
+            let mut carry_ptr = d_carry.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut high_ptr as *mut _ as *mut c_void,
+                &mut low_ptr as *mut _ as *mut c_void,
+                &mut close_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut pdm_ptr as *mut _ as *mut c_void,
+                &mut mdm_ptr as *mut _ as *mut c_void,
+                &mut tr_ptr as *mut _ as *mut c_void,
+                &mut carry_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
     }
 
     pub fn dx_batch_into_host_f32(

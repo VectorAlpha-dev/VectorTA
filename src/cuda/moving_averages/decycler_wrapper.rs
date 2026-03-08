@@ -262,10 +262,6 @@ impl CudaDecycler {
         let params_bytes = n
             .checked_mul(per_combo_bytes)
             .ok_or_else(|| CudaDecyclerError::InvalidInput("params bytes overflow".into()))?;
-        let diff_bytes = prepared
-            .series_len
-            .checked_mul(elem_f32)
-            .ok_or_else(|| CudaDecyclerError::InvalidInput("diff bytes overflow".into()))?;
         let out_elems = prepared
             .series_len
             .checked_mul(n)
@@ -275,7 +271,6 @@ impl CudaDecycler {
             .ok_or_else(|| CudaDecyclerError::InvalidInput("output bytes overflow".into()))?;
         let required = prices_bytes
             .checked_add(params_bytes)
-            .and_then(|x| x.checked_add(diff_bytes))
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaDecyclerError::InvalidInput("total bytes overflow".into()))?;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
@@ -294,7 +289,6 @@ impl CudaDecycler {
         let d_two = unsafe { DeviceBuffer::from_slice_async(&prepared.two_1m_vals, &self.stream) }?;
         let d_neg =
             unsafe { DeviceBuffer::from_slice_async(&prepared.neg_oma_sq_vals, &self.stream) }?;
-        let d_diff = unsafe { DeviceBuffer::from_slice_async(&prepared.diff, &self.stream) }?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream)? };
 
@@ -304,7 +298,6 @@ impl CudaDecycler {
             &d_c,
             &d_two,
             &d_neg,
-            &d_diff,
             prepared.series_len,
             n,
             prepared.first_valid,
@@ -312,6 +305,76 @@ impl CudaDecycler {
         )?;
 
         self.synchronize()?;
+        Ok(DeviceArrayF32Decycler {
+            buf: d_out,
+            rows: n,
+            cols: prepared.series_len,
+            ctx: self._context.clone(),
+            device_id: self.device_id,
+        })
+    }
+
+    pub fn decycler_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &DecyclerBatchRange,
+    ) -> Result<DeviceArrayF32Decycler, CudaDecyclerError> {
+        let prepared = Self::prepare_batch_params(series_len, first_valid, sweep)?;
+        let n = prepared.combos.len();
+
+        let elem_f32 = std::mem::size_of::<f32>();
+        let elem_i32 = std::mem::size_of::<i32>();
+        let per_combo_bytes =
+            elem_i32
+                .checked_add(3usize.checked_mul(elem_f32).ok_or_else(|| {
+                    CudaDecyclerError::InvalidInput("param bytes overflow".into())
+                })?)
+                .ok_or_else(|| CudaDecyclerError::InvalidInput("param bytes overflow".into()))?;
+        let params_bytes = n
+            .checked_mul(per_combo_bytes)
+            .ok_or_else(|| CudaDecyclerError::InvalidInput("params bytes overflow".into()))?;
+        let out_elems = prepared
+            .series_len
+            .checked_mul(n)
+            .ok_or_else(|| CudaDecyclerError::InvalidInput("output elements overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(elem_f32)
+            .ok_or_else(|| CudaDecyclerError::InvalidInput("output bytes overflow".into()))?;
+        let required = params_bytes
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaDecyclerError::InvalidInput("total bytes overflow".into()))?;
+        if !Self::will_fit(required, 64 * 1024 * 1024) {
+            let (free, _) = mem_get_info().unwrap_or((0, 0));
+            return Err(CudaDecyclerError::OutOfMemory {
+                required,
+                free,
+                headroom: 64 * 1024 * 1024,
+            });
+        }
+
+        let d_periods =
+            unsafe { DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream) }?;
+        let d_c = unsafe { DeviceBuffer::from_slice_async(&prepared.c_vals, &self.stream) }?;
+        let d_two = unsafe { DeviceBuffer::from_slice_async(&prepared.two_1m_vals, &self.stream) }?;
+        let d_neg =
+            unsafe { DeviceBuffer::from_slice_async(&prepared.neg_oma_sq_vals, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream)? };
+
+        self.launch_batch_kernel(
+            d_prices,
+            &d_periods,
+            &d_c,
+            &d_two,
+            &d_neg,
+            prepared.series_len,
+            n,
+            prepared.first_valid,
+            &mut d_out,
+        )?;
+
         Ok(DeviceArrayF32Decycler {
             buf: d_out,
             rows: n,
@@ -329,7 +392,6 @@ impl CudaDecycler {
         d_c: &DeviceBuffer<f32>,
         d_two_1m: &DeviceBuffer<f32>,
         d_neg_oma_sq: &DeviceBuffer<f32>,
-        d_diff: &DeviceBuffer<f32>,
         series_len: usize,
         n_combos: usize,
         first_valid: usize,
@@ -358,18 +420,16 @@ impl CudaDecycler {
                         let mut c_ptr = d_c.as_device_ptr().add(launched).as_raw();
                         let mut two_ptr = d_two_1m.as_device_ptr().add(launched).as_raw();
                         let mut neg_ptr = d_neg_oma_sq.as_device_ptr().add(launched).as_raw();
-                        let mut diff_ptr = d_diff.as_device_ptr().as_raw();
                         let mut len_i = series_len as i32;
                         let mut n_i = rows as i32;
                         let mut first_i = first_valid as i32;
                         let mut out_ptr = d_out.as_device_ptr().add(launched * series_len).as_raw();
-                        let mut args: [*mut c_void; 10] = [
+                        let mut args: [*mut c_void; 9] = [
                             &mut p_ptr as *mut _ as *mut c_void,
                             &mut per_ptr as *mut _ as *mut c_void,
                             &mut c_ptr as *mut _ as *mut c_void,
                             &mut two_ptr as *mut _ as *mut c_void,
                             &mut neg_ptr as *mut _ as *mut c_void,
-                            &mut diff_ptr as *mut _ as *mut c_void,
                             &mut len_i as *mut _ as *mut c_void,
                             &mut n_i as *mut _ as *mut c_void,
                             &mut first_i as *mut _ as *mut c_void,
@@ -424,18 +484,16 @@ impl CudaDecycler {
             let mut c_ptr = d_c.as_device_ptr().as_raw();
             let mut two_ptr = d_two_1m.as_device_ptr().as_raw();
             let mut neg_ptr = d_neg_oma_sq.as_device_ptr().as_raw();
-            let mut diff_ptr = d_diff.as_device_ptr().as_raw();
             let mut len_i = series_len as i32;
             let mut n_i = n_combos as i32;
             let mut first_i = first_valid as i32;
             let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let mut args: [*mut c_void; 10] = [
+            let mut args: [*mut c_void; 9] = [
                 &mut p_ptr as *mut _ as *mut c_void,
                 &mut per_ptr as *mut _ as *mut c_void,
                 &mut c_ptr as *mut _ as *mut c_void,
                 &mut two_ptr as *mut _ as *mut c_void,
                 &mut neg_ptr as *mut _ as *mut c_void,
-                &mut diff_ptr as *mut _ as *mut c_void,
                 &mut len_i as *mut _ as *mut c_void,
                 &mut n_i as *mut _ as *mut c_void,
                 &mut first_i as *mut _ as *mut c_void,
@@ -623,14 +681,24 @@ impl CudaDecycler {
                 series_len - fv
             )));
         }
+        Self::prepare_batch_params(series_len, fv, sweep)
+    }
 
-        let mut diff = vec![0f32; series_len];
-        for i in (fv + 2)..series_len {
-            let x = data_f32[i];
-            let x1 = data_f32[i - 1];
-            let x2 = data_f32[i - 2];
-            diff[i] = x - 2.0 * x1 + x2;
+    fn prepare_batch_params(
+        series_len: usize,
+        first_valid: usize,
+        sweep: &DecyclerBatchRange,
+    ) -> Result<PreparedDecyclerBatch, CudaDecyclerError> {
+        if series_len == 0 {
+            return Err(CudaDecyclerError::InvalidInput("empty series".into()));
         }
+        if first_valid >= series_len {
+            return Err(CudaDecyclerError::InvalidInput(format!(
+                "invalid first_valid {} for series length {}",
+                first_valid, series_len
+            )));
+        }
+        let combos = expand_grid(sweep)?;
 
         let mut periods_i32 = Vec::with_capacity(combos.len());
         let mut c_vals = Vec::with_capacity(combos.len());
@@ -648,13 +716,12 @@ impl CudaDecycler {
 
         Ok(PreparedDecyclerBatch {
             combos,
-            first_valid: fv,
+            first_valid,
             series_len,
             periods_i32,
             c_vals,
             two_1m_vals,
             neg_oma_sq_vals,
-            diff,
         })
     }
 
@@ -728,7 +795,6 @@ struct PreparedDecyclerBatch {
     c_vals: Vec<f32>,
     two_1m_vals: Vec<f32>,
     neg_oma_sq_vals: Vec<f32>,
-    diff: Vec<f32>,
 }
 struct PreparedDecyclerMany {
     first_valids: Vec<i32>,
@@ -768,7 +834,6 @@ pub mod benches {
         d_c: DeviceBuffer<f32>,
         d_two_1m: DeviceBuffer<f32>,
         d_neg_oma_sq: DeviceBuffer<f32>,
-        d_diff: DeviceBuffer<f32>,
         series_len: usize,
         n_combos: usize,
         first_valid: usize,
@@ -783,7 +848,6 @@ pub mod benches {
                     &self.d_c,
                     &self.d_two_1m,
                     &self.d_neg_oma_sq,
-                    &self.d_diff,
                     self.series_len,
                     self.n_combos,
                     self.first_valid,
@@ -810,7 +874,6 @@ pub mod benches {
         let d_c = DeviceBuffer::from_slice(&prep.c_vals).expect("d_c");
         let d_two_1m = DeviceBuffer::from_slice(&prep.two_1m_vals).expect("d_two_1m");
         let d_neg_oma_sq = DeviceBuffer::from_slice(&prep.neg_oma_sq_vals).expect("d_neg_oma_sq");
-        let d_diff = DeviceBuffer::from_slice(&prep.diff).expect("d_diff");
         let d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(prep.series_len * n_combos) }.expect("d_out");
         cuda.synchronize().expect("sync after prep");
@@ -822,7 +885,6 @@ pub mod benches {
             d_c,
             d_two_1m,
             d_neg_oma_sq,
-            d_diff,
             series_len: prep.series_len,
             n_combos,
             first_valid: prep.first_valid,

@@ -185,6 +185,108 @@ impl CudaSupertrend {
         ))
     }
 
+    fn launch_hl2_builder_raw(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        len: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaSupertrendError> {
+        let func = self
+            .module
+            .get_function("supertrend_build_hl2_f32")
+            .map_err(|_| CudaSupertrendError::MissingKernelSymbol {
+                name: "supertrend_build_hl2_f32",
+            })?;
+        let block_x = 256u32;
+        let grid_x = ((len as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        unsafe {
+            use cust::prelude::launch;
+            let stream = &self.stream;
+            launch!(func<<<grid, block, 0, stream>>>(
+                d_high.as_device_ptr(),
+                d_low.as_device_ptr(),
+                len as i32,
+                d_out.as_device_ptr()
+            ))?;
+        }
+        Ok(())
+    }
+
+    fn launch_batch_kernel_raw(
+        &self,
+        d_hl2: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        d_atr_rows: &DeviceBuffer<f32>,
+        d_row_idx: &DeviceBuffer<i32>,
+        d_row_fac: &DeviceBuffer<f32>,
+        d_row_warm: &DeviceBuffer<i32>,
+        len: usize,
+        combos_len: usize,
+        d_trend: &mut DeviceBuffer<f32>,
+        d_changed: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaSupertrendError> {
+        let func = self
+            .module
+            .get_function("supertrend_batch_f32")
+            .map_err(|_| CudaSupertrendError::MissingKernelSymbol {
+                name: "supertrend_batch_f32",
+            })?;
+
+        match self.policy.batch {
+            BatchKernelPolicy::OneThreadPerRow => {
+                let grid: GridSize = ((combos_len as u32).max(1), 1, 1).into();
+                let block: BlockSize = (1, 1, 1).into();
+                unsafe {
+                    use cust::prelude::launch;
+                    let stream = &self.stream;
+                    launch!(func<<<grid, block, 0, stream>>>(
+                        d_hl2.as_device_ptr(),
+                        d_close.as_device_ptr(),
+                        d_atr_rows.as_device_ptr(),
+                        d_row_idx.as_device_ptr(),
+                        d_row_fac.as_device_ptr(),
+                        d_row_warm.as_device_ptr(),
+                        len as i32,
+                        combos_len as i32,
+                        d_trend.as_device_ptr(),
+                        d_changed.as_device_ptr()
+                    ))?;
+                }
+            }
+            _ => {
+                let bx = if let BatchKernelPolicy::OneD { block_x } = self.policy.batch {
+                    block_x
+                } else {
+                    Self::pick_batch_block_x(combos_len)
+                };
+                let gx = ((combos_len as u32) + bx - 1) / bx;
+                let grid: GridSize = (gx.max(1), 1, 1).into();
+                let block: BlockSize = (bx, 1, 1).into();
+                unsafe {
+                    use cust::prelude::launch;
+                    let stream = &self.stream;
+                    launch!(func<<<grid, block, 0, stream>>>(
+                        d_hl2.as_device_ptr(),
+                        d_close.as_device_ptr(),
+                        d_atr_rows.as_device_ptr(),
+                        d_row_idx.as_device_ptr(),
+                        d_row_fac.as_device_ptr(),
+                        d_row_warm.as_device_ptr(),
+                        len as i32,
+                        combos_len as i32,
+                        d_trend.as_device_ptr(),
+                        d_changed.as_device_ptr()
+                    ))?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn supertrend_batch_dev(
         &self,
         high: &[f32],
@@ -192,14 +294,49 @@ impl CudaSupertrend {
         close: &[f32],
         sweep: &SuperTrendBatchRange,
     ) -> Result<(DeviceArrayF32, DeviceArrayF32, Vec<SuperTrendParams>), CudaSupertrendError> {
-        let len = close.len();
         if !(high.len() == low.len() && low.len() == close.len()) {
             return Err(CudaSupertrendError::InvalidInput(
                 "input length mismatch".into(),
             ));
         }
+        let len = close.len();
+        let first_valid = Self::first_valid_hlc(high, low, close)?;
+        let d_high = DeviceBuffer::from_slice(high)?;
+        let d_low = DeviceBuffer::from_slice(low)?;
+        let d_close = DeviceBuffer::from_slice(close)?;
+        let out = self.supertrend_batch_dev_from_device_inputs(
+            &d_high,
+            &d_low,
+            &d_close,
+            len,
+            first_valid,
+            sweep,
+        )?;
+        self.stream.synchronize()?;
+        Ok(out)
+    }
+
+    pub fn supertrend_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &SuperTrendBatchRange,
+    ) -> Result<(DeviceArrayF32, DeviceArrayF32, Vec<SuperTrendParams>), CudaSupertrendError> {
+        if d_high.len() != len || d_low.len() != len || d_close.len() != len {
+            return Err(CudaSupertrendError::InvalidInput(
+                "device input length mismatch".into(),
+            ));
+        }
         if len == 0 {
             return Err(CudaSupertrendError::InvalidInput("empty series".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaSupertrendError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
         }
 
         let combos = expand_grid_local(sweep)?;
@@ -214,35 +351,29 @@ impl CudaSupertrend {
                 "invalid period limits".into(),
             ));
         }
-
-        let first_valid = Self::first_valid_hlc(high, low, close)?;
         if len - first_valid < min_p {
             return Err(CudaSupertrendError::InvalidInput(
                 "not enough valid data".into(),
             ));
         }
 
-        let mut hl2 = vec![f32::NAN; len];
-        for i in 0..len {
-            let h = high[i];
-            let l = low[i];
-            hl2[i] = 0.5f32 * (h + l);
-        }
-        let d_hl2 = DeviceBuffer::from_slice(&hl2)?;
-        let d_close = DeviceBuffer::from_slice(close)?;
+        let mut d_hl2: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
+        self.launch_hl2_builder_raw(d_high, d_low, len, &mut d_hl2)?;
 
         let cuda_atr = CudaAtr::new(self.device_id as usize)
             .map_err(|e| CudaSupertrendError::InvalidInput(e.to_string()))?;
         let atr_rows = cuda_atr
-            .atr_batch_dev(
-                high,
-                low,
-                close,
+            .atr_batch_from_device_ptrs(
+                d_high.as_device_ptr(),
+                d_low.as_device_ptr(),
+                d_close.as_device_ptr(),
+                len,
+                first_valid,
                 &AtrBatchRange {
                     length: (min_p, max_p, 1),
                 },
             )
-            .map_err(|e| CudaSupertrendError::InvalidInput(format!("atr: {}", e.to_string())))?;
+            .map_err(|e| CudaSupertrendError::InvalidInput(format!("atr: {}", e)))?;
 
         let row_period_idx: Vec<i32> = combos
             .iter()
@@ -269,64 +400,18 @@ impl CudaSupertrend {
 
         let mut d_trend: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
         let mut d_changed: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
-
-        let func = self
-            .module
-            .get_function("supertrend_batch_f32")
-            .map_err(|_| CudaSupertrendError::MissingKernelSymbol {
-                name: "supertrend_batch_f32",
-            })?;
-
-        match self.policy.batch {
-            BatchKernelPolicy::OneThreadPerRow => {
-                let grid: GridSize = ((combos_len as u32).max(1), 1, 1).into();
-                let block: BlockSize = (1, 1, 1).into();
-                unsafe {
-                    use cust::prelude::launch;
-                    let stream = &self.stream;
-                    launch!(func<<<grid, block, 0, stream>>>(
-                        d_hl2.as_device_ptr(),
-                        d_close.as_device_ptr(),
-                        atr_rows.buf.as_device_ptr(),
-                        d_row_idx.as_device_ptr(),
-                        d_row_fac.as_device_ptr(),
-                        d_row_warm.as_device_ptr(),
-                        len as i32,
-                        combos_len as i32,
-                        d_trend.as_device_ptr(),
-                        d_changed.as_device_ptr()
-                    ))?;
-                }
-            }
-            _ => {
-                let bx = if let BatchKernelPolicy::OneD { block_x } = self.policy.batch {
-                    block_x
-                } else {
-                    Self::pick_batch_block_x(combos_len)
-                };
-                let gx = ((combos_len as u32) + bx - 1) / bx;
-                let grid: GridSize = (gx.max(1), 1, 1).into();
-                let block: BlockSize = (bx, 1, 1).into();
-                unsafe {
-                    use cust::prelude::launch;
-                    let stream = &self.stream;
-                    launch!(func<<<grid, block, 0, stream>>>(
-                        d_hl2.as_device_ptr(),
-                        d_close.as_device_ptr(),
-                        atr_rows.buf.as_device_ptr(),
-                        d_row_idx.as_device_ptr(),
-                        d_row_fac.as_device_ptr(),
-                        d_row_warm.as_device_ptr(),
-                        len as i32,
-                        combos_len as i32,
-                        d_trend.as_device_ptr(),
-                        d_changed.as_device_ptr()
-                    ))?;
-                }
-            }
-        }
-
-        self.stream.synchronize()?;
+        self.launch_batch_kernel_raw(
+            &d_hl2,
+            d_close,
+            &atr_rows.buf,
+            &d_row_idx,
+            &d_row_fac,
+            &d_row_warm,
+            len,
+            combos_len,
+            &mut d_trend,
+            &mut d_changed,
+        )?;
 
         Ok((
             DeviceArrayF32 {

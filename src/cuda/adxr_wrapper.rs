@@ -355,6 +355,194 @@ impl CudaAdxr {
         }
     }
 
+    pub fn adxr_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &AdxrBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<AdxrParams>), CudaAdxrError> {
+        if len == 0 || d_high.len() != len || d_low.len() != len || d_close.len() != len {
+            return Err(CudaAdxrError::InvalidInput(
+                "device input buffers are empty or mismatched".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaAdxrError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = Self::expand_periods(sweep);
+        if combos.is_empty() {
+            return Err(CudaAdxrError::InvalidInput("no period combinations".into()));
+        }
+
+        let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
+        if len - first_valid < max_p + 1 {
+            return Err(CudaAdxrError::InvalidInput(format!(
+                "not enough valid data: needed >= {}, have {}",
+                max_p + 1,
+                len - first_valid
+            )));
+        }
+
+        let headroom = 64 * 1024 * 1024;
+        let out_elems = len
+            .checked_mul(combos.len())
+            .ok_or_else(|| CudaAdxrError::InvalidInput("rows*cols overflow".into()))?;
+        let bytes = (d_high.len() + d_low.len() + d_close.len())
+            .checked_mul(4)
+            .and_then(|b| b.checked_add(combos.len().saturating_mul(core::mem::size_of::<i32>())))
+            .and_then(|b| b.checked_add(out_elems.saturating_mul(4)))
+            .ok_or_else(|| CudaAdxrError::InvalidInput("byte size overflow".into()))?;
+        Self::will_fit(bytes, headroom)?;
+
+        let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let n_combos = periods_i32.len();
+
+        const MIN_COMBOS_FOR_OPT: usize = 64;
+        const MIN_SERIES_LEN_FOR_OPT: usize = 100_000;
+        let use_opt = n_combos >= MIN_COMBOS_FOR_OPT || len >= MIN_SERIES_LEN_FOR_OPT;
+
+        if use_opt {
+            let ring_pitch = Self::round_up(max_p, 32);
+            let ring_elems = ring_pitch
+                .checked_mul(n_combos)
+                .ok_or_else(|| CudaAdxrError::InvalidInput("ring workspace overflow".into()))?;
+
+            let out_elems2 = n_combos
+                .checked_mul(len)
+                .ok_or_else(|| CudaAdxrError::InvalidInput("rows*cols overflow".into()))?;
+            let bytes = (d_high.len() + d_low.len() + d_close.len())
+                .checked_mul(4)
+                .and_then(|b| b.checked_add(periods_i32.len().saturating_mul(4)))
+                .and_then(|b| b.checked_add(ring_elems.saturating_mul(4)))
+                .and_then(|b| b.checked_add(out_elems2.saturating_mul(4)))
+                .ok_or_else(|| CudaAdxrError::InvalidInput("byte size overflow".into()))?;
+            Self::will_fit(bytes, headroom)?;
+
+            let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }?;
+            let mut d_ring: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(ring_elems, &self.stream) }
+                    .map_err(CudaAdxrError::Cuda)?;
+            let mut d_out: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(out_elems2, &self.stream) }
+                    .map_err(CudaAdxrError::Cuda)?;
+
+            let mut func = self
+                .module
+                .get_function("adxr_one_series_many_params_f32_opt")
+                .map_err(|_| CudaAdxrError::MissingKernelSymbol {
+                    name: "adxr_one_series_many_params_f32_opt",
+                })?;
+
+            func.set_cache_config(CacheConfig::PreferShared)?;
+
+            let shmem_bytes: usize = 2 * 256 * core::mem::size_of::<f32>();
+
+            const TARGET_BLOCKS: u32 = 64;
+            let mut block_x = ((n_combos as u32 + TARGET_BLOCKS - 1) / TARGET_BLOCKS).max(32);
+            block_x = ((block_x + 31) / 32) * 32;
+            if block_x > 256 {
+                block_x = 256;
+            }
+
+            let blocks_x = ((n_combos as u32 + block_x - 1) / block_x).max(1);
+            let grid: GridSize = (blocks_x, 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+            let stream = &self.stream;
+            unsafe {
+                launch!(
+                    func<<<grid, block, (shmem_bytes as u32), stream>>>(
+                        d_high.as_device_ptr(),
+                        d_low.as_device_ptr(),
+                        d_close.as_device_ptr(),
+                        d_periods.as_device_ptr(),
+                        len as i32,
+                        first_valid as i32,
+                        n_combos as i32,
+                        d_ring.as_device_ptr(),
+                        ring_pitch as i32,
+                        d_out.as_device_ptr()
+                    )
+                )?;
+            }
+
+            Ok((
+                DeviceArrayF32 {
+                    buf: d_out,
+                    rows: n_combos,
+                    cols: len,
+                },
+                combos,
+            ))
+        } else {
+            let out_elems3 = n_combos
+                .checked_mul(len)
+                .ok_or_else(|| CudaAdxrError::InvalidInput("rows*cols overflow".into()))?;
+            let bytes = (d_high.len() + d_low.len() + d_close.len())
+                .checked_mul(4)
+                .and_then(|b| b.checked_add(periods_i32.len().saturating_mul(4)))
+                .and_then(|b| b.checked_add(out_elems3.saturating_mul(4)))
+                .ok_or_else(|| CudaAdxrError::InvalidInput("byte size overflow".into()))?;
+            Self::will_fit(bytes, headroom)?;
+
+            let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
+            let mut d_out: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(out_elems3, &self.stream) }
+                    .map_err(CudaAdxrError::Cuda)?;
+
+            let func = self.module.get_function("adxr_batch_f32").map_err(|_| {
+                CudaAdxrError::MissingKernelSymbol {
+                    name: "adxr_batch_f32",
+                }
+            })?;
+
+            let (_, suggested) = func
+                .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
+                .unwrap_or((0, 0));
+            let block_x = if suggested > 0 { suggested } else { 128 } as u32;
+
+            let max_grid_y = 65_535usize;
+            let mut launched = 0usize;
+            while launched < n_combos {
+                let chunk = (n_combos - launched).min(max_grid_y);
+                let grid: GridSize = (1u32, chunk as u32, 1u32).into();
+                let block: BlockSize = (block_x, 1, 1).into();
+                let stream = &self.stream;
+                unsafe {
+                    let d_periods_off = d_periods.as_device_ptr().add(launched);
+                    let d_out_off = d_out.as_device_ptr().add(launched * len);
+                    launch!(
+                        func<<<grid, block, 0, stream>>>(
+                            d_high.as_device_ptr(),
+                            d_low.as_device_ptr(),
+                            d_close.as_device_ptr(),
+                            d_periods_off,
+                            len as i32,
+                            first_valid as i32,
+                            chunk as i32,
+                            d_out_off
+                        )
+                    )?;
+                }
+                launched += chunk;
+            }
+
+            Ok((
+                DeviceArrayF32 {
+                    buf: d_out,
+                    rows: n_combos,
+                    cols: len,
+                },
+                combos,
+            ))
+        }
+    }
+
     pub fn adxr_many_series_one_param_time_major_dev(
         &self,
         high_tm_f32: &[f32],

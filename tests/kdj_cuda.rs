@@ -3,10 +3,10 @@
 use cust::memory::CopyDestination;
 use vector_ta::cuda::cuda_available;
 use vector_ta::cuda::CudaKdj;
+use vector_ta::cuda::CudaRuntime;
 use vector_ta::indicators::kdj::{
     kdj_batch_with_kernel, kdj_with_kernel, KdjBatchRange, KdjInput, KdjParams,
 };
-use vector_ta::utilities::data_loader::Candles;
 use vector_ta::utilities::enums::Kernel;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
@@ -108,6 +108,78 @@ fn kdj_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         gpu_finite,
         cpu_finite
     );
+    Ok(())
+}
+
+#[test]
+fn kdj_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[kdj_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 2048usize;
+    let mut close = vec![f64::NAN; len];
+    for i in 7..len {
+        let x = i as f64 * 0.0021;
+        close[i] = (x * 0.77).sin() + 0.00019 * i as f64 + (x * 0.29).cos() * 0.03;
+    }
+    let (high, low) = synth_from_close(&close);
+    let sweep = KdjBatchRange {
+        fast_k_period: (9, 17, 4),
+        slow_k_period: (3, 3, 0),
+        slow_k_ma_type: ("sma".into(), "sma".into(), "".into()),
+        slow_d_period: (3, 3, 0),
+        slow_d_ma_type: ("sma".into(), "sma".into(), "".into()),
+    };
+
+    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+    let first_valid = (0..len)
+        .find(|&i| high_f32[i].is_finite() && low_f32[i].is_finite() && close_f32[i].is_finite())
+        .expect("first valid");
+
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+    let d_close = runtime.upload_f32(&close_f32).expect("upload close");
+    let cuda = CudaKdj::new(0).expect("CudaKdj::new");
+
+    let legacy = cuda
+        .kdj_batch_dev(&high_f32, &low_f32, &close_f32, &sweep)
+        .expect("legacy kdj");
+    let device = cuda
+        .kdj_batch_dev_from_device_inputs(
+            d_high.buffer(),
+            d_low.buffer(),
+            d_close.buffer(),
+            len,
+            first_valid,
+            &sweep,
+        )
+        .expect("device kdj");
+    cuda.synchronize().expect("kdj sync");
+
+    for ((legacy_buf, device_buf), label) in [
+        ((&legacy.0, &device.0), "k"),
+        ((&legacy.1, &device.1), "d"),
+        ((&legacy.2, &device.2), "j"),
+    ] {
+        assert_eq!(legacy_buf.rows, device_buf.rows);
+        assert_eq!(legacy_buf.cols, device_buf.cols);
+        let mut legacy_host = vec![0f32; legacy_buf.len()];
+        let mut device_host = vec![0f32; device_buf.len()];
+        legacy_buf.buf.copy_to(&mut legacy_host)?;
+        device_buf.buf.copy_to(&mut device_host)?;
+        for (lhs, rhs) in legacy_host.iter().zip(device_host.iter()) {
+            if lhs.is_nan() && rhs.is_nan() {
+                continue;
+            }
+            assert!((lhs - rhs).abs() <= 1e-6, "{label} lhs={lhs} rhs={rhs}");
+        }
+    }
+
     Ok(())
 }
 

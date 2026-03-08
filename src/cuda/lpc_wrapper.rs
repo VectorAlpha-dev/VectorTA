@@ -2,7 +2,7 @@
 
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::cuda::wto_wrapper::DeviceArrayF32Triplet;
-use crate::indicators::lpc::{dom_cycle, LpcBatchRange, LpcParams};
+use crate::indicators::lpc::{LpcBatchRange, LpcParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::error::CudaError;
@@ -113,6 +113,17 @@ pub struct CudaLpc {
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
+}
+
+struct PreparedLpcBatch {
+    combos: Vec<LpcParams>,
+    periods: Vec<i32>,
+    cms: Vec<f32>,
+    tms: Vec<f32>,
+    cutoff_adaptive: bool,
+    alpha_lut: Option<Vec<f32>>,
+    alpha_lut_len_i32: i32,
+    alpha_lut_pmin_i32: i32,
 }
 
 impl CudaLpc {
@@ -484,24 +495,20 @@ impl CudaLpc {
             .find(|&i| h[i].is_finite() && l[i].is_finite() && c[i].is_finite() && s[i].is_finite())
     }
 
-    pub fn lpc_batch_dev(
-        &self,
-        high: &[f32],
-        low: &[f32],
-        close: &[f32],
-        src: &[f32],
+    fn prepare_batch_metadata(
+        len: usize,
+        first_valid: usize,
         range: &LpcBatchRange,
-    ) -> Result<(DeviceArrayF32Triplet, Vec<LpcParams>), CudaLpcError> {
-        if high.len() != low.len() || high.len() != close.len() || high.len() != src.len() {
-            return Err(CudaLpcError::InvalidInput("length mismatch".into()));
-        }
-        if src.is_empty() {
+    ) -> Result<PreparedLpcBatch, CudaLpcError> {
+        if len == 0 {
             return Err(CudaLpcError::InvalidInput("empty input".into()));
         }
-        let len = src.len();
-        let first = Self::first_valid_ohlc4(high, low, close, src)
-            .ok_or_else(|| CudaLpcError::InvalidInput("all values are NaN".into()))?;
-        if len.saturating_sub(first) < 2 {
+        if first_valid >= len {
+            return Err(CudaLpcError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+        if len.saturating_sub(first_valid) < 2 {
             return Err(CudaLpcError::InvalidInput(
                 "not enough valid data after first".into(),
             ));
@@ -520,73 +527,6 @@ impl CudaLpc {
             }
         }
 
-        let n = len;
-        let rows = combos.len();
-
-        let item_bytes = std::mem::size_of::<f32>();
-        let inputs_elems = high
-            .len()
-            .checked_add(low.len())
-            .and_then(|v| v.checked_add(close.len()))
-            .and_then(|v| v.checked_add(src.len()))
-            .ok_or_else(|| CudaLpcError::InvalidInput("input length overflow".into()))?;
-        let bytes_inputs = inputs_elems
-            .checked_mul(item_bytes)
-            .ok_or_else(|| CudaLpcError::InvalidInput("input bytes overflow".into()))?;
-        let bytes_params = rows
-            .checked_mul(3 * item_bytes)
-            .ok_or_else(|| CudaLpcError::InvalidInput("params bytes overflow".into()))?;
-        let bytes_outputs = rows
-            .checked_mul(n)
-            .and_then(|v| v.checked_mul(3 * item_bytes))
-            .ok_or_else(|| CudaLpcError::InvalidInput("output bytes overflow".into()))?;
-        let mut bytes_dom = 0usize;
-        let cutoff_adaptive = range.cutoff_type.eq_ignore_ascii_case("adaptive");
-        let dom_host_f32: Option<Vec<f32>> = if cutoff_adaptive {
-            let src64: Vec<f64> = src.iter().map(|&v| v as f64).collect();
-            let dc = dom_cycle(&src64, range.max_cycle_limit);
-            let v32: Vec<f32> = dc.iter().map(|&v| v as f32).collect();
-            bytes_dom = v32
-                .len()
-                .checked_mul(item_bytes)
-                .ok_or_else(|| CudaLpcError::InvalidInput("dom bytes overflow".into()))?;
-            Some(v32)
-        } else {
-            None
-        };
-        let required = bytes_inputs
-            .checked_add(bytes_params)
-            .and_then(|v| v.checked_add(bytes_outputs))
-            .and_then(|v| v.checked_add(bytes_dom))
-            .ok_or_else(|| CudaLpcError::InvalidInput("total bytes overflow".into()))?;
-        Self::will_fit(required, 64 * 1024 * 1024)?;
-
-        let d_h = DeviceBuffer::from_slice(high)?;
-        let d_l = DeviceBuffer::from_slice(low)?;
-        let d_c = DeviceBuffer::from_slice(close)?;
-        let d_s = DeviceBuffer::from_slice(src)?;
-
-        fn host_true_range_f32(h: &[f32], l: &[f32], c: &[f32]) -> Vec<f32> {
-            let n = h.len();
-            let mut tr = vec![0f32; n];
-            if n == 0 {
-                return tr;
-            }
-            if n == 0 {
-                return tr;
-            }
-            tr[0] = h[0] - l[0];
-            for i in 1..n {
-                let hl = h[i] - l[i];
-                let c_l1 = (c[i] - l[i - 1]).abs();
-                let c_h1 = (c[i] - h[i - 1]).abs();
-                tr[i] = hl.max(c_l1).max(c_h1);
-            }
-            tr
-        }
-        let tr_host = host_true_range_f32(high, low, close);
-        let d_tr = DeviceBuffer::from_slice(&tr_host)?;
-
         let periods: Vec<i32> = combos
             .iter()
             .map(|p| p.fixed_period.unwrap() as i32)
@@ -596,87 +536,340 @@ impl CudaLpc {
             .map(|p| p.cycle_mult.unwrap() as f32)
             .collect();
         let tms: Vec<f32> = combos.iter().map(|p| p.tr_mult.unwrap() as f32).collect();
-        let d_periods = DeviceBuffer::from_slice(&periods)?;
-        let d_cms = DeviceBuffer::from_slice(&cms)?;
-        let d_tms = DeviceBuffer::from_slice(&tms)?;
-        let d_dom = if let Some(v) = &dom_host_f32 {
-            Some(DeviceBuffer::from_slice(v)?)
+
+        let cutoff_adaptive = range.cutoff_type.eq_ignore_ascii_case("adaptive");
+        let (alpha_lut, alpha_lut_len_i32, alpha_lut_pmin_i32) =
+            if cutoff_adaptive && range.max_cycle_limit > 0 {
+                let p_min = 3i32;
+                let max_fixed = *periods.iter().max().unwrap_or(&p_min);
+                let p_max = max_fixed.max((range.max_cycle_limit.min(i32::MAX as usize)) as i32);
+                let (lut, pmin) = build_alpha_lut(p_min, p_max.max(p_min));
+                let len_i32 = lut.len() as i32;
+                (Some(lut), len_i32, pmin)
+            } else {
+                (None, 0, 0)
+            };
+
+        Ok(PreparedLpcBatch {
+            combos,
+            periods,
+            cms,
+            tms,
+            cutoff_adaptive,
+            alpha_lut,
+            alpha_lut_len_i32,
+            alpha_lut_pmin_i32,
+        })
+    }
+
+    fn batch_alloc_bytes(
+        len: usize,
+        rows: usize,
+        cutoff_adaptive: bool,
+        alpha_lut_len: usize,
+        max_cycle_limit: usize,
+        include_inputs: bool,
+    ) -> Result<usize, CudaLpcError> {
+        let item_f32 = std::mem::size_of::<f32>();
+        let item_f64 = std::mem::size_of::<f64>();
+
+        let mut total = 0usize;
+        if include_inputs {
+            let input_elems = len
+                .checked_mul(4)
+                .ok_or_else(|| CudaLpcError::InvalidInput("input length overflow".into()))?;
+            total = total
+                .checked_add(
+                    input_elems
+                        .checked_mul(item_f32)
+                        .ok_or_else(|| CudaLpcError::InvalidInput("input bytes overflow".into()))?,
+                )
+                .ok_or_else(|| CudaLpcError::InvalidInput("total bytes overflow".into()))?;
+        }
+
+        let param_bytes = rows
+            .checked_mul(
+                std::mem::size_of::<i32>()
+                    + 2usize
+                        .checked_mul(item_f32)
+                        .ok_or_else(|| CudaLpcError::InvalidInput("params bytes overflow".into()))?,
+            )
+            .ok_or_else(|| CudaLpcError::InvalidInput("params bytes overflow".into()))?;
+        total = total
+            .checked_add(param_bytes)
+            .ok_or_else(|| CudaLpcError::InvalidInput("total bytes overflow".into()))?;
+
+        let tr_bytes = len
+            .checked_mul(item_f32)
+            .ok_or_else(|| CudaLpcError::InvalidInput("TR bytes overflow".into()))?;
+        total = total
+            .checked_add(tr_bytes)
+            .ok_or_else(|| CudaLpcError::InvalidInput("total bytes overflow".into()))?;
+
+        if cutoff_adaptive {
+            let dom_bytes = len
+                .checked_mul(item_f32)
+                .ok_or_else(|| CudaLpcError::InvalidInput("dom bytes overflow".into()))?;
+            let ring_len = max_cycle_limit
+                .min(len.saturating_sub(1))
+                .checked_add(1)
+                .ok_or_else(|| CudaLpcError::InvalidInput("dom scratch overflow".into()))?;
+            let scratch_bytes = ring_len
+                .checked_mul(item_f64)
+                .ok_or_else(|| CudaLpcError::InvalidInput("dom scratch bytes overflow".into()))?;
+            total = total
+                .checked_add(dom_bytes)
+                .and_then(|v| v.checked_add(scratch_bytes))
+                .ok_or_else(|| CudaLpcError::InvalidInput("total bytes overflow".into()))?;
+        }
+
+        if alpha_lut_len > 0 {
+            total = total
+                .checked_add(
+                    alpha_lut_len.checked_mul(item_f32).ok_or_else(|| {
+                        CudaLpcError::InvalidInput("alpha LUT bytes overflow".into())
+                    })?,
+                )
+                .ok_or_else(|| CudaLpcError::InvalidInput("total bytes overflow".into()))?;
+        }
+
+        let out_bytes = rows
+            .checked_mul(len)
+            .and_then(|v| v.checked_mul(3))
+            .and_then(|v| v.checked_mul(item_f32))
+            .ok_or_else(|| CudaLpcError::InvalidInput("output bytes overflow".into()))?;
+        total = total
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaLpcError::InvalidInput("total bytes overflow".into()))?;
+
+        Ok(total)
+    }
+
+    fn launch_true_range_prep(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        d_tr: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaLpcError> {
+        let func = self.module.get_function("lpc_build_true_range_f32").map_err(|_| {
+            CudaLpcError::MissingKernelSymbol {
+                name: "lpc_build_true_range_f32",
+            }
+        })?;
+        let block_x = 256u32;
+        let grid_x = ((len as u32) + block_x - 1) / block_x;
+
+        unsafe {
+            let grid: GridSize = (grid_x.max(1), 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+            let mut h_ptr = d_high.as_device_ptr().as_raw();
+            let mut l_ptr = d_low.as_device_ptr().as_raw();
+            let mut c_ptr = d_close.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut tr_ptr = d_tr.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut h_ptr as *mut _ as *mut c_void,
+                &mut l_ptr as *mut _ as *mut c_void,
+                &mut c_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut tr_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
+    fn launch_dom_cycle_prep(
+        &self,
+        d_src: &DeviceBuffer<f32>,
+        len: usize,
+        max_cycle_limit: usize,
+        d_dom: &mut DeviceBuffer<f32>,
+        d_delta_ring: &mut DeviceBuffer<f64>,
+    ) -> Result<(), CudaLpcError> {
+        let func = self
+            .module
+            .get_function("lpc_build_dom_cycle_f32_serial")
+            .map_err(|_| CudaLpcError::MissingKernelSymbol {
+                name: "lpc_build_dom_cycle_f32_serial",
+            })?;
+
+        unsafe {
+            let grid: GridSize = (1, 1, 1).into();
+            let block: BlockSize = (1, 1, 1).into();
+            let mut src_ptr = d_src.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut max_cycle_i = max_cycle_limit as i32;
+            let mut ring_ptr = d_delta_ring.as_device_ptr().as_raw();
+            let mut ring_len_i = d_delta_ring.len() as i32;
+            let mut dom_ptr = d_dom.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut src_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut max_cycle_i as *mut _ as *mut c_void,
+                &mut ring_ptr as *mut _ as *mut c_void,
+                &mut ring_len_i as *mut _ as *mut c_void,
+                &mut dom_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn lpc_batch_dev(
+        &self,
+        high: &[f32],
+        low: &[f32],
+        close: &[f32],
+        src: &[f32],
+        range: &LpcBatchRange,
+    ) -> Result<(DeviceArrayF32Triplet, Vec<LpcParams>), CudaLpcError> {
+        if high.len() != low.len() || high.len() != close.len() || high.len() != src.len() {
+            return Err(CudaLpcError::InvalidInput("length mismatch".into()));
+        }
+        if src.is_empty() {
+            return Err(CudaLpcError::InvalidInput("empty input".into()));
+        }
+        let len = src.len();
+        let first = Self::first_valid_ohlc4(high, low, close, src)
+            .ok_or_else(|| CudaLpcError::InvalidInput("all values are NaN".into()))?;
+        let prepared = Self::prepare_batch_metadata(len, first, range)?;
+        let required = Self::batch_alloc_bytes(
+            len,
+            prepared.combos.len(),
+            prepared.cutoff_adaptive,
+            prepared.alpha_lut.as_ref().map_or(0, Vec::len),
+            range.max_cycle_limit,
+            true,
+        )?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
+
+        let d_h = unsafe { DeviceBuffer::from_slice_async(high, &self.stream) }?;
+        let d_l = unsafe { DeviceBuffer::from_slice_async(low, &self.stream) }?;
+        let d_c = unsafe { DeviceBuffer::from_slice_async(close, &self.stream) }?;
+        let d_s = unsafe { DeviceBuffer::from_slice_async(src, &self.stream) }?;
+
+        let out = self.lpc_batch_dev_from_device_inputs(&d_h, &d_l, &d_c, &d_s, len, first, range)?;
+        self.stream.synchronize()?;
+        Ok(out)
+    }
+
+    pub fn lpc_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        d_src: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        range: &LpcBatchRange,
+    ) -> Result<(DeviceArrayF32Triplet, Vec<LpcParams>), CudaLpcError> {
+        if len == 0 {
+            return Err(CudaLpcError::InvalidInput("empty input".into()));
+        }
+        if d_high.len() != len || d_low.len() != len || d_close.len() != len || d_src.len() != len {
+            return Err(CudaLpcError::InvalidInput(
+                "device input buffer length mismatch".into(),
+            ));
+        }
+
+        let prepared = Self::prepare_batch_metadata(len, first_valid, range)?;
+        let rows = prepared.combos.len();
+        let required = Self::batch_alloc_bytes(
+            len,
+            rows,
+            prepared.cutoff_adaptive,
+            prepared.alpha_lut.as_ref().map_or(0, Vec::len),
+            range.max_cycle_limit,
+            false,
+        )?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
+
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&prepared.periods, &self.stream) }?;
+        let d_cms = unsafe { DeviceBuffer::from_slice_async(&prepared.cms, &self.stream) }?;
+        let d_tms = unsafe { DeviceBuffer::from_slice_async(&prepared.tms, &self.stream) }?;
+
+        let mut d_tr = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }?;
+        self.launch_true_range_prep(d_high, d_low, d_close, len, &mut d_tr)?;
+
+        let mut d_dom = if prepared.cutoff_adaptive {
+            let mut dom = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }?;
+            let ring_len = range
+                .max_cycle_limit
+                .min(len.saturating_sub(1))
+                .checked_add(1)
+                .ok_or_else(|| CudaLpcError::InvalidInput("dom scratch overflow".into()))?;
+            let mut d_delta_ring =
+                unsafe { DeviceBuffer::<f64>::uninitialized_async(ring_len, &self.stream) }?;
+            self.launch_dom_cycle_prep(
+                d_src,
+                len,
+                range.max_cycle_limit,
+                &mut dom,
+                &mut d_delta_ring,
+            )?;
+            Some(dom)
         } else {
             None
         };
 
-        let (d_alpha_lut, alpha_lut_len_i32, alpha_lut_pmin_i32) = if cutoff_adaptive {
-            let p_min = 3i32;
-            let max_fixed = *periods.iter().max().unwrap_or(&p_min);
-            let cm_max = cms.iter().copied().fold(0.0f32, f32::max);
-            let dom_max = dom_host_f32
-                .as_ref()
-                .map(|v| v.iter().copied().fold(0.0f32, f32::max))
-                .unwrap_or(0.0f32);
-            let mut from_dom = (dom_max * cm_max).ceil() as i32;
-            let max_cap = if range.max_cycle_limit > 0 {
-                range.max_cycle_limit as i32
-            } else {
-                i32::MAX
-            };
-            if from_dom > max_cap {
-                from_dom = max_cap;
-            }
-            let p_max = max_fixed.max(from_dom.max(p_min));
-            let (lut, pmin) = build_alpha_lut(p_min, p_max);
-            let len_i32 = lut.len() as i32;
-            let buf = DeviceBuffer::from_slice(&lut)?;
-            (Some(buf), len_i32, pmin)
+        let d_alpha_lut = if let Some(alpha_lut) = &prepared.alpha_lut {
+            Some(unsafe { DeviceBuffer::from_slice_async(alpha_lut, &self.stream) }?)
         } else {
-            (None, 0, 0)
+            None
         };
 
         let out_elems = rows
-            .checked_mul(n)
+            .checked_mul(len)
             .ok_or_else(|| CudaLpcError::InvalidInput("output length overflow".into()))?;
-        let mut d_f = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
-        let mut d_hi = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
-        let mut d_lo = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
+        let mut d_f = unsafe { DeviceBuffer::<f32>::uninitialized_async(out_elems, &self.stream) }?;
+        let mut d_hi =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(out_elems, &self.stream) }?;
+        let mut d_lo =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(out_elems, &self.stream) }?;
 
         let selected = self.launch_batch_f32_v2(
-            &d_h,
-            &d_l,
-            &d_c,
-            &d_s,
-            n,
+            d_high,
+            d_low,
+            d_close,
+            d_src,
+            len,
             Some(&d_tr),
             &d_periods,
             &d_cms,
             &d_tms,
-            first,
-            cutoff_adaptive,
+            first_valid,
+            prepared.cutoff_adaptive,
             range.max_cycle_limit,
             d_dom.as_ref(),
             d_alpha_lut.as_ref(),
-            alpha_lut_len_i32,
-            alpha_lut_pmin_i32,
+            prepared.alpha_lut_len_i32,
+            prepared.alpha_lut_pmin_i32,
             false,
             &mut d_f,
             &mut d_hi,
             &mut d_lo,
         )?;
-        self.stream.synchronize()?;
 
         let triplet = DeviceArrayF32Triplet {
             wt1: DeviceArrayF32 {
                 buf: d_f,
                 rows,
-                cols: n,
+                cols: len,
             },
             wt2: DeviceArrayF32 {
                 buf: d_hi,
                 rows,
-                cols: n,
+                cols: len,
             },
             hist: DeviceArrayF32 {
                 buf: d_lo,
                 rows,
-                cols: n,
+                cols: len,
             },
         };
         unsafe {
@@ -688,7 +881,7 @@ impl CudaLpc {
                 (*(self as *const _ as *mut CudaLpc)).debug_batch_logged = true;
             }
         }
-        Ok((triplet, combos))
+        Ok((triplet, prepared.combos))
     }
 
     pub fn lpc_many_series_one_param_time_major_dev(

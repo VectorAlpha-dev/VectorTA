@@ -6,14 +6,7 @@ use vector_ta::utilities::enums::Kernel;
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::{cuda_available, CudaDamianiVolatmeter};
-
-fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() {
-        return true;
-    }
-    (a - b).abs() <= tol
-}
+use vector_ta::cuda::{cuda_available, CudaDamianiVolatmeter, CudaRuntime};
 
 #[test]
 fn cuda_feature_off_noop() {
@@ -108,6 +101,74 @@ fn damiani_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
                 "GPU anti should be finite where CPU is finite"
             );
         }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn damiani_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[damiani_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 4096usize;
+    let mut data = vec![f64::NAN; len];
+    for i in 5..len {
+        let x = i as f64;
+        let base = (x * 0.00037).sin() + (x * 0.00021).cos();
+        data[i] = base + 0.001 * (i % 7) as f64;
+        if i % 257 == 0 {
+            data[i] = f64::NAN;
+        }
+    }
+
+    let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+    let first_valid = data_f32
+        .iter()
+        .position(|value| value.is_finite())
+        .expect("first valid");
+    let sweep = DamianiVolatmeterBatchRange {
+        vis_atr: (13, 40, 9),
+        vis_std: (20, 40, 10),
+        sed_atr: (40, 40, 0),
+        sed_std: (100, 100, 0),
+        threshold: (1.4, 1.4, 0.0),
+    };
+
+    let cuda = CudaDamianiVolatmeter::new(0).expect("CudaDamianiVolatmeter::new");
+    let (legacy, legacy_combos) = cuda
+        .damiani_volatmeter_batch_dev(&data_f32, &sweep)
+        .expect("legacy damiani");
+
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let d_prices = runtime.upload_f32(&data_f32).expect("upload prices");
+    let (device, device_combos) = cuda
+        .damiani_volatmeter_batch_dev_from_device_prices(
+            d_prices.buffer(),
+            len,
+            first_valid,
+            &sweep,
+        )
+        .expect("device damiani");
+    cuda.synchronize().expect("damiani sync");
+
+    assert_eq!(legacy_combos.len(), device_combos.len());
+    assert_eq!(legacy.rows, device.rows);
+    assert_eq!(legacy.cols, device.cols);
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    let mut device_host = vec![0f32; device.len()];
+    device.buf.copy_to(&mut device_host)?;
+
+    for (lhs, rhs) in legacy_host.iter().zip(device_host.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!((lhs - rhs).abs() <= 1e-6, "lhs={lhs} rhs={rhs}");
     }
 
     Ok(())

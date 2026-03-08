@@ -255,6 +255,47 @@ impl CudaFosc {
         })
     }
 
+    pub fn fosc_batch_device(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        periods: &[i32],
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaFoscError> {
+        if len == 0 {
+            return Err(CudaFoscError::InvalidInput("empty data".into()));
+        }
+        if d_data.len() != len {
+            return Err(CudaFoscError::InvalidInput(
+                "device data buffer length mismatch".into(),
+            ));
+        }
+        if periods.is_empty() {
+            return Err(CudaFoscError::InvalidInput("empty period sweep".into()));
+        }
+        let n_combos = periods.len();
+        let out_elems = n_combos
+            .checked_mul(len)
+            .ok_or_else(|| CudaFoscError::InvalidInput("rows*cols overflow".into()))?;
+        if d_out.len() != out_elems {
+            return Err(CudaFoscError::InvalidInput(
+                "output buffer length mismatch".into(),
+            ));
+        }
+        let d_periods = DeviceBuffer::from_slice(periods)?;
+        self.launch_batch_kernel(
+            d_data,
+            len as i32,
+            first_valid as i32,
+            &d_periods,
+            n_combos as i32,
+            d_out,
+        )?;
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn launch_batch_kernel(
         &self,

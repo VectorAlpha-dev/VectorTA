@@ -190,6 +190,11 @@ impl CudaVar {
     }
 
     #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaVarError> {
+        self.stream.synchronize().map_err(Into::into)
+    }
+
+    #[inline]
     fn headroom_bytes() -> usize {
         env::var("CUDA_MEM_HEADROOM")
             .ok()
@@ -237,6 +242,27 @@ impl CudaVar {
         }
     }
 
+    fn validate_launch(grid: GridSize, block: BlockSize) -> Result<(), CudaVarError> {
+        let (gx, gy, gz) = (grid.x, grid.y, grid.z);
+        let (bx, by, bz) = (block.x, block.y, block.z);
+        if bx == 0 || by == 0 || bz == 0 || gx == 0 || gy == 0 || gz == 0 {
+            return Err(CudaVarError::InvalidInput(
+                "zero grid/block dimension".into(),
+            ));
+        }
+        if bx.saturating_mul(by).saturating_mul(bz) > 1024 {
+            return Err(CudaVarError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
+        }
+        Ok(())
+    }
+
     fn build_prefixes_1d(data_f32: &[f32]) -> (Vec<f64>, Vec<f64>, Vec<i32>, usize, usize) {
         let len = data_f32.len();
         let first_valid = data_f32.iter().position(|v| !v.is_nan()).unwrap_or(len);
@@ -262,6 +288,82 @@ impl CudaVar {
             pn[i + 1] = c;
         }
         (ps, ps2, pn, first_valid, len)
+    }
+
+    fn prepare_device_batch_inputs(
+        len: usize,
+        first_valid: usize,
+        sweep: &VarBatchRange,
+    ) -> Result<Vec<VarParams>, CudaVarError> {
+        if len == 0 {
+            return Err(CudaVarError::InvalidInput("empty data".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaVarError::InvalidInput(
+                "first_valid must be within the input length".into(),
+            ));
+        }
+
+        let combos = var_expand_grid(sweep);
+        if combos.is_empty() {
+            return Err(CudaVarError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        for prm in &combos {
+            let p = prm.period.unwrap_or(0);
+            if p == 0 || p > len {
+                return Err(CudaVarError::InvalidInput("invalid period".into()));
+            }
+            if len - first_valid < p {
+                return Err(CudaVarError::InvalidInput(
+                    "not enough valid data after first valid".into(),
+                ));
+            }
+            let nb = prm.nbdev.unwrap_or(1.0);
+            if !nb.is_finite() {
+                return Err(CudaVarError::InvalidInput("nbdev not finite".into()));
+            }
+        }
+        Ok(combos)
+    }
+
+    fn launch_prefix_builder_device_raw(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_ps: &mut DeviceBuffer<Float2>,
+        d_ps2: &mut DeviceBuffer<Float2>,
+        d_pn: &mut DeviceBuffer<i32>,
+    ) -> Result<(), CudaVarError> {
+        let func = self
+            .module
+            .get_function("var_build_prefix_f32")
+            .map_err(|_| CudaVarError::MissingKernelSymbol {
+                name: "var_build_prefix_f32",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+
+        unsafe {
+            let mut data_ptr = d_data.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut ps_ptr = d_ps.as_device_ptr().as_raw();
+            let mut ps2_ptr = d_ps2.as_device_ptr().as_raw();
+            let mut pn_ptr = d_pn.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut data_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut ps_ptr as *mut _ as *mut c_void,
+                &mut ps2_ptr as *mut _ as *mut c_void,
+                &mut pn_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
     }
 
     fn build_prefixes_time_major(
@@ -308,30 +410,33 @@ impl CudaVar {
         if data_f32.is_empty() {
             return Err(CudaVarError::InvalidInput("empty data".into()));
         }
-        let (ps, ps2, pn, first_valid, len) = Self::build_prefixes_1d(data_f32);
+        let len = data_f32.len();
+        let first_valid = data_f32
+            .iter()
+            .position(|v| !v.is_nan())
+            .ok_or_else(|| CudaVarError::InvalidInput("all values are NaN".into()))?;
+        let d_data = DeviceBuffer::from_slice(data_f32)?;
+        let out = self.var_batch_dev_from_device_prices(&d_data, len, first_valid, sweep)?;
+        self.stream.synchronize()?;
+        Ok(out)
+    }
 
-        let mut combos = var_expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaVarError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
-        for prm in &combos {
-            let p = prm.period.unwrap_or(0);
-            if p == 0 || p > len {
-                return Err(CudaVarError::InvalidInput("invalid period".into()));
-            }
-            if len - first_valid < p {
-                return Err(CudaVarError::InvalidInput(
-                    "not enough valid data after first valid".into(),
-                ));
-            }
-            let nb = prm.nbdev.unwrap_or(1.0);
-            if !nb.is_finite() {
-                return Err(CudaVarError::InvalidInput("nbdev not finite".into()));
-            }
+    pub fn var_batch_dev_from_device_prices(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &VarBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<VarParams>), CudaVarError> {
+        if d_data.len() != len {
+            return Err(CudaVarError::InvalidInput(format!(
+                "device input length mismatch (buffer={}, len={})",
+                d_data.len(),
+                len
+            )));
         }
 
+        let combos = Self::prepare_device_batch_inputs(len, first_valid, sweep)?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let nb2: Vec<f32> = combos
             .iter()
@@ -344,15 +449,15 @@ impl CudaVar {
         let out_elems = Self::checked_mul(rows, len, "var: rows * len")?;
         let out_bytes = Self::checked_mul(out_elems, std::mem::size_of::<f32>(), "var: out_bytes")?;
 
-        let ps_ff: Vec<Float2> = split_f64_to_float2_vec(&ps);
-        let ps2_ff: Vec<Float2> = split_f64_to_float2_vec(&ps2);
-
         let sz_f2 = std::mem::size_of::<Float2>();
         let sz_i32 = std::mem::size_of::<i32>();
         let sz_f32 = std::mem::size_of::<f32>();
-        let prefix_pairs = Self::checked_add(ps_ff.len(), ps2_ff.len(), "var: prefix pair count")?;
+        let prefix_elems = len
+            .checked_add(1)
+            .ok_or_else(|| CudaVarError::InvalidInput("var: prefix length overflow".into()))?;
+        let prefix_pairs = Self::checked_mul(prefix_elems, 2, "var: prefix pair count")?;
         let prefix_bytes = Self::checked_mul(prefix_pairs, sz_f2, "var: prefix bytes")?;
-        let pn_bytes = Self::checked_mul(pn.len(), sz_i32, "var: prefix_nan bytes")?;
+        let pn_bytes = Self::checked_mul(prefix_elems, sz_i32, "var: prefix_nan bytes")?;
         let periods_bytes = Self::checked_mul(periods.len(), sz_i32, "var: periods bytes")?;
         let nb2_bytes = Self::checked_mul(nb2.len(), sz_f32, "var: nb2 bytes")?;
         let in_bytes = Self::checked_add(
@@ -392,33 +497,34 @@ impl CudaVar {
         Self::will_fit(work_bytes, headroom)?;
 
         let mut d_ps: DeviceBuffer<Float2> =
-            unsafe { DeviceBuffer::uninitialized_async(ps_ff.len(), &self.stream) }?;
+            unsafe { DeviceBuffer::uninitialized_async(prefix_elems, &self.stream) }?;
         let mut d_ps2: DeviceBuffer<Float2> =
-            unsafe { DeviceBuffer::uninitialized_async(ps2_ff.len(), &self.stream) }?;
+            unsafe { DeviceBuffer::uninitialized_async(prefix_elems, &self.stream) }?;
         let mut d_pn: DeviceBuffer<i32> =
-            unsafe { DeviceBuffer::uninitialized_async(pn.len(), &self.stream) }?;
+            unsafe { DeviceBuffer::uninitialized_async(prefix_elems, &self.stream) }?;
+        self.launch_prefix_builder_device_raw(
+            d_data,
+            len,
+            first_valid,
+            &mut d_ps,
+            &mut d_ps2,
+            &mut d_pn,
+        )?;
+
         let mut d_periods: DeviceBuffer<i32> =
             unsafe { DeviceBuffer::uninitialized_async(periods.len(), &self.stream) }?;
         let mut d_nb2: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(nb2.len(), &self.stream) }?;
-
-        let h_ps = LockedBuffer::from_slice(&ps_ff)?;
-        let h_ps2 = LockedBuffer::from_slice(&ps2_ff)?;
-        let h_pn = LockedBuffer::from_slice(&pn)?;
         let h_periods = LockedBuffer::from_slice(&periods)?;
         let h_nb2 = LockedBuffer::from_slice(&nb2)?;
-
         unsafe {
-            d_ps.async_copy_from(&h_ps, &self.stream)?;
-            d_ps2.async_copy_from(&h_ps2, &self.stream)?;
-            d_pn.async_copy_from(&h_pn, &self.stream)?;
             d_periods.async_copy_from(&h_periods, &self.stream)?;
             d_nb2.async_copy_from(&h_nb2, &self.stream)?;
         }
 
         self.try_enable_persisting_l2(
             d_ps.as_device_ptr().as_raw() as u64,
-            ps_ff.len() * std::mem::size_of::<Float2>(),
+            prefix_elems * std::mem::size_of::<Float2>(),
         );
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
 
@@ -459,8 +565,6 @@ impl CudaVar {
                 out_ptr,
             )?;
         }
-
-        self.stream.synchronize()?;
 
         Ok((
             DeviceArrayF32 {

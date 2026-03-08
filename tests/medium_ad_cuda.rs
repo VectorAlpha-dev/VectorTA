@@ -1,6 +1,5 @@
 use vector_ta::indicators::medium_ad::{
-    medium_ad_batch_with_kernel, MediumAdBatchBuilder, MediumAdBatchRange, MediumAdBuilder,
-    MediumAdParams,
+    medium_ad_batch_with_kernel, MediumAdBatchRange, MediumAdBuilder,
 };
 use vector_ta::utilities::enums::Kernel;
 
@@ -9,7 +8,7 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::CudaMediumAd;
+use vector_ta::cuda::{CudaMediumAd, CudaRuntime};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -133,6 +132,61 @@ fn medium_ad_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
             i,
             a,
             b
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn medium_ad_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[medium_ad_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 4096usize;
+    let mut data = vec![f64::NAN; len];
+    for i in 5..len {
+        let x = i as f64;
+        data[i] = (x * 0.00107).sin() + 0.00011 * x.cos();
+    }
+    let sweep = MediumAdBatchRange { period: (7, 21, 7) };
+
+    let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+    let first_valid = data_f32
+        .iter()
+        .position(|v| v.is_finite())
+        .expect("first_valid");
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let d_prices = runtime.upload_f32(&data_f32).expect("upload");
+
+    let cuda = CudaMediumAd::new(0).expect("CudaMediumAd::new");
+    let legacy_dev = cuda.medium_ad_batch_dev(&data_f32, &sweep)?;
+    let device_dev = cuda.medium_ad_batch_dev_from_device_prices(
+        d_prices.buffer(),
+        data_f32.len(),
+        first_valid,
+        &sweep,
+    )?;
+
+    assert_eq!(legacy_dev.rows, device_dev.rows);
+    assert_eq!(legacy_dev.cols, device_dev.cols);
+
+    let mut legacy_host = vec![0f32; legacy_dev.len()];
+    legacy_dev.buf.copy_to(&mut legacy_host)?;
+    let mut device_host = vec![0f32; device_dev.len()];
+    device_dev.buf.copy_to(&mut device_host)?;
+
+    let tol = 1e-4;
+    for idx in 0..legacy_host.len() {
+        assert!(
+            approx_eq(legacy_host[idx] as f64, device_host[idx] as f64, tol),
+            "MEDIUM_AD device-input mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_host[idx],
+            device_host[idx]
         );
     }
 

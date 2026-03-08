@@ -620,6 +620,265 @@ impl CudaPercentileNearestRank {
         ))
     }
 
+    pub fn pnr_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &PercentileNearestRankBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<PercentileNearestRankParams>), CudaPnrError> {
+        if len == 0 || d_prices.len() != len {
+            return Err(CudaPnrError::InvalidInput(
+                "device price buffer must match non-zero length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaPnrError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = Self::expand_grid(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaPnrError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        let max_len = combos.iter().map(|c| c.length.unwrap_or(15)).max().unwrap();
+        if len - first_valid < max_len {
+            return Err(CudaPnrError::InvalidInput("not enough valid data".into()));
+        }
+
+        let periods: Vec<i32> = combos
+            .iter()
+            .map(|c| c.length.unwrap_or(15) as i32)
+            .collect();
+        let percs: Vec<f32> = combos
+            .iter()
+            .map(|c| c.percentage.unwrap_or(50.0) as f32)
+            .collect();
+
+        let lengths_axis: Vec<usize> = Self::axis_usize(sweep.length)?;
+        let percs_axis: Vec<f64> = Self::axis_f64(sweep.percentage)?;
+        let group_rows = percs_axis.len();
+
+        let prices_bytes = len
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or_else(|| CudaPnrError::InvalidInput("series_len bytes overflow".into()))?;
+        let percs_bytes = percs
+            .len()
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or_else(|| CudaPnrError::InvalidInput("percs bytes overflow".into()))?;
+        let periods_bytes = periods
+            .len()
+            .checked_mul(core::mem::size_of::<i32>())
+            .ok_or_else(|| CudaPnrError::InvalidInput("periods bytes overflow".into()))?;
+        let out_elems = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaPnrError::InvalidInput("output elements overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or_else(|| CudaPnrError::InvalidInput("output bytes overflow".into()))?;
+
+        let mut func_shared = self
+            .module
+            .get_function("percentile_nearest_rank_one_series_many_params_same_len_f32")
+            .map_err(|_| CudaPnrError::MissingKernelSymbol {
+                name: "percentile_nearest_rank_one_series_many_params_same_len_f32",
+            })?;
+        func_shared.set_cache_config(CacheConfig::PreferShared)?;
+
+        let max_smem_per_block = Device::get_device(0)
+            .and_then(|d| d.get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock))
+            .unwrap_or(48 * 1024) as usize;
+
+        let mut use_shared: Vec<bool> = Vec::with_capacity(lengths_axis.len());
+        for &l in &lengths_axis {
+            let smem_need = Self::smem_bytes_for_len(l);
+            let enough_smem = smem_need <= max_smem_per_block;
+            use_shared.push(enough_smem && Self::shared_worth_it(l, group_rows));
+        }
+
+        let mut scratch_bytes = 0usize;
+        for (g, &l) in lengths_axis.iter().enumerate() {
+            if !use_shared[g] {
+                let group = group_rows
+                    .checked_mul(l)
+                    .and_then(|x| x.checked_mul(core::mem::size_of::<f32>()))
+                    .ok_or_else(|| CudaPnrError::InvalidInput("scratch bytes overflow".into()))?;
+                scratch_bytes = scratch_bytes
+                    .checked_add(group)
+                    .ok_or_else(|| CudaPnrError::InvalidInput("scratch bytes overflow".into()))?;
+            }
+        }
+
+        let required = prices_bytes
+            .checked_add(percs_bytes)
+            .and_then(|x| x.checked_add(periods_bytes))
+            .and_then(|x| x.checked_add(out_bytes))
+            .and_then(|x| x.checked_add(scratch_bytes))
+            .ok_or_else(|| CudaPnrError::InvalidInput("total bytes overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaPnrError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaPnrError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
+        }
+
+        let mut d_percs: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(percs.len()) }?;
+        let mut d_periods: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::uninitialized(periods.len()) }?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
+
+        unsafe {
+            d_percs.async_copy_from(&percs, &self.stream)?;
+            d_periods.async_copy_from(&periods, &self.stream)?;
+        }
+
+        let func_baseline = self
+            .module
+            .get_function("percentile_nearest_rank_batch_f32")
+            .map_err(|_| CudaPnrError::MissingKernelSymbol {
+                name: "percentile_nearest_rank_batch_f32",
+            })?;
+        let block_x_baseline = match self.policy.batch {
+            BatchKernelPolicy::Auto => 128,
+            BatchKernelPolicy::OneD { block_x } => block_x,
+        };
+
+        let series_len_i = len as i32;
+        let first_valid_i = first_valid as i32;
+        let mut last_block_x_used: u32 = block_x_baseline;
+
+        for (gi, &l) in lengths_axis.iter().enumerate() {
+            let group_start = gi * group_rows;
+            let group_size = group_rows;
+            let warm = first_valid + l - 1;
+            if warm >= len {
+                let grid_x = ((group_size as u32) + block_x_baseline - 1) / block_x_baseline;
+
+                let mut d_scratch: DeviceBuffer<f32> =
+                    unsafe { DeviceBuffer::uninitialized(group_size * l) }?;
+                unsafe {
+                    let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                    let mut periods_ptr = d_periods.as_device_ptr().add(group_start).as_raw();
+                    let mut percs_ptr = d_percs.as_device_ptr().add(group_start).as_raw();
+                    let mut series_len_i = series_len_i;
+                    let mut combos_i = group_size as i32;
+                    let mut first_valid_i = first_valid_i;
+                    let mut out_ptr = d_out.as_device_ptr().add(group_start * len).as_raw();
+                    let mut scratch_ptr = d_scratch.as_device_ptr().as_raw();
+                    let mut max_len_i = l as i32;
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut prices_ptr as *mut _ as *mut c_void,
+                        &mut periods_ptr as *mut _ as *mut c_void,
+                        &mut percs_ptr as *mut _ as *mut c_void,
+                        &mut series_len_i as *mut _ as *mut c_void,
+                        &mut combos_i as *mut _ as *mut c_void,
+                        &mut first_valid_i as *mut _ as *mut c_void,
+                        &mut out_ptr as *mut _ as *mut c_void,
+                        &mut scratch_ptr as *mut _ as *mut c_void,
+                        &mut max_len_i as *mut _ as *mut c_void,
+                    ];
+                    let grid: GridSize = (grid_x.max(1), 1, 1).into();
+                    let block: BlockSize = (block_x_baseline, 1, 1).into();
+                    self.validate_launch(grid_x.max(1), 1, 1, block_x_baseline, 1, 1)?;
+                    self.stream.launch(&func_baseline, grid, block, 0, args)?;
+                }
+                continue;
+            }
+
+            if use_shared[gi] {
+                let threads = Self::next_pow2_u32(l as u32).min(256);
+                let smem_bytes = Self::smem_bytes_for_len(l);
+                let tcount = len - warm;
+                let grid_x = (tcount as u32).min(80);
+                unsafe {
+                    let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                    let mut series_len_i = series_len_i;
+                    let mut l_i = l as i32;
+                    let mut percs_ptr = d_percs.as_device_ptr().add(group_start).as_raw();
+                    let mut n_percs_i = group_size as i32;
+                    let mut first_valid_i = first_valid_i;
+                    let mut out_ptr = d_out.as_device_ptr().add(group_start * len).as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut prices_ptr as *mut _ as *mut c_void,
+                        &mut series_len_i as *mut _ as *mut c_void,
+                        &mut l_i as *mut _ as *mut c_void,
+                        &mut percs_ptr as *mut _ as *mut c_void,
+                        &mut n_percs_i as *mut _ as *mut c_void,
+                        &mut first_valid_i as *mut _ as *mut c_void,
+                        &mut out_ptr as *mut _ as *mut c_void,
+                    ];
+                    let grid: GridSize = (grid_x.max(1), 1, 1).into();
+                    let block: BlockSize = (threads, 1, 1).into();
+                    self.validate_launch(grid_x.max(1), 1, 1, threads, 1, 1)?;
+                    self.stream
+                        .launch(&func_shared, grid, block, smem_bytes as u32, args)?;
+                    last_block_x_used = threads;
+                }
+            } else {
+                let grid_x = ((group_size as u32) + block_x_baseline - 1) / block_x_baseline;
+                let mut d_scratch: DeviceBuffer<f32> =
+                    unsafe { DeviceBuffer::uninitialized(group_size * l) }?;
+                unsafe {
+                    let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                    let mut periods_ptr = d_periods.as_device_ptr().add(group_start).as_raw();
+                    let mut percs_ptr = d_percs.as_device_ptr().add(group_start).as_raw();
+                    let mut series_len_i = series_len_i;
+                    let mut combos_i = group_size as i32;
+                    let mut first_valid_i = first_valid_i;
+                    let mut out_ptr = d_out.as_device_ptr().add(group_start * len).as_raw();
+                    let mut scratch_ptr = d_scratch.as_device_ptr().as_raw();
+                    let mut max_len_i = l as i32;
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut prices_ptr as *mut _ as *mut c_void,
+                        &mut periods_ptr as *mut _ as *mut c_void,
+                        &mut percs_ptr as *mut _ as *mut c_void,
+                        &mut series_len_i as *mut _ as *mut c_void,
+                        &mut combos_i as *mut _ as *mut c_void,
+                        &mut first_valid_i as *mut _ as *mut c_void,
+                        &mut out_ptr as *mut _ as *mut c_void,
+                        &mut scratch_ptr as *mut _ as *mut c_void,
+                        &mut max_len_i as *mut _ as *mut c_void,
+                    ];
+                    let grid: GridSize = (grid_x.max(1), 1, 1).into();
+                    let block: BlockSize = (block_x_baseline, 1, 1).into();
+                    self.validate_launch(grid_x.max(1), 1, 1, block_x_baseline, 1, 1)?;
+                    self.stream.launch(&func_baseline, grid, block, 0, args)?;
+                }
+            }
+        }
+
+        let sel = BatchKernelSelected::OneD {
+            block_x: last_block_x_used,
+        };
+        unsafe {
+            (*(self as *const _ as *mut CudaPercentileNearestRank)).last_batch = Some(sel);
+        }
+        static ONCE: AtomicBool = AtomicBool::new(false);
+        let mut printed = false;
+        Self::maybe_log(Some(sel), "batch", &ONCE, &mut printed);
+
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: combos.len(),
+                cols: len,
+            },
+            combos,
+        ))
+    }
+
     pub fn pnr_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],

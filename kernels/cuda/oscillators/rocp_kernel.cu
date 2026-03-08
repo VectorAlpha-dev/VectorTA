@@ -35,6 +35,15 @@ __device__ __forceinline__ float rocp_qnan() {
 
 
 extern "C" __global__
+void rocp_build_reciprocals_f32(const float* __restrict__ data,
+                                int len,
+                                float* __restrict__ inv) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= len) return;
+    inv[idx] = 1.0f / data[idx];
+}
+
+extern "C" __global__
 void rocp_batch_f32(const float* __restrict__ data,
                     const float* __restrict__ inv,
                     const int* __restrict__ periods,

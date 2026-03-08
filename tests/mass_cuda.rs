@@ -6,7 +6,7 @@ use vector_ta::utilities::enums::Kernel;
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::{cuda_available, CudaMass};
+use vector_ta::cuda::{cuda_available, CudaMass, CudaRuntime};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -145,5 +145,60 @@ fn mass_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
             idx
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn mass_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[mass_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 8192usize;
+    let mut high = vec![f64::NAN; len];
+    let mut low = vec![f64::NAN; len];
+    for i in 6..len {
+        let x = i as f64 * 0.0023;
+        let base = (x * 0.81).sin() + 0.0015 * x;
+        let width = 0.24 + 0.04 * (x * 0.17).cos().abs();
+        high[i] = base + width;
+        low[i] = base - width;
+    }
+
+    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let sweep = MassBatchRange { period: (9, 18, 3) };
+
+    let mut cuda = CudaMass::new(0).expect("CudaMass::new");
+    let (legacy, legacy_combos) = cuda
+        .mass_batch_dev(&high_f32, &low_f32, &sweep)
+        .expect("legacy mass batch");
+
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let d_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+    let (device, device_combos) = cuda
+        .mass_batch_dev_from_device_inputs(d_high.buffer(), d_low.buffer(), len, 6, &sweep)
+        .expect("device mass batch");
+    cuda.synchronize().expect("mass sync");
+
+    assert_eq!(legacy_combos.len(), device_combos.len());
+    assert_eq!(legacy.rows, device.rows);
+    assert_eq!(legacy.cols, device.cols);
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    let mut device_host = vec![0f32; device.len()];
+    device.buf.copy_to(&mut device_host)?;
+
+    for (lhs, rhs) in legacy_host.iter().zip(device_host.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!((lhs - rhs).abs() <= 1e-6, "lhs={lhs} rhs={rhs}");
+    }
+
     Ok(())
 }

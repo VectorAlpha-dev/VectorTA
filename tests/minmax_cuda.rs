@@ -7,9 +7,9 @@ use vector_ta::utilities::enums::Kernel;
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::cuda_available;
-#[cfg(feature = "cuda")]
 use vector_ta::cuda::minmax_wrapper::CudaMinmax;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::{cuda_available, CudaRuntime};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -204,6 +204,113 @@ fn minmax_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
         );
         assert!(
             approx_eq(cpu_last_max[idx], g_last_max[idx] as f64, tol),
+            "last_max mismatch at {}",
+            idx
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn minmax_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[minmax_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 8192usize;
+    let first_valid = 4usize;
+    let mut high_f32 = vec![f32::NAN; len];
+    let mut low_f32 = vec![f32::NAN; len];
+    for i in first_valid..len {
+        let x = i as f32;
+        let base = (x * 0.0013).sin() + 0.00011 * x;
+        let spread = (x * 0.00073).cos().abs() * 0.2 + 0.2;
+        low_f32[i] = base;
+        high_f32[i] = base * (1.0 + spread);
+    }
+
+    let sweep = MinmaxBatchRange { order: (3, 31, 4) };
+    let cuda = CudaMinmax::new(0).expect("CudaMinmax::new");
+    let (legacy, legacy_params) = cuda
+        .minmax_batch_dev(&high_f32, &low_f32, &sweep)
+        .expect("legacy batch");
+
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let device_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let device_low = runtime.upload_f32(&low_f32).expect("upload low");
+    let (device, device_params) = cuda
+        .minmax_batch_dev_from_device_inputs(
+            device_high.buffer(),
+            device_low.buffer(),
+            len,
+            first_valid,
+            &sweep,
+        )
+        .expect("device inputs");
+    cuda.synchronize().expect("sync");
+
+    assert_eq!(legacy.rows, device.rows);
+    assert_eq!(legacy.cols, device.cols);
+    assert_eq!(legacy_params.len(), device_params.len());
+    for (lhs, rhs) in legacy_params.iter().zip(device_params.iter()) {
+        assert_eq!(lhs.order, rhs.order);
+    }
+
+    let total = legacy.rows * legacy.cols;
+    let mut legacy_is_min = vec![0f32; total];
+    let mut legacy_is_max = vec![0f32; total];
+    let mut legacy_last_min = vec![0f32; total];
+    let mut legacy_last_max = vec![0f32; total];
+    legacy.is_min.copy_to(&mut legacy_is_min)?;
+    legacy.is_max.copy_to(&mut legacy_is_max)?;
+    legacy.last_min.copy_to(&mut legacy_last_min)?;
+    legacy.last_max.copy_to(&mut legacy_last_max)?;
+
+    let mut device_is_min = vec![0f32; total];
+    let mut device_is_max = vec![0f32; total];
+    let mut device_last_min = vec![0f32; total];
+    let mut device_last_max = vec![0f32; total];
+    device.is_min.copy_to(&mut device_is_min)?;
+    device.is_max.copy_to(&mut device_is_max)?;
+    device.last_min.copy_to(&mut device_last_min)?;
+    device.last_max.copy_to(&mut device_last_max)?;
+
+    let tol = 5e-4;
+    for (idx, (&lhs, &rhs)) in legacy_is_min.iter().zip(device_is_min.iter()).enumerate() {
+        assert!(
+            approx_eq(lhs as f64, rhs as f64, tol),
+            "is_min mismatch at {}",
+            idx
+        );
+    }
+    for (idx, (&lhs, &rhs)) in legacy_is_max.iter().zip(device_is_max.iter()).enumerate() {
+        assert!(
+            approx_eq(lhs as f64, rhs as f64, tol),
+            "is_max mismatch at {}",
+            idx
+        );
+    }
+    for (idx, (&lhs, &rhs)) in legacy_last_min
+        .iter()
+        .zip(device_last_min.iter())
+        .enumerate()
+    {
+        assert!(
+            approx_eq(lhs as f64, rhs as f64, tol),
+            "last_min mismatch at {}",
+            idx
+        );
+    }
+    for (idx, (&lhs, &rhs)) in legacy_last_max
+        .iter()
+        .zip(device_last_max.iter())
+        .enumerate()
+    {
+        assert!(
+            approx_eq(lhs as f64, rhs as f64, tol),
             "last_max mismatch at {}",
             idx
         );

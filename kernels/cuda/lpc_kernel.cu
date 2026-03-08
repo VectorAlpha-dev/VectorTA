@@ -33,6 +33,111 @@ static __forceinline__ __device__ float lut_or_formula_alpha(
     return alpha_from_period_iir_f(p);
 }
 
+extern "C" __global__ void lpc_build_true_range_f32(
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    const float* __restrict__ close,
+    int len,
+    float* __restrict__ tr_out
+) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= len) return;
+
+    if (i == 0) {
+        tr_out[0] = high[0] - low[0];
+        return;
+    }
+
+    const float hl  = high[i] - low[i];
+    const float c_l = fabsf(close[i] - low[i - 1]);
+    const float c_h = fabsf(close[i] - high[i - 1]);
+    tr_out[i] = fmaxf(hl, fmaxf(c_l, c_h));
+}
+
+extern "C" __global__ void lpc_build_dom_cycle_f32_serial(
+    const float* __restrict__ src,
+    int len,
+    int max_cycle_limit,
+    double* __restrict__ delta_phase_ring,
+    int delta_phase_ring_len,
+    float* __restrict__ dom_out
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+
+    const uint32_t qnan_bits = 0x7fc00000u;
+    const float qnan = __int_as_float(qnan_bits);
+    for (int i = 0; i < len; ++i) {
+        dom_out[i] = qnan;
+    }
+    if (len < 8 || delta_phase_ring_len <= 0) return;
+
+    for (int i = 0; i < delta_phase_ring_len; ++i) {
+        delta_phase_ring[i] = 0.0;
+    }
+
+    double in_phase_hist[4] = {0.0, 0.0, 0.0, 0.0};
+    double quadrature_hist[4] = {0.0, 0.0, 0.0, 0.0};
+    double real_prev = 0.0;
+    double imag_prev = 0.0;
+    double inst_prev = 0.0;
+    double dom_prev = CUDART_NAN;
+
+    for (int i = 7; i < len; ++i) {
+        const int src_m11 = (i >= 11) ? (i - 11) : 0;
+        const int src_m9  = (i >= 9) ? (i - 9) : 0;
+
+        const double val1 = (double)src[i] - (double)src[i - 7];
+        const double val1_4 = (double)src[i - 4] - (double)src[src_m11];
+        const double val1_2 = (double)src[i - 2] - (double)src[src_m9];
+
+        const double in_phase_i =
+            1.25 * (val1_4 - 0.635 * val1_2) + 0.635 * in_phase_hist[(i - 3) & 3];
+        const double quadrature_i =
+            val1_2 - 0.338 * val1 + 0.338 * quadrature_hist[(i - 2) & 3];
+
+        const double in_phase_prev = in_phase_hist[(i - 1) & 3];
+        const double quadrature_prev = quadrature_hist[(i - 1) & 3];
+
+        const double real_i =
+            0.2 * (in_phase_i * in_phase_prev + quadrature_i * quadrature_prev) + 0.8 * real_prev;
+        const double imag_i =
+            0.2 * (in_phase_i * quadrature_prev - in_phase_prev * quadrature_i) + 0.8 * imag_prev;
+
+        double delta_i = 0.0;
+        if (real_i != 0.0) {
+            delta_i = atan(imag_i / real_i);
+        }
+        delta_phase_ring[i % delta_phase_ring_len] = delta_i;
+
+        double val2 = 0.0;
+        bool found_period = false;
+        double inst_i = inst_prev;
+        const int limit = max_cycle_limit < i ? max_cycle_limit : i;
+        for (int j = 0; j <= limit; ++j) {
+            val2 += delta_phase_ring[(i - j) % delta_phase_ring_len];
+            if (val2 > 2.0 * CUDART_PI && !found_period) {
+                inst_i = (double)j;
+                found_period = true;
+                break;
+            }
+        }
+
+        if (!found_period) {
+            inst_i = (i > 0) ? inst_prev : 20.0;
+        }
+
+        const double dom_i = !isnan(dom_prev) ? (0.25 * inst_i + 0.75 * dom_prev) : inst_i;
+        dom_out[i] = (float)dom_i;
+
+        in_phase_hist[i & 3] = in_phase_i;
+        quadrature_hist[i & 3] = quadrature_i;
+        real_prev = real_i;
+        imag_prev = imag_i;
+        inst_prev = inst_i;
+        dom_prev = dom_i;
+    }
+}
+
 
 
 

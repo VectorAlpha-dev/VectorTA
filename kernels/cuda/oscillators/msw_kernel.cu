@@ -307,6 +307,79 @@ void msw_batch_f32(const float* __restrict__ prices,
     }
 }
 
+extern "C" __global__
+void msw_batch_single_output_f32(const float* __restrict__ prices,
+                                 const int*   __restrict__ periods,
+                                 int series_len,
+                                 int n_combos,
+                                 int first_valid,
+                                 int output_index,
+                                 float* __restrict__ out)
+{
+    const int combo = blockIdx.y;
+    if (combo >= n_combos) return;
+
+    const int period = periods[combo];
+    if (period <= 0) return;
+
+    const int warm = first_valid + period - 1;
+    const int base_out = combo * series_len;
+
+    {
+        int t = blockIdx.x * blockDim.x + threadIdx.x;
+        const int stride = gridDim.x * blockDim.x;
+        const int stop = min(warm, series_len);
+        for (; t < stop; t += stride) {
+            out[base_out + t] = NAN;
+        }
+    }
+
+    extern __shared__ unsigned char shmem_raw[];
+    double* __restrict__ cosw_d = reinterpret_cast<double*>(shmem_raw);
+    double* __restrict__ sinw_d = cosw_d + period;
+    float* __restrict__ tile = reinterpret_cast<float*>(sinw_d + period);
+
+    const double step_d = 6.2831852 / (double)period;
+    for (int j = threadIdx.x; j < period; j += blockDim.x) {
+        const double ang = step_d * (double)j;
+        sinw_d[j] = sin(ang);
+        cosw_d[j] = cos(ang);
+    }
+    __syncthreads();
+
+    const int stride2 = gridDim.x * blockDim.x;
+    for (int base_t = blockIdx.x * blockDim.x; base_t < series_len; base_t += stride2) {
+        const int t_begin = max(base_t, warm);
+        const int t_end = min(base_t + blockDim.x - 1, series_len - 1);
+        if (t_begin > t_end) continue;
+
+        const int tile_in_start = t_begin - (period - 1);
+        const int tile_len = (t_end - t_begin + 1) + (period - 1);
+
+        for (int i = threadIdx.x; i < tile_len; i += blockDim.x) {
+            tile[i] = prices[tile_in_start + i];
+        }
+        __syncthreads();
+
+        const int t = base_t + threadIdx.x;
+        if (t >= t_begin && t <= t_end) {
+            const int start = t - t_begin;
+            double dr = 0.0, di = 0.0;
+            #pragma unroll 1
+            for (int j = 0; j < period; ++j) {
+                const double w = (double)tile[start + (period - 1 - j)];
+                dr += cosw_d[j] * w;
+                di += sinw_d[j] * w;
+            }
+            const float phase = msw_phase_batch_from_dr_di(dr, di);
+            float s, c;
+            __sincosf(phase, &s, &c);
+            out[base_out + t] = (output_index == 0) ? s : (s + c) * MSW_SQRT_HALF_F;
+        }
+        __syncthreads();
+    }
+}
+
 
 
 extern "C" __global__

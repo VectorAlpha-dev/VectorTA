@@ -17,6 +17,39 @@ static __device__ __forceinline__ float f32_nan() {
     return __int_as_float(0x7fffffff);
 }
 
+extern "C" __global__ void vwmacd_build_prefix_one_series_f64(
+    const float* __restrict__ prices,
+    const float* __restrict__ volumes,
+    int len,
+    int first_valid,
+    double* __restrict__ pv_prefix,
+    double* __restrict__ vol_prefix)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (len < 0) return;
+
+    double acc_pv = 0.0;
+    double acc_vol = 0.0;
+    for (int i = 0; i < len; ++i) {
+        if (i >= first_valid) {
+            const double p = (double)prices[i];
+            const double v = (double)volumes[i];
+            if (isnan(p) || isnan(v) || isnan(acc_pv) || isnan(acc_vol)) {
+                acc_pv = nan("");
+                acc_vol = nan("");
+            } else {
+                acc_pv += p * v;
+                acc_vol += v;
+            }
+            pv_prefix[i] = acc_pv;
+            vol_prefix[i] = acc_vol;
+        } else {
+            pv_prefix[i] = 0.0;
+            vol_prefix[i] = 0.0;
+        }
+    }
+}
+
 
 
 extern "C" __global__ void vwmacd_batch_f32(

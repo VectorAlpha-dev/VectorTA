@@ -441,6 +441,122 @@ impl CudaIftRsi {
         ))
     }
 
+    pub fn ift_rsi_batch_device(
+        &self,
+        d_in: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        rsi_periods: &[i32],
+        wma_periods: &[i32],
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaIftRsiError> {
+        if len == 0 {
+            return Err(CudaIftRsiError::InvalidInput("empty input".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaIftRsiError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+        if d_in.len() != len {
+            return Err(CudaIftRsiError::InvalidInput(
+                "device input buffer length mismatch".into(),
+            ));
+        }
+        if rsi_periods.is_empty() || wma_periods.is_empty() {
+            return Err(CudaIftRsiError::InvalidInput(
+                "empty parameter sweep".into(),
+            ));
+        }
+        if rsi_periods.len() != wma_periods.len() {
+            return Err(CudaIftRsiError::InvalidInput(
+                "rsi_period and wma_period sweep length mismatch".into(),
+            ));
+        }
+        if rsi_periods.iter().any(|&period| period <= 0)
+            || wma_periods.iter().any(|&period| period <= 0)
+        {
+            return Err(CudaIftRsiError::InvalidInput(
+                "period values must be > 0".into(),
+            ));
+        }
+
+        let n_combos = rsi_periods.len();
+        let out_elems = n_combos
+            .checked_mul(len)
+            .ok_or_else(|| CudaIftRsiError::InvalidInput("size overflow".into()))?;
+        if d_out.len() != out_elems {
+            return Err(CudaIftRsiError::InvalidInput(
+                "output buffer length mismatch".into(),
+            ));
+        }
+
+        let max_wp = wma_periods
+            .iter()
+            .copied()
+            .max()
+            .ok_or_else(|| CudaIftRsiError::InvalidInput("empty wma_period sweep".into()))?
+            as usize;
+        let shmem_bytes_usize = max_wp
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or_else(|| CudaIftRsiError::InvalidInput("wma_period too large".into()))?;
+        if shmem_bytes_usize > self.max_smem_per_block {
+            return Err(CudaIftRsiError::InvalidInput(format!(
+                "wma_period={} requires {}B shared memory but device allows {}B per block",
+                max_wp, shmem_bytes_usize, self.max_smem_per_block
+            )));
+        }
+
+        let d_rp = DeviceBuffer::from_slice(rsi_periods)?;
+        let d_wp = DeviceBuffer::from_slice(wma_periods)?;
+        let func = self.module.get_function("ift_rsi_batch_f32").map_err(|_| {
+            CudaIftRsiError::MissingKernelSymbol {
+                name: "ift_rsi_batch_f32",
+            }
+        })?;
+
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Auto => self.warp_size.max(32),
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+        };
+        let target_blocks = self.sm_count.saturating_mul(8).max(1);
+        let grid_x = (n_combos as u32).min(target_blocks);
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch_dims((grid_x.max(1), 1, 1), (block_x, 1, 1))?;
+        let shmem_bytes = shmem_bytes_usize as u32;
+
+        unsafe {
+            (*(self as *const _ as *mut CudaIftRsi)).last_batch =
+                Some(BatchKernelSelected::Plain {
+                    block_x,
+                    shmem_bytes,
+                });
+        }
+        unsafe {
+            let mut in_ptr = d_in.as_device_ptr().as_raw();
+            let mut series_len_i = len as i32;
+            let mut n_combos_i = n_combos as i32;
+            let mut first_i = first_valid as i32;
+            let mut rp_ptr = d_rp.as_device_ptr().as_raw();
+            let mut wp_ptr = d_wp.as_device_ptr().as_raw();
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut in_ptr as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut n_combos_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut rp_ptr as *mut _ as *mut c_void,
+                &mut wp_ptr as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, shmem_bytes, args)?;
+        }
+
+        self.maybe_log_batch_debug();
+        Ok(())
+    }
+
     pub fn ift_rsi_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],

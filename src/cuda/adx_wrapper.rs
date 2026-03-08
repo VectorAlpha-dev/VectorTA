@@ -250,6 +250,107 @@ impl CudaAdx {
         ))
     }
 
+    pub fn adx_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &AdxBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<AdxParams>), CudaAdxError> {
+        if len == 0 {
+            return Err(CudaAdxError::InvalidInput("empty input".into()));
+        }
+        if d_high.len() != len || d_low.len() != len || d_close.len() != len {
+            return Err(CudaAdxError::InvalidInput(
+                "device input length mismatch".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaAdxError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let (start, end, step) = sweep.period;
+        let periods: Vec<usize> = if start == end || step == 0 {
+            vec![start]
+        } else if start < end {
+            (start..=end).step_by(step.max(1)).collect()
+        } else {
+            let mut v = Vec::new();
+            let mut cur = start;
+            let s = step.max(1);
+            while cur >= end {
+                v.push(cur);
+                if cur < s {
+                    break;
+                }
+                cur -= s;
+                if cur == usize::MAX {
+                    break;
+                }
+            }
+            v
+        };
+        if periods.is_empty() {
+            return Err(CudaAdxError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        let combos: Vec<AdxParams> = periods
+            .iter()
+            .map(|&p| AdxParams { period: Some(p) })
+            .collect();
+        let max_p = *periods.iter().max().unwrap();
+        if len - first_valid < max_p + 1 {
+            return Err(CudaAdxError::InvalidInput(format!(
+                "not enough valid data (needed >= {}, valid = {})",
+                max_p + 1,
+                len - first_valid
+            )));
+        }
+
+        let rows = combos.len();
+        let el = std::mem::size_of::<f32>();
+        let req = len
+            .checked_mul(3)
+            .and_then(|x| x.checked_add(rows))
+            .and_then(|x| x.checked_add(rows.checked_mul(len)?))
+            .and_then(|x| x.checked_mul(el))
+            .ok_or_else(|| CudaAdxError::InvalidInput("size overflow".into()))?;
+        Self::will_fit(req, 64 * 1024 * 1024)?;
+
+        let out_len = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaAdxError::InvalidInput("rows*len overflow".into()))?;
+        let periods_host: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_host, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_len, &self.stream) }?;
+
+        self.launch_batch(
+            d_high,
+            d_low,
+            d_close,
+            &d_periods,
+            len,
+            rows,
+            first_valid,
+            &mut d_out,
+        )?;
+
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols: len,
+            },
+            combos,
+        ))
+    }
+
     pub fn adx_batch_into_host_f32(
         &self,
         high: &[f32],

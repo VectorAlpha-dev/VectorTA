@@ -55,6 +55,93 @@ struct VwapSegOp {
     }
 };
 
+__device__ __forceinline__ long long floor_div_days_i64(long long value, long long divisor) {
+    long long q = value / divisor;
+    const long long r = value % divisor;
+    if (r != 0 && ((r < 0) != (divisor < 0))) {
+        --q;
+    }
+    return q;
+}
+
+__device__ __forceinline__ int month_id_from_ts_ms(long long ts_ms) {
+    const long long days = floor_div_days_i64(ts_ms, 86400000LL);
+    const long long z = days + 719468LL;
+    const long long era = (z >= 0 ? z : z - 146096LL) / 146097LL;
+    const unsigned doe = static_cast<unsigned>(z - era * 146097LL);
+    const unsigned yoe = (doe - doe / 1460U + doe / 36524U - doe / 146096U) / 365U;
+    long long year = static_cast<long long>(yoe) + era * 400LL;
+    const unsigned doy = doe - (365U * yoe + yoe / 4U - yoe / 100U);
+    const unsigned mp = (5U * doy + 2U) / 153U;
+    const unsigned month = (mp < 10U) ? (mp + 3U) : (mp - 9U);
+    year += (month <= 2U);
+
+    const long long total_months = (year - 1970LL) * 12LL + static_cast<long long>(month) - 1LL;
+    if (total_months < static_cast<long long>(INT_MIN)) return INT_MIN;
+    if (total_months > static_cast<long long>(INT_MAX)) return INT_MAX;
+    return static_cast<int>(total_months);
+}
+
+extern "C" __global__
+void vwap_build_month_ids_i32(const long long* __restrict__ timestamps,
+                              int series_len,
+                              int* __restrict__ out_month_ids)
+{
+    const int idx = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (idx >= series_len) return;
+    out_month_ids[idx] = month_id_from_ts_ms(ld_ro(&timestamps[idx]));
+}
+
+extern "C" __global__
+void vwap_build_first_valids_i32(const long long* __restrict__ timestamps,
+                                 const float* __restrict__ volumes,
+                                 const int* __restrict__ counts,
+                                 const int* __restrict__ unit_codes,
+                                 const long long* __restrict__ divisors,
+                                 const int* __restrict__ month_ids,
+                                 int series_len,
+                                 int n_combos,
+                                 int* __restrict__ out_first_valids)
+{
+    const int combo = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    if (combo >= n_combos) return;
+
+    const int count = counts[combo];
+    const int unit = unit_codes[combo];
+    long long divisor = divisors[combo];
+    if (count <= 0 || series_len <= 0) {
+        out_first_valids[combo] = 0;
+        return;
+    }
+    if (unit != 3 && divisor <= 0) divisor = 1;
+
+    long long cur_gid = LLONG_MIN;
+    float vsum = 0.0f;
+    int first_valid = 0;
+    bool found = false;
+    for (int i = 0; i < series_len; ++i) {
+        long long gid = LLONG_MIN;
+        if (unit == 3) {
+            const int month = month_ids ? ld_ro(&month_ids[i]) : 0;
+            gid = static_cast<long long>(month / count);
+        } else {
+            const long long ts = ld_ro(&timestamps[i]);
+            gid = ts / divisor;
+        }
+        if (gid != cur_gid) {
+            cur_gid = gid;
+            vsum = 0.0f;
+        }
+        vsum += ld_ro(&volumes[i]);
+        if (vsum > 0.0f) {
+            first_valid = i;
+            found = true;
+            break;
+        }
+    }
+    out_first_valids[combo] = found ? first_valid : 0;
+}
+
 extern "C" __global__
 void vwap_batch_f32(const long long* __restrict__ timestamps,
                     const float* __restrict__ volumes,

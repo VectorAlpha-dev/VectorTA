@@ -10,6 +10,8 @@ use cust::memory::CopyDestination;
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::CudaMfi;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -139,5 +141,56 @@ fn mfi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             assert!(false, "mismatch at {}", idx);
         }
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn mfi_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[mfi_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 2048usize;
+    let mut tp = vec![0.0f64; len];
+    let mut vol = vec![0.0f64; len];
+    for i in 0..len {
+        let x = i as f64 * 0.0031;
+        tp[i] = 100.0 + x.sin() * 0.8 + 0.0002 * i as f64;
+        vol[i] = ((x * 0.7).cos().abs() + 1.0) * 750.0;
+    }
+    let sweep = MfiBatchRange { period: (5, 25, 5) };
+
+    let tp32: Vec<f32> = tp.iter().map(|&v| v as f32).collect();
+    let vol32: Vec<f32> = vol.iter().map(|&v| v as f32).collect();
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_tp = runtime.upload_f32(&tp32).expect("upload typical");
+    let d_vol = runtime.upload_f32(&vol32).expect("upload volume");
+    let cuda = CudaMfi::new(0).expect("CudaMfi::new");
+
+    let (legacy, _) = cuda
+        .mfi_batch_dev(&tp32, &vol32, &sweep)
+        .expect("legacy mfi");
+    let (device, _) = cuda
+        .mfi_batch_dev_from_device_inputs(d_tp.buffer(), d_vol.buffer(), len, 0, &sweep)
+        .expect("device mfi");
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    let mut device_host = vec![0f32; device.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    device.buf.copy_to(&mut device_host)?;
+
+    let tol = 5e-4;
+    for idx in 0..legacy_host.len() {
+        assert!(
+            approx_eq(legacy_host[idx] as f64, device_host[idx] as f64, tol),
+            "mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_host[idx],
+            device_host[idx]
+        );
+    }
+
     Ok(())
 }

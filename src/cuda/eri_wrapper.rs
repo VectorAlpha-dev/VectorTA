@@ -1,8 +1,9 @@
 #![cfg(feature = "cuda")]
 
-use crate::cuda::moving_averages::ma_selector::{CudaMaData, CudaMaSelector};
+use crate::cuda::moving_averages::ma_selector::{CudaMaData, CudaMaDeviceDataRef, CudaMaSelector};
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::cuda::moving_averages::{CudaEmaError, CudaSmaError, CudaWmaError, CudaZlemaError};
+use crate::cuda::CudaDeviceSliceF32Ref;
 use crate::indicators::eri::{EriBatchRange, EriParams};
 use cust::context::Context;
 use cust::device::Device;
@@ -557,6 +558,238 @@ impl CudaEri {
             cols: len,
         };
         Ok(((bull, bear), combos))
+    }
+
+    pub fn eri_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        source: CudaDeviceSliceF32Ref,
+        first_valid: usize,
+        sweep: &EriBatchRange,
+    ) -> Result<((DeviceArrayF32, DeviceArrayF32), Vec<EriParams>), CudaEriError> {
+        let len = source.len();
+        if len == 0 {
+            return Err(CudaEriError::InvalidInput("empty input".into()));
+        }
+        if d_high.len() != len || d_low.len() != len {
+            return Err(CudaEriError::InvalidInput(
+                "device input length mismatch".into(),
+            ));
+        }
+        let periods = Self::expand_periods(sweep)?;
+        let max_p = *periods
+            .iter()
+            .max()
+            .ok_or_else(|| CudaEriError::InvalidInput("empty period sweep".into()))?;
+        if first_valid >= len {
+            return Err(CudaEriError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, len
+            )));
+        }
+        if len - first_valid < max_p {
+            return Err(CudaEriError::InvalidInput("not enough valid data".into()));
+        }
+
+        let selector = CudaMaSelector::new(self.device_id as usize);
+        let ma_rm = selector
+            .ma_sweep_to_device_ref(
+                &sweep.ma_type,
+                CudaMaDeviceDataRef::Slice(source),
+                first_valid,
+                sweep.period.0,
+                sweep.period.1,
+                sweep.period.2,
+            )
+            .map_err(|e| CudaEriError::InvalidInput(e.to_string()))?;
+        self.run_batch_with_ma_rows(
+            d_high,
+            d_low,
+            ma_rm,
+            periods.as_slice(),
+            first_valid,
+            &sweep.ma_type,
+            len,
+        )
+    }
+
+    fn run_batch_with_ma_rows(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        ma_rm: DeviceArrayF32,
+        periods: &[usize],
+        first_valid: usize,
+        ma_type: &str,
+        len: usize,
+    ) -> Result<((DeviceArrayF32, DeviceArrayF32), Vec<EriParams>), CudaEriError> {
+        let combos = periods.len();
+        let pl = combos
+            .checked_mul(len)
+            .ok_or_else(|| CudaEriError::InvalidInput("P*len overflow".into()))?;
+        let mut d_bull: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(pl, &self.stream) }?;
+        let mut d_bear: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(pl, &self.stream) }?;
+        let mut combo_meta = Vec::with_capacity(periods.len());
+
+        if periods.len() <= ERI_SMALL_P_NO_TRANSPOSE_THRESHOLD {
+            let func = self.module.get_function("eri_batch_f32").map_err(|_| {
+                CudaEriError::MissingKernelSymbol {
+                    name: "eri_batch_f32",
+                }
+            })?;
+            let block_x = match self.policy.batch {
+                BatchKernelPolicy::Auto => 256,
+                BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+            };
+            let block: BlockSize = (block_x, 1, 1).into();
+            let grid: GridSize = (((len as u32 + block_x - 1) / block_x).max(1), 1, 1).into();
+
+            for (row_idx, &p) in periods.iter().enumerate() {
+                let row_bytes = match row_idx
+                    .checked_mul(len)
+                    .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+                {
+                    Some(v) => v as u64,
+                    None => return Err(CudaEriError::InvalidInput("row offset overflow".into())),
+                };
+                unsafe {
+                    let mut h = d_high.as_device_ptr().as_raw();
+                    let mut l = d_low.as_device_ptr().as_raw();
+                    let mut m = ma_rm.buf.as_device_ptr().as_raw() + row_bytes;
+                    let mut n = len as i32;
+                    let mut fv = first_valid as i32;
+                    let mut per = p as i32;
+                    let mut bo = d_bull.as_device_ptr().as_raw() + row_bytes;
+                    let mut ro = d_bear.as_device_ptr().as_raw() + row_bytes;
+                    let mut args: [*mut c_void; 8] = [
+                        &mut h as *mut _ as *mut c_void,
+                        &mut l as *mut _ as *mut c_void,
+                        &mut m as *mut _ as *mut c_void,
+                        &mut n as *mut _ as *mut c_void,
+                        &mut fv as *mut _ as *mut c_void,
+                        &mut per as *mut _ as *mut c_void,
+                        &mut bo as *mut _ as *mut c_void,
+                        &mut ro as *mut _ as *mut c_void,
+                    ];
+                    self.stream.launch(&func, grid, block, 0, &mut args)?;
+                }
+                combo_meta.push(EriParams {
+                    period: Some(p),
+                    ma_type: Some(ma_type.to_string()),
+                });
+            }
+        } else {
+            let func_tr = self
+                .module
+                .get_function("transpose_rm_to_tm_32x32_pad_f32")
+                .map_err(|_| CudaEriError::MissingKernelSymbol {
+                    name: "transpose_rm_to_tm_32x32_pad_f32",
+                })?;
+            let tm_len = periods
+                .len()
+                .checked_mul(len)
+                .ok_or_else(|| CudaEriError::InvalidInput("P*len overflow".into()))?;
+            let mut d_ma_tm: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(tm_len, &self.stream) }?;
+            unsafe {
+                let mut in_ptr = ma_rm.buf.as_device_ptr().as_raw();
+                let mut rows_i = periods.len() as i32;
+                let mut cols_i = len as i32;
+                let mut out_ptr = d_ma_tm.as_device_ptr().as_raw();
+                let block_tr: BlockSize = (32, 32, 1).into();
+                let grid_tr: GridSize =
+                    (ceil_div(cols_i as u32, 32), ceil_div(rows_i as u32, 32), 1).into();
+                let mut args: [*mut c_void; 4] = [
+                    &mut in_ptr as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream
+                    .launch(&func_tr, grid_tr, block_tr, 0, &mut args)?;
+            }
+
+            let func = self
+                .module
+                .get_function("eri_one_series_many_params_time_major_f32")
+                .map_err(|_| CudaEriError::MissingKernelSymbol {
+                    name: "eri_one_series_many_params_time_major_f32",
+                })?;
+            let periods_i32: Vec<i32> = periods.iter().map(|&p| p as i32).collect();
+            let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }?;
+            let block_x = match self.policy.batch {
+                BatchKernelPolicy::Auto => {
+                    let p = periods.len() as u32;
+                    if p <= 32 {
+                        32
+                    } else if p <= 64 {
+                        64
+                    } else if p <= 128 {
+                        128
+                    } else {
+                        256
+                    }
+                }
+                BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+            };
+            let block: BlockSize = (block_x, 1, 1).into();
+            let grid: GridSize = (
+                ceil_div(periods.len() as u32, block_x),
+                ceil_div(len as u32, ERI_TIME_TILE),
+                1,
+            )
+                .into();
+            unsafe {
+                let mut h = d_high.as_device_ptr().as_raw();
+                let mut l = d_low.as_device_ptr().as_raw();
+                let mut m_tm = d_ma_tm.as_device_ptr().as_raw();
+                let mut p_i = periods.len() as i32;
+                let mut rows_i = len as i32;
+                let mut fv_i = first_valid as i32;
+                let mut per_ptr = d_periods.as_device_ptr().as_raw();
+                let mut per_fallback = 0i32;
+                let mut bo = d_bull.as_device_ptr().as_raw();
+                let mut ro = d_bear.as_device_ptr().as_raw();
+                let mut out_rm = 1i32;
+                let mut args: [*mut c_void; 11] = [
+                    &mut h as *mut _ as *mut c_void,
+                    &mut l as *mut _ as *mut c_void,
+                    &mut m_tm as *mut _ as *mut c_void,
+                    &mut p_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut fv_i as *mut _ as *mut c_void,
+                    &mut per_ptr as *mut _ as *mut c_void,
+                    &mut per_fallback as *mut _ as *mut c_void,
+                    &mut bo as *mut _ as *mut c_void,
+                    &mut ro as *mut _ as *mut c_void,
+                    &mut out_rm as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(&func, grid, block, 0, &mut args)?;
+            }
+            combo_meta.extend(periods.iter().map(|&p| EriParams {
+                period: Some(p),
+                ma_type: Some(ma_type.to_string()),
+            }));
+        }
+
+        Ok((
+            (
+                DeviceArrayF32 {
+                    buf: d_bull,
+                    rows: periods.len(),
+                    cols: len,
+                },
+                DeviceArrayF32 {
+                    buf: d_bear,
+                    rows: periods.len(),
+                    cols: len,
+                },
+            ),
+            combo_meta,
+        ))
     }
 
     pub fn eri_many_series_one_param_time_major_dev(

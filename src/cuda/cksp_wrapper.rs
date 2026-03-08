@@ -362,6 +362,189 @@ impl CudaCksp {
         ))
     }
 
+    pub fn cksp_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &CkspBatchRange,
+    ) -> Result<(DeviceArrayF32Pair, Vec<CkspParams>), CudaCkspError> {
+        if len == 0 || d_high.len() != len || d_low.len() != len || d_close.len() != len {
+            return Err(CudaCkspError::InvalidInput(
+                "device inputs must be non-empty and same length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaCkspError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = expand_cksp_combos(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaCkspError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+
+        let mut p_i32 = Vec::with_capacity(combos.len());
+        let mut x_f32 = Vec::with_capacity(combos.len());
+        let mut q_i32 = Vec::with_capacity(combos.len());
+        let mut max_q: usize = 0;
+        let valid = len - first_valid;
+        for prm in &combos {
+            let p = prm.p.unwrap_or(10);
+            let q = prm.q.unwrap_or(9);
+            let x = prm.x.unwrap_or(1.0) as f32;
+            if p == 0 || q == 0 {
+                return Err(CudaCkspError::InvalidInput("p and q must be > 0".into()));
+            }
+            let warm_rel = p
+                .checked_add(q)
+                .and_then(|v| v.checked_sub(1))
+                .ok_or_else(|| {
+                    CudaCkspError::InvalidInput("warmup overflow (p+q too large)".into())
+                })?;
+            if valid <= warm_rel {
+                return Err(CudaCkspError::InvalidInput(
+                    "not enough valid data for CKSP warmup".into(),
+                ));
+            }
+            p_i32.push(p as i32);
+            q_i32.push(q as i32);
+            x_f32.push(x);
+            max_q = max_q.max(q);
+        }
+
+        let cap_max = max_q
+            .checked_add(1)
+            .ok_or_else(|| CudaCkspError::InvalidInput("cap_max overflow".into()))?
+            as usize;
+        let sh_i32 = cap_max
+            .checked_mul(4usize)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<i32>()))
+            .ok_or_else(|| {
+                CudaCkspError::InvalidInput("shared memory size overflow (i32)".into())
+            })?;
+        let sh_f32 = cap_max
+            .checked_mul(2usize)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| {
+                CudaCkspError::InvalidInput("shared memory size overflow (f32)".into())
+            })?;
+        let shmem_bytes = sh_i32
+            .checked_add(sh_f32)
+            .ok_or_else(|| CudaCkspError::InvalidInput("shared memory size overflow".into()))?;
+
+        let dev = Device::get_device(self.device_id)?;
+        let max_shmem = dev.get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)? as usize;
+        if shmem_bytes > max_shmem {
+            return Err(CudaCkspError::InvalidInput(format!(
+                "q too large for device dynamic shared memory: needs {} bytes (> {} bytes)",
+                shmem_bytes, max_shmem
+            )));
+        }
+
+        let f32_sz = std::mem::size_of::<f32>();
+        let i32_sz = std::mem::size_of::<i32>();
+        let in_bytes = len
+            .checked_mul(3)
+            .and_then(|v| v.checked_mul(f32_sz))
+            .ok_or_else(|| CudaCkspError::InvalidInput("input byte size overflow".into()))?;
+        let params_per = 2usize
+            .checked_mul(i32_sz)
+            .and_then(|v| v.checked_add(f32_sz))
+            .ok_or_else(|| CudaCkspError::InvalidInput("parameter byte size overflow".into()))?;
+        let params_bytes = combos
+            .len()
+            .checked_mul(params_per)
+            .ok_or_else(|| CudaCkspError::InvalidInput("parameter buffer size overflow".into()))?;
+        let out_row_bytes = len
+            .checked_mul(2)
+            .and_then(|v| v.checked_mul(f32_sz))
+            .ok_or_else(|| CudaCkspError::InvalidInput("output row byte size overflow".into()))?;
+        let out_bytes = combos
+            .len()
+            .checked_mul(out_row_bytes)
+            .ok_or_else(|| CudaCkspError::InvalidInput("output buffer size overflow".into()))?;
+        let required = in_bytes
+            .checked_add(params_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaCkspError::InvalidInput("total VRAM size overflow".into()))?;
+        if !Self::will_fit(required, 64 * 1024 * 1024) {
+            if let Ok((free, _)) = mem_get_info() {
+                return Err(CudaCkspError::OutOfMemory {
+                    required,
+                    free,
+                    headroom: 64 * 1024 * 1024,
+                });
+            } else {
+                return Err(CudaCkspError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
+        }
+
+        let d_p = unsafe { DeviceBuffer::from_slice_async(&p_i32, &self.stream) }?;
+        let d_x = unsafe { DeviceBuffer::from_slice_async(&x_f32, &self.stream) }?;
+        let d_q = unsafe { DeviceBuffer::from_slice_async(&q_i32, &self.stream) }?;
+
+        let elems = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaCkspError::InvalidInput("rows*cols overflow".into()))?;
+        let mut d_long: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
+        let mut d_short: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
+
+        let rows = combos.len();
+        let y_limit = 65_535usize;
+        let mut start = 0usize;
+        let cap_i32: i32 = cap_max
+            .try_into()
+            .map_err(|_| CudaCkspError::InvalidInput("cap_max too large for i32".into()))?;
+        while start < rows {
+            let count = (rows - start).min(y_limit);
+            self.launch_batch_kernel_subrange(
+                d_high,
+                d_low,
+                d_close,
+                None,
+                len as i32,
+                first_valid as i32,
+                &d_p,
+                &d_x,
+                &d_q,
+                start,
+                count,
+                cap_i32,
+                &mut d_long,
+                &mut d_short,
+                shmem_bytes as u32,
+            )?;
+            start += count;
+        }
+
+        Ok((
+            DeviceArrayF32Pair {
+                long: DeviceArrayF32 {
+                    buf: d_long,
+                    rows: combos.len(),
+                    cols: len,
+                },
+                short: DeviceArrayF32 {
+                    buf: d_short,
+                    rows: combos.len(),
+                    cols: len,
+                },
+            },
+            combos,
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn launch_batch_kernel_subrange(
         &self,

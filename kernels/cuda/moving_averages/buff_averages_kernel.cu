@@ -38,6 +38,29 @@ __device__ __forceinline__ float qnan32() {
     return __int_as_float(0x7fffffff);
 }
 
+extern "C" __global__ void buff_averages_build_prefix_f32(
+    const float* __restrict__ prices,
+    const float* __restrict__ volumes,
+    int len,
+    float* __restrict__ prefix_pv,
+    float* __restrict__ prefix_vv) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    prefix_pv[0] = 0.0f;
+    prefix_vv[0] = 0.0f;
+    double acc_pv = 0.0;
+    double acc_vv = 0.0;
+    for (int i = 0; i < len; ++i) {
+        const float p = prices[i];
+        const float v = volumes[i];
+        const double pv = (isnan(p) || isnan(v)) ? 0.0 : (double)p * (double)v;
+        const double vv = isnan(v) ? 0.0 : (double)v;
+        acc_pv += pv;
+        acc_vv += vv;
+        prefix_pv[i + 1] = (float)acc_pv;
+        prefix_vv[i + 1] = (float)acc_vv;
+    }
+}
+
 
 __device__ __forceinline__ float ratio_from_prefix(float pv_t, float pv_s,
                                                    float vv_t, float vv_s) {

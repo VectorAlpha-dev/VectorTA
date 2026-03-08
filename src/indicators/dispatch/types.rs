@@ -1,3 +1,8 @@
+#[cfg(feature = "cuda")]
+use crate::cuda::{
+    CudaDeviceCloseVolumeRef, CudaDeviceHighLowRef, CudaDeviceOhlcRef, CudaDeviceOhlcvRef,
+    CudaDeviceSliceF32Ref,
+};
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 
@@ -206,6 +211,27 @@ pub struct IndicatorCudaRequest<'a> {
     pub indicator_id: &'a str,
     pub output_id: Option<&'a str>,
     pub data: IndicatorCudaDataRef<'a>,
+    pub params: &'a [ParamKV<'a>],
+    pub kernel: Kernel,
+    pub target: CudaOutputTarget,
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndicatorCudaDeviceDataRef {
+    Slice { values: CudaDeviceSliceF32Ref },
+    Ohlc(CudaDeviceOhlcRef),
+    Ohlcv(CudaDeviceOhlcvRef),
+    HighLow(CudaDeviceHighLowRef),
+    CloseVolume(CudaDeviceCloseVolumeRef),
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Debug, Clone, Copy)]
+pub struct IndicatorCudaDeviceRequest<'a> {
+    pub indicator_id: &'a str,
+    pub output_id: Option<&'a str>,
+    pub data: IndicatorCudaDeviceDataRef,
     pub params: &'a [ParamKV<'a>],
     pub kernel: Kernel,
     pub target: CudaOutputTarget,

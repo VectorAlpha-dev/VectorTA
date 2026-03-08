@@ -173,7 +173,7 @@ pub use linearreg_intercept_wrapper::{CudaLinregIntercept, CudaLinregInterceptEr
 pub use linearreg_slope_wrapper::{CudaLinearregSlope, CudaLinearregSlopeError};
 pub use linreg_wrapper::{CudaLinreg, CudaLinregError};
 #[cfg(feature = "cuda")]
-pub use ma_selector::{CudaMaData, CudaMaSelector, CudaMaSelectorError};
+pub use ma_selector::{CudaMaData, CudaMaDeviceDataRef, CudaMaSelector, CudaMaSelectorError};
 pub use maaq_wrapper::CudaMaaq;
 #[cfg(feature = "cuda")]
 pub use mab_wrapper::{CudaMab, CudaMabError};

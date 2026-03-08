@@ -538,6 +538,102 @@ impl CudaReverseRsi {
         ))
     }
 
+    pub fn reverse_rsi_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &ReverseRsiBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<ReverseRsiParams>), CudaReverseRsiError> {
+        if len == 0 || d_prices.len() != len {
+            return Err(CudaReverseRsiError::InvalidInput(
+                "device input buffer must match non-zero length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaReverseRsiError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = Self::expand_grid(sweep)?;
+        let max_len = combos
+            .iter()
+            .map(|p| p.rsi_length.unwrap_or(14))
+            .max()
+            .unwrap_or(14);
+        let ema_len = (2usize)
+            .checked_mul(max_len)
+            .and_then(|v| v.checked_sub(1))
+            .ok_or_else(|| {
+                CudaReverseRsiError::InvalidInput("ema_len overflow in prepare_batch_inputs".into())
+            })?;
+        if len - first_valid <= ema_len {
+            return Err(CudaReverseRsiError::InvalidInput(format!(
+                "not enough valid data: needed > {}, have {}",
+                ema_len,
+                len - first_valid
+            )));
+        }
+
+        let rows = combos.len();
+        let prices_bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaReverseRsiError::InvalidInput("price byte size overflow".into()))?;
+        let lengths_bytes = rows
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| {
+                CudaReverseRsiError::InvalidInput("lengths byte size overflow".into())
+            })?;
+        let levels_bytes = rows
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaReverseRsiError::InvalidInput("levels byte size overflow".into()))?;
+        let out_elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaReverseRsiError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaReverseRsiError::InvalidInput("out byte size overflow".into()))?;
+        let bytes = prices_bytes
+            .checked_add(lengths_bytes)
+            .and_then(|v| v.checked_add(levels_bytes))
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| {
+                CudaReverseRsiError::InvalidInput("aggregate byte size overflow".into())
+            })?;
+        Self::will_fit(bytes, 64 * 1024 * 1024)?;
+
+        let lengths_i32: Vec<i32> = combos
+            .iter()
+            .map(|c| c.rsi_length.unwrap_or(14) as i32)
+            .collect();
+        let levels_f32: Vec<f32> = combos
+            .iter()
+            .map(|c| c.rsi_level.unwrap_or(50.0) as f32)
+            .collect();
+        let d_lengths = DeviceBuffer::from_slice(&lengths_i32)?;
+        let d_levels = DeviceBuffer::from_slice(&levels_f32)?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
+        self.launch_batch_kernel(
+            d_prices,
+            &d_lengths,
+            &d_levels,
+            len,
+            rows,
+            first_valid,
+            &mut d_out,
+        )?;
+
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols: len,
+            },
+            combos,
+        ))
+    }
+
     fn prepare_many_series_inputs(
         prices_tm: &[f32],
         cols: usize,

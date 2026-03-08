@@ -337,8 +337,7 @@ impl CudaUma {
             has_volume,
             d_raw,
             d_out,
-        )?;
-        self.stream.synchronize().map_err(CudaUmaError::from)
+        )
     }
 
     pub fn uma_many_series_one_param_device(

@@ -4,6 +4,8 @@ use vector_ta::utilities::enums::Kernel;
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
+#[cfg(feature = "cuda")]
 use vector_ta::cuda::{cuda_available, CudaDx};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
@@ -164,6 +166,81 @@ fn dx_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
             approx_eq(cpu_tm[i], g_tm[i] as f64, tol),
             "mismatch at {}",
             i
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn dx_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[dx_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 4096usize;
+    let mut close = vec![f64::NAN; len];
+    for i in 0..len {
+        if i >= 4 {
+            let x = i as f64;
+            close[i] = (x * 0.0023).sin() + 0.0004 * x;
+        }
+    }
+    let mut high = close.clone();
+    let mut low = close.clone();
+    for i in 0..len {
+        if !close[i].is_nan() {
+            let x = i as f64 * 0.0025;
+            let off = (0.002 * x.sin()).abs() + 0.15;
+            high[i] = close[i] + off;
+            low[i] = close[i] - off;
+        }
+    }
+    let sweep = DxBatchRange { period: (6, 18, 6) };
+
+    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+    let first_valid = (0..len)
+        .find(|&i| high_f32[i].is_finite() && low_f32[i].is_finite() && close_f32[i].is_finite())
+        .expect("first_valid");
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let d_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+    let d_close = runtime.upload_f32(&close_f32).expect("upload close");
+
+    let cuda = CudaDx::new(0).expect("CudaDx::new");
+    let (legacy, _) = cuda
+        .dx_batch_dev(&high_f32, &low_f32, &close_f32, &sweep)
+        .expect("legacy dx");
+    let (device, _) = cuda
+        .dx_batch_dev_from_device_inputs(
+            d_high.buffer(),
+            d_low.buffer(),
+            d_close.buffer(),
+            len,
+            first_valid,
+            &sweep,
+        )
+        .expect("device dx");
+
+    assert_eq!(legacy.rows, device.rows);
+    assert_eq!(legacy.cols, device.cols);
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    let mut device_host = vec![0f32; device.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    device.buf.copy_to(&mut device_host)?;
+
+    let tol = 1e-5;
+    for idx in 0..legacy_host.len() {
+        assert!(
+            approx_eq(legacy_host[idx] as f64, device_host[idx] as f64, tol),
+            "mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_host[idx],
+            device_host[idx]
         );
     }
     Ok(())

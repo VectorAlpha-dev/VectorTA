@@ -35,6 +35,24 @@ __device__ __forceinline__ dsf load_dsf(const float2* __restrict__ p, int idx) {
     return ds_make(v.x, v.y);
 }
 
+extern "C" __global__ void ao_build_prefix_dsf_serial_f32(
+    const float* __restrict__ hl2,
+    int len,
+    int first_valid,
+    float2* __restrict__ prefix_ds)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (len < 0) return;
+
+    prefix_ds[0] = make_float2(0.0f, 0.0f);
+    dsf acc = ds_set(0.0f);
+    for (int i = 0; i < len; ++i) {
+        const float v = (i >= first_valid && !isnan(hl2[i])) ? hl2[i] : 0.0f;
+        acc = ds_add(acc, ds_set(v));
+        prefix_ds[i + 1] = make_float2(acc.hi, acc.lo);
+    }
+}
+
 
 
 

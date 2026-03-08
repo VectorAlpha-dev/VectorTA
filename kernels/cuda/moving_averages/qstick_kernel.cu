@@ -25,6 +25,24 @@
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
 
+extern "C" __global__ void qstick_build_prefix_serial_f32(
+    const float* __restrict__ open,
+    const float* __restrict__ close,
+    int len,
+    int first_valid,
+    float* __restrict__ prefix_out
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    prefix_out[0] = 0.0f;
+    double acc = 0.0;
+    for (int i = 0; i < len; ++i) {
+        if (i >= first_valid) {
+            acc += static_cast<double>(close[i]) - static_cast<double>(open[i]);
+        }
+        prefix_out[i + 1] = static_cast<float>(acc);
+    }
+}
+
 extern "C" __global__ void qstick_batch_prefix_f32(
     const float* __restrict__ prefix_diff,
     int len,

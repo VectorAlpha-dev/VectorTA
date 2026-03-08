@@ -474,7 +474,7 @@ impl CudaTilson {
             )?;
             launched += this;
         }
-        self.stream.synchronize().map_err(CudaTilsonError::from)
+        Ok(())
     }
 
     pub fn tilson_many_series_one_param_time_major_dev(

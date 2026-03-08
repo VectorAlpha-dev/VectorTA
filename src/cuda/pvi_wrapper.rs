@@ -320,6 +320,138 @@ impl CudaPvi {
         })
     }
 
+    pub fn pvi_batch_device(
+        &self,
+        d_close: &DeviceBuffer<f32>,
+        d_volume: &DeviceBuffer<f32>,
+        first_valid: usize,
+        initial_values: &[f32],
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaPviError> {
+        let len = d_close.len();
+        if len == 0 {
+            return Err(CudaPviError::InvalidInput("empty inputs".into()));
+        }
+        if d_volume.len() != len {
+            return Err(CudaPviError::InvalidInput("length mismatch".into()));
+        }
+        if initial_values.is_empty() {
+            return Err(CudaPviError::InvalidInput(
+                "no initial values provided".into(),
+            ));
+        }
+        if first_valid >= len || len - first_valid < 2 {
+            return Err(CudaPviError::InvalidInput(
+                "not enough valid data (need >= 2 after first valid)".into(),
+            ));
+        }
+        let rows = initial_values.len();
+        let rows_len = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaPviError::InvalidInput("rows*len overflow".into()))?;
+        if d_out.len() != rows_len {
+            return Err(CudaPviError::InvalidInput(
+                "output buffer length mismatch".into(),
+            ));
+        }
+
+        let elem_size = std::mem::size_of::<f32>();
+        let scale_bytes = len
+            .checked_mul(elem_size)
+            .ok_or_else(|| CudaPviError::InvalidInput("scale bytes overflow".into()))?;
+        let inits_bytes = rows
+            .checked_mul(elem_size)
+            .ok_or_else(|| CudaPviError::InvalidInput("initial values bytes overflow".into()))?;
+        let out_bytes = rows_len
+            .checked_mul(elem_size)
+            .ok_or_else(|| CudaPviError::InvalidInput("output bytes overflow".into()))?;
+        let required = scale_bytes
+            .checked_add(inits_bytes)
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaPviError::InvalidInput("total bytes overflow".into()))?;
+        Self::will_fit(required, 64 << 20)?;
+
+        let d_inits = DeviceBuffer::from_slice(initial_values)?;
+        let mut d_scale: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
+
+        let build = self
+            .module
+            .get_function("pvi_build_scale_f32")
+            .map_err(|_| CudaPviError::MissingKernelSymbol {
+                name: "pvi_build_scale_f32",
+            })?;
+        unsafe {
+            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut vol_ptr = d_volume.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let mut scale_ptr = d_scale.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut close_ptr as *mut _ as *mut c_void,
+                &mut vol_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut scale_ptr as *mut _ as *mut c_void,
+            ];
+            let grid: GridSize = (1, 1, 1).into();
+            let block: BlockSize = (1, 1, 1).into();
+            self.validate_launch_dims((1, 1, 1), (1, 1, 1))?;
+            self.stream.launch(&build, grid, block, 0, args)?;
+        }
+
+        let apply = self
+            .module
+            .get_function("pvi_apply_scale_batch_f32")
+            .map_err(|_| CudaPviError::MissingKernelSymbol {
+                name: "pvi_apply_scale_batch_f32",
+            })?;
+        unsafe {
+            let mut scale_ptr = d_scale.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let block_x: u32 = 256;
+            let block_y: u32 = 4;
+            let grid_x: u32 = ((len as u32) + block_x - 1) / block_x;
+            let block: BlockSize = (block_x, block_y, 1).into();
+
+            const MAX_GRID_Y: usize = 65_535;
+            let mut start_row = 0usize;
+            while start_row < rows {
+                let chunk = (rows - start_row).min(MAX_GRID_Y);
+                let grid_y: u32 = ((chunk as u32) + block_y - 1) / block_y;
+                let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
+
+                let mut inits_ptr = d_inits
+                    .as_device_ptr()
+                    .as_raw()
+                    .wrapping_add((start_row * std::mem::size_of::<f32>()) as u64);
+                let mut rows_i = chunk as i32;
+                let mut out_ptr = d_out
+                    .as_device_ptr()
+                    .as_raw()
+                    .wrapping_add((start_row * len * std::mem::size_of::<f32>()) as u64);
+                let args: &mut [*mut c_void] = &mut [
+                    &mut scale_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut inits_ptr as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+
+                self.validate_launch_dims(
+                    (grid_x.max(1), grid_y.max(1), 1),
+                    (block_x, block_y, 1),
+                )?;
+                self.stream.launch(&apply, grid, block, 0, args)?;
+                start_row += chunk;
+            }
+        }
+
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
     pub fn pvi_many_series_one_param_time_major_dev(
         &self,
         close_tm: &[f32],

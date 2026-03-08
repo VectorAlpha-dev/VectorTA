@@ -10,6 +10,8 @@ use cust::memory::CopyDestination;
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::oscillators::CudaAroonOsc;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -142,6 +144,63 @@ fn aroonosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
                 t
             );
         }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn aroonosc_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[aroonosc_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let series_len = 2048usize;
+    let mut high = vec![f64::NAN; series_len];
+    let mut low = vec![f64::NAN; series_len];
+    for i in 20..series_len {
+        let x = i as f64;
+        let base = (x * 0.002).sin() + 0.0008 * x;
+        high[i] = base + 0.9;
+        low[i] = base - 0.7;
+    }
+
+    let sweep = AroonOscBatchRange { length: (9, 29, 5) };
+    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+    let cuda = CudaAroonOsc::new(0).expect("CudaAroonOsc::new");
+
+    let legacy = cuda
+        .aroonosc_batch_dev(&high_f32, &low_f32, &sweep)
+        .expect("legacy aroonosc");
+    let device = cuda
+        .aroonosc_batch_dev_from_device_inputs(
+            d_high.buffer(),
+            d_low.buffer(),
+            series_len,
+            20,
+            &sweep,
+        )
+        .expect("device aroonosc");
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    let mut device_host = vec![0f32; device.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    device.buf.copy_to(&mut device_host)?;
+
+    for idx in 0..legacy_host.len() {
+        assert!(
+            approx_eq(legacy_host[idx] as f64, device_host[idx] as f64, 1e-4),
+            "mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_host[idx],
+            device_host[idx]
+        );
     }
 
     Ok(())

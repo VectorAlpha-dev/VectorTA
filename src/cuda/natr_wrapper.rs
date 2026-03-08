@@ -286,6 +286,203 @@ impl CudaNatr {
         Ok(fv)
     }
 
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaNatrError> {
+        if step == 0 || start == end {
+            return Ok(vec![start]);
+        }
+
+        let mut values = Vec::new();
+        if start <= end {
+            let mut v = start;
+            loop {
+                if v > end {
+                    break;
+                }
+                values.push(v);
+                match v.checked_add(step) {
+                    Some(next) => v = next,
+                    None => break,
+                }
+            }
+        } else {
+            let mut v = start;
+            loop {
+                if v < end {
+                    break;
+                }
+                values.push(v);
+                match v.checked_sub(step) {
+                    Some(next) => v = next,
+                    None => break,
+                }
+            }
+        }
+
+        if values.is_empty() {
+            return Err(CudaNatrError::InvalidInput("empty period range".into()));
+        }
+        Ok(values)
+    }
+
+    fn launch_tr_from_hlc_raw(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_tr: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaNatrError> {
+        let func = self
+            .module
+            .get_function("natr_tr_from_hlc_f32")
+            .map_err(|_| CudaNatrError::MissingKernelSymbol {
+                name: "natr_tr_from_hlc_f32",
+            })?;
+        let block_x = 256u32;
+        let grid_x = ((len as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch(grid_x.max(1), 1, 1, block_x, 1, 1)?;
+        unsafe {
+            let mut high_ptr = d_high.as_device_ptr().as_raw();
+            let mut low_ptr = d_low.as_device_ptr().as_raw();
+            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let mut tr_ptr = d_tr.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut high_ptr as *mut _ as *mut c_void,
+                &mut low_ptr as *mut _ as *mut c_void,
+                &mut close_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut tr_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
+    fn launch_inv_close_raw(
+        &self,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        d_inv: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaNatrError> {
+        let make_fn = self
+            .module
+            .get_function("natr_make_inv_close100")
+            .map_err(|_| CudaNatrError::MissingKernelSymbol {
+                name: "natr_make_inv_close100",
+            })?;
+        let block_x = 256u32;
+        let grid_x = ((len as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch(grid_x.max(1), 1, 1, block_x, 1, 1)?;
+        unsafe {
+            let mut c_ptr = d_close.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut inv_ptr = d_inv.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut c_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut inv_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&make_fn, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
+    fn launch_batch_raw(
+        &self,
+        d_tr: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        d_inv: Option<&DeviceBuffer<f32>>,
+        d_periods: &DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        rows: usize,
+        block_x: u32,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaNatrError> {
+        let warp_io_enabled = std::env::var("NATR_BATCH_WARP_IO")
+            .map(|v| v != "0")
+            .unwrap_or(false);
+        let use_warp_io = warp_io_enabled && block_x == 32;
+        let func = match (use_warp_io, d_inv.is_some()) {
+            (true, true) => self
+                .module
+                .get_function("natr_batch_warp_io_f32_with_inv")
+                .map_err(|_| CudaNatrError::MissingKernelSymbol {
+                    name: "natr_batch_warp_io_f32_with_inv",
+                })?,
+            (true, false) => self
+                .module
+                .get_function("natr_batch_warp_io_f32")
+                .map_err(|_| CudaNatrError::MissingKernelSymbol {
+                    name: "natr_batch_warp_io_f32",
+                })?,
+            (false, true) => self
+                .module
+                .get_function("natr_batch_f32_with_inv")
+                .map_err(|_| CudaNatrError::MissingKernelSymbol {
+                    name: "natr_batch_f32_with_inv",
+                })?,
+            (false, false) => self.module.get_function("natr_batch_f32").map_err(|_| {
+                CudaNatrError::MissingKernelSymbol {
+                    name: "natr_batch_f32",
+                }
+            })?,
+        };
+        let grid_x = rows as u32;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch(grid_x.max(1), 1, 1, block_x, 1, 1)?;
+
+        unsafe {
+            if let Some(d_inv) = d_inv {
+                let mut tr_ptr = d_tr.as_device_ptr().as_raw();
+                let mut inv_ptr = d_inv.as_device_ptr().as_raw();
+                let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+                let mut len_i = len as i32;
+                let mut first_i = first_valid as i32;
+                let mut rows_i = rows as i32;
+                let mut out_ptr = d_out.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut tr_ptr as *mut _ as *mut c_void,
+                    &mut inv_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(&func, grid, block, 0, args)?;
+            } else {
+                let mut tr_ptr = d_tr.as_device_ptr().as_raw();
+                let mut close_ptr = d_close.as_device_ptr().as_raw();
+                let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+                let mut len_i = len as i32;
+                let mut first_i = first_valid as i32;
+                let mut rows_i = rows as i32;
+                let mut out_ptr = d_out.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut tr_ptr as *mut _ as *mut c_void,
+                    &mut close_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(&func, grid, block, 0, args)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn natr_batch_dev(
         &mut self,
         high: &[f32],
@@ -300,48 +497,7 @@ impl CudaNatr {
             ));
         }
 
-        fn axis_usize(
-            (start, end, step): (usize, usize, usize),
-        ) -> Result<Vec<usize>, CudaNatrError> {
-            if step == 0 || start == end {
-                return Ok(vec![start]);
-            }
-
-            let mut values = Vec::new();
-            let step_u = step;
-
-            if start <= end {
-                let mut v = start;
-                loop {
-                    if v > end {
-                        break;
-                    }
-                    values.push(v);
-                    match v.checked_add(step_u) {
-                        Some(next) => v = next,
-                        None => break,
-                    }
-                }
-            } else {
-                let mut v = start;
-                loop {
-                    if v < end {
-                        break;
-                    }
-                    values.push(v);
-                    match v.checked_sub(step_u) {
-                        Some(next) => v = next,
-                        None => break,
-                    }
-                }
-            }
-
-            if values.is_empty() {
-                return Err(CudaNatrError::InvalidInput("empty period range".into()));
-            }
-            Ok(values)
-        }
-        let periods_v = axis_usize(sweep.period)?;
+        let periods_v = Self::axis_usize(sweep.period)?;
         let (tr, first_valid) = Self::build_tr_one_series(high, low, close)?;
 
         let max_p = *periods_v.iter().max().unwrap();
@@ -423,27 +579,7 @@ impl CudaNatr {
                 Ok(buf) => buf,
                 Err(_) => unsafe { DeviceBuffer::<f32>::uninitialized(len)? },
             };
-            let make_fn = self
-                .module
-                .get_function("natr_make_inv_close100")
-                .map_err(|_| CudaNatrError::MissingKernelSymbol {
-                    name: "natr_make_inv_close100",
-                })?;
-            unsafe {
-                let mut c_ptr = d_close.as_device_ptr().as_raw();
-                let mut len_i = len as i32;
-                let mut inv_ptr = d.as_device_ptr().as_raw();
-                let args: &mut [*mut c_void] = &mut [
-                    &mut c_ptr as *mut _ as *mut c_void,
-                    &mut len_i as *mut _ as *mut c_void,
-                    &mut inv_ptr as *mut _ as *mut c_void,
-                ];
-                let grid_x = ((len as u32) + 255) / 256;
-                let grid: GridSize = (grid_x, 1, 1).into();
-                let block: BlockSize = (256u32, 1, 1).into();
-                self.validate_launch(grid_x, 1, 1, 256, 1, 1)?;
-                self.stream.launch(&make_fn, grid, block, 0, args)?;
-            }
+            self.launch_inv_close_raw(&d_close, len, &mut d)?;
             d_inv = Some(d);
         }
 
@@ -462,79 +598,145 @@ impl CudaNatr {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
         };
 
-        let use_warp_io = warp_io_enabled && block_x == 32;
-
-        let func = match (use_warp_io, d_inv.is_some()) {
-            (true, true) => self
-                .module
-                .get_function("natr_batch_warp_io_f32_with_inv")
-                .map_err(|_| CudaNatrError::MissingKernelSymbol {
-                    name: "natr_batch_warp_io_f32_with_inv",
-                })?,
-            (true, false) => self
-                .module
-                .get_function("natr_batch_warp_io_f32")
-                .map_err(|_| CudaNatrError::MissingKernelSymbol {
-                    name: "natr_batch_warp_io_f32",
-                })?,
-            (false, true) => self
-                .module
-                .get_function("natr_batch_f32_with_inv")
-                .map_err(|_| CudaNatrError::MissingKernelSymbol {
-                    name: "natr_batch_f32_with_inv",
-                })?,
-            (false, false) => self.module.get_function("natr_batch_f32").map_err(|_| {
-                CudaNatrError::MissingKernelSymbol {
-                    name: "natr_batch_f32",
-                }
-            })?,
-        };
-        let grid_x = rows as u32;
-        let grid: GridSize = (grid_x, 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
-        self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
-
-        unsafe {
-            if let Some(mut d_inv) = d_inv {
-                let mut tr_ptr = d_tr.as_device_ptr().as_raw();
-                let mut inv_ptr = d_inv.as_device_ptr().as_raw();
-                let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-                let mut len_i = len as i32;
-                let mut first_i = first_valid as i32;
-                let mut rows_i = rows as i32;
-                let mut out_ptr = d_out.as_device_ptr().as_raw();
-                let args: &mut [*mut c_void] = &mut [
-                    &mut tr_ptr as *mut _ as *mut c_void,
-                    &mut inv_ptr as *mut _ as *mut c_void,
-                    &mut periods_ptr as *mut _ as *mut c_void,
-                    &mut len_i as *mut _ as *mut c_void,
-                    &mut first_i as *mut _ as *mut c_void,
-                    &mut rows_i as *mut _ as *mut c_void,
-                    &mut out_ptr as *mut _ as *mut c_void,
-                ];
-                self.stream.launch(&func, grid, block, 0, args)?;
-            } else {
-                let mut tr_ptr = d_tr.as_device_ptr().as_raw();
-                let mut close_ptr = d_close.as_device_ptr().as_raw();
-                let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-                let mut len_i = len as i32;
-                let mut first_i = first_valid as i32;
-                let mut rows_i = rows as i32;
-                let mut out_ptr = d_out.as_device_ptr().as_raw();
-                let args: &mut [*mut c_void] = &mut [
-                    &mut tr_ptr as *mut _ as *mut c_void,
-                    &mut close_ptr as *mut _ as *mut c_void,
-                    &mut periods_ptr as *mut _ as *mut c_void,
-                    &mut len_i as *mut _ as *mut c_void,
-                    &mut first_i as *mut _ as *mut c_void,
-                    &mut rows_i as *mut _ as *mut c_void,
-                    &mut out_ptr as *mut _ as *mut c_void,
-                ];
-                self.stream.launch(&func, grid, block, 0, args)?;
-            }
-        }
+        self.launch_batch_raw(
+            &d_tr,
+            &d_close,
+            d_inv.as_ref(),
+            &d_periods,
+            len,
+            first_valid,
+            rows,
+            block_x,
+            &mut d_out,
+        )?;
 
         self.stream.synchronize()?;
+
+        Ok(DeviceArrayF32Natr {
+            buf: d_out,
+            rows,
+            cols: len,
+            ctx: Arc::clone(&self._context),
+            device_id: self.device_id,
+        })
+    }
+
+    pub fn natr_batch_dev_from_device_inputs(
+        &mut self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &NatrBatchRange,
+    ) -> Result<DeviceArrayF32Natr, CudaNatrError> {
+        if len == 0 || d_high.len() != len || d_low.len() != len || d_close.len() != len {
+            return Err(CudaNatrError::InvalidInput(
+                "device input buffers must match non-zero length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaNatrError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let periods_v = Self::axis_usize(sweep.period)?;
+        let max_p = *periods_v.iter().max().unwrap();
+        if len - first_valid < max_p {
+            return Err(CudaNatrError::InvalidInput(format!(
+                "not enough valid data (needed >= {}, valid = {})",
+                max_p,
+                len - first_valid
+            )));
+        }
+        let periods_i32: Vec<i32> = periods_v.iter().map(|&p| p as i32).collect();
+        let rows = periods_v.len();
+
+        let min_period = *periods_v.iter().min().unwrap();
+        let warm_needed = first_valid + min_period - 1;
+        let active_len = if len > warm_needed {
+            len - warm_needed
+        } else {
+            0
+        };
+        let use_precompute = rows >= 4 || rows.saturating_mul(active_len) >= 1_000_000;
+
+        let elem_out = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaNatrError::InvalidInput("rows*len overflow".into()))?;
+        let out_bytes = elem_out
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaNatrError::InvalidInput("output bytes overflow".into()))?;
+        let tr_bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaNatrError::InvalidInput("tr bytes overflow".into()))?;
+        let close_bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaNatrError::InvalidInput("close bytes overflow".into()))?;
+        let periods_bytes = periods_i32
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaNatrError::InvalidInput("periods bytes overflow".into()))?;
+        let in_bytes = tr_bytes
+            .checked_add(close_bytes)
+            .and_then(|b| b.checked_add(periods_bytes))
+            .ok_or_else(|| CudaNatrError::InvalidInput("input bytes overflow".into()))?;
+        let head = Self::headroom_bytes();
+        let base_bytes = out_bytes
+            .checked_add(in_bytes)
+            .ok_or_else(|| CudaNatrError::InvalidInput("VRAM size overflow".into()))?;
+        Self::will_fit(base_bytes, head)?;
+
+        let inv_bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaNatrError::InvalidInput("inv bytes overflow".into()))?;
+        let allow_inv = if use_precompute {
+            let total_with_inv = base_bytes
+                .checked_add(inv_bytes)
+                .ok_or_else(|| CudaNatrError::InvalidInput("VRAM size overflow".into()))?;
+            Self::will_fit(total_with_inv, head).is_ok()
+        } else {
+            false
+        };
+
+        let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
+        let mut d_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len)? };
+        self.launch_tr_from_hlc_raw(d_high, d_low, d_close, len, first_valid, &mut d_tr)?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elem_out)? };
+
+        let mut d_inv: Option<DeviceBuffer<f32>> = None;
+        if allow_inv {
+            let mut inv = unsafe { DeviceBuffer::<f32>::uninitialized(len)? };
+            self.launch_inv_close_raw(d_close, len, &mut inv)?;
+            d_inv = Some(inv);
+        }
+
+        let warp_io_enabled = std::env::var("NATR_BATCH_WARP_IO")
+            .map(|v| v != "0")
+            .unwrap_or(false);
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Auto => {
+                if warp_io_enabled {
+                    32u32
+                } else {
+                    256u32
+                }
+            }
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
+        };
+
+        self.launch_batch_raw(
+            &d_tr,
+            d_close,
+            d_inv.as_ref(),
+            &d_periods,
+            len,
+            first_valid,
+            rows,
+            block_x,
+            &mut d_out,
+        )?;
 
         Ok(DeviceArrayF32Natr {
             buf: d_out,

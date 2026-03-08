@@ -8,6 +8,8 @@ use cust::memory::CopyDestination;
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::oscillators::CudaSrsi;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
 
 fn approx_eq_f32(a: f32, b: f32, tol: f32) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -330,6 +332,67 @@ fn srsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn srsi_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[srsi_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 2048usize;
+    let mut price = vec![f32::NAN; len];
+    for i in 9..len {
+        let x = i as f32 * 0.0031;
+        price[i] = (x * 0.61).sin() + x.cos() * 0.07 + 0.0003 * i as f32;
+    }
+    let first_valid = price.iter().position(|v| v.is_finite()).expect("first valid");
+    let sweep = SrsiBatchRange {
+        rsi_period: (6, 12, 3),
+        stoch_period: (5, 11, 3),
+        k: (3, 4, 1),
+        d: (3, 4, 1),
+    };
+
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_price = runtime.upload_f32(&price).expect("upload price");
+    let cuda = CudaSrsi::new(0).expect("CudaSrsi::new");
+
+    let (legacy, legacy_combos) = cuda.srsi_batch_dev(&price, &sweep).expect("legacy srsi");
+    let (device, device_combos) = cuda
+        .srsi_batch_dev_from_device_prices(d_price.buffer(), len, first_valid, &sweep)
+        .expect("device srsi");
+    cuda.synchronize().expect("srsi sync");
+
+    assert_eq!(legacy_combos.len(), device_combos.len());
+    for (legacy_params, device_params) in legacy_combos.iter().zip(device_combos.iter()) {
+        assert_eq!(legacy_params.rsi_period, device_params.rsi_period);
+        assert_eq!(legacy_params.stoch_period, device_params.stoch_period);
+        assert_eq!(legacy_params.k, device_params.k);
+        assert_eq!(legacy_params.d, device_params.d);
+        assert_eq!(legacy_params.source, device_params.source);
+    }
+    for ((legacy_buf, device_buf), label) in [
+        ((&legacy.k, &device.k), "k"),
+        ((&legacy.d, &device.d), "d"),
+    ] {
+        assert_eq!(legacy_buf.rows, device_buf.rows);
+        assert_eq!(legacy_buf.cols, device_buf.cols);
+        let mut legacy_host = vec![0f32; legacy_buf.len()];
+        let mut device_host = vec![0f32; device_buf.len()];
+        legacy_buf.buf.copy_to(&mut legacy_host)?;
+        device_buf.buf.copy_to(&mut device_host)?;
+        for (lhs, rhs) in legacy_host.iter().zip(device_host.iter()) {
+            if lhs.is_nan() && rhs.is_nan() {
+                continue;
+            }
+            assert!((lhs - rhs).abs() <= 1e-6, "{label} lhs={lhs} rhs={rhs}");
+        }
+    }
+
     Ok(())
 }
 

@@ -200,6 +200,50 @@ impl CudaKvo {
             ));
         }
 
+        let d_high = unsafe { DeviceBuffer::from_slice_async(high, &self.stream) }?;
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low, &self.stream) }?;
+        let d_close = unsafe { DeviceBuffer::from_slice_async(close, &self.stream) }?;
+        let d_volume = unsafe { DeviceBuffer::from_slice_async(volume, &self.stream) }?;
+        let out = self.kvo_batch_dev_from_device_inputs(
+            &d_high, &d_low, &d_close, &d_volume, len, first, sweep,
+        )?;
+        self.stream.synchronize()?;
+        Ok(out)
+    }
+
+    pub fn kvo_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        d_volume: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &KvoBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<KvoParams>), CudaKvoError> {
+        if len == 0 {
+            return Err(CudaKvoError::InvalidInput("empty input".into()));
+        }
+        if d_high.len() != len
+            || d_low.len() != len
+            || d_close.len() != len
+            || d_volume.len() != len
+        {
+            return Err(CudaKvoError::InvalidInput(
+                "device inputs must have equal non-zero length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaKvoError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+        if len - first_valid < 2 {
+            return Err(CudaKvoError::InvalidInput(
+                "not enough valid data (need >=2 after first)".into(),
+            ));
+        }
+
         let combos = expand_grid(sweep)?;
         let mut shorts = Vec::with_capacity(combos.len());
         let mut longs = Vec::with_capacity(combos.len());
@@ -212,8 +256,6 @@ impl CudaKvo {
             shorts.push(s as i32);
             longs.push(l as i32);
         }
-
-        let vf = precompute_vf_f32(high, low, close, volume, first);
 
         let combos_len = combos.len();
         let size_overflow = || CudaKvoError::InvalidInput("size overflow".into());
@@ -229,21 +271,31 @@ impl CudaKvo {
             .ok_or_else(size_overflow)?;
         Self::will_fit(bytes, Self::headroom_bytes())?;
 
-        let d_vf = DeviceBuffer::from_slice(&vf)?;
-        let d_shorts = DeviceBuffer::from_slice(&shorts)?;
-        let d_longs = DeviceBuffer::from_slice(&longs)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems)? };
+        let mut d_vf: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream)? };
+        self.launch_precompute_vf_kernel(
+            d_high,
+            d_low,
+            d_close,
+            d_volume,
+            len,
+            first_valid,
+            &mut d_vf,
+        )?;
+        let d_shorts = unsafe { DeviceBuffer::from_slice_async(&shorts, &self.stream) }?;
+        let d_longs = unsafe { DeviceBuffer::from_slice_async(&longs, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream)? };
 
         self.launch_batch_kernel(
             &d_vf,
             len as i32,
-            first as i32,
+            first_valid as i32,
             &d_shorts,
             &d_longs,
             combos.len() as i32,
             &mut d_out,
         )?;
-        self.stream.synchronize()?;
 
         Ok((
             DeviceArrayF32 {
@@ -253,6 +305,51 @@ impl CudaKvo {
             },
             combos,
         ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_precompute_vf_kernel(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        d_volume: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_vf: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaKvoError> {
+        if len == 0 {
+            return Ok(());
+        }
+        let func = self.module.get_function("kvo_build_vf_f32").map_err(|_| {
+            CudaKvoError::MissingKernelSymbol {
+                name: "kvo_build_vf_f32",
+            }
+        })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+        Self::validate_launch(grid, block)?;
+
+        unsafe {
+            let mut p_high = d_high.as_device_ptr().as_raw();
+            let mut p_low = d_low.as_device_ptr().as_raw();
+            let mut p_close = d_close.as_device_ptr().as_raw();
+            let mut p_volume = d_volume.as_device_ptr().as_raw();
+            let mut p_len = len as i32;
+            let mut p_first = first_valid as i32;
+            let mut p_vf = d_vf.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut p_high as *mut _ as *mut c_void,
+                &mut p_low as *mut _ as *mut c_void,
+                &mut p_close as *mut _ as *mut c_void,
+                &mut p_volume as *mut _ as *mut c_void,
+                &mut p_len as *mut _ as *mut c_void,
+                &mut p_first as *mut _ as *mut c_void,
+                &mut p_vf as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]

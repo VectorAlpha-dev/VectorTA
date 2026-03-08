@@ -1,13 +1,15 @@
 use vector_ta::indicators::safezonestop::{
     safezonestop_batch_with_kernel, safezonestop_with_kernel, SafeZoneStopBatchRange,
-    SafeZoneStopBuilder, SafeZoneStopInput, SafeZoneStopParams,
+    SafeZoneStopInput, SafeZoneStopParams,
 };
 use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
+use cust::memory::CopyDestination;
+#[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::CudaSafeZoneStop;
+use vector_ta::cuda::{CudaRuntime, CudaSafeZoneStop};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -155,6 +157,77 @@ fn safezonestop_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
             cpu_tm[idx],
             gpu_tm[idx]
         );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn safezonestop_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[safezonestop_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 4096usize;
+    let mut high = vec![f64::NAN; len];
+    let mut low = vec![f64::NAN; len];
+    for i in 5..len {
+        let x = i as f64 * 0.0021;
+        let base = 100.0 + (x * 0.73).sin() * 0.7 + 0.0005 * i as f64;
+        let width = 0.35 + (x * 0.19).cos().abs() * 0.08;
+        high[i] = base + width;
+        low[i] = base - width;
+    }
+
+    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let first_valid = high_f32
+        .iter()
+        .zip(low_f32.iter())
+        .position(|(high, low)| high.is_finite() && low.is_finite())
+        .expect("first valid");
+    let sweep = SafeZoneStopBatchRange {
+        period: (10, 22, 6),
+        mult: (1.5, 3.0, 0.75),
+        max_lookback: (3, 5, 1),
+    };
+
+    let cuda = CudaSafeZoneStop::new(0).expect("CudaSafeZoneStop::new");
+    let (legacy, legacy_combos) = cuda
+        .safezonestop_batch_dev(&high_f32, &low_f32, "long", &sweep)
+        .expect("legacy safezonestop");
+
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let d_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+    let (device, device_combos) = cuda
+        .safezonestop_batch_dev_from_device_inputs(
+            d_high.buffer(),
+            d_low.buffer(),
+            len,
+            first_valid,
+            "long",
+            &sweep,
+        )
+        .expect("device safezonestop");
+    cuda.synchronize().expect("safezonestop sync");
+
+    assert_eq!(legacy_combos.len(), device_combos.len());
+    assert_eq!(legacy.rows, device.rows);
+    assert_eq!(legacy.cols, device.cols);
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    let mut device_host = vec![0f32; device.len()];
+    device.buf.copy_to(&mut device_host)?;
+
+    for (lhs, rhs) in legacy_host.iter().zip(device_host.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!((lhs - rhs).abs() <= 1e-6, "lhs={lhs} rhs={rhs}");
     }
 
     Ok(())

@@ -6,7 +6,7 @@ use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::launch;
 use cust::memory::AsyncCopyDestination;
-use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
+use cust::memory::{mem_get_info, DeviceBuffer, DevicePointer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -580,7 +580,7 @@ impl CudaAlma {
             ));
         }
         self.launch_batch_kernel_precomputed(
-            d_prices,
+            d_prices.as_device_ptr(),
             d_weights,
             d_periods,
             d_inv_norms,
@@ -665,12 +665,28 @@ impl CudaAlma {
 
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? };
 
-        self.run_batch_with_prices_device(&d_prices, series_len, first_valid, &combos, max_period)
+        self.run_batch_with_prices_device(
+            d_prices.as_device_ptr(),
+            series_len,
+            first_valid,
+            &combos,
+            max_period,
+        )
     }
 
     pub fn alma_batch_from_device_prices(
         &self,
         d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &AlmaBatchRange,
+    ) -> Result<DeviceArrayF32, CudaAlmaError> {
+        self.alma_batch_from_device_ptr(d_prices.as_device_ptr(), series_len, first_valid, sweep)
+    }
+
+    pub fn alma_batch_from_device_ptr(
+        &self,
+        d_prices: DevicePointer<f32>,
         series_len: usize,
         first_valid: usize,
         sweep: &AlmaBatchRange,
@@ -682,7 +698,7 @@ impl CudaAlma {
 
     fn run_batch_with_prices_device(
         &self,
-        d_prices: &DeviceBuffer<f32>,
+        d_prices: DevicePointer<f32>,
         series_len: usize,
         first_valid: usize,
         combos: &[AlmaParams],
@@ -691,7 +707,7 @@ impl CudaAlma {
         let n_combos = combos.len();
 
         self.try_enable_persisting_l2(
-            d_prices.as_device_ptr().as_raw(),
+            d_prices.as_raw(),
             series_len
                 .checked_mul(std::mem::size_of::<f32>())
                 .ok_or_else(|| CudaAlmaError::InvalidInput("series_len bytes overflow".into()))?,
@@ -771,8 +787,6 @@ impl CudaAlma {
             return Err(CudaAlmaError::NotImplemented);
         }
 
-        self.stream.synchronize()?;
-
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: n_combos,
@@ -799,8 +813,9 @@ impl CudaAlma {
                 expected_len
             )));
         }
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? };
         let arr = self.run_batch_with_prices_device(
-            &unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? },
+            d_prices.as_device_ptr(),
             series_len,
             first_valid,
             &combos,
@@ -929,7 +944,7 @@ impl CudaAlma {
 
     fn launch_batch_kernel_ondev(
         &self,
-        d_prices: &DeviceBuffer<f32>,
+        d_prices: DevicePointer<f32>,
         combos: &[AlmaParams],
         series_len: usize,
         n_combos: usize,
@@ -986,7 +1001,7 @@ impl CudaAlma {
             unsafe {
                 launch!(
                     func<<<grid, block, shared_bytes, stream>>>(
-                        d_prices.as_device_ptr(),
+                        d_prices,
                         d_periods.as_device_ptr(),
                         d_offsets.as_device_ptr(),
                         d_sigmas.as_device_ptr(),
@@ -1004,7 +1019,7 @@ impl CudaAlma {
 
     fn launch_batch_kernel_precomputed(
         &self,
-        d_prices: &DeviceBuffer<f32>,
+        d_prices: DevicePointer<f32>,
         d_weights: &DeviceBuffer<f32>,
         d_periods: &DeviceBuffer<i32>,
         d_inv_norms: &DeviceBuffer<f32>,
@@ -1113,7 +1128,7 @@ impl CudaAlma {
                 unsafe {
                     launch!(
                         func<<<grid, block, shared_bytes, stream>>>(
-                            d_prices.as_device_ptr(),
+                            d_prices,
                             d_weights.as_device_ptr(),
                             d_periods.as_device_ptr(),
                             d_inv_norms.as_device_ptr(),
@@ -1162,7 +1177,7 @@ impl CudaAlma {
                 unsafe {
                     launch!(
                         func<<<grid, block, shared_bytes, stream>>>(
-                            d_prices.as_device_ptr(),
+                            d_prices,
                             d_weights.as_device_ptr(),
                             d_periods.as_device_ptr(),
                             d_inv_norms.as_device_ptr(),

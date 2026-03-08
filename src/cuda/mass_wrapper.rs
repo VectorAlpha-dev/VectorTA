@@ -147,6 +147,10 @@ impl CudaMass {
         self.device_id
     }
 
+    pub fn synchronize(&self) -> Result<(), CudaMassError> {
+        self.stream.synchronize().map_err(Into::into)
+    }
+
     fn maybe_log_selected(&mut self, which: &str, block_x: u32) {
         if self.debug_logged {
             return;
@@ -255,6 +259,39 @@ impl CudaMass {
         }
 
         Ok((prefix_ratio_ds, prefix_nan, first))
+    }
+
+    fn launch_prefix_builder_one_series_ds_raw(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_prefix_ratio: &mut DeviceBuffer<F2>,
+        d_prefix_nan: &mut DeviceBuffer<i32>,
+    ) -> Result<(), CudaMassError> {
+        let func = self
+            .module
+            .get_function("mass_build_prefix_one_series_ds_f32")
+            .map_err(|_| CudaMassError::MissingKernelSymbol {
+                name: "mass_build_prefix_one_series_ds_f32",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+        let stream = &self.stream;
+        unsafe {
+            launch!(
+                func<<<grid, block, 0, stream>>>(
+                    d_high.as_device_ptr(),
+                    d_low.as_device_ptr(),
+                    len as i32,
+                    first_valid as i32,
+                    d_prefix_ratio.as_device_ptr(),
+                    d_prefix_nan.as_device_ptr()
+                )
+            )?;
+        }
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -435,16 +472,50 @@ impl CudaMass {
                 "no parameter combinations".into(),
             ));
         }
-        let (prefix_ratio_ds, prefix_nan, first_valid) =
-            Self::precompute_ratio_prefix_one_series_ds(high, low)?;
+        let first_valid = Self::first_valid_hilo(high, low)
+            .ok_or_else(|| CudaMassError::InvalidInput("all values are NaN".into()))?;
 
         let len = high.len();
+        let d_high = DeviceBuffer::from_slice(high)?;
+        let d_low = DeviceBuffer::from_slice(low)?;
+        let (dev, combos) =
+            self.mass_batch_dev_from_device_inputs(&d_high, &d_low, len, first_valid, sweep)?;
+        self.stream.synchronize()?;
+        Ok((dev, combos))
+    }
+
+    pub fn mass_batch_dev_from_device_inputs(
+        &mut self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &MassBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<MassParams>), CudaMassError> {
+        if len == 0 || d_high.len() != len || d_low.len() != len {
+            return Err(CudaMassError::InvalidInput(
+                "device high/low buffers must match non-zero length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaMassError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = expand_mass_combos(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaMassError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+
         let max_period = combos
             .iter()
             .map(|c| c.period.unwrap_or(0))
             .max()
             .unwrap_or(0);
-        if max_period == 0 || len - (first_valid as usize) < max_period {
+        if max_period == 0 || len - first_valid < max_period {
             return Err(CudaMassError::InvalidInput(format!(
                 "not enough valid data (needed >= {}, valid = {})",
                 max_period,
@@ -455,13 +526,10 @@ impl CudaMass {
         let size_f2 = std::mem::size_of::<F2>();
         let size_i32 = std::mem::size_of::<i32>();
         let size_f32 = std::mem::size_of::<f32>();
-
-        let ratio_bytes = prefix_ratio_ds
-            .len()
+        let ratio_bytes = (len + 1)
             .checked_mul(size_f2)
             .ok_or_else(|| CudaMassError::InvalidInput("size overflow (ratio)".into()))?;
-        let nan_bytes = prefix_nan
-            .len()
+        let nan_bytes = (len + 1)
             .checked_mul(size_i32)
             .ok_or_else(|| CudaMassError::InvalidInput("size overflow (nan prefix)".into()))?;
         let periods_bytes = combos
@@ -474,7 +542,6 @@ impl CudaMass {
         let out_bytes = out_elems
             .checked_mul(size_f32)
             .ok_or_else(|| CudaMassError::InvalidInput("size overflow (output bytes)".into()))?;
-
         let bytes_needed = ratio_bytes
             .checked_add(nan_bytes)
             .and_then(|v| v.checked_add(periods_bytes))
@@ -484,8 +551,17 @@ impl CudaMass {
         let headroom = 64usize << 20;
         Self::will_fit(bytes_needed, headroom)?;
 
-        let d_prefix_ratio = DeviceBuffer::from_slice(&prefix_ratio_ds)?;
-        let d_prefix_nan = DeviceBuffer::from_slice(&prefix_nan)?;
+        let mut d_prefix_ratio: DeviceBuffer<F2> = unsafe { DeviceBuffer::uninitialized(len + 1) }?;
+        let mut d_prefix_nan: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(len + 1) }?;
+        self.launch_prefix_builder_one_series_ds_raw(
+            d_high,
+            d_low,
+            len,
+            first_valid,
+            &mut d_prefix_ratio,
+            &mut d_prefix_nan,
+        )?;
+
         let periods_i32: Vec<i32> = combos
             .iter()
             .map(|c| c.period.unwrap_or(0) as i32)
@@ -527,7 +603,7 @@ impl CudaMass {
             }
             launched += chunk;
         }
-        self.stream.synchronize()?;
+
         Ok((
             DeviceArrayF32 {
                 buf: d_out,

@@ -10,6 +10,50 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
+extern "C" __global__
+void dx_build_terms_f64(const float* __restrict__ high,
+                        const float* __restrict__ low,
+                        const float* __restrict__ close,
+                        int len,
+                        double* __restrict__ plus_dm,
+                        double* __restrict__ minus_dm,
+                        double* __restrict__ tr,
+                        unsigned char* __restrict__ carry) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (len <= 0) return;
+
+    plus_dm[0] = 0.0;
+    minus_dm[0] = 0.0;
+    tr[0] = 0.0;
+    carry[0] = 0u;
+
+    for (int i = 1; i < len; ++i) {
+        const double h = (double)high[i];
+        const double l = (double)low[i];
+        const double c = (double)close[i];
+        plus_dm[i] = 0.0;
+        minus_dm[i] = 0.0;
+        tr[i] = 0.0;
+        carry[i] = 0u;
+
+        if (isnan(h) || isnan(l) || isnan(c)) {
+            carry[i] = 1u;
+            continue;
+        }
+
+        const double prev_h = (double)high[i - 1];
+        const double prev_l = (double)low[i - 1];
+        const double prev_c = (double)close[i - 1];
+        const double up = h - prev_h;
+        const double dn = prev_l - l;
+        plus_dm[i] = (up > 0.0 && up > dn) ? up : 0.0;
+        minus_dm[i] = (dn > 0.0 && dn > up) ? dn : 0.0;
+        const double tr1 = h - l;
+        const double tr2 = fabs(h - prev_c);
+        const double tr3 = fabs(l - prev_c);
+        tr[i] = fmax(fmax(tr1, tr2), tr3);
+    }
+}
 
 
 

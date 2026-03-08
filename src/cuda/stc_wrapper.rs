@@ -251,7 +251,47 @@ impl CudaStc {
             .max()
             .unwrap();
         let first_valid = Self::validate_first_valid(data, max_needed)?;
+        let h = LockedBuffer::from_slice(data)?;
+        let mut d_prices: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
+        unsafe {
+            d_prices.async_copy_from(&h, &self.stream)?;
+        }
+        let result = self.stc_batch_dev_from_device_prices(&d_prices, len, first_valid, sweep)?;
+        self.stream.synchronize()?;
+        Ok(result)
+    }
 
+    pub fn stc_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &StcBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<StcParams>), CudaStcError> {
+        if len == 0 || d_prices.len() != len {
+            return Err(CudaStcError::InvalidInput(
+                "device prices must have non-zero input length".into(),
+            ));
+        }
+        let combos = Self::expand_grid(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaStcError::InvalidInput("empty sweep".into()));
+        }
+        let max_needed = combos
+            .iter()
+            .map(|c| {
+                c.fast_period
+                    .unwrap()
+                    .max(c.slow_period.unwrap())
+                    .max(c.k_period.unwrap())
+                    .max(c.d_period.unwrap())
+            })
+            .max()
+            .unwrap();
+        if first_valid >= len || len - first_valid < max_needed {
+            return Err(CudaStcError::InvalidInput("not enough valid data".into()));
+        }
         let rows = combos.len();
         let rows_len = rows
             .checked_mul(len)
@@ -282,13 +322,6 @@ impl CudaStc {
                     "insufficient device memory".into(),
                 ));
             }
-        }
-
-        let h = LockedBuffer::from_slice(data)?;
-        let mut d_prices: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
-        unsafe {
-            d_prices.async_copy_from(&h, &self.stream)?;
         }
 
         let fasts: Vec<i32> = combos
@@ -395,7 +428,6 @@ impl CudaStc {
             }
         }
 
-        self.stream.synchronize()?;
         Ok((
             DeviceArrayF32 {
                 buf: d_out,

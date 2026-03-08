@@ -1,4 +1,6 @@
-use vector_ta::indicators::kvo::{kvo_with_kernel, KvoBatchBuilder, KvoInput, KvoParams};
+use vector_ta::indicators::kvo::{
+    kvo_with_kernel, KvoBatchBuilder, KvoBatchRange, KvoInput, KvoParams,
+};
 use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
@@ -7,6 +9,8 @@ use cust::memory::CopyDestination;
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::CudaKvo;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -74,9 +78,6 @@ fn kvo_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let v_f32: Vec<f32> = volume.iter().copied().map(|v| v as f32).collect();
 
     let cuda = CudaKvo::new(0).expect("CudaKvo::new");
-    let (dev, combos) = cuda
-        .kvo_batch_dev(&h_f32, &l_f32, &c_f32, &v_f32, &sweep)
-        .expect("kvo_batch_dev");
     let (dev, combos) = cuda
         .kvo_batch_dev(&h_f32, &l_f32, &c_f32, &v_f32, &sweep)
         .expect("kvo_batch_dev");
@@ -156,10 +157,6 @@ fn kvo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             short_period: Some(short),
             long_period: Some(long),
         };
-        let params = KvoParams {
-            short_period: Some(short),
-            long_period: Some(long),
-        };
         let input = KvoInput::from_slices(&h, &l, &c, &v, params);
         let out = kvo_with_kernel(&input, Kernel::Scalar)?.values;
         for t in 0..rows {
@@ -206,5 +203,86 @@ fn kvo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             idx
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn kvo_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[kvo_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 2048usize;
+    let mut high = vec![f64::NAN; len];
+    let mut low = vec![f64::NAN; len];
+    let mut close = vec![f64::NAN; len];
+    let mut volume = vec![f64::NAN; len];
+    for i in 4..len {
+        let x = i as f64 * 0.0027;
+        let base = 100.0 + x.sin() * 0.9 + 0.0003 * i as f64;
+        let spread = 0.08 + (x * 0.31).cos().abs() * 0.04;
+        high[i] = base + spread;
+        low[i] = base - spread;
+        close[i] = base + (x * 0.7).sin() * 0.03;
+        volume[i] = ((x * 0.9).cos().abs() + 1.0) * 600.0;
+    }
+    let sweep = KvoBatchRange {
+        short_period: (2, 8, 2),
+        long_period: (10, 18, 2),
+    };
+
+    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+    let volume_f32: Vec<f32> = volume.iter().map(|&v| v as f32).collect();
+    let first_valid = high_f32
+        .iter()
+        .zip(low_f32.iter())
+        .zip(close_f32.iter())
+        .zip(volume_f32.iter())
+        .position(|(((high, low), close), volume)| {
+            high.is_finite() && low.is_finite() && close.is_finite() && volume.is_finite()
+        })
+        .expect("first valid");
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+    let d_close = runtime.upload_f32(&close_f32).expect("upload close");
+    let d_volume = runtime.upload_f32(&volume_f32).expect("upload volume");
+    let cuda = CudaKvo::new(0).expect("CudaKvo::new");
+
+    let (legacy, _) = cuda
+        .kvo_batch_dev(&high_f32, &low_f32, &close_f32, &volume_f32, &sweep)
+        .expect("legacy kvo");
+    let (device, _) = cuda
+        .kvo_batch_dev_from_device_inputs(
+            d_high.buffer(),
+            d_low.buffer(),
+            d_close.buffer(),
+            d_volume.buffer(),
+            len,
+            first_valid,
+            &sweep,
+        )
+        .expect("device kvo");
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    let mut device_host = vec![0f32; device.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    device.buf.copy_to(&mut device_host)?;
+
+    let tol = 5e-4;
+    for idx in 0..legacy_host.len() {
+        assert!(
+            approx_eq(legacy_host[idx] as f64, device_host[idx] as f64, tol),
+            "mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_host[idx],
+            device_host[idx]
+        );
+    }
+
     Ok(())
 }

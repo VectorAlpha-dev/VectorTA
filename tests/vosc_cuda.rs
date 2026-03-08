@@ -8,6 +8,8 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
+#[cfg(feature = "cuda")]
 use vector_ta::cuda::CudaVosc;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
@@ -130,5 +132,59 @@ fn vosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
             idx
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn vosc_cuda_device_prices_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[vosc_cuda_device_prices_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 2048usize;
+    let mut volume = vec![f64::NAN; len];
+    for i in 5..len {
+        let x = i as f64 * 0.0043;
+        volume[i] = 1000.0 + x.cos() * 40.0 + (x * 0.31).sin() * 15.0;
+    }
+    let sweep = VoscBatchRange {
+        short_period: (3, 9, 3),
+        long_period: (10, 22, 4),
+    };
+
+    let volume_f32: Vec<f32> = volume.iter().map(|&v| v as f32).collect();
+    let first_valid = volume_f32
+        .iter()
+        .position(|value| !value.is_nan())
+        .expect("first valid");
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_volume = runtime.upload_f32(&volume_f32).expect("upload volume");
+    let cuda = CudaVosc::new(0).expect("CudaVosc::new");
+
+    let (legacy, _) = cuda
+        .vosc_batch_dev(&volume_f32, &sweep)
+        .expect("legacy vosc");
+    let (device, _) = cuda
+        .vosc_batch_dev_from_device_prices(d_volume.buffer(), len, first_valid, &sweep)
+        .expect("device vosc");
+
+    let mut legacy_host = vec![0f32; legacy.len()];
+    let mut device_host = vec![0f32; device.len()];
+    legacy.buf.copy_to(&mut legacy_host)?;
+    device.buf.copy_to(&mut device_host)?;
+
+    let tol = 5e-4;
+    for idx in 0..legacy_host.len() {
+        assert!(
+            approx_eq(legacy_host[idx] as f64, device_host[idx] as f64, tol),
+            "mismatch at {}: legacy={} device={}",
+            idx,
+            legacy_host[idx],
+            device_host[idx]
+        );
+    }
+
     Ok(())
 }

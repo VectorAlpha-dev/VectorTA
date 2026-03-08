@@ -331,18 +331,9 @@ impl CudaRvi {
             }
         }
 
-        let h_data = LockedBuffer::from_slice(data)?;
-        let mut d_data = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream)? };
-        unsafe {
-            d_data.async_copy_from(&h_data, &self.stream)?;
-        }
-
-        let mut d_out =
-            unsafe { DeviceBuffer::<f32>::uninitialized_async(rows_len, &self.stream)? };
-
-        let use_prefix = false;
-
         if rows * len <= 2_000_000 {
+            let mut d_out =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(rows_len, &self.stream)? };
             let data_f64: Vec<f64> = data.iter().map(|&v| v as f64).collect();
             let cpu = rvi_scalar_mod::rvi_batch_with_kernel(&data_f64, sweep, Kernel::ScalarBatch)
                 .map_err(|e| CudaRviError::InvalidInput(format!("CPU fallback failed: {:?}", e)))?;
@@ -361,6 +352,127 @@ impl CudaRvi {
                 cpu.combos,
             ));
         }
+
+        let h_data = LockedBuffer::from_slice(data)?;
+        let mut d_data = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream)? };
+        unsafe {
+            d_data.async_copy_from(&h_data, &self.stream)?;
+        }
+        let result = self.rvi_batch_dev_from_device_prices(&d_data, len, first_valid, sweep)?;
+        self.stream.synchronize().map_err(CudaRviError::from)?;
+        Ok(result)
+    }
+
+    pub fn rvi_batch_dev_from_device_prices(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &RviBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<RviParams>), CudaRviError> {
+        if len == 0 || d_data.len() != len {
+            return Err(CudaRviError::InvalidInput(
+                "device prices must have non-zero input length".into(),
+            ));
+        }
+        let combos = Self::expand_grid(sweep)?;
+        if combos.is_empty() {
+            return Err(CudaRviError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        if combos.iter().any(|c| c.devtype.unwrap_or(0) == 2) {
+            return Err(CudaRviError::InvalidInput(
+                "devtype=2 (median abs dev) not supported by CUDA kernel yet".into(),
+            ));
+        }
+
+        let max_period = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        let max_ma_len = combos
+            .iter()
+            .map(|c| c.ma_len.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        if max_period == 0 || max_ma_len == 0 {
+            return Err(CudaRviError::InvalidInput("invalid period/ma_len".into()));
+        }
+        if first_valid >= len || len - first_valid <= (max_period - 1) + (max_ma_len - 1) {
+            return Err(CudaRviError::InvalidInput(
+                "not enough valid data for warmup".into(),
+            ));
+        }
+
+        let rows = combos.len();
+        let rows_len = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaRviError::InvalidInput("rows * len overflow".into()))?;
+
+        let mut idx_std = Vec::with_capacity(rows);
+        let mut idx_mad = Vec::with_capacity(rows);
+        for (i, c) in combos.iter().enumerate() {
+            match c.devtype.unwrap_or(0) {
+                0 => idx_std.push(i),
+                _ => idx_mad.push(i),
+            }
+        }
+        let rows_std = idx_std.len();
+        let rows_mad = idx_mad.len();
+
+        let mut combos_sorted = Vec::with_capacity(rows);
+        for &i in &idx_std {
+            combos_sorted.push(combos[i].clone());
+        }
+        for &i in &idx_mad {
+            combos_sorted.push(combos[i].clone());
+        }
+
+        let param_i32_bytes = rows
+            .checked_mul(4)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<i32>()))
+            .ok_or_else(|| CudaRviError::InvalidInput("param bytes overflow".into()))?;
+        let prices_bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaRviError::InvalidInput("prices bytes overflow".into()))?;
+        let out_bytes = rows_len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaRviError::InvalidInput("output bytes overflow".into()))?;
+        let mut req = prices_bytes
+            .checked_add(out_bytes)
+            .and_then(|x| x.checked_add(param_i32_bytes))
+            .ok_or_else(|| CudaRviError::InvalidInput("VRAM estimate overflow".into()))?;
+        if rows_std > 0 {
+            let extra = (2usize)
+                .checked_mul(len)
+                .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+                .and_then(|x| x.checked_add(len.saturating_mul(std::mem::size_of::<i32>())))
+                .ok_or_else(|| CudaRviError::InvalidInput("prefix bytes overflow".into()))?;
+            req = req
+                .checked_add(extra)
+                .ok_or_else(|| CudaRviError::InvalidInput("VRAM estimate overflow".into()))?;
+        }
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(req, headroom) {
+            if let Some((free, _)) = Self::device_mem_info() {
+                return Err(CudaRviError::OutOfMemory {
+                    required: req,
+                    free,
+                    headroom,
+                });
+            } else {
+                return Err(CudaRviError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
+            }
+        }
+
+        let mut d_out =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(rows_len, &self.stream)? };
+
+        let use_prefix = false;
 
         if use_prefix {
             let periods_std: Vec<i32> = idx_std
@@ -404,7 +516,7 @@ impl CudaRvi {
                     d_t.async_copy_from(&ht, &self.stream)?;
                 }
                 self.launch_batch_stddev_from_prefix(
-                    &d_data,
+                    d_data,
                     &d_pref,
                     &d_pref2,
                     &d_runlen,
@@ -465,7 +577,7 @@ impl CudaRvi {
                     d_d.async_copy_from(&hd, &self.stream)?;
                 }
                 self.launch_batch_mad(
-                    &d_data,
+                    d_data,
                     &mut d_out,
                     &mut d_p,
                     &mut d_m,
@@ -513,7 +625,7 @@ impl CudaRvi {
                     d_d.async_copy_from(&hd, &self.stream)?;
                 }
                 self.launch_batch_mad(
-                    &d_data,
+                    d_data,
                     &mut d_out,
                     &mut d_p,
                     &mut d_m,
@@ -529,8 +641,6 @@ impl CudaRvi {
                 )?;
             }
         }
-
-        self.stream.synchronize().map_err(CudaRviError::from)?;
         Ok((
             DeviceArrayF32 {
                 buf: d_out,

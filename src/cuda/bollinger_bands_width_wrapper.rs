@@ -249,6 +249,23 @@ impl CudaBbw {
         Ok((combos.len(), len, meta))
     }
 
+    pub fn bbw_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        first_valid: usize,
+        sweep: &BollingerBandsWidthBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<(usize, f32)>), CudaBbwError> {
+        let len = d_prices.len();
+        if len == 0 {
+            return Err(CudaBbwError::InvalidInput("empty data".into()));
+        }
+        let combos = Self::expand_batch_combos(sweep)?;
+        Self::validate_batch_request(len, first_valid, &combos)?;
+        let arr = self.run_batch_kernel_from_device_prices(d_prices, &combos, first_valid, len)?;
+        let meta = combos.iter().map(|c| (c.period, c.u_plus_d)).collect();
+        Ok((arr, meta))
+    }
+
     fn prepare_batch_inputs(
         data_f32: &[f32],
         sweep: &BollingerBandsWidthBatchRange,
@@ -262,6 +279,14 @@ impl CudaBbw {
             .position(|&v| !v.is_nan())
             .ok_or_else(|| CudaBbwError::InvalidInput("all values are NaN".into()))?;
 
+        let combos = Self::expand_batch_combos(sweep)?;
+        Self::validate_batch_request(len, first_valid, &combos)?;
+        Ok((combos, first_valid, len))
+    }
+
+    fn expand_batch_combos(
+        sweep: &BollingerBandsWidthBatchRange,
+    ) -> Result<Vec<BbwCombo>, CudaBbwError> {
         let mut periods = Vec::new();
         let (ps, pe, pst) = sweep.period;
         if pst == 0 || ps == pe {
@@ -330,7 +355,6 @@ impl CudaBbw {
             .and_then(|v| v.checked_mul(devdns.len()))
             .ok_or_else(|| CudaBbwError::InvalidInput("range too large".into()))?;
         let mut combos = Vec::with_capacity(cap);
-        let mut max_period = 0usize;
         for &p in &periods {
             for &u in &devups {
                 for &d in &devdns {
@@ -340,7 +364,26 @@ impl CudaBbw {
                     });
                 }
             }
-            max_period = max_period.max(p);
+        }
+        Ok(combos)
+    }
+
+    fn validate_batch_request(
+        len: usize,
+        first_valid: usize,
+        combos: &[BbwCombo],
+    ) -> Result<(), CudaBbwError> {
+        if first_valid >= len {
+            return Err(CudaBbwError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, len
+            )));
+        }
+        let max_period = combos.iter().map(|combo| combo.period).max().unwrap_or(0);
+        if max_period == 0 {
+            return Err(CudaBbwError::InvalidInput(
+                "period values must be positive".into(),
+            ));
         }
         if len - first_valid < max_period {
             return Err(CudaBbwError::InvalidInput(format!(
@@ -349,7 +392,7 @@ impl CudaBbw {
                 len - first_valid
             )));
         }
-        Ok((combos, first_valid, len))
+        Ok(())
     }
 
     fn build_prefixes(data: &[f32]) -> (Vec<Float2>, Vec<Float2>, Vec<i32>) {
@@ -498,6 +541,55 @@ impl CudaBbw {
 
         self.stream.synchronize()?;
 
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combos.len(),
+            cols: len,
+        })
+    }
+
+    fn run_batch_kernel_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        combos: &[BbwCombo],
+        first_valid: usize,
+        len: usize,
+    ) -> Result<DeviceArrayF32, CudaBbwError> {
+        let out_elems = len
+            .checked_mul(combos.len())
+            .ok_or_else(|| CudaBbwError::InvalidInput("output too large".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaBbwError::InvalidInput("output too large".into()))?;
+        let periods: Vec<i32> = combos.iter().map(|c| c.period as i32).collect();
+        let uplusd: Vec<f32> = combos.iter().map(|c| c.u_plus_d).collect();
+        let metadata_bytes = periods
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .and_then(|v| {
+                uplusd
+                    .len()
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .and_then(|u| v.checked_add(u))
+            })
+            .ok_or_else(|| CudaBbwError::InvalidInput("size overflow".into()))?;
+        let required = metadata_bytes
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaBbwError::InvalidInput("size overflow".into()))?;
+        self.will_fit(required, 64usize * 1024 * 1024)?;
+
+        let d_periods = DeviceBuffer::from_slice(periods.as_slice())?;
+        let d_uplusd = DeviceBuffer::from_slice(uplusd.as_slice())?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
+        self.launch_batch_kernel_streaming(
+            d_prices,
+            len,
+            first_valid,
+            d_periods.as_device_ptr(),
+            d_uplusd.as_device_ptr(),
+            combos.len(),
+            d_out.as_device_ptr(),
+        )?;
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: combos.len(),

@@ -385,6 +385,43 @@ impl CudaWad {
         self.run_batch(high, low, close, 1)
     }
 
+    pub fn wad_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        series_len: usize,
+    ) -> Result<DeviceArrayF32, CudaWadError> {
+        if series_len == 0
+            || d_high.len() != series_len
+            || d_low.len() != series_len
+            || d_close.len() != series_len
+        {
+            return Err(CudaWadError::InvalidInput(
+                "device OHLC buffers must match non-zero length".into(),
+            ));
+        }
+
+        let required_cells_inputs = 3usize
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaWadError::InvalidInput("size overflow".into()))?;
+        let required_cells_output = series_len;
+        let required = (required_cells_inputs + required_cells_output) * std::mem::size_of::<f32>();
+        let headroom = 64 * 1024 * 1024;
+        Self::will_fit(required, headroom)?;
+
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(series_len, &self.stream) }?;
+
+        self.launch_batch_kernel(d_high, d_low, d_close, series_len, 1, &mut d_out)?;
+
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: 1,
+            cols: series_len,
+        })
+    }
+
     pub fn wad_batch_into_host_f32(
         &self,
         high: &[f32],

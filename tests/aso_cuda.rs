@@ -7,6 +7,8 @@ use cust::memory::CopyDestination;
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::oscillators::CudaAso;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -84,6 +86,95 @@ fn aso_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             i
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn aso_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[aso_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 2048usize;
+    let mut open = vec![f64::NAN; len];
+    let mut high = vec![f64::NAN; len];
+    let mut low = vec![f64::NAN; len];
+    let mut close = vec![f64::NAN; len];
+    for i in 6..len {
+        let x = i as f64 * 0.0023;
+        let base = (x * 0.91).sin() + 0.00017 * i as f64;
+        open[i] = base - 0.04 + (x * 0.31).cos() * 0.01;
+        high[i] = base + 0.11 + (x * 0.27).sin().abs() * 0.02;
+        low[i] = base - 0.10 - (x * 0.19).cos().abs() * 0.015;
+        close[i] = base + 0.015 + (x * 0.43).sin() * 0.01;
+    }
+    let sweep = AsoBatchRange {
+        period: (5, 17, 4),
+        mode: (0, 2, 1),
+    };
+
+    let open_f32: Vec<f32> = open.iter().map(|&v| v as f32).collect();
+    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+    let first_valid = close_f32
+        .iter()
+        .position(|value| value.is_finite())
+        .expect("first valid");
+
+    let runtime = CudaRuntime::new(0).expect("CudaRuntime::new");
+    let d_open = runtime.upload_f32(&open_f32).expect("upload open");
+    let d_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+    let d_close = runtime.upload_f32(&close_f32).expect("upload close");
+    let cuda = CudaAso::new(0).expect("CudaAso::new");
+
+    let legacy = cuda
+        .aso_batch_dev(&open_f32, &high_f32, &low_f32, &close_f32, &sweep)
+        .expect("legacy aso");
+    let device = cuda
+        .aso_batch_dev_from_device_inputs(
+            d_open.buffer(),
+            d_high.buffer(),
+            d_low.buffer(),
+            d_close.buffer(),
+            len,
+            first_valid,
+            &sweep,
+        )
+        .expect("device aso");
+    cuda.synchronize().expect("aso sync");
+
+    assert_eq!(legacy.0.rows, device.0.rows);
+    assert_eq!(legacy.0.cols, device.0.cols);
+    assert_eq!(legacy.1.rows, device.1.rows);
+    assert_eq!(legacy.1.cols, device.1.cols);
+
+    let mut legacy_bulls = vec![0f32; legacy.0.len()];
+    let mut legacy_bears = vec![0f32; legacy.1.len()];
+    legacy.0.buf.copy_to(&mut legacy_bulls)?;
+    legacy.1.buf.copy_to(&mut legacy_bears)?;
+
+    let mut device_bulls = vec![0f32; device.0.len()];
+    let mut device_bears = vec![0f32; device.1.len()];
+    device.0.buf.copy_to(&mut device_bulls)?;
+    device.1.buf.copy_to(&mut device_bears)?;
+
+    for (lhs, rhs) in legacy_bulls.iter().zip(device_bulls.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!((lhs - rhs).abs() <= 1e-6, "bulls lhs={lhs} rhs={rhs}");
+    }
+    for (lhs, rhs) in legacy_bears.iter().zip(device_bears.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!((lhs - rhs).abs() <= 1e-6, "bears lhs={lhs} rhs={rhs}");
+    }
+
     Ok(())
 }
 

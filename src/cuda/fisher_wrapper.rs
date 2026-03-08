@@ -292,6 +292,41 @@ impl CudaFisher {
         Ok(())
     }
 
+    fn prepare_batch_meta(
+        len: usize,
+        first_valid: usize,
+        sweep: &FisherBatchRange,
+    ) -> Result<(Vec<FisherParams>, usize), CudaFisherError> {
+        if len == 0 {
+            return Err(CudaFisherError::InvalidInput("empty input".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaFisherError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+        let combos = Self::expand_grid(sweep);
+        if combos.is_empty() {
+            return Err(CudaFisherError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        let max_p = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        if max_p == 0 || max_p > len {
+            return Err(CudaFisherError::InvalidInput("invalid period".into()));
+        }
+        if len - first_valid < max_p {
+            return Err(CudaFisherError::InvalidInput(
+                "not enough valid data".into(),
+            ));
+        }
+        Ok((combos, max_p))
+    }
+
     fn prepare_batch_inputs(
         high_f32: &[f32],
         low_f32: &[f32],
@@ -316,26 +351,7 @@ impl CudaFisher {
         }
         let first_valid = first_valid
             .ok_or_else(|| CudaFisherError::InvalidInput("all values are NaN".into()))?;
-
-        let combos = Self::expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaFisherError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
-        let max_p = combos
-            .iter()
-            .map(|c| c.period.unwrap_or(0))
-            .max()
-            .unwrap_or(0);
-        if max_p == 0 || max_p > len {
-            return Err(CudaFisherError::InvalidInput("invalid period".into()));
-        }
-        if len - first_valid < max_p {
-            return Err(CudaFisherError::InvalidInput(
-                "not enough valid data".into(),
-            ));
-        }
+        let (combos, max_p) = Self::prepare_batch_meta(len, first_valid, sweep)?;
 
         let mut hl2 = unsafe { LockedBuffer::uninitialized(len) }?;
         {
@@ -345,6 +361,124 @@ impl CudaFisher {
             }
         }
         Ok((combos, first_valid, len, hl2, max_p))
+    }
+
+    fn launch_hl2_builder_raw(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        len: usize,
+        d_hl: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaFisherError> {
+        let func = self
+            .module
+            .get_function("fisher_build_hl2_f32")
+            .map_err(|_| CudaFisherError::MissingKernelSymbol {
+                name: "fisher_build_hl2_f32",
+            })?;
+        let block_x = 256u32;
+        let grid_x = ((len as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        Self::validate_launch_dims(grid, block)?;
+        unsafe {
+            let mut high_ptr = d_high.as_device_ptr().as_raw();
+            let mut low_ptr = d_low.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut hl_ptr = d_hl.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut high_ptr as *mut _ as *mut c_void,
+                &mut low_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut hl_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
+    fn launch_batch_raw(
+        &self,
+        d_hl: &DeviceBuffer<f32>,
+        d_periods: &DeviceBuffer<i32>,
+        len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        max_p: usize,
+        d_fish: &mut DeviceBuffer<f32>,
+        d_sig: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaFisherError> {
+        let mut func = self.module.get_function("fisher_batch_f32").map_err(|_| {
+            CudaFisherError::MissingKernelSymbol {
+                name: "fisher_batch_f32",
+            }
+        })?;
+
+        let shmem_bytes = (2 * max_p * std::mem::size_of::<i32>()) as usize;
+        if shmem_bytes >= 32 * 1024 {
+            func.set_cache_config(CacheConfig::PreferShared)?;
+        }
+        if shmem_bytes > 48 * 1024 {
+            let res = unsafe {
+                sys::cuFuncSetAttribute(
+                    func.to_raw(),
+                    sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    shmem_bytes as i32,
+                )
+            };
+            if res != sys::CUresult::CUDA_SUCCESS {
+                return Err(CudaFisherError::InvalidPolicy(
+                    "dynamic shared memory attribute",
+                ));
+            }
+            let _ = unsafe {
+                sys::cuFuncSetAttribute(
+                    func.to_raw(),
+                    sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
+                    100,
+                )
+            };
+        }
+
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Auto => env::var("FISHER_BLOCK_X")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(1)
+                .clamp(1, 1024),
+            BatchKernelPolicy::Plain { block_x } => block_x.max(1),
+        };
+        let grid_x: u32 = n_combos as u32;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        Self::validate_launch_dims(grid, block)?;
+        let shared_bytes: u32 = shmem_bytes as u32;
+        unsafe {
+            (*(self as *const _ as *mut CudaFisher)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
+        unsafe {
+            let mut hl_ptr = d_hl.as_device_ptr().as_raw();
+            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+            let mut series_len_i = len as i32;
+            let mut n_combos_i = n_combos as i32;
+            let mut first_i = first_valid as i32;
+            let mut fish_ptr = d_fish.as_device_ptr().as_raw();
+            let mut sig_ptr = d_sig.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut hl_ptr as *mut _ as *mut c_void,
+                &mut periods_ptr as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut n_combos_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut fish_ptr as *mut _ as *mut c_void,
+                &mut sig_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, shared_bytes, args)?;
+        }
+        self.maybe_log_batch_debug();
+        Ok(())
     }
 
     pub fn fisher_batch_dev(
@@ -399,78 +533,92 @@ impl CudaFisher {
             unsafe { DeviceBuffer::uninitialized_async(total, &self.stream) }?;
         let mut d_sig: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(total, &self.stream) }?;
-
-        let mut func = self.module.get_function("fisher_batch_f32").map_err(|_| {
-            CudaFisherError::MissingKernelSymbol {
-                name: "fisher_batch_f32",
-            }
-        })?;
-
-        let shmem_bytes = (2 * max_p * std::mem::size_of::<i32>()) as usize;
-        if shmem_bytes >= 32 * 1024 {
-            func.set_cache_config(CacheConfig::PreferShared)?;
-        }
-        if shmem_bytes > 48 * 1024 {
-            let res = unsafe {
-                sys::cuFuncSetAttribute(
-                    func.to_raw(),
-                    sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                    shmem_bytes as i32,
-                )
-            };
-            if res != sys::CUresult::CUDA_SUCCESS {
-                return Err(CudaFisherError::InvalidPolicy(
-                    "dynamic shared memory attribute",
-                ));
-            }
-            let _ = unsafe {
-                sys::cuFuncSetAttribute(
-                    func.to_raw(),
-                    sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
-                    100,
-                )
-            };
-        }
-
-        let block_x: u32 = match self.policy.batch {
-            BatchKernelPolicy::Auto => env::var("FISHER_BLOCK_X")
-                .ok()
-                .and_then(|v| v.parse::<u32>().ok())
-                .filter(|&v| v > 0)
-                .unwrap_or(1)
-                .clamp(1, 1024),
-            BatchKernelPolicy::Plain { block_x } => block_x.max(1),
-        };
-        let grid_x: u32 = combos.len() as u32;
-        let grid: GridSize = (grid_x.max(1), 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
-        Self::validate_launch_dims(grid, block)?;
-        let shared_bytes: u32 = shmem_bytes as u32;
-        unsafe {
-            (*(self as *const _ as *mut CudaFisher)).last_batch =
-                Some(BatchKernelSelected::Plain { block_x });
-        }
-        unsafe {
-            let mut hl_ptr = d_hl.as_device_ptr().as_raw();
-            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-            let mut series_len_i = len as i32;
-            let mut n_combos_i = combos.len() as i32;
-            let mut first_i = first_valid as i32;
-            let mut fish_ptr = d_fish.as_device_ptr().as_raw();
-            let mut sig_ptr = d_sig.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut hl_ptr as *mut _ as *mut c_void,
-                &mut periods_ptr as *mut _ as *mut c_void,
-                &mut series_len_i as *mut _ as *mut c_void,
-                &mut n_combos_i as *mut _ as *mut c_void,
-                &mut first_i as *mut _ as *mut c_void,
-                &mut fish_ptr as *mut _ as *mut c_void,
-                &mut sig_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream.launch(&func, grid, block, shared_bytes, args)?;
-        }
+        self.launch_batch_raw(
+            &d_hl,
+            &d_periods,
+            len,
+            combos.len(),
+            first_valid,
+            max_p,
+            &mut d_fish,
+            &mut d_sig,
+        )?;
         self.stream.synchronize()?;
-        self.maybe_log_batch_debug();
+
+        Ok((
+            DeviceFisherPair {
+                fisher: DeviceArrayF32 {
+                    buf: d_fish,
+                    rows: combos.len(),
+                    cols: len,
+                },
+                signal: DeviceArrayF32 {
+                    buf: d_sig,
+                    rows: combos.len(),
+                    cols: len,
+                },
+            },
+            combos,
+        ))
+    }
+
+    pub fn fisher_batch_dev_from_device_inputs(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &FisherBatchRange,
+    ) -> Result<(DeviceFisherPair, Vec<FisherParams>), CudaFisherError> {
+        if len == 0 || d_high.len() != len || d_low.len() != len {
+            return Err(CudaFisherError::InvalidInput(
+                "device input buffers must match non-zero length".into(),
+            ));
+        }
+        let (combos, max_p) = Self::prepare_batch_meta(len, first_valid, sweep)?;
+
+        let bytes_in = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaFisherError::InvalidInput("size overflow".into()))?;
+        let bytes_periods = combos
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaFisherError::InvalidInput("size overflow".into()))?;
+        let bytes_out = 2usize
+            .checked_mul(combos.len())
+            .and_then(|v| v.checked_mul(len))
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaFisherError::InvalidInput("size overflow".into()))?;
+        let required = bytes_in
+            .checked_add(bytes_periods)
+            .and_then(|v| v.checked_add(bytes_out))
+            .ok_or_else(|| CudaFisherError::InvalidInput("size overflow".into()))?;
+        Self::ensure_will_fit(required, 64 * 1024 * 1024)?;
+
+        let periods_i32: Vec<i32> = combos
+            .iter()
+            .map(|combo| combo.period.unwrap_or(0) as i32)
+            .collect();
+        let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
+        let mut d_hl: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len)? };
+        self.launch_hl2_builder_raw(d_high, d_low, len, &mut d_hl)?;
+
+        let total = combos
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaFisherError::InvalidInput("size overflow".into()))?;
+        let mut d_fish: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total)? };
+        let mut d_sig: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total)? };
+        self.launch_batch_raw(
+            &d_hl,
+            &d_periods,
+            len,
+            combos.len(),
+            first_valid,
+            max_p,
+            &mut d_fish,
+            &mut d_sig,
+        )?;
 
         Ok((
             DeviceFisherPair {

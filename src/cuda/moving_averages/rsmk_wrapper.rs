@@ -136,62 +136,66 @@ impl CudaRsmk {
         Ok(())
     }
 
+    #[inline]
+    fn memset_nan32_async(&self, dst_ptr_raw: u64, n_elems: usize) -> Result<(), CudaRsmkError> {
+        const QNAN_BITS: u32 = 0x7FC0_0000;
+        unsafe {
+            use cust::sys::cuMemsetD32Async;
+            let res = cuMemsetD32Async(
+                dst_ptr_raw as cust::sys::CUdeviceptr,
+                QNAN_BITS,
+                n_elems,
+                self.stream.as_inner(),
+            );
+            if res != cust::sys::CUresult::CUDA_SUCCESS {
+                return Err(CudaRsmkError::Cuda(cust::error::CudaError::UnknownError));
+            }
+        }
+        Ok(())
+    }
+
     fn first_valid(main: &[f32], compare: &[f32]) -> Option<usize> {
         main.iter()
             .zip(compare.iter())
             .position(|(&m, &c)| m.is_finite() && c.is_finite() && c != 0.0)
     }
 
-    pub fn rsmk_batch_dev(
-        &self,
-        main_f32: &[f32],
-        compare_f32: &[f32],
-        sweep: &RsmkBatchRange,
-    ) -> Result<(DeviceArrayF32Pair, Vec<RsmkParams>), CudaRsmkError> {
-        if main_f32.len() != compare_f32.len() {
-            return Err(CudaRsmkError::InvalidInput("length mismatch".into()));
+    fn axis(a: (usize, usize, usize)) -> Vec<usize> {
+        let (start, end, step) = a;
+        if step == 0 || start == end {
+            return vec![start];
         }
-        let len = main_f32.len();
-        if len == 0 {
-            return Err(CudaRsmkError::InvalidInput("empty input".into()));
+        let mut vals = Vec::new();
+        if start <= end {
+            let st = step.max(1);
+            for v in (start..=end).step_by(st) {
+                vals.push(v);
+            }
+        } else {
+            let mut cur = start;
+            let s = step.max(1);
+            loop {
+                vals.push(cur);
+                if cur <= end {
+                    break;
+                }
+                if cur < s {
+                    break;
+                }
+                let next = cur - s;
+                if next == cur {
+                    break;
+                }
+                cur = next;
+            }
         }
-        let first_valid = Self::first_valid(main_f32, compare_f32)
-            .ok_or_else(|| CudaRsmkError::InvalidInput("all values NaN or compare==0".into()))?;
+        vals
+    }
 
-        fn axis(a: (usize, usize, usize)) -> Vec<usize> {
-            let (start, end, step) = a;
-            if step == 0 || start == end {
-                return vec![start];
-            }
-            let mut vals = Vec::new();
-            if start <= end {
-                let st = step.max(1);
-                for v in (start..=end).step_by(st) {
-                    vals.push(v);
-                }
-            } else {
-                let mut cur = start;
-                let s = step.max(1);
-                loop {
-                    vals.push(cur);
-                    if cur <= end {
-                        break;
-                    }
-                    if cur < s {
-                        break;
-                    }
-                    let next = cur - s;
-                    if next == cur {
-                        break;
-                    }
-                    cur = next;
-                }
-            }
-            vals
-        }
-        let looks = axis(sweep.lookback);
-        let periods = axis(sweep.period);
-        let sigs = axis(sweep.signal_period);
+    fn expand_batch_combos(sweep: &RsmkBatchRange) -> Result<Vec<RsmkParams>, CudaRsmkError> {
+        let looks = Self::axis(sweep.lookback);
+        let periods = Self::axis(sweep.period);
+        let sigs = Self::axis(sweep.signal_period);
         let mut combos = Vec::with_capacity(looks.len() * periods.len() * sigs.len());
         for &l in &looks {
             for &p in &periods {
@@ -211,7 +215,50 @@ impl CudaRsmk {
                 "no parameter combinations".into(),
             ));
         }
+        Ok(combos)
+    }
 
+    pub fn rsmk_batch_dev(
+        &self,
+        main_f32: &[f32],
+        compare_f32: &[f32],
+        sweep: &RsmkBatchRange,
+    ) -> Result<(DeviceArrayF32Pair, Vec<RsmkParams>), CudaRsmkError> {
+        if main_f32.len() != compare_f32.len() {
+            return Err(CudaRsmkError::InvalidInput("length mismatch".into()));
+        }
+        let len = main_f32.len();
+        if len == 0 {
+            return Err(CudaRsmkError::InvalidInput("empty input".into()));
+        }
+        let first_valid = Self::first_valid(main_f32, compare_f32)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("all values NaN or compare==0".into()))?;
+        let d_main = DeviceBuffer::from_slice(main_f32)?;
+        let d_comp = DeviceBuffer::from_slice(compare_f32)?;
+        let (pair, combos) =
+            self.rsmk_batch_dev_from_device_inputs(&d_main, &d_comp, len, first_valid, sweep)?;
+        self.stream.synchronize()?;
+        Ok((pair, combos))
+    }
+
+    pub fn rsmk_batch_dev_from_device_inputs(
+        &self,
+        d_main: &DeviceBuffer<f32>,
+        d_compare: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &RsmkBatchRange,
+    ) -> Result<(DeviceArrayF32Pair, Vec<RsmkParams>), CudaRsmkError> {
+        if len == 0 {
+            return Err(CudaRsmkError::InvalidInput("empty input".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaRsmkError::InvalidInput(format!(
+                "invalid first_valid {} for length {}",
+                first_valid, len
+            )));
+        }
+        let combos = Self::expand_batch_combos(sweep)?;
         let rows = combos.len();
         let uniq_looks: BTreeSet<usize> = combos.iter().map(|p| p.lookback.unwrap()).collect();
         let el = std::mem::size_of::<f32>();
@@ -235,11 +282,10 @@ impl CudaRsmk {
             .ok_or_else(|| CudaRsmkError::InvalidInput("VRAM size overflow".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        let d_main = DeviceBuffer::from_slice(main_f32)?;
-        let d_comp = DeviceBuffer::from_slice(compare_f32)?;
-
         let mut d_indicator: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows_len) }?;
         let mut d_signal: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows_len) }?;
+        self.memset_nan32_async(d_indicator.as_device_ptr().as_raw() as u64, rows_len)?;
+        self.memset_nan32_async(d_signal.as_device_ptr().as_raw() as u64, rows_len)?;
 
         let mut k_mom: Function = self.module.get_function("rsmk_momentum_f32").map_err(|_| {
             CudaRsmkError::MissingKernelSymbol {
@@ -258,7 +304,7 @@ impl CudaRsmk {
             let mut d_m: DeviceBuffer<f32> = unsafe { DeviceBuffer::<f32>::uninitialized(len) }?;
             unsafe {
                 let mut main_ptr = d_main.as_device_ptr().as_raw();
-                let mut comp_ptr = d_comp.as_device_ptr().as_raw();
+                let mut comp_ptr = d_compare.as_device_ptr().as_raw();
                 let mut lb_i = lb as i32;
                 let mut fv_i = first_valid as i32;
                 let mut len_i = len as i32;
@@ -325,8 +371,6 @@ impl CudaRsmk {
                 )?;
             }
         }
-
-        self.stream.synchronize()?;
 
         Ok((
             DeviceArrayF32Pair {

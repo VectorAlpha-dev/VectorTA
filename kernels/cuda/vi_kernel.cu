@@ -23,6 +23,60 @@
 
 
 
+extern "C" __global__ void vi_build_prefix_f32(
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    const float* __restrict__ close,
+    int series_len,
+    int first_valid,
+    float* __restrict__ out_tr,
+    float* __restrict__ out_vp,
+    float* __restrict__ out_vm
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    if (series_len <= 0 || first_valid < 0 || first_valid >= series_len) {
+        return;
+    }
+
+    for (int i = 0; i < first_valid; ++i) {
+        out_tr[i] = 0.0f;
+        out_vp[i] = 0.0f;
+        out_vm[i] = 0.0f;
+    }
+
+    double acc_tr = (double)(high[first_valid] - low[first_valid]);
+    double acc_vp = 0.0;
+    double acc_vm = 0.0;
+    out_tr[first_valid] = (float)acc_tr;
+    out_vp[first_valid] = 0.0f;
+    out_vm[first_valid] = 0.0f;
+
+    float prev_h = high[first_valid];
+    float prev_l = low[first_valid];
+    float prev_c = close[first_valid];
+    for (int i = first_valid + 1; i < series_len; ++i) {
+        const float hi = high[i];
+        const float lo = low[i];
+        const float hl = hi - lo;
+        const float hc = fabsf(hi - prev_c);
+        const float lc = fabsf(lo - prev_c);
+        const float tr_i = fmaxf(hl, fmaxf(hc, lc));
+        const float vp_i = fabsf(hi - prev_l);
+        const float vm_i = fabsf(lo - prev_h);
+        acc_tr += (double)tr_i;
+        acc_vp += (double)vp_i;
+        acc_vm += (double)vm_i;
+        out_tr[i] = (float)acc_tr;
+        out_vp[i] = (float)acc_vp;
+        out_vm[i] = (float)acc_vm;
+        prev_h = hi;
+        prev_l = lo;
+        prev_c = close[i];
+    }
+}
+
 extern "C" __global__ void vi_batch_f32(
     const float* __restrict__ pfx_tr,
     const float* __restrict__ pfx_vp,

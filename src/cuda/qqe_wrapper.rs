@@ -349,10 +349,47 @@ impl CudaQqe {
             ));
         }
 
+        let d_prices: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(prices_f32, &self.stream) }?;
+        let dev = self.qqe_batch_dev_from_device_prices(&d_prices, len, first_valid, sweep)?;
+        self.stream.synchronize()?;
+        Ok((dev, combos))
+    }
+
+    pub fn qqe_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &QqeBatchRange,
+    ) -> Result<DeviceArrayF32, CudaQqeError> {
+        if d_prices.len() != len || len == 0 {
+            return Err(CudaQqeError::InvalidInput(
+                "device prices must match non-zero series length".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaQqeError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
+        let combos = Self::expand_grid(sweep);
+        if combos.is_empty() {
+            return Err(CudaQqeError::InvalidInput("empty parameter sweep".into()));
+        }
+        let mut worst_needed = 0usize;
+        for c in &combos {
+            let need = c.rsi_period.unwrap() + c.smoothing_factor.unwrap();
+            worst_needed = worst_needed.max(need);
+        }
+        if len - first_valid < worst_needed {
+            return Err(CudaQqeError::InvalidInput(
+                "not enough valid data for warmup".into(),
+            ));
+        }
+
         let rows = combos.len();
-        let bytes_prices = len
-            .checked_mul(4)
-            .ok_or_else(|| CudaQqeError::InvalidInput("size overflow in prices bytes".into()))?;
         let bytes_params = rows
             .checked_mul(12)
             .ok_or_else(|| CudaQqeError::InvalidInput("size overflow in params bytes".into()))?;
@@ -363,14 +400,11 @@ impl CudaQqe {
         let bytes_out = elems_out
             .checked_mul(4)
             .ok_or_else(|| CudaQqeError::InvalidInput("size overflow in output bytes".into()))?;
-        let required = bytes_prices
-            .checked_add(bytes_params)
-            .and_then(|x| x.checked_add(bytes_out))
+        let required = bytes_params
+            .checked_add(bytes_out)
             .ok_or_else(|| CudaQqeError::InvalidInput("size overflow in VRAM estimate".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        let d_prices: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::from_slice_async(prices_f32, &self.stream) }?;
         let rsi_i32: Vec<i32> = combos
             .iter()
             .map(|c| c.rsi_period.unwrap() as i32)
@@ -442,11 +476,90 @@ impl CudaQqe {
             self.maybe_log_batch_debug();
             base += take;
         }
-        self.stream.synchronize()?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: 2 * rows,
+            cols: len,
+        })
+    }
+
+    fn launch_extract_output_rows(
+        &self,
+        packed: &DeviceBuffer<f32>,
+        rows: usize,
+        cols: usize,
+        output_index: usize,
+        out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaQqeError> {
+        let func = self
+            .module
+            .get_function("qqe_extract_output_rows_f32")
+            .map_err(|_| CudaQqeError::MissingKernelSymbol {
+                name: "qqe_extract_output_rows_f32",
+            })?;
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaQqeError::InvalidInput("rows*cols overflow".into()))?;
+        let block_x = match self.policy_batch {
+            BatchKernelPolicy::Plain { block_x } => Self::warp_align(block_x),
+            BatchKernelPolicy::Auto => 256,
+        };
+        let grid_x = ((total as u32) + block_x - 1) / block_x;
+        let grid_dims = (grid_x.max(1), 1u32, 1u32);
+        let block_dims = (block_x, 1u32, 1u32);
+        Self::validate_launch(self, grid_dims, block_dims)?;
+        let grid: GridSize = grid_dims.into();
+        let block: BlockSize = block_dims.into();
+
+        unsafe {
+            let mut packed_ptr = packed.as_device_ptr().as_raw();
+            let mut rows_i = rows as i32;
+            let mut cols_i = cols as i32;
+            let mut output_i = output_index as i32;
+            let mut out_ptr = out.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut packed_ptr as *mut _ as *mut c_void,
+                &mut rows_i as *mut _ as *mut c_void,
+                &mut cols_i as *mut _ as *mut c_void,
+                &mut output_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn qqe_batch_output_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        sweep: &QqeBatchRange,
+        output_index: usize,
+    ) -> Result<(DeviceArrayF32, Vec<QqeParams>), CudaQqeError> {
+        if output_index > 1 {
+            return Err(CudaQqeError::InvalidInput(
+                "output_index must be 0 (fast) or 1 (slow)".into(),
+            ));
+        }
+
+        let combos = Self::expand_grid(sweep);
+        if combos.is_empty() {
+            return Err(CudaQqeError::InvalidInput("empty parameter sweep".into()));
+        }
+        let packed = self.qqe_batch_dev_from_device_prices(d_prices, len, first_valid, sweep)?;
+        let rows = combos.len();
+        let elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaQqeError::InvalidInput("rows*cols overflow".into()))?;
+        let mut out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
+        self.launch_extract_output_rows(&packed.buf, rows, len, output_index, &mut out)?;
+
         Ok((
             DeviceArrayF32 {
-                buf: d_out,
-                rows: 2 * rows,
+                buf: out,
+                rows,
                 cols: len,
             },
             combos,

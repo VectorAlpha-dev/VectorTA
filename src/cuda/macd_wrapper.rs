@@ -283,6 +283,62 @@ impl CudaMacd {
         Ok((outputs, combos))
     }
 
+    pub fn macd_batch_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        fasts: &[i32],
+        slows: &[i32],
+        signals: &[i32],
+        d_macd: &mut DeviceBuffer<f32>,
+        d_sig: &mut DeviceBuffer<f32>,
+        d_hist: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaMacdError> {
+        if len == 0 {
+            return Err(CudaMacdError::InvalidInput("empty input".into()));
+        }
+        if d_prices.len() != len {
+            return Err(CudaMacdError::InvalidInput(
+                "device price buffer length mismatch".into(),
+            ));
+        }
+        if fasts.is_empty() || slows.is_empty() || signals.is_empty() {
+            return Err(CudaMacdError::InvalidInput("empty parameter sweep".into()));
+        }
+        if fasts.len() != slows.len() || fasts.len() != signals.len() {
+            return Err(CudaMacdError::InvalidInput(
+                "parameter array length mismatch".into(),
+            ));
+        }
+        let rows = fasts.len();
+        let expected = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaMacdError::InvalidInput("rows*len overflow".into()))?;
+        if d_macd.len() != expected || d_sig.len() != expected || d_hist.len() != expected {
+            return Err(CudaMacdError::InvalidInput(
+                "output buffer length mismatch".into(),
+            ));
+        }
+        let d_f = DeviceBuffer::from_slice(fasts)?;
+        let d_s = DeviceBuffer::from_slice(slows)?;
+        let d_g = DeviceBuffer::from_slice(signals)?;
+        self.launch_batch_kernel(
+            d_prices,
+            &d_f,
+            &d_s,
+            &d_g,
+            len,
+            first_valid,
+            rows,
+            d_macd,
+            d_sig,
+            d_hist,
+        )?;
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn launch_batch_kernel(
         &self,

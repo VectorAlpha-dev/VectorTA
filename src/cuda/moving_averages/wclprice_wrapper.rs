@@ -390,6 +390,37 @@ impl CudaWclprice {
         })
     }
 
+    pub fn wclprice_batch_device(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaWclpriceError> {
+        if series_len == 0 {
+            return Err(CudaWclpriceError::InvalidInput("empty OHLC data".into()));
+        }
+        if d_high.len() != series_len || d_low.len() != series_len || d_close.len() != series_len {
+            return Err(CudaWclpriceError::InvalidInput(
+                "device OHLC length mismatch".into(),
+            ));
+        }
+        if first_valid >= series_len {
+            return Err(CudaWclpriceError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+        if d_out.len() != series_len {
+            return Err(CudaWclpriceError::InvalidInput(
+                "output buffer length mismatch".into(),
+            ));
+        }
+
+        self.launch_batch_kernel(d_high, d_low, d_close, series_len, first_valid, d_out)
+    }
+
     fn prepare_many_series_inputs(
         high_tm: &[f32],
         low_tm: &[f32],

@@ -38,6 +38,33 @@ static __device__ __forceinline__ void ema_kahan_step(const float alpha,
 }
 
 
+extern "C" __global__ void dti_build_x_ax_f32(
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    int series_len,
+    int start,
+    float* __restrict__ x,
+    float* __restrict__ ax
+){
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= series_len) return;
+
+    if (idx < start || idx == 0) {
+        x[idx] = 0.0f;
+        ax[idx] = 0.0f;
+        return;
+    }
+
+    const float dh = high[idx] - high[idx - 1];
+    const float dl = low[idx] - low[idx - 1];
+    const float x_hmu = fmaxf(dh, 0.0f);
+    const float x_lmd = fmaxf(-dl, 0.0f);
+    const float v = x_hmu - x_lmd;
+    x[idx] = v;
+    ax[idx] = fabsf(v);
+}
+
+
 
 extern "C" __global__ void dti_batch_f32(
     const float* __restrict__ x,
