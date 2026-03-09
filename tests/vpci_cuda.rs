@@ -8,9 +8,9 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::CudaRuntime;
-#[cfg(feature = "cuda")]
 use vector_ta::cuda::vpci_wrapper::CudaVpci;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {

@@ -590,9 +590,9 @@ impl CudaLpc {
         let param_bytes = rows
             .checked_mul(
                 std::mem::size_of::<i32>()
-                    + 2usize
-                        .checked_mul(item_f32)
-                        .ok_or_else(|| CudaLpcError::InvalidInput("params bytes overflow".into()))?,
+                    + 2usize.checked_mul(item_f32).ok_or_else(|| {
+                        CudaLpcError::InvalidInput("params bytes overflow".into())
+                    })?,
             )
             .ok_or_else(|| CudaLpcError::InvalidInput("params bytes overflow".into()))?;
         total = total
@@ -624,13 +624,12 @@ impl CudaLpc {
         }
 
         if alpha_lut_len > 0 {
-            total = total
-                .checked_add(
-                    alpha_lut_len.checked_mul(item_f32).ok_or_else(|| {
+            total =
+                total
+                    .checked_add(alpha_lut_len.checked_mul(item_f32).ok_or_else(|| {
                         CudaLpcError::InvalidInput("alpha LUT bytes overflow".into())
-                    })?,
-                )
-                .ok_or_else(|| CudaLpcError::InvalidInput("total bytes overflow".into()))?;
+                    })?)
+                    .ok_or_else(|| CudaLpcError::InvalidInput("total bytes overflow".into()))?;
         }
 
         let out_bytes = rows
@@ -653,11 +652,12 @@ impl CudaLpc {
         len: usize,
         d_tr: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaLpcError> {
-        let func = self.module.get_function("lpc_build_true_range_f32").map_err(|_| {
-            CudaLpcError::MissingKernelSymbol {
+        let func = self
+            .module
+            .get_function("lpc_build_true_range_f32")
+            .map_err(|_| CudaLpcError::MissingKernelSymbol {
                 name: "lpc_build_true_range_f32",
-            }
-        })?;
+            })?;
         let block_x = 256u32;
         let grid_x = ((len as u32) + block_x - 1) / block_x;
 
@@ -753,7 +753,8 @@ impl CudaLpc {
         let d_c = unsafe { DeviceBuffer::from_slice_async(close, &self.stream) }?;
         let d_s = unsafe { DeviceBuffer::from_slice_async(src, &self.stream) }?;
 
-        let out = self.lpc_batch_dev_from_device_inputs(&d_h, &d_l, &d_c, &d_s, len, first, range)?;
+        let out =
+            self.lpc_batch_dev_from_device_inputs(&d_h, &d_l, &d_c, &d_s, len, first, range)?;
         self.stream.synchronize()?;
         Ok(out)
     }

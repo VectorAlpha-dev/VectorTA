@@ -3106,4 +3106,77 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn ttm_squeeze_scalar_batch_matches_single_scalar_on_dispatch_fixture(
+    ) -> Result<(), Box<dyn Error>> {
+        let len = 192usize;
+        let open: Vec<f64> = (0..len)
+            .map(|i| 100.0f64 + (i as f64 * 0.1) + ((i as f64) * 0.03).sin())
+            .collect();
+        let high: Vec<f64> = open
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v + 0.8 + ((i as f64) * 0.02).cos().abs() * 0.3)
+            .collect();
+        let low: Vec<f64> = open
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v - 0.8 - ((i as f64) * 0.02).sin().abs() * 0.3)
+            .collect();
+        let close: Vec<f64> = open
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v + ((i as f64) * 0.05).sin() * 0.4)
+            .collect();
+
+        let params = TtmSqueezeParams {
+            length: Some(20),
+            bb_mult: Some(2.0),
+            kc_mult_high: Some(1.0),
+            kc_mult_mid: Some(1.5),
+            kc_mult_low: Some(2.0),
+        };
+        let single = ttm_squeeze_with_kernel(
+            &TtmSqueezeInput::from_slices(&high, &low, &close, params.clone()),
+            Kernel::Scalar,
+        )?;
+        let batch = ttm_squeeze_batch_with_kernel(
+            &high,
+            &low,
+            &close,
+            &TtmSqueezeBatchRange {
+                length: (20, 20, 0),
+                bb_mult: (2.0, 2.0, 0.0),
+                kc_high: (1.0, 1.0, 0.0),
+                kc_mid: (1.5, 1.5, 0.0),
+                kc_low: (2.0, 2.0, 0.0),
+            },
+            Kernel::ScalarBatch,
+        )?;
+
+        let row = batch
+            .momentum_for(&params)
+            .expect("default batch row should exist");
+        let mut max_diff = 0.0f64;
+        let mut worst = None;
+        for (idx, (&lhs, &rhs)) in single.momentum.iter().zip(row.iter()).enumerate() {
+            if lhs.is_nan() && rhs.is_nan() {
+                continue;
+            }
+            let diff = (lhs - rhs).abs();
+            if diff > max_diff {
+                max_diff = diff;
+                worst = Some((idx, lhs, rhs));
+            }
+        }
+        if let Some((idx, lhs, rhs)) = worst {
+            assert!(
+                max_diff < 1e-6,
+                "worst momentum mismatch at {idx}: lhs={lhs} rhs={rhs} diff={max_diff}"
+            );
+        }
+
+        Ok(())
+    }
 }

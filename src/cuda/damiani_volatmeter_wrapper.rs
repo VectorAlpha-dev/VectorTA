@@ -12,8 +12,8 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
-use crate::indicators::damiani_volatmeter::{DamianiVolatmeterBatchRange, DamianiVolatmeterParams};
 use crate::cuda::DeviceArrayF32;
+use crate::indicators::damiani_volatmeter::{DamianiVolatmeterBatchRange, DamianiVolatmeterParams};
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -852,8 +852,12 @@ impl CudaDamianiVolatmeter {
                 "output_index must be 0 or 1".into(),
             ));
         }
-        let (packed, combos) =
-            self.damiani_volatmeter_batch_dev_from_device_prices(d_prices, series_len, first_valid, sweep)?;
+        let (packed, combos) = self.damiani_volatmeter_batch_dev_from_device_prices(
+            d_prices,
+            series_len,
+            first_valid,
+            sweep,
+        )?;
         let out_len = combos
             .len()
             .checked_mul(series_len)

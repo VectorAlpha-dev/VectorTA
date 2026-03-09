@@ -37,37 +37,41 @@ static __device__ __forceinline__ bool is_finite_f(float x) { return isfinite(x)
 
 
 struct NeumaierSumF {
-    float s, c;
-    __device__ __forceinline__ void reset() { s = 0.f; c = 0.f; }
-    __device__ __forceinline__ void add(float x) {
-        float t = s + x;
-        if (fabsf(s) >= fabsf(x)) c += (s - t) + x;
-        else                      c += (x - t) + s;
+    double s, c;
+    __device__ __forceinline__ void reset() { s = 0.0; c = 0.0; }
+    __device__ __forceinline__ void add(double x) {
+        double t = s + x;
+        if (fabs(s) >= fabs(x)) c += (s - t) + x;
+        else                    c += (x - t) + s;
         s = t;
     }
-    __device__ __forceinline__ float val() const { return s + c; }
+    __device__ __forceinline__ double val() const { return s + c; }
 };
 
 
 struct DequeI {
-    int *buf; int cap; int head; int tail;
-    __device__ __forceinline__ DequeI(int* p, int c): buf(p), cap(c), head(0), tail(0) {}
-    __device__ __forceinline__ bool empty() const { return head == tail; }
-    __device__ __forceinline__ int  size()  const { int d = tail - head; return (d >= 0) ? d : d + cap; }
+    int *buf; int cap; int head; int tail; int len;
+    __device__ __forceinline__ DequeI(int* p, int c): buf(p), cap(c), head(0), tail(0), len(0) {}
+    __device__ __forceinline__ bool empty() const { return len == 0; }
+    __device__ __forceinline__ int  size()  const { return len; }
     __device__ __forceinline__ int  front() const { int i = head; return buf[i]; }
     __device__ __forceinline__ int  back()  const { int i = tail - 1; if (i < 0) i += cap; return buf[i]; }
-    __device__ __forceinline__ void pop_front() { head = (head + 1 == cap) ? 0 : head + 1; }
-    __device__ __forceinline__ void pop_back()  { tail = (tail == 0) ? cap - 1 : tail - 1; }
-    __device__ __forceinline__ void push_back(int v) { buf[tail] = v; tail = (tail + 1 == cap) ? 0 : tail + 1; }
+    __device__ __forceinline__ void pop_front() { head = (head + 1 == cap) ? 0 : head + 1; --len; }
+    __device__ __forceinline__ void pop_back()  { tail = (tail == 0) ? cap - 1 : tail - 1; --len; }
+    __device__ __forceinline__ void push_back(int v) { buf[tail] = v; tail = (tail + 1 == cap) ? 0 : tail + 1; ++len; }
 };
 
 
 static __device__ __forceinline__ float true_range_idx_f32(
-    int i, const float* __restrict__ high, const float* __restrict__ low, const float* __restrict__ close
+    int i,
+    int first_valid,
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    const float* __restrict__ close
 ){
     const float h = high[i];
     const float l = low[i];
-    if (i == 0) return fabsf(h - l);
+    if (i == first_valid) return fabsf(h - l);
     const float pc  = close[i - 1];
     const float tr1 = fabsf(h - l);
     const float tr2 = fabsf(h - pc);
@@ -121,7 +125,7 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
     __shared__ int seed_ok_i;
     if (threadIdx.x == 0) {
         bool seed_ok = true;
-        for (int j = 0; j < L && j < series_len; ++j) {
+        for (int j = first_valid; j < first_valid + L && j < series_len; ++j) {
             if (!is_finite_f(close[j]) || !is_finite_f(high[j]) || !is_finite_f(low[j])) { seed_ok = false; break; }
         }
         seed_ok_i = seed_ok ? 1 : 0;
@@ -141,17 +145,17 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
     if (threadIdx.x != 0) return;
 
 
-    const float n    = (float)L;
-    const float invL = 1.0f / n;
-    const float sx   = 0.5f * n * (n - 1.0f);
-    const float sx2  = (n - 1.0f) * n * (2.0f * n - 1.0f) / 6.0f;
-    const float den  = n * sx2 - sx * sx;
-    const float inv_den = (den != 0.0f) ? (1.0f / den) : 0.0f;
+    const double n    = (double)L;
+    const double invL = 1.0 / n;
+    const double sx   = 0.5 * n * (n - 1.0);
+    const double sx2  = (n - 1.0) * n * (2.0 * n - 1.0) / 6.0;
+    const double den  = n * sx2 - sx * sx;
+    const double inv_den = (den != 0.0) ? (1.0 / den) : 0.0;
 
-    const float bb_sq = bb_mult_arr[combo] * bb_mult_arr[combo];
-    const float kh_sq = kc_high_arr[combo] * kc_high_arr[combo];
-    const float km_sq = kc_mid_arr[combo]  * kc_mid_arr[combo];
-    const float kl_sq = kc_low_arr[combo]  * kc_low_arr[combo];
+    const double bb_sq = (double)bb_mult_arr[combo] * (double)bb_mult_arr[combo];
+    const double kh_sq = (double)kc_high_arr[combo] * (double)kc_high_arr[combo];
+    const double km_sq = (double)kc_mid_arr[combo]  * (double)kc_mid_arr[combo];
+    const double kl_sq = (double)kc_low_arr[combo]  * (double)kc_low_arr[combo];
 
 
     extern __shared__ unsigned char __ttm_smem[];
@@ -170,7 +174,7 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
     NeumaierSumF sumc;  sumc.reset();
     NeumaierSumF sumc2; sumc2.reset();
     NeumaierSumF sumtr; sumtr.reset();
-    float sumxc = 0.0f;
+    double sumxc = 0.0;
 
     int bad_in_window = 0;
     int bad_tr_window = 0;
@@ -186,10 +190,15 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
         if (!fin) ++bad_in_window;
 
         ring_c[k] = c;
-        if (fin) { sumc.add(c); sumc2.add(c * c); sumxc = fmaf((float)k, c, sumxc); }
+        if (fin) {
+            const double cd = (double)c;
+            sumc.add(cd);
+            sumc2.add(cd * cd);
+            sumxc += (double)k * cd;
+        }
 
 
-        const float tr = true_range_idx_f32(idx, high, low, close);
+        const float tr = true_range_idx_f32(idx, first_valid, high, low, close);
         const unsigned char ftr = (unsigned char)is_finite_f(tr);
         v_tr[k] = ftr;
         if (!ftr) ++bad_tr_window;
@@ -208,29 +217,29 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
 
 
     if (bad_in_window == 0 && bad_tr_window == 0) {
-        const float mean = sumc.val() * invL;
-        const float var  = fmaxf(sumc2.val() * invL - mean * mean, 0.0f);
-        const float dkc  = sumtr.val() * invL;
-        const float dkc2 = dkc * dkc;
+        const double mean = sumc.val() * invL;
+        const double var  = fmax(sumc2.val() * invL - mean * mean, 0.0);
+        const double dkc  = sumtr.val() * invL;
+        const double dkc2 = dkc * dkc;
 
 
-        const float bbv = bb_sq * var;
-        const float t_low  = kl_sq * dkc2;
-        const float t_mid  = km_sq * dkc2;
-        const float t_high = kh_sq * dkc2;
+        const double bbv = bb_sq * var;
+        const double t_low  = kl_sq * dkc2;
+        const double t_mid  = km_sq * dkc2;
+        const double t_high = kh_sq * dkc2;
         out_squeeze[base + warm] = (bbv > t_low) ? 0.0f : ((bbv <= t_high) ? 3.0f : ((bbv <= t_mid) ? 2.0f : 1.0f));
 
 
-        const float highest = high[dq_max.front()];
-        const float lowest  = low [dq_min.front()];
-        const float midpoint = 0.5f * (highest + lowest);
-        const float avg = 0.5f * (midpoint + mean);
-        const float S0 = sumc.val() - n * avg;
-        const float S1 = sumxc - avg * sx;
-        const float slope = (den != 0.0f) ? ( (n * S1 - sx * S0) * inv_den ) : 0.0f;
-        const float intercept = (S0 - slope * sx) * (1.0f / n);
-        const float yhat_last = intercept + slope * (n - 1.0f);
-        out_momentum[base + warm] = yhat_last;
+        const double highest = (double)high[dq_max.front()];
+        const double lowest  = (double)low [dq_min.front()];
+        const double midpoint = 0.5 * (highest + lowest);
+        const double avg = 0.5 * (midpoint + mean);
+        const double S0 = sumc.val() - n * avg;
+        const double S1 = sumxc - avg * sx;
+        const double slope = (den != 0.0) ? ((n * S1 - sx * S0) * inv_den) : 0.0;
+        const double intercept = (S0 - slope * sx) / n;
+        const double yhat_last = intercept + slope * (n - 1.0);
+        out_momentum[base + warm] = (float)yhat_last;
     } else {
         out_squeeze[base + warm]  = TTM_QNAN_F;
         out_momentum[base + warm] = TTM_QNAN_F;
@@ -252,7 +261,7 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
         const float c_new = close[idx_new];
         const unsigned char fin_new = (unsigned char)(is_finite_f(h_new) & is_finite_f(l_new) & is_finite_f(c_new));
 
-        const float tr_new = true_range_idx_f32(idx_new, high, low, close);
+        const float tr_new = true_range_idx_f32(idx_new, first_valid, high, low, close);
         const unsigned char ftr_new = (unsigned char)is_finite_f(tr_new);
 
 
@@ -266,15 +275,22 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
         bad_tr_window += (int)!ftr_new - (int)!ftr_old;
 
 
-        const float sumc_before = sumc.val();
-        if (fin_old) { sumc.add(-c_old); sumc2.add(-(c_old * c_old)); }
-        if (fin_new) { sumc.add( c_new); sumc2.add(  c_new * c_new ); }
+        const double sumc_before = sumc.val();
+        if (fin_old) {
+            const double oldd = (double)c_old;
+            sumc.add(-oldd);
+            sumc2.add(-(oldd * oldd));
+        }
+        if (fin_new) {
+            const double newd = (double)c_new;
+            sumc.add(newd);
+            sumc2.add(newd * newd);
+        }
 
-
-        float adj_old = (fin_old ? c_old : 0.0f);
-        float adj_new = (fin_new ? c_new : 0.0f);
-        sumxc = fmaf(-1.0f, (sumc_before - adj_old), sumxc);
-        sumxc = fmaf((float)(L - 1), adj_new,        sumxc);
+        const double adj_old = fin_old ? (double)c_old : 0.0;
+        const double adj_new = fin_new ? (double)c_new : 0.0;
+        sumxc -= (sumc_before - adj_old);
+        sumxc += (double)(L - 1) * adj_new;
 
         if (ftr_old) sumtr.add(-tr_old);
         if (ftr_new) sumtr.add( tr_new);
@@ -291,27 +307,27 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
         dq_min.push_back(idx_new);
 
         if (bad_in_window == 0 && bad_tr_window == 0) {
-            const float mean = sumc.val() * invL;
-            const float var  = fmaxf(sumc2.val() * invL - mean * mean, 0.0f);
-            const float dkc  = sumtr.val() * invL;
-            const float dkc2 = dkc * dkc;
+            const double mean = sumc.val() * invL;
+            const double var  = fmax(sumc2.val() * invL - mean * mean, 0.0);
+            const double dkc  = sumtr.val() * invL;
+            const double dkc2 = dkc * dkc;
 
-            const float bbv = bb_sq * var;
-            const float t_low  = kl_sq * dkc2;
-            const float t_mid  = km_sq * dkc2;
-            const float t_high = kh_sq * dkc2;
+            const double bbv = bb_sq * var;
+            const double t_low  = kl_sq * dkc2;
+            const double t_mid  = km_sq * dkc2;
+            const double t_high = kh_sq * dkc2;
             out_squeeze[base + i] = (bbv > t_low) ? 0.0f : ((bbv <= t_high) ? 3.0f : ((bbv <= t_mid) ? 2.0f : 1.0f));
 
-            const float highest = high[dq_max.front()];
-            const float lowest  = low [dq_min.front()];
-            const float midpoint = 0.5f * (highest + lowest);
-            const float avg = 0.5f * (midpoint + mean);
-            const float S0 = sumc.val() - n * avg;
-            const float S1 = sumxc - avg * sx;
-            const float slope = (den != 0.0f) ? ( (n * S1 - sx * S0) * inv_den ) : 0.0f;
-            const float intercept = (S0 - slope * sx) * (1.0f / n);
-            const float yhat_last = intercept + slope * (n - 1.0f);
-            out_momentum[base + i] = yhat_last;
+            const double highest = (double)high[dq_max.front()];
+            const double lowest  = (double)low [dq_min.front()];
+            const double midpoint = 0.5 * (highest + lowest);
+            const double avg = 0.5 * (midpoint + mean);
+            const double S0 = sumc.val() - n * avg;
+            const double S1 = sumxc - avg * sx;
+            const double slope = (den != 0.0) ? ((n * S1 - sx * S0) * inv_den) : 0.0;
+            const double intercept = (S0 - slope * sx) / n;
+            const double yhat_last = intercept + slope * (n - 1.0);
+            out_momentum[base + i] = (float)yhat_last;
         } else {
             out_squeeze[base + i]  = TTM_QNAN_F;
             out_momentum[base + i] = TTM_QNAN_F;
@@ -374,7 +390,7 @@ extern "C" __global__ void ttm_squeeze_many_series_one_param_f32(
     auto C = [&](int t){ return close_tm[(size_t)t * num_series + s]; };
 
     auto TR = [&](int t){
-        if (t == 0) return fabsf(H(t) - Lw(t));
+        if (t == fv) return fabsf(H(t) - Lw(t));
         const float pc = C(t - 1);
         const float tr1 = fabsf(H(t) - Lw(t));
         const float tr2 = fabsf(H(t) - pc);

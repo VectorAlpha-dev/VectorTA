@@ -349,7 +349,10 @@ fn srsi_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error
         let x = i as f32 * 0.0031;
         price[i] = (x * 0.61).sin() + x.cos() * 0.07 + 0.0003 * i as f32;
     }
-    let first_valid = price.iter().position(|v| v.is_finite()).expect("first valid");
+    let first_valid = price
+        .iter()
+        .position(|v| v.is_finite())
+        .expect("first valid");
     let sweep = SrsiBatchRange {
         rsi_period: (6, 12, 3),
         stoch_period: (5, 11, 3),
@@ -375,10 +378,9 @@ fn srsi_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error
         assert_eq!(legacy_params.d, device_params.d);
         assert_eq!(legacy_params.source, device_params.source);
     }
-    for ((legacy_buf, device_buf), label) in [
-        ((&legacy.k, &device.k), "k"),
-        ((&legacy.d, &device.d), "d"),
-    ] {
+    for ((legacy_buf, device_buf), label) in
+        [((&legacy.k, &device.k), "k"), ((&legacy.d, &device.d), "d")]
+    {
         assert_eq!(legacy_buf.rows, device_buf.rows);
         assert_eq!(legacy_buf.cols, device_buf.cols);
         let mut legacy_host = vec![0f32; legacy_buf.len()];

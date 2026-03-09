@@ -302,8 +302,8 @@ impl CudaAso {
         let d_offsets =
             DeviceBuffer::from_slice(&prepared.level_offsets).map_err(CudaAsoError::Cuda)?;
 
-        let cuda_willr =
-            CudaWillr::new(self.device_id as usize).map_err(|e| CudaAsoError::InvalidInput(e.to_string()))?;
+        let cuda_willr = CudaWillr::new(self.device_id as usize)
+            .map_err(|e| CudaAsoError::InvalidInput(e.to_string()))?;
         let (d_st_max, d_st_min, _d_nan_psum) = cuda_willr
             .build_tables_device_from_inputs(
                 &self.stream,
@@ -756,7 +756,9 @@ fn prepare_device_batch_inputs(
         level_offsets.push(i32::try_from(total).unwrap_or(i32::MAX));
         total = total
             .checked_add(len + 1 - window)
-            .ok_or(CudaAsoError::InvalidInput("sparse table size overflow".into()))?;
+            .ok_or(CudaAsoError::InvalidInput(
+                "sparse table size overflow".into(),
+            ))?;
         window <<= 1;
     }
     level_offsets.push(i32::try_from(total).unwrap_or(i32::MAX));

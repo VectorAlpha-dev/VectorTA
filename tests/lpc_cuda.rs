@@ -229,10 +229,12 @@ fn lpc_cuda_many_series_one_param_matches_cpu_fixed() -> Result<(), Box<dyn std:
 
 #[cfg(feature = "cuda")]
 #[test]
-fn lpc_cuda_borrowed_device_path_matches_legacy_wrapper(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn lpc_cuda_borrowed_device_path_matches_legacy_wrapper() -> Result<(), Box<dyn std::error::Error>>
+{
     if !cuda_available() {
-        eprintln!("[lpc_cuda_borrowed_device_path_matches_legacy_wrapper] skipped - no CUDA device");
+        eprintln!(
+            "[lpc_cuda_borrowed_device_path_matches_legacy_wrapper] skipped - no CUDA device"
+        );
         return Ok(());
     }
 
@@ -275,7 +277,10 @@ fn lpc_cuda_borrowed_device_path_matches_legacy_wrapper(
 
     assert_eq!(legacy_combos.len(), borrowed_combos.len());
     for (legacy, borrowed) in legacy_combos.iter().zip(borrowed_combos.iter()) {
-        assert_eq!(legacy.cutoff_type.as_deref(), borrowed.cutoff_type.as_deref());
+        assert_eq!(
+            legacy.cutoff_type.as_deref(),
+            borrowed.cutoff_type.as_deref()
+        );
         assert_eq!(legacy.fixed_period, borrowed.fixed_period);
         assert_eq!(legacy.max_cycle_limit, borrowed.max_cycle_limit);
         assert_eq!(legacy.cycle_mult, borrowed.cycle_mult);

@@ -16,24 +16,25 @@ use crate::cuda::oscillators::{
 };
 use crate::cuda::pattern_recognition_wrapper::CudaPatternRecognition;
 use crate::cuda::{
-    CudaAdx, CudaAdxr, CudaAlligator, CudaAlma, CudaAroon, CudaAtr, CudaAvsl, CudaBandpass,
-    CudaBbw, CudaBollingerBands, CudaChande, CudaChandelierExit, CudaCksp, CudaCmo, CudaCoppock,
-    CudaCorrelHl, CudaDecOsc, CudaDevStop, CudaDeviation, CudaDeviceCloseVolumeRef,
-    CudaDeviceHighLowRef, CudaDeviceOhlc, CudaDeviceOhlcv, CudaDeviceSliceF32Ref,
-    CudaDeviceSliceI64Ref, CudaDeviceVectorF32, CudaDamianiVolatmeter, CudaDi, CudaDm, CudaDonchian, CudaDti, CudaDvdiqqe,
-    CudaDx, CudaEfi, CudaEmd, CudaEmv, CudaEr, CudaEri, CudaFvgTs, CudaHalftrend, CudaIftRsi,
-    CudaKaufmanstop, CudaKdj, CudaKeltner, CudaKurtosis, CudaKvo, CudaLinearregAngle, CudaLpc,
-    CudaMarketefi, CudaMass, CudaMeanAd, CudaMediumAd, CudaMedprice, CudaMfi, CudaMinmax,
-    CudaModGodMode, CudaMsw, CudaNatr, CudaNetMyrsi, CudaNwe, CudaPercentileNearestRank, CudaPfe,
-    CudaPivot, CudaPpo, CudaQstick, CudaRangeFilter, CudaReverseRsi, CudaRocr, CudaRuntime,
-    CudaRuntimeError, CudaRvi, CudaSafeZoneStop, CudaSar, CudaSqueezeMomentum, CudaStddev,
-    CudaSupertrend, CudaTsi, CudaTtmTrend, CudaUi, CudaVar, CudaVi, CudaVidya,
-    CudaVosc, CudaVoss, CudaVpci, CudaVpt, CudaVwmacd, CudaWad, CudaWclprice, CudaZscore,
-    DeviceArrayF32,
+    CudaAdx, CudaAdxr, CudaAlligator, CudaAlma, CudaAlphaTrend, CudaAroon, CudaAtr, CudaAvsl,
+    CudaBandpass, CudaBbw, CudaBollingerBands, CudaChande, CudaChandelierExit, CudaCksp, CudaCmo,
+    CudaCoppock, CudaCorrelHl, CudaDamianiVolatmeter, CudaDecOsc, CudaDevStop, CudaDeviation,
+    CudaDeviceCloseVolumeRef, CudaDeviceHighLowRef, CudaDeviceOhlc, CudaDeviceOhlcv,
+    CudaDeviceSliceF32Ref, CudaDeviceSliceI64Ref, CudaDeviceVectorF32, CudaDi, CudaDm,
+    CudaDonchian, CudaDti, CudaDvdiqqe, CudaDx, CudaEfi, CudaEmd, CudaEmv, CudaEr, CudaEri,
+    CudaFvgTs, CudaHalftrend, CudaIftRsi, CudaKaufmanstop, CudaKdj, CudaKeltner, CudaKurtosis,
+    CudaKvo, CudaLinearregAngle, CudaLpc, CudaMarketefi, CudaMass, CudaMeanAd, CudaMediumAd,
+    CudaMedprice, CudaMfi, CudaMinmax, CudaModGodMode, CudaMsw, CudaNatr, CudaNetMyrsi, CudaNwe,
+    CudaPercentileNearestRank, CudaPfe, CudaPivot, CudaPpo, CudaPrb, CudaQstick, CudaRangeFilter,
+    CudaReverseRsi, CudaRocr, CudaRuntime, CudaRuntimeError, CudaRvi, CudaSafeZoneStop, CudaSar,
+    CudaSqueezeMomentum, CudaStddev, CudaSupertrend, CudaTsi, CudaTtmSqueeze, CudaTtmTrend, CudaUi,
+    CudaVar, CudaVi, CudaVidya, CudaVosc, CudaVoss, CudaVpci, CudaVpt, CudaVwmacd, CudaWad,
+    CudaWclprice, CudaZscore, DeviceArrayF32,
 };
 use crate::indicators::adx::AdxBatchRange;
 use crate::indicators::adxr::AdxrBatchRange;
 use crate::indicators::alligator::AlligatorBatchRange;
+use crate::indicators::alphatrend::AlphaTrendBatchRange;
 use crate::indicators::ao::AoBatchRange;
 use crate::indicators::aroon::AroonBatchRange;
 use crate::indicators::aroonosc::AroonOscBatchRange;
@@ -51,6 +52,7 @@ use crate::indicators::cksp::CkspBatchRange;
 use crate::indicators::coppock::CoppockBatchRange;
 use crate::indicators::correl_hl::CorrelHlBatchRange;
 use crate::indicators::correlation_cycle::CorrelationCycleBatchRange;
+use crate::indicators::damiani_volatmeter::DamianiVolatmeterBatchRange;
 use crate::indicators::decycler::DecyclerBatchRange;
 use crate::indicators::deviation::DeviationBatchRange;
 use crate::indicators::devstop::DevStopBatchRange;
@@ -61,7 +63,6 @@ use crate::indicators::dpo::DpoBatchRange;
 use crate::indicators::dti::DtiBatchRange;
 use crate::indicators::dvdiqqe::DvdiqqeBatchRange;
 use crate::indicators::dx::DxBatchRange;
-use crate::indicators::damiani_volatmeter::DamianiVolatmeterBatchRange;
 use crate::indicators::emd::EmdBatchRange;
 use crate::indicators::er::ErBatchRange;
 use crate::indicators::fisher::FisherBatchRange;
@@ -124,6 +125,7 @@ use crate::indicators::pfe::PfeBatchRange;
 use crate::indicators::pivot::PivotBatchRange;
 use crate::indicators::pma::PmaBatchRange;
 use crate::indicators::ppo::PpoBatchRange;
+use crate::indicators::prb::PrbBatchRange;
 use crate::indicators::qqe::QqeBatchRange;
 use crate::indicators::qstick::QstickBatchRange;
 use crate::indicators::range_filter::RangeFilterBatchRange;
@@ -143,16 +145,17 @@ use crate::indicators::supertrend::SuperTrendBatchRange;
 use crate::indicators::trix::TrixBatchRange;
 use crate::indicators::tsf::TsfBatchRange;
 use crate::indicators::tsi::TsiBatchRange;
+use crate::indicators::ttm_squeeze::TtmSqueezeBatchRange;
 use crate::indicators::ttm_trend::TtmTrendBatchRange;
 use crate::indicators::ui::UiBatchRange;
 use crate::indicators::ultosc::UltOscBatchRange;
-use crate::indicators::vpci::VpciBatchRange;
 use crate::indicators::var::VarBatchRange;
 use crate::indicators::vi::ViBatchRange;
 use crate::indicators::vidya::VidyaBatchRange;
 use crate::indicators::vlma::VlmaBatchRange;
 use crate::indicators::vosc::VoscBatchRange;
 use crate::indicators::voss::VossBatchRange;
+use crate::indicators::vpci::VpciBatchRange;
 use crate::indicators::vwmacd::VwmacdBatchRange;
 use crate::indicators::willr::WillrBatchRange;
 use crate::indicators::zscore::ZscoreBatchRange;
@@ -550,11 +553,17 @@ fn dispatch_cuda_device_supported(
     if normalized_id.eq_ignore_ascii_case("squeeze_momentum") {
         return compute_squeeze_momentum_cuda_device(req, info);
     }
+    if normalized_id.eq_ignore_ascii_case("ttm_squeeze") {
+        return compute_ttm_squeeze_cuda_device(req, info);
+    }
     if normalized_id.eq_ignore_ascii_case("ttm_trend") {
         return compute_ttm_trend_cuda_device(req, info);
     }
     if normalized_id.eq_ignore_ascii_case("supertrend") {
         return compute_supertrend_cuda_device(req, info);
+    }
+    if normalized_id.eq_ignore_ascii_case("alphatrend") {
+        return compute_alphatrend_cuda_device(req, info);
     }
     if normalized_id.eq_ignore_ascii_case("halftrend") {
         return compute_halftrend_cuda_device(req, info);
@@ -567,6 +576,9 @@ fn dispatch_cuda_device_supported(
     }
     if normalized_id.eq_ignore_ascii_case("lpc") {
         return compute_lpc_cuda_device(req, info);
+    }
+    if normalized_id.eq_ignore_ascii_case("prb") {
+        return compute_prb_cuda_device(req, info);
     }
     if normalized_id.eq_ignore_ascii_case("keltner") {
         return compute_keltner_cuda_device(req, info);
@@ -969,12 +981,15 @@ fn supports_cuda_device_dispatch(indicator_id: &str) -> bool {
             | "qqe"
             | "net_myrsi"
             | "squeeze_momentum"
+            | "ttm_squeeze"
             | "ttm_trend"
             | "supertrend"
+            | "alphatrend"
             | "halftrend"
             | "stochf"
             | "kdj"
             | "lpc"
+            | "prb"
             | "keltner"
             | "stddev"
             | "msw"
@@ -1504,6 +1519,11 @@ fn host_first_valid_for_indicator(
             .expect("emv requires high/low");
         let volume = volume.expect("emv requires volume");
         return first_valid_in_high_low_volume(high, low, volume);
+    }
+    if indicator.eq_ignore_ascii_case("alphatrend") {
+        let (high, low, close) = hlc.expect("alphatrend requires HLC");
+        let volume = volume.expect("alphatrend requires volume");
+        return first_valid_in_ohlcv_values(high, low, close, volume);
     }
     if indicator.eq_ignore_ascii_case("avsl") {
         let (_, low, close) = hlc.expect("avsl requires HLC");
@@ -3063,6 +3083,133 @@ fn compute_ttm_trend_cuda_device(
     finalize_cuda_device_output(output_id, dev, warmup, req.target, device_id)
 }
 
+fn compute_ttm_squeeze_cuda_device(
+    req: IndicatorCudaDeviceRequest<'_>,
+    info: &IndicatorInfo,
+) -> Result<IndicatorCudaOutput, IndicatorDispatchError> {
+    fn resolve_ttm_squeeze_range_param_device(
+        params: &[ParamKV<'_>],
+        primary: &str,
+        alias: &str,
+        default: (f64, f64, f64),
+        indicator: &str,
+    ) -> Result<(f64, f64, f64), IndicatorDispatchError> {
+        let mut out = default;
+        if let Some(v) =
+            get_f64_param(params, primary, indicator)?.or(get_f64_param(params, alias, indicator)?)
+        {
+            out = (v, v, 0.0);
+        }
+
+        let primary_start = format!("{}_start", primary);
+        let alias_start = format!("{}_start", alias);
+        if let Some(v) = get_f64_param(params, primary_start.as_str(), indicator)?
+            .or(get_f64_param(params, alias_start.as_str(), indicator)?)
+        {
+            out.0 = v;
+        }
+
+        let primary_end = format!("{}_end", primary);
+        let alias_end = format!("{}_end", alias);
+        if let Some(v) = get_f64_param(params, primary_end.as_str(), indicator)?.or(get_f64_param(
+            params,
+            alias_end.as_str(),
+            indicator,
+        )?) {
+            out.1 = v;
+        }
+
+        let primary_step = format!("{}_step", primary);
+        let alias_step = format!("{}_step", alias);
+        if let Some(v) = get_f64_param(params, primary_step.as_str(), indicator)?.or(get_f64_param(
+            params,
+            alias_step.as_str(),
+            indicator,
+        )?) {
+            out.2 = v;
+        }
+
+        Ok(out)
+    }
+
+    if !info.capabilities.supports_cuda_batch {
+        return Err(IndicatorDispatchError::UnsupportedCapability {
+            indicator: info.id.to_string(),
+            capability: "cuda_device_batch",
+        });
+    }
+
+    let output_id = resolve_output_id(info, req.output_id)?;
+    let output_index = resolve_output_index(info, output_id).unwrap_or(0);
+    let (high, low, close, device_id) = cuda_device_hlc_from_req(info.id, req.data)?;
+    let device_id = resolve_device_runtime_id(info.id, req.params, device_id)?;
+    let first_valid = resolve_device_first_valid(info.id, req.params)?;
+    let sweep = TtmSqueezeBatchRange {
+        length: resolve_usize_range_param_device(req.params, "length", (20, 20, 0), info.id)?,
+        bb_mult: resolve_f64_range_param_device(req.params, "bb_mult", (2.0, 2.0, 0.0), info.id)?,
+        kc_high: resolve_ttm_squeeze_range_param_device(
+            req.params,
+            "kc_high",
+            "kc_mult_high",
+            (1.0, 1.0, 0.0),
+            info.id,
+        )?,
+        kc_mid: resolve_ttm_squeeze_range_param_device(
+            req.params,
+            "kc_mid",
+            "kc_mult_mid",
+            (1.5, 1.5, 0.0),
+            info.id,
+        )?,
+        kc_low: resolve_ttm_squeeze_range_param_device(
+            req.params,
+            "kc_low",
+            "kc_mult_low",
+            (2.0, 2.0, 0.0),
+            info.id,
+        )?,
+    };
+    let high_buf = unsafe { BorrowedCudaDeviceSeries::from_view(high) };
+    let low_buf = unsafe { BorrowedCudaDeviceSeries::from_view(low) };
+    let close_buf = unsafe { BorrowedCudaDeviceSeries::from_view(close) };
+    let cuda = CudaTtmSqueeze::new(device_id as usize).map_err(|e| {
+        IndicatorDispatchError::KernelUnavailable {
+            details: e.to_string(),
+        }
+    })?;
+    let (momentum, squeeze) = cuda
+        .ttm_squeeze_batch_dev_from_device_inputs(
+            high_buf.as_buffer(),
+            low_buf.as_buffer(),
+            close_buf.as_buffer(),
+            close.len(),
+            first_valid,
+            &sweep,
+        )
+        .map_err(|e| IndicatorDispatchError::ComputeFailed {
+            indicator: info.id.to_string(),
+            details: e.to_string(),
+        })?;
+    if matches!(req.target, CudaOutputTarget::HostF32) {
+        cuda.synchronize()
+            .map_err(|e| IndicatorDispatchError::KernelUnavailable {
+                details: e.to_string(),
+            })?;
+    }
+    let selected = match output_index {
+        0 => momentum,
+        1 => squeeze,
+        _ => {
+            return Err(IndicatorDispatchError::UnknownOutput {
+                indicator: info.id.to_string(),
+                output: output_id.to_string(),
+            });
+        }
+    };
+    let warmup = Some(first_valid + sweep.length.0.min(sweep.length.1).saturating_sub(1));
+    finalize_cuda_device_output(output_id, selected, warmup, req.target, device_id)
+}
+
 fn compute_supertrend_cuda_device(
     req: IndicatorCudaDeviceRequest<'_>,
     info: &IndicatorInfo,
@@ -3119,6 +3266,88 @@ fn compute_supertrend_cuda_device(
                 output: output_id.to_string(),
             });
         }
+    };
+    let warmup = Some(first_valid + sweep.period.0.min(sweep.period.1).saturating_sub(1));
+    finalize_cuda_device_output(output_id, selected, warmup, req.target, device_id)
+}
+
+fn compute_alphatrend_cuda_device(
+    req: IndicatorCudaDeviceRequest<'_>,
+    info: &IndicatorInfo,
+) -> Result<IndicatorCudaOutput, IndicatorDispatchError> {
+    if !info.capabilities.supports_cuda_batch {
+        return Err(IndicatorDispatchError::UnsupportedCapability {
+            indicator: info.id.to_string(),
+            capability: "cuda_device_batch",
+        });
+    }
+
+    let (output_id, output_index) = match req.output_id.map(|id| id.to_ascii_lowercase()) {
+        None => ("k1", 0usize),
+        Some(id) if id == "k1" || id == "value" => ("k1", 0usize),
+        Some(id) if id == "k2" => ("k2", 1usize),
+        Some(other) => {
+            return Err(IndicatorDispatchError::UnknownOutput {
+                indicator: info.id.to_string(),
+                output: other,
+            });
+        }
+    };
+    let (high, low, close, volume, data_device_id) = match req.data {
+        IndicatorCudaDeviceDataRef::Ohlcv(ohlcv) => (
+            ohlcv.high(),
+            ohlcv.low(),
+            ohlcv.close(),
+            ohlcv.volume(),
+            ohlcv.device_id(),
+        ),
+        _ => {
+            return Err(IndicatorDispatchError::MissingRequiredInput {
+                indicator: info.id.to_string(),
+                input: IndicatorInputKind::Ohlcv,
+            });
+        }
+    };
+    let device_id = resolve_device_runtime_id(info.id, req.params, data_device_id)?;
+    let first_valid = resolve_device_first_valid(info.id, req.params)?;
+    let sweep = AlphaTrendBatchRange {
+        coeff: resolve_f64_range_param_device(req.params, "coeff", (1.0, 1.0, 0.0), info.id)?,
+        period: resolve_usize_range_param_device(req.params, "period", (14, 14, 0), info.id)?,
+        no_volume: get_bool_param(req.params, "no_volume", info.id)?.unwrap_or(false),
+    };
+    let high_buf = unsafe { BorrowedCudaDeviceSeries::from_view(high) };
+    let low_buf = unsafe { BorrowedCudaDeviceSeries::from_view(low) };
+    let close_buf = unsafe { BorrowedCudaDeviceSeries::from_view(close) };
+    let volume_buf = unsafe { BorrowedCudaDeviceSeries::from_view(volume) };
+    let cuda = CudaAlphaTrend::new(device_id as usize).map_err(|e| {
+        IndicatorDispatchError::KernelUnavailable {
+            details: e.to_string(),
+        }
+    })?;
+    let batch = cuda
+        .alphatrend_batch_dev_from_device_inputs(
+            high_buf.as_buffer(),
+            low_buf.as_buffer(),
+            close_buf.as_buffer(),
+            volume_buf.as_buffer(),
+            close.len(),
+            first_valid,
+            &sweep,
+        )
+        .map_err(|e| IndicatorDispatchError::ComputeFailed {
+            indicator: info.id.to_string(),
+            details: e.to_string(),
+        })?;
+    if matches!(req.target, CudaOutputTarget::HostF32) {
+        cuda.synchronize()
+            .map_err(|e| IndicatorDispatchError::KernelUnavailable {
+                details: e.to_string(),
+            })?;
+    }
+    let selected = match output_index {
+        0 => batch.k1,
+        1 => batch.k2,
+        _ => unreachable!(),
     };
     let warmup = Some(first_valid + sweep.period.0.min(sweep.period.1).saturating_sub(1));
     finalize_cuda_device_output(output_id, selected, warmup, req.target, device_id)
@@ -3566,6 +3795,100 @@ fn compute_lpc_cuda_device(
         }
     };
     finalize_cuda_device_output(output_id, owner, Some(first_valid), req.target, device_id)
+}
+
+fn compute_prb_cuda_device(
+    req: IndicatorCudaDeviceRequest<'_>,
+    info: &IndicatorInfo,
+) -> Result<IndicatorCudaOutput, IndicatorDispatchError> {
+    if !info.capabilities.supports_cuda_batch {
+        return Err(IndicatorDispatchError::UnsupportedCapability {
+            indicator: info.id.to_string(),
+            capability: "cuda_device_batch",
+        });
+    }
+
+    let (output_id, output_index) = match req.output_id.map(|id| id.to_ascii_lowercase()) {
+        None => ("values", 0usize),
+        Some(id) if id == "values" || id == "value" => ("values", 0usize),
+        Some(id) if id == "upper_band" || id == "upper" => ("upper_band", 1usize),
+        Some(id) if id == "lower_band" || id == "lower" => ("lower_band", 2usize),
+        Some(other) => {
+            return Err(IndicatorDispatchError::UnknownOutput {
+                indicator: info.id.to_string(),
+                output: other,
+            });
+        }
+    };
+    let prices = cuda_device_prices_from_req(info.id, req.data)?;
+    let device_id = resolve_device_runtime_id(info.id, req.params, prices.device_id())?;
+    let first_valid = resolve_device_first_valid(info.id, req.params)?;
+    let smooth_data = get_bool_param(req.params, "smooth_data", info.id)?.unwrap_or(true);
+    let sweep = PrbBatchRange {
+        smooth_period: resolve_usize_range_param_device(
+            req.params,
+            "smooth_period",
+            (10, 10, 0),
+            info.id,
+        )?,
+        regression_period: resolve_usize_range_param_device(
+            req.params,
+            "regression_period",
+            (100, 100, 0),
+            info.id,
+        )?,
+        polynomial_order: resolve_usize_range_param_device(
+            req.params,
+            "polynomial_order",
+            (2, 2, 0),
+            info.id,
+        )?,
+        regression_offset: resolve_i32_range_param_device(
+            req.params,
+            "regression_offset",
+            (0, 0, 0),
+            info.id,
+        )?,
+    };
+    let prices_buf = unsafe { BorrowedCudaDeviceSeries::from_view(prices) };
+    let cuda = CudaPrb::new(device_id as usize).map_err(|e| {
+        IndicatorDispatchError::KernelUnavailable {
+            details: e.to_string(),
+        }
+    })?;
+    let (main, upper, lower) = cuda
+        .prb_batch_dev_from_device_prices(
+            prices_buf.as_buffer(),
+            prices.len(),
+            first_valid,
+            &sweep,
+            smooth_data,
+        )
+        .map_err(|e| IndicatorDispatchError::ComputeFailed {
+            indicator: info.id.to_string(),
+            details: e.to_string(),
+        })?;
+    if matches!(req.target, CudaOutputTarget::HostF32) {
+        cuda.synchronize()
+            .map_err(|e| IndicatorDispatchError::KernelUnavailable {
+                details: e.to_string(),
+            })?;
+    }
+    let owner = match output_index {
+        0 => main,
+        1 => upper,
+        2 => lower,
+        _ => unreachable!(),
+    };
+    let warmup = Some(
+        first_valid
+            + sweep
+                .regression_period
+                .0
+                .min(sweep.regression_period.1)
+                .saturating_sub(1),
+    );
+    finalize_cuda_device_output(output_id, owner, warmup, req.target, device_id)
 }
 
 fn compute_stddev_cuda_device(
@@ -8847,14 +9170,7 @@ fn compute_vpci_cuda_device(
         1 => pair.b,
         _ => unreachable!(),
     };
-    let warmup = Some(
-        first_valid
-            + sweep
-                .long_range
-                .0
-                .min(sweep.long_range.1)
-                .saturating_sub(1),
-    );
+    let warmup = Some(first_valid + sweep.long_range.0.min(sweep.long_range.1).saturating_sub(1));
     finalize_cuda_device_output(output_id, owner, warmup, req.target, device_id)
 }
 
@@ -13823,6 +14139,31 @@ fn resolve_f64_range_param_device(
     Ok(out)
 }
 
+fn resolve_i32_range_param_device(
+    params: &[ParamKV<'_>],
+    key: &str,
+    default: (i32, i32, i32),
+    indicator: &str,
+) -> Result<(i32, i32, i32), IndicatorDispatchError> {
+    let mut out = default;
+    if let Some(v) = get_i32_param(params, key, indicator)? {
+        out = (v, v, 0);
+    }
+    let k_start = format!("{}_start", key);
+    let k_end = format!("{}_end", key);
+    let k_step = format!("{}_step", key);
+    if let Some(v) = get_i32_param(params, k_start.as_str(), indicator)? {
+        out.0 = v;
+    }
+    if let Some(v) = get_i32_param(params, k_end.as_str(), indicator)? {
+        out.1 = v;
+    }
+    if let Some(v) = get_i32_param(params, k_step.as_str(), indicator)? {
+        out.2 = v;
+    }
+    Ok(out)
+}
+
 fn resolve_named_range(
     indicator: &str,
     params: &[ParamKV<'_>],
@@ -13982,6 +14323,56 @@ fn get_f64_param(
             indicator: indicator.to_string(),
             key: key.to_string(),
             reason: format!("expected numeric value, got enum string '{}'", v),
+        }),
+    }
+}
+
+fn get_i32_param(
+    params: &[ParamKV<'_>],
+    key: &str,
+    indicator: &str,
+) -> Result<Option<i32>, IndicatorDispatchError> {
+    let item = params.iter().find(|kv| kv.key.eq_ignore_ascii_case(key));
+    let Some(item) = item else {
+        return Ok(None);
+    };
+    match item.value {
+        ParamValue::Int(value) => {
+            if value < i32::MIN as i64 || value > i32::MAX as i64 {
+                return Err(IndicatorDispatchError::InvalidParam {
+                    indicator: indicator.to_string(),
+                    key: key.to_string(),
+                    reason: "integer out of i32 range".to_string(),
+                });
+            }
+            Ok(Some(value as i32))
+        }
+        ParamValue::Float(value) => {
+            if !value.is_finite() {
+                return Err(IndicatorDispatchError::InvalidParam {
+                    indicator: indicator.to_string(),
+                    key: key.to_string(),
+                    reason: format!("expected finite number, got {}", value),
+                });
+            }
+            let rounded = value.round();
+            if (value - rounded).abs() > 1e-9
+                || rounded < i32::MIN as f64
+                || rounded > i32::MAX as f64
+            {
+                return Err(IndicatorDispatchError::InvalidParam {
+                    indicator: indicator.to_string(),
+                    key: key.to_string(),
+                    reason: format!("expected i32-compatible whole number, got {}", value),
+                });
+            }
+            Ok(Some(rounded as i32))
+        }
+        ParamValue::Bool(value) => Ok(Some(if value { 1 } else { 0 })),
+        ParamValue::EnumString(value) => Err(IndicatorDispatchError::InvalidParam {
+            indicator: indicator.to_string(),
+            key: key.to_string(),
+            reason: format!("expected integer value, got enum string '{}'", value),
         }),
     }
 }
@@ -14352,31 +14743,6 @@ mod tests {
                 assert_eq!(id, "does_not_exist");
             }
             other => panic!("expected UnknownIndicator, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn device_path_reports_unmigrated_capability() {
-        let req = IndicatorCudaDeviceRequest {
-            indicator_id: "prb",
-            output_id: None,
-            data: IndicatorCudaDeviceDataRef::Slice {
-                values: dummy_device_slice(128),
-            },
-            params: &[],
-            kernel: Kernel::Auto,
-            target: CudaOutputTarget::DeviceF32,
-        };
-        let err = compute_cuda_device(req).unwrap_err();
-        match err {
-            IndicatorDispatchError::UnsupportedCapability {
-                indicator,
-                capability,
-            } => {
-                assert_eq!(indicator, "prb");
-                assert_eq!(capability, "cuda_device_batch");
-            }
-            other => panic!("expected UnsupportedCapability, got {other:?}"),
         }
     }
 
@@ -15621,12 +15987,20 @@ mod tests {
                 "squeeze_momentum_batch_dev_from_device_inputs",
             ),
             (
+                "src/cuda/ttm_squeeze_wrapper.rs",
+                "ttm_squeeze_batch_dev_from_device_inputs",
+            ),
+            (
                 "src/cuda/ttm_trend_wrapper.rs",
                 "ttm_trend_batch_dev_from_device_inputs",
             ),
             (
                 "src/cuda/supertrend_wrapper.rs",
                 "supertrend_batch_dev_from_device_inputs",
+            ),
+            (
+                "src/cuda/alphatrend_wrapper.rs",
+                "alphatrend_batch_dev_from_device_inputs",
             ),
             (
                 "src/cuda/halftrend_wrapper.rs",
@@ -15643,6 +16017,10 @@ mod tests {
             (
                 "src/cuda/lpc_wrapper.rs",
                 "lpc_batch_dev_from_device_inputs",
+            ),
+            (
+                "src/cuda/prb_wrapper.rs",
+                "prb_batch_dev_from_device_prices",
             ),
             (
                 "src/cuda/keltner_wrapper.rs",
@@ -16097,12 +16475,20 @@ mod tests {
                 "squeeze_momentum_batch_dev_from_device_inputs",
             ),
             (
+                "src/cuda/ttm_squeeze_wrapper.rs",
+                "ttm_squeeze_batch_dev_from_device_inputs",
+            ),
+            (
                 "src/cuda/ttm_trend_wrapper.rs",
                 "ttm_trend_batch_dev_from_device_inputs",
             ),
             (
                 "src/cuda/supertrend_wrapper.rs",
                 "supertrend_batch_dev_from_device_inputs",
+            ),
+            (
+                "src/cuda/alphatrend_wrapper.rs",
+                "alphatrend_batch_dev_from_device_inputs",
             ),
             (
                 "src/cuda/halftrend_wrapper.rs",
@@ -16119,6 +16505,10 @@ mod tests {
             (
                 "src/cuda/lpc_wrapper.rs",
                 "lpc_batch_dev_from_device_inputs",
+            ),
+            (
+                "src/cuda/prb_wrapper.rs",
+                "prb_batch_dev_from_device_prices",
             ),
             (
                 "src/cuda/keltner_wrapper.rs",
@@ -19861,6 +20251,178 @@ mod tests {
     }
 
     #[test]
+    fn alphatrend_k1_device_path_matches_cpu_when_gpu_available() {
+        if !crate::cuda::cuda_available() {
+            return;
+        }
+
+        let data = ProbeInputData::new(192);
+        let open_f64 = to_f64(&data.open);
+        let high_f64 = to_f64(&data.high);
+        let low_f64 = to_f64(&data.low);
+        let close_f64 = to_f64(&data.close);
+        let volume_f64 = to_f64(&data.volume);
+        let runtime = CudaRuntime::new(0).expect("runtime");
+        let device_ohlcv = runtime
+            .upload_ohlcv(
+                Some(&data.timestamp),
+                &data.open,
+                &data.high,
+                &data.low,
+                &data.close,
+                &data.volume,
+                Some(&data.close),
+            )
+            .expect("upload ohlcv");
+        let host_params = [
+            ParamKV {
+                key: "coeff",
+                value: ParamValue::Float(1.0),
+            },
+            ParamKV {
+                key: "period",
+                value: ParamValue::Int(14),
+            },
+            ParamKV {
+                key: "no_volume",
+                value: ParamValue::Bool(false),
+            },
+        ];
+        let mut device_params = host_params.to_vec();
+        device_params.push(ParamKV {
+            key: "first_valid",
+            value: ParamValue::Int(0),
+        });
+
+        let cpu_out = compute_cpu(IndicatorComputeRequest {
+            indicator_id: "alphatrend",
+            output_id: Some("k1"),
+            data: IndicatorDataRef::Ohlcv {
+                open: &open_f64,
+                high: &high_f64,
+                low: &low_f64,
+                close: &close_f64,
+                volume: &volume_f64,
+            },
+            params: &host_params,
+            kernel: Kernel::Auto,
+        })
+        .expect("cpu path");
+        let device_out = compute_cuda_device(IndicatorCudaDeviceRequest {
+            indicator_id: "alphatrend",
+            output_id: Some("k1"),
+            data: IndicatorCudaDeviceDataRef::Ohlcv(device_ohlcv.as_view()),
+            params: &device_params,
+            kernel: Kernel::Auto,
+            target: CudaOutputTarget::HostF32,
+        })
+        .expect("device path");
+
+        assert_eq!(cpu_out.rows, device_out.rows);
+        assert_eq!(cpu_out.cols, device_out.cols);
+        let cpu_values = match cpu_out.series {
+            IndicatorSeries::F64(values) => values,
+            other => panic!("expected f64 cpu output, got {other:?}"),
+        };
+        let device_values = match device_out.series {
+            IndicatorCudaSeries::HostF32(values) => values,
+            other => panic!("expected host device output, got {other:?}"),
+        };
+        for (lhs, rhs) in cpu_values.iter().zip(device_values.iter()) {
+            if lhs.is_nan() && rhs.is_nan() {
+                continue;
+            }
+            assert!((*lhs as f32 - *rhs).abs() < 5e-3, "lhs={lhs} rhs={rhs}");
+        }
+    }
+
+    #[test]
+    fn alphatrend_device_path_matches_host_cuda_when_gpu_available() {
+        if !crate::cuda::cuda_available() {
+            return;
+        }
+
+        let data = ProbeInputData::new(192);
+        let runtime = CudaRuntime::new(0).expect("runtime");
+        let device_ohlcv = runtime
+            .upload_ohlcv(
+                Some(&data.timestamp),
+                &data.open,
+                &data.high,
+                &data.low,
+                &data.close,
+                &data.volume,
+                Some(&data.close),
+            )
+            .expect("upload ohlcv");
+        let host_params = [
+            ParamKV {
+                key: "coeff",
+                value: ParamValue::Float(1.0),
+            },
+            ParamKV {
+                key: "period",
+                value: ParamValue::Int(14),
+            },
+            ParamKV {
+                key: "no_volume",
+                value: ParamValue::Bool(false),
+            },
+        ];
+        let mut device_params = host_params.to_vec();
+        device_params.push(ParamKV {
+            key: "first_valid",
+            value: ParamValue::Int(0),
+        });
+
+        for output in [Some("k1"), Some("k2")] {
+            let host_out = compute_cuda(IndicatorCudaRequest {
+                indicator_id: "alphatrend",
+                output_id: output,
+                data: IndicatorCudaDataRef::Ohlcv {
+                    timestamp: Some(&data.timestamp),
+                    open: &data.open,
+                    high: &data.high,
+                    low: &data.low,
+                    close: &data.close,
+                    volume: &data.volume,
+                    source: Some(&data.close),
+                },
+                params: &host_params,
+                kernel: Kernel::Auto,
+                target: CudaOutputTarget::HostF32,
+            })
+            .expect("host path");
+            let device_out = compute_cuda_device(IndicatorCudaDeviceRequest {
+                indicator_id: "alphatrend",
+                output_id: output,
+                data: IndicatorCudaDeviceDataRef::Ohlcv(device_ohlcv.as_view()),
+                params: &device_params,
+                kernel: Kernel::Auto,
+                target: CudaOutputTarget::HostF32,
+            })
+            .expect("device path");
+
+            assert_eq!(host_out.rows, device_out.rows);
+            assert_eq!(host_out.cols, device_out.cols);
+            let host_values = match host_out.series {
+                IndicatorCudaSeries::HostF32(values) => values,
+                other => panic!("expected host output, got {other:?}"),
+            };
+            let device_values = match device_out.series {
+                IndicatorCudaSeries::HostF32(values) => values,
+                other => panic!("expected host output, got {other:?}"),
+            };
+            for (lhs, rhs) in host_values.iter().zip(device_values.iter()) {
+                if lhs.is_nan() && rhs.is_nan() {
+                    continue;
+                }
+                assert!((lhs - rhs).abs() < 5e-4, "lhs={lhs} rhs={rhs}");
+            }
+        }
+    }
+
+    #[test]
     fn halftrend_device_path_matches_cpu_when_gpu_available() {
         let params = [
             ParamKV {
@@ -20127,6 +20689,62 @@ mod tests {
         ];
         for output in [Some("filter"), Some("high_band"), Some("low_band")] {
             assert_ohlc_device_path_matches_host_cuda_with_output("lpc", output, &params);
+        }
+    }
+
+    #[test]
+    fn prb_values_device_path_matches_cpu_when_gpu_available() {
+        let params = [
+            ParamKV {
+                key: "smooth_data",
+                value: ParamValue::Bool(true),
+            },
+            ParamKV {
+                key: "smooth_period",
+                value: ParamValue::Int(10),
+            },
+            ParamKV {
+                key: "regression_period",
+                value: ParamValue::Int(64),
+            },
+            ParamKV {
+                key: "polynomial_order",
+                value: ParamValue::Int(2),
+            },
+            ParamKV {
+                key: "regression_offset",
+                value: ParamValue::Int(0),
+            },
+        ];
+        assert_slice_device_path_matches_cpu_with_output("prb", Some("values"), &params);
+    }
+
+    #[test]
+    fn prb_device_path_matches_host_cuda_when_gpu_available() {
+        let params = [
+            ParamKV {
+                key: "smooth_data",
+                value: ParamValue::Bool(true),
+            },
+            ParamKV {
+                key: "smooth_period",
+                value: ParamValue::Int(10),
+            },
+            ParamKV {
+                key: "regression_period",
+                value: ParamValue::Int(64),
+            },
+            ParamKV {
+                key: "polynomial_order",
+                value: ParamValue::Int(2),
+            },
+            ParamKV {
+                key: "regression_offset",
+                value: ParamValue::Int(0),
+            },
+        ];
+        for output in [Some("values"), Some("upper_band"), Some("lower_band")] {
+            assert_device_path_matches_host_cuda_with_output("prb", output, &params);
         }
     }
 
@@ -21064,6 +21682,219 @@ mod tests {
                 assert!(
                     (*lhs - *rhs).abs() < 2e-3,
                     "{output_id} mismatch at {idx}: lhs={lhs} rhs={rhs}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ttm_squeeze_momentum_device_path_matches_cpu_when_gpu_available() {
+        if !crate::cuda::cuda_available() {
+            return;
+        }
+
+        let (open_f32, high_f32, low_f32, close_f32) = sample_ohlc(192);
+        let high_f64 = to_f64(&high_f32);
+        let low_f64 = to_f64(&low_f32);
+        let close_f64 = to_f64(&close_f32);
+
+        let runtime = CudaRuntime::new(0).expect("runtime");
+        let device_ohlc = runtime
+            .upload_ohlc(&open_f32, &high_f32, &low_f32, &close_f32, None)
+            .expect("upload ohlc");
+
+        let device_params = [
+            ParamKV {
+                key: "length",
+                value: ParamValue::Int(20),
+            },
+            ParamKV {
+                key: "bb_mult",
+                value: ParamValue::Float(2.0),
+            },
+            ParamKV {
+                key: "kc_high",
+                value: ParamValue::Float(1.0),
+            },
+            ParamKV {
+                key: "kc_mid",
+                value: ParamValue::Float(1.5),
+            },
+            ParamKV {
+                key: "kc_low",
+                value: ParamValue::Float(2.0),
+            },
+            ParamKV {
+                key: "first_valid",
+                value: ParamValue::Int(0),
+            },
+        ];
+
+        let cpu_out = crate::indicators::ttm_squeeze::ttm_squeeze_batch_with_kernel(
+            &high_f64,
+            &low_f64,
+            &close_f64,
+            &crate::indicators::ttm_squeeze::TtmSqueezeBatchRange {
+                length: (20, 20, 0),
+                bb_mult: (2.0, 2.0, 0.0),
+                kc_high: (1.0, 1.0, 0.0),
+                kc_mid: (1.5, 1.5, 0.0),
+                kc_low: (2.0, 2.0, 0.0),
+            },
+            Kernel::ScalarBatch,
+        )
+        .expect("cpu path");
+        let device_out = compute_cuda_device(IndicatorCudaDeviceRequest {
+            indicator_id: "ttm_squeeze",
+            output_id: Some("momentum"),
+            data: IndicatorCudaDeviceDataRef::Ohlc(device_ohlc.as_view()),
+            params: &device_params,
+            kernel: Kernel::Auto,
+            target: CudaOutputTarget::HostF32,
+        })
+        .expect("device path");
+
+        assert_eq!(cpu_out.cols, device_out.cols);
+        assert_eq!(cpu_out.rows, 1);
+        let device_values = match device_out.series {
+            IndicatorCudaSeries::HostF32(values) => values,
+            other => panic!("expected host device output, got {other:?}"),
+        };
+        for (idx, (&lhs, &rhs)) in cpu_out
+            .momentum
+            .iter()
+            .take(cpu_out.cols)
+            .zip(device_values.iter())
+            .enumerate()
+        {
+            if lhs.is_nan() && rhs.is_nan() {
+                continue;
+            }
+            assert!(
+                ((lhs as f32) - rhs).abs() < 1e-2,
+                "ttm_squeeze momentum mismatch at {idx}: lhs={} rhs={}",
+                lhs,
+                rhs
+            );
+        }
+    }
+
+    #[test]
+    fn ttm_squeeze_device_path_matches_host_cuda_when_gpu_available() {
+        if !crate::cuda::cuda_available() {
+            return;
+        }
+
+        let len = 8192usize;
+        let first_valid = 2usize;
+        let mut high_f32 = vec![f32::NAN; len];
+        let mut low_f32 = vec![f32::NAN; len];
+        let mut close_f32 = vec![f32::NAN; len];
+        for i in first_valid..len {
+            let x = i as f32;
+            high_f32[i] = 100.0 + x * 0.01 + (x * 0.002).sin();
+            low_f32[i] = high_f32[i] - 1.2 - (x * 0.0011).cos().abs() * 0.2;
+            close_f32[i] = (high_f32[i] + low_f32[i]) * 0.5 + (x * 0.0017).sin() * 0.15;
+        }
+        let open_f32 = close_f32.clone();
+        let runtime = CudaRuntime::new(0).expect("runtime");
+        let device_ohlc = runtime
+            .upload_ohlc(&open_f32, &high_f32, &low_f32, &close_f32, None)
+            .expect("upload ohlc");
+
+        let host_params = [
+            ParamKV {
+                key: "length",
+                value: ParamValue::Int(20),
+            },
+            ParamKV {
+                key: "bb_mult",
+                value: ParamValue::Float(2.0),
+            },
+            ParamKV {
+                key: "kc_high",
+                value: ParamValue::Float(1.0),
+            },
+            ParamKV {
+                key: "kc_mid",
+                value: ParamValue::Float(1.5),
+            },
+            ParamKV {
+                key: "kc_low",
+                value: ParamValue::Float(2.0),
+            },
+        ];
+        let device_params = [
+            ParamKV {
+                key: "length",
+                value: ParamValue::Int(20),
+            },
+            ParamKV {
+                key: "bb_mult",
+                value: ParamValue::Float(2.0),
+            },
+            ParamKV {
+                key: "kc_high",
+                value: ParamValue::Float(1.0),
+            },
+            ParamKV {
+                key: "kc_mid",
+                value: ParamValue::Float(1.5),
+            },
+            ParamKV {
+                key: "kc_low",
+                value: ParamValue::Float(2.0),
+            },
+            ParamKV {
+                key: "first_valid",
+                value: ParamValue::Int(first_valid as i64),
+            },
+        ];
+
+        for output in [Some("momentum"), Some("squeeze")] {
+            let host_out = compute_cuda(IndicatorCudaRequest {
+                indicator_id: "ttm_squeeze",
+                output_id: output,
+                data: IndicatorCudaDataRef::Ohlc {
+                    open: &open_f32,
+                    high: &high_f32,
+                    low: &low_f32,
+                    close: &close_f32,
+                    source: None,
+                },
+                params: &host_params,
+                kernel: Kernel::Auto,
+                target: CudaOutputTarget::HostF32,
+            })
+            .expect("host path");
+            let device_out = compute_cuda_device(IndicatorCudaDeviceRequest {
+                indicator_id: "ttm_squeeze",
+                output_id: output,
+                data: IndicatorCudaDeviceDataRef::Ohlc(device_ohlc.as_view()),
+                params: &device_params,
+                kernel: Kernel::Auto,
+                target: CudaOutputTarget::HostF32,
+            })
+            .expect("device path");
+
+            assert_eq!(host_out.rows, device_out.rows, "{output:?} rows");
+            assert_eq!(host_out.cols, device_out.cols, "{output:?} cols");
+            assert_eq!(host_out.warmup, device_out.warmup, "{output:?} warmup");
+            let host_values = match host_out.series {
+                IndicatorCudaSeries::HostF32(values) => values,
+                other => panic!("expected host output, got {other:?}"),
+            };
+            let device_values = match device_out.series {
+                IndicatorCudaSeries::HostF32(values) => values,
+                other => panic!("expected host output, got {other:?}"),
+            };
+            for (idx, (lhs, rhs)) in host_values.iter().zip(device_values.iter()).enumerate() {
+                if lhs.is_nan() && rhs.is_nan() {
+                    continue;
+                }
+                assert!(
+                    (*lhs - *rhs).abs() < 1e-5,
+                    "{output:?} mismatch at {idx}: lhs={lhs} rhs={rhs}"
                 );
             }
         }

@@ -2,6 +2,7 @@
 
 use crate::cuda::moving_averages::ma_selector::{CudaMaData, CudaMaDeviceDataRef, CudaMaSelector};
 use crate::cuda::moving_averages::DeviceArrayF32;
+use crate::cuda::runtime::CudaSession;
 use crate::cuda::CudaDeviceSliceF32Ref;
 use crate::indicators::stoch::{StochBatchRange, StochParams};
 use cust::context::Context;
@@ -51,7 +52,7 @@ pub struct CudaStoch {
     module: Module,
     sma_module: Module,
     ema_module: Module,
-    stream: Stream,
+    stream: Arc<Stream>,
     context: Arc<Context>,
     device_id: u32,
 }
@@ -89,7 +90,7 @@ impl CudaStoch {
         let ptx_ema: &str = include_str!(concat!(env!("OUT_DIR"), "/ema_kernel.ptx"));
         let ema_module = load(ptx_ema)?;
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
+        let stream = Arc::new(Stream::new(StreamFlags::NON_BLOCKING, None)?);
 
         Ok(Self {
             module,
@@ -98,6 +99,38 @@ impl CudaStoch {
             stream,
             context,
             device_id: device_id as u32,
+        })
+    }
+
+    pub fn from_session(session: Arc<CudaSession>) -> Result<Self, CudaStochError> {
+        let load = |ptx: &'static str| -> Result<Module, CudaStochError> {
+            Module::from_ptx(
+                ptx,
+                &[
+                    ModuleJitOption::DetermineTargetFromContext,
+                    ModuleJitOption::OptLevel(OptLevel::O2),
+                ],
+            )
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))
+            .map_err(CudaStochError::Cuda)
+        };
+
+        let ptx_stoch: &str = include_str!(concat!(env!("OUT_DIR"), "/stoch_kernel.ptx"));
+        let module = load(ptx_stoch)?;
+
+        let ptx_sma: &str = include_str!(concat!(env!("OUT_DIR"), "/sma_kernel.ptx"));
+        let sma_module = load(ptx_sma)?;
+        let ptx_ema: &str = include_str!(concat!(env!("OUT_DIR"), "/ema_kernel.ptx"));
+        let ema_module = load(ptx_ema)?;
+
+        Ok(Self {
+            module,
+            sma_module,
+            ema_module,
+            stream: session.stream_arc(),
+            context: session.context_arc(),
+            device_id: session.device_id(),
         })
     }
 
@@ -142,6 +175,15 @@ impl CudaStoch {
     #[inline]
     pub fn device_id(&self) -> u32 {
         self.device_id
+    }
+
+    #[inline]
+    fn shared_session(&self) -> Arc<CudaSession> {
+        Arc::new(CudaSession::from_parts(
+            self.context.clone(),
+            self.stream.clone(),
+            self.device_id,
+        ))
     }
 
     pub fn stoch_batch_dev(
@@ -728,7 +770,8 @@ impl CudaStoch {
                     }
                     out
                 } else {
-                    let selector = CudaMaSelector::new(self.device_id as usize);
+                    let selector = CudaMaSelector::from_session(self.shared_session());
+                    let device_selector = selector.device_native();
                     let kraw_view = unsafe {
                         CudaDeviceSliceF32Ref::from_raw_parts(
                             d_kraw_ref.as_device_ptr().as_raw(),
@@ -737,7 +780,7 @@ impl CudaStoch {
                         )
                         .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?
                     };
-                    let dev = selector
+                    let dev = device_selector
                         .ma_to_device_ref(
                             &sk_key.ty,
                             CudaMaDeviceDataRef::Slice(kraw_view),
@@ -848,7 +891,8 @@ impl CudaStoch {
                         }
                         out
                     } else {
-                        let selector = CudaMaSelector::new(self.device_id as usize);
+                        let selector = CudaMaSelector::from_session(self.shared_session());
+                        let device_selector = selector.device_native();
                         let slowk_view = unsafe {
                             CudaDeviceSliceF32Ref::from_raw_parts(
                                 slowk_dev_buf.as_device_ptr().as_raw(),
@@ -857,7 +901,7 @@ impl CudaStoch {
                             )
                             .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?
                         };
-                        let dev = selector
+                        let dev = device_selector
                             .ma_to_device_ref(
                                 &sd_key.ty,
                                 CudaMaDeviceDataRef::Slice(slowk_view),
@@ -1056,6 +1100,10 @@ impl CudaStoch {
             .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
             d_k_sm
         } else {
+            // Compatibility-only many-series fallback:
+            // the selector still expects contiguous borrowed device series, so
+            // non-SMA/non-EMA time-major smoothing stages download/reupload
+            // per-series rows instead of pretending to be device-native.
             let selector = CudaMaSelector::new(0);
 
             let mut k_tm_host = vec![0f32; total];
@@ -1115,6 +1163,10 @@ impl CudaStoch {
             .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
             d_d_sm
         } else {
+            // Compatibility-only many-series fallback:
+            // the selector still expects contiguous borrowed device series, so
+            // non-SMA/non-EMA time-major smoothing stages download/reupload
+            // per-series rows instead of pretending to be device-native.
             let selector = CudaMaSelector::new(0);
             let mut k_tm_host = vec![0f32; total];
             k_tm.copy_to(&mut k_tm_host).map_err(CudaStochError::Cuda)?;

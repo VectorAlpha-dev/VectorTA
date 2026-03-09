@@ -373,24 +373,97 @@ impl CudaPrb {
         inv
     }
 
-    pub fn prb_batch_dev(
+    fn launch_ssf_filter_prep(
         &self,
-        data_f32: &[f32],
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        period: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaPrbError> {
+        if d_prices.len() != len || d_out.len() != len {
+            return Err(CudaPrbError::InvalidInput(
+                "device smoothing buffer length mismatch".into(),
+            ));
+        }
+        let func = self
+            .module
+            .get_function("prb_ssf_filter_f32_serial")
+            .map_err(|_| CudaPrbError::MissingKernelSymbol {
+                name: "prb_ssf_filter_f32_serial",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let mut period_i = period as i32;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let mut args: [*mut c_void; 5] = [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut period_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, &mut args)?;
+        }
+        Ok(())
+    }
+
+    fn launch_contig_valid_prep(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        d_out: &mut DeviceBuffer<i32>,
+    ) -> Result<(), CudaPrbError> {
+        if d_prices.len() != len || d_out.len() != len {
+            return Err(CudaPrbError::InvalidInput(
+                "device contig buffer length mismatch".into(),
+            ));
+        }
+        let func = self
+            .module
+            .get_function("prb_contig_valid_f32_serial")
+            .map_err(|_| CudaPrbError::MissingKernelSymbol {
+                name: "prb_contig_valid_f32_serial",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let mut args: [*mut c_void; 3] = [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, &mut args)?;
+        }
+        Ok(())
+    }
+
+    pub fn prb_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
         sweep: &PrbBatchRange,
         smooth_data: bool,
     ) -> Result<(DeviceArrayF32, DeviceArrayF32, DeviceArrayF32), CudaPrbError> {
-        if data_f32.is_empty() {
+        if len == 0 || d_prices.len() != len {
             return Err(CudaPrbError::InvalidInput("empty data".into()));
         }
-        let len = data_f32.len();
-        let first_valid = data_f32
-            .iter()
-            .position(|v| !v.is_nan())
-            .ok_or_else(|| CudaPrbError::InvalidInput("all values are NaN".into()))?;
-        let combos = Self::expand_grid(sweep, smooth_data)?;
+        if first_valid >= len {
+            return Err(CudaPrbError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
 
+        let combos = Self::expand_grid(sweep, smooth_data)?;
         let mut uniq_nk: BTreeSet<(usize, usize)> = BTreeSet::new();
-        let mut uniq_sp: BTreeSet<usize> = BTreeSet::new();
         for c in &combos {
             let n = c.regression_period.unwrap();
             let k = c.polynomial_order.unwrap();
@@ -400,9 +473,6 @@ impl CudaPrb {
                 ));
             }
             uniq_nk.insert((n, k));
-            if smooth_data {
-                uniq_sp.insert(c.smooth_period.unwrap_or(10));
-            }
         }
 
         let mut a_inv_map: BTreeMap<(usize, usize), Vec<f32>> = BTreeMap::new();
@@ -424,19 +494,26 @@ impl CudaPrb {
             .len()
             .checked_mul(len)
             .ok_or_else(|| CudaPrbError::InvalidInput("rows*cols overflow".into()))?;
-        let bytes_inputs = len
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaPrbError::InvalidInput("input bytes overflow".into()))?;
         let bytes_out = 3usize
             .checked_mul(total_elems)
             .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| CudaPrbError::InvalidInput("output bytes overflow".into()))?;
+        let bytes_workspace = len
+            .checked_mul(
+                std::mem::size_of::<i32>()
+                    + if smooth_data {
+                        std::mem::size_of::<f32>()
+                    } else {
+                        0
+                    },
+            )
+            .ok_or_else(|| CudaPrbError::InvalidInput("workspace bytes overflow".into()))?;
         let bytes_params = combos
             .len()
             .checked_mul(3 * std::mem::size_of::<i32>() + 64)
             .ok_or_else(|| CudaPrbError::InvalidInput("params bytes overflow".into()))?;
-        let required = bytes_inputs
-            .checked_add(bytes_out)
+        let required = bytes_out
+            .checked_add(bytes_workspace)
             .and_then(|x| x.checked_add(bytes_params))
             .and_then(|x| x.checked_add(64 * 1024))
             .ok_or_else(|| CudaPrbError::InvalidInput("required bytes overflow".into()))?;
@@ -445,40 +522,22 @@ impl CudaPrb {
         let mut d_main: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
         let mut d_up: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
         let mut d_lo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
-
-        let mut d_src: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
         let mut d_contig: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(len) }?;
+        let mut d_smoothed = if smooth_data {
+            Some(unsafe { DeviceBuffer::<f32>::uninitialized(len) }?)
+        } else {
+            None
+        };
 
-        let mut h_src_keepalive: Vec<LockedBuffer<f32>> = Vec::new();
-        let mut h_contig_keepalive: Vec<LockedBuffer<i32>> = Vec::new();
-
-        let mut keep_periods: Vec<DeviceBuffer<i32>> = Vec::new();
-        let mut keep_orders: Vec<DeviceBuffer<i32>> = Vec::new();
-        let mut keep_offsets: Vec<DeviceBuffer<i32>> = Vec::new();
-        let mut keep_ainv: Vec<DeviceBuffer<f32>> = Vec::new();
-        let mut keep_rowmap: Vec<DeviceBuffer<i32>> = Vec::new();
         for (sp, rows_idx) in groups.iter() {
-            let source: Vec<f32> = if smooth_data {
-                Self::ssf_filter_f32(data_f32, *sp, first_valid)
+            let source_buf: &DeviceBuffer<f32> = if smooth_data {
+                let smoothed = d_smoothed.as_mut().expect("smoothed workspace");
+                self.launch_ssf_filter_prep(d_prices, len, first_valid, *sp, smoothed)?;
+                smoothed
             } else {
-                data_f32.to_vec()
+                d_prices
             };
-            let has_nan_after_first = source[first_valid..].iter().any(|v| v.is_nan());
-            let contig = if smooth_data {
-                Self::contig_valid(&source)
-            } else {
-                Self::contig_valid(data_f32)
-            };
-
-            let h_src = LockedBuffer::from_slice(&source)?;
-            let h_contig = LockedBuffer::from_slice(&contig)?;
-            unsafe {
-                d_src.async_copy_from(h_src.as_slice(), &self.stream)?;
-                d_contig.async_copy_from(h_contig.as_slice(), &self.stream)?;
-            }
-
-            h_src_keepalive.push(h_src);
-            h_contig_keepalive.push(h_contig);
+            self.launch_contig_valid_prep(source_buf, len, &mut d_contig)?;
 
             let mut periods: Vec<i32> = Vec::with_capacity(rows_idx.len());
             let mut orders: Vec<i32> = Vec::with_capacity(rows_idx.len());
@@ -504,57 +563,20 @@ impl CudaPrb {
             let d_offsets = DeviceBuffer::from_slice(&offsets)?;
             let d_ainv = DeviceBuffer::from_slice(&a_invs)?;
             let d_rowmap = DeviceBuffer::from_slice(&row_map)?;
-
-            const PRB_BATCH_CHUNK_LEN: usize = 4096;
-            let use_chunked =
-                matches!(self.policy.batch, BatchKernelPolicy::Auto) && !has_nan_after_first;
-            let (func, block_x, grid_x): (Function, u32, u32) = if use_chunked {
-                let f = self
-                    .module
-                    .get_function("prb_batch_chunked_f32")
-                    .map_err(|_| CudaPrbError::MissingKernelSymbol {
-                        name: "prb_batch_chunked_f32",
-                    })?;
-                let bx = 32u32;
-                let chunks = len.div_ceil(PRB_BATCH_CHUNK_LEN);
-                let gx = chunks.div_ceil(bx as usize) as u32;
-                (f, bx, gx.max(1))
-            } else {
-                if let BatchKernelPolicy::Plain { block_x } = self.policy.batch {
-                    if block_x != 1 {
-                        return Err(CudaPrbError::InvalidPolicy(
-                            "prb_batch_f32 requires block_x=1 (serial row kernel)",
-                        ));
-                    }
+            let func = self.module.get_function("prb_batch_f32").map_err(|_| {
+                CudaPrbError::MissingKernelSymbol {
+                    name: "prb_batch_f32",
                 }
-                let f = self.module.get_function("prb_batch_f32").map_err(|_| {
-                    CudaPrbError::MissingKernelSymbol {
-                        name: "prb_batch_f32",
-                    }
-                })?;
-                (f, 1u32, 1u32)
-            };
-            let block: BlockSize = (block_x, 1, 1).into();
-            let dev = Device::get_device(self.device_id)?;
-            let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
-            if block_x > max_bx {
-                return Err(CudaPrbError::LaunchConfigTooLarge {
-                    gx: grid_x,
-                    gy: 1,
-                    gz: 1,
-                    bx: block_x,
-                    by: 1,
-                    bz: 1,
-                });
-            }
+            })?;
 
             const MAX_GRID_Y: usize = 65_535;
             let mut start = 0usize;
             while start < rows_idx.len() {
                 let chunk = (rows_idx.len() - start).min(MAX_GRID_Y);
-                let grid: GridSize = (grid_x, chunk as u32, 1).into();
+                let grid: GridSize = (1, chunk as u32, 1).into();
+                let block: BlockSize = (1, 1, 1).into();
                 unsafe {
-                    let mut p_src = d_src.as_device_ptr().as_raw();
+                    let mut p_src = source_buf.as_device_ptr().as_raw();
                     let mut len_i = len as i32;
                     let mut first_i = first_valid as i32;
                     let mut p_per = d_periods
@@ -606,17 +628,7 @@ impl CudaPrb {
                 }
                 start += chunk;
             }
-
-            keep_periods.push(d_periods);
-            keep_orders.push(d_orders);
-            keep_offsets.push(d_offsets);
-            keep_ainv.push(d_ainv);
-            keep_rowmap.push(d_rowmap);
         }
-
-        self.stream.synchronize()?;
-        drop(h_src_keepalive);
-        drop(h_contig_keepalive);
 
         Ok((
             DeviceArrayF32 {
@@ -635,6 +647,31 @@ impl CudaPrb {
                 cols: len,
             },
         ))
+    }
+
+    pub fn prb_batch_dev(
+        &self,
+        data_f32: &[f32],
+        sweep: &PrbBatchRange,
+        smooth_data: bool,
+    ) -> Result<(DeviceArrayF32, DeviceArrayF32, DeviceArrayF32), CudaPrbError> {
+        if data_f32.is_empty() {
+            return Err(CudaPrbError::InvalidInput("empty data".into()));
+        }
+        let first_valid = data_f32
+            .iter()
+            .position(|v| !v.is_nan())
+            .ok_or_else(|| CudaPrbError::InvalidInput("all values are NaN".into()))?;
+        let d_prices = DeviceBuffer::from_slice(data_f32)?;
+        let out = self.prb_batch_dev_from_device_prices(
+            &d_prices,
+            data_f32.len(),
+            first_valid,
+            sweep,
+            smooth_data,
+        )?;
+        self.stream.synchronize()?;
+        Ok(out)
     }
 
     pub fn prb_many_series_one_param_time_major_dev(

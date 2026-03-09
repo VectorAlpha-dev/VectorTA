@@ -116,6 +116,7 @@ target-cuda-tests*/
 # Local scratch binaries
 test_nan
 rustc_write_test*
+*AGENTS.md
 
 # Benchmarks
 benches/**/*.json

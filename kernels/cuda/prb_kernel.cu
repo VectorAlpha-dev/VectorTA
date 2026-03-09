@@ -28,6 +28,63 @@ __constant__ float PRB_BINOM_SIGN[8][8] = {
 
 __device__ __forceinline__ float qnan32() { return __int_as_float(0x7fffffff); }
 
+__global__ void prb_ssf_filter_f32_serial(
+    const float* __restrict__ data,
+    const int len,
+    const int first_valid,
+    const int period,
+    float* __restrict__ out)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+
+    const float nan = qnan32();
+    if (!data || !out || len <= 0 || first_valid < 0 || first_valid >= len || period <= 0) {
+        for (int i = 0; i < len; ++i) out[i] = nan;
+        return;
+    }
+
+    for (int i = 0; i < first_valid; ++i) out[i] = nan;
+
+    const float pi = 3.14159265358979323846f;
+    const float omega = 2.0f * pi / (float)period;
+    const float a = expf(-1.4142135623730951f * pi / (float)period);
+    const float b = 2.0f * a * cosf(0.7071067811865476f * omega);
+    const float c3 = -a * a;
+    const float c2 = b;
+    const float c1 = 1.0f - c2 - c3;
+
+    float y1 = nan;
+    float y2 = nan;
+    for (int i = first_valid; i < len; ++i) {
+        const float x = data[i];
+        const float prev1 = isnan(y1) ? x : y1;
+        const float prev2 = isnan(y2) ? prev1 : y2;
+        const float y = c1 * x + c2 * prev1 + c3 * prev2;
+        out[i] = y;
+        y2 = y1;
+        y1 = y;
+    }
+}
+
+__global__ void prb_contig_valid_f32_serial(
+    const float* __restrict__ data,
+    const int len,
+    int* __restrict__ out)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+
+    int count = 0;
+    for (int i = 0; i < len; ++i) {
+        const float x = data[i];
+        if (isnan(x)) {
+            count = 0;
+        } else {
+            count += 1;
+        }
+        out[i] = count;
+    }
+}
+
 __device__ __forceinline__ float horner_eval(const float* coeffs, int m, float x) {
 
     float acc = 0.0f;

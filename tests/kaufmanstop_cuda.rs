@@ -1,6 +1,5 @@
 use vector_ta::indicators::kaufmanstop::{
-    kaufmanstop_batch_with_kernel, KaufmanstopBatchBuilder, KaufmanstopBatchRange,
-    KaufmanstopBuilder, KaufmanstopParams,
+    kaufmanstop_batch_with_kernel, KaufmanstopBatchRange, KaufmanstopBuilder, KaufmanstopParams,
 };
 use vector_ta::utilities::enums::Kernel;
 
@@ -10,6 +9,8 @@ use cust::memory::CopyDestination;
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::CudaKaufmanstop;
+#[cfg(feature = "cuda")]
+use vector_ta::cuda::CudaRuntime;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -154,6 +155,84 @@ fn kaufmanstop_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn st
             approx_eq(cpu_tm[idx], g_tm[idx] as f64, tol),
             "mismatch at {}",
             idx
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn kaufmanstop_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[kaufmanstop_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 4096usize;
+    let mut high = vec![f64::NAN; len];
+    let mut low = vec![f64::NAN; len];
+    for i in 5..len {
+        let x = i as f64;
+        let v = (x * 0.00123).sin() * 0.5 + 0.00017 * x;
+        let r = 0.5 + (x * 0.00037).cos().abs();
+        high[i] = v + r * 0.5;
+        low[i] = v - r * 0.5;
+    }
+    let sweep = KaufmanstopBatchRange {
+        period: (10, 40, 5),
+        mult: (1.5, 2.5, 0.5),
+        direction: ("long".to_string(), "short".to_string(), 1.0),
+        ma_type: ("sma".to_string(), "ema".to_string(), 1.0),
+    };
+
+    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let first_valid = high_f32
+        .iter()
+        .zip(low_f32.iter())
+        .position(|(h, l)| h.is_finite() && l.is_finite())
+        .expect("finite input");
+    let runtime = CudaRuntime::new(0).expect("runtime");
+    let d_high = runtime.upload_f32(&high_f32).expect("upload high");
+    let d_low = runtime.upload_f32(&low_f32).expect("upload low");
+    let cuda = CudaKaufmanstop::new(0).expect("CudaKaufmanstop::new");
+
+    let (legacy_dev, legacy_combos) = cuda
+        .kaufmanstop_batch_dev(&high_f32, &low_f32, &sweep)
+        .expect("legacy batch");
+    let (device_dev, device_combos) = cuda
+        .kaufmanstop_batch_dev_from_device_inputs(
+            d_high.buffer(),
+            d_low.buffer(),
+            len,
+            first_valid,
+            &sweep,
+        )
+        .expect("device batch");
+
+    assert_eq!(legacy_combos.len(), device_combos.len());
+    for (legacy_combo, device_combo) in legacy_combos.iter().zip(device_combos.iter()) {
+        assert_eq!(legacy_combo.period, device_combo.period);
+        assert_eq!(legacy_combo.mult, device_combo.mult);
+        assert_eq!(legacy_combo.direction, device_combo.direction);
+        assert_eq!(legacy_combo.ma_type, device_combo.ma_type);
+    }
+    assert_eq!(legacy_dev.rows, device_dev.rows);
+    assert_eq!(legacy_dev.cols, device_dev.cols);
+
+    let mut legacy = vec![0f32; legacy_dev.len()];
+    legacy_dev.buf.copy_to(&mut legacy)?;
+    let mut device = vec![0f32; device_dev.len()];
+    device_dev.buf.copy_to(&mut device)?;
+
+    for (idx, (lhs, rhs)) in legacy.iter().zip(device.iter()).enumerate() {
+        assert!(
+            approx_eq(*lhs as f64, *rhs as f64, 5e-4),
+            "mismatch at {}: legacy={} device={}",
+            idx,
+            lhs,
+            rhs
         );
     }
 

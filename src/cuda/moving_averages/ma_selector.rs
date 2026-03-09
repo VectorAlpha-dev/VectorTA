@@ -3,17 +3,15 @@
 use super::alma_wrapper::DeviceArrayF32;
 use crate::cuda::device_types::ensure_same_device;
 use crate::cuda::moving_averages::*;
+use crate::cuda::runtime::CudaSession;
 use crate::cuda::{CudaDeviceOhlcRef, CudaDeviceOhlcvRef, CudaDeviceSliceF32Ref};
 use crate::utilities::data_loader::{source_type, Candles};
 
 use cust::context::Context;
-use cust::device::Device;
 use cust::memory::DevicePointer;
 use cust::memory::{
     mem_get_info, AsyncCopyDestination, CopyDestination, DeviceBuffer, LockedBuffer,
 };
-use cust::prelude::CudaFlags;
-use cust::stream::{Stream, StreamFlags};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
@@ -218,6 +216,72 @@ fn typed_params_to_maps(
     Ok((numeric, text))
 }
 
+fn build_sweep_periods(
+    start: usize,
+    end: usize,
+    step: usize,
+) -> Result<Vec<usize>, CudaMaSelectorError> {
+    let periods: Vec<usize> = if step == 0 || start == end {
+        vec![start]
+    } else if start < end {
+        let s = step.max(1);
+        let mut v = Vec::new();
+        let mut cur = start;
+        while cur <= end {
+            v.push(cur);
+            match cur.checked_add(s) {
+                Some(next) if next > cur => {
+                    cur = next;
+                    if cur > end {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        v
+    } else {
+        let s = step.max(1);
+        let mut v = Vec::new();
+        let mut cur = start;
+        while cur >= end {
+            v.push(cur);
+            if cur == 0 {
+                break;
+            }
+            let next = cur.saturating_sub(s);
+            if next == cur {
+                break;
+            }
+            cur = next;
+            if cur < end {
+                break;
+            }
+        }
+        v
+    };
+    if periods.is_empty() {
+        Err(CudaMaSelectorError::InvalidRange { start, end, step })
+    } else {
+        Ok(periods)
+    }
+}
+
+fn periods_to_i32(periods: &[usize]) -> Result<Box<[i32]>, CudaMaSelectorError> {
+    periods
+        .iter()
+        .map(|&period| {
+            i32::try_from(period).map_err(|_| {
+                CudaMaSelectorError::InvalidInput(format!(
+                    "period exceeds CUDA i32 range: {}",
+                    period
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Vec::into_boxed_slice)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum CudaMaData<'a> {
     Candles {
@@ -329,6 +393,27 @@ pub enum CudaMaParamValue<'a> {
 pub struct CudaMaParamKV<'a> {
     pub key: &'a str,
     pub value: CudaMaParamValue<'a>,
+}
+
+pub struct CudaMaSweepPlan {
+    device_id: u32,
+    periods: Box<[usize]>,
+    periods_i32: Box<[i32]>,
+    d_periods: DeviceBuffer<i32>,
+}
+
+impl CudaMaSweepPlan {
+    pub fn periods(&self) -> &[usize] {
+        &self.periods
+    }
+
+    pub fn len(&self) -> usize {
+        self.periods.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.periods.is_empty()
+    }
 }
 
 impl<'a> CudaMaData<'a> {
@@ -468,10 +553,13 @@ fn map_device_view_err(err: crate::cuda::CudaDeviceViewError) -> CudaMaSelectorE
 }
 
 pub struct CudaMaSelector {
+    session: Arc<CudaSession>,
     device_id: usize,
 
-    stream: Stream,
+    stream: Arc<cust::stream::Stream>,
     _context: Arc<Context>,
+    vram_ma: RefCell<Option<super::vram_ma::VramMaComputer>>,
+    cached_sweep_periods_i32: RefCell<Option<(Box<[i32]>, DeviceBuffer<i32>)>>,
     sma: RefCell<Option<CudaSma>>,
     ema: RefCell<Option<CudaEma>>,
     dema: RefCell<Option<CudaDema>>,
@@ -479,17 +567,25 @@ pub struct CudaMaSelector {
     zlema: RefCell<Option<CudaZlema>>,
 }
 
+pub struct CudaMaDeviceSelector<'a> {
+    selector: &'a CudaMaSelector,
+}
+
 impl CudaMaSelector {
     pub fn new(device_id: usize) -> Self {
-        cust::init(CudaFlags::empty()).expect("failed to init CUDA");
-        let device = Device::get_device(device_id as u32).expect("failed to get CUDA device");
-        let context = Arc::new(Context::new(device).expect("failed to create CUDA context"));
-        let stream =
-            Stream::new(StreamFlags::NON_BLOCKING, None).expect("failed to create CUDA stream");
+        let session =
+            Arc::new(CudaSession::new(device_id).expect("failed to create shared CUDA session"));
+        Self::from_session(session)
+    }
+
+    pub fn from_session(session: Arc<CudaSession>) -> Self {
         Self {
-            device_id,
-            stream,
-            _context: context,
+            device_id: session.device_id() as usize,
+            stream: session.stream_arc(),
+            _context: session.context_arc(),
+            session,
+            vram_ma: RefCell::new(None),
+            cached_sweep_periods_i32: RefCell::new(None),
             sma: RefCell::new(None),
             ema: RefCell::new(None),
             dema: RefCell::new(None),
@@ -576,6 +672,64 @@ impl CudaMaSelector {
             .as_ref()
             .ok_or_else(|| CudaMaSelectorError::Backend("failed to initialize zlema".into()))?;
         f(cuda)
+    }
+
+    fn with_vram_ma<R>(
+        &self,
+        f: impl FnOnce(&mut super::vram_ma::VramMaComputer) -> Result<R, CudaMaSelectorError>,
+    ) -> Result<R, CudaMaSelectorError> {
+        let mut vram_ma = self.vram_ma.borrow_mut();
+        if vram_ma.is_none() {
+            *vram_ma = Some(super::vram_ma::VramMaComputer::new(self.device_id as u32));
+        }
+        let computer = vram_ma
+            .as_mut()
+            .ok_or_else(|| CudaMaSelectorError::Backend("failed to initialize vram ma".into()))?;
+        f(computer)
+    }
+
+    fn with_cached_sweep_periods_i32<R>(
+        &self,
+        periods_i32: &[i32],
+        f: impl FnOnce(&DeviceBuffer<i32>) -> Result<R, CudaMaSelectorError>,
+    ) -> Result<R, CudaMaSelectorError> {
+        let mut cached = self.cached_sweep_periods_i32.borrow_mut();
+        let needs_refresh = cached
+            .as_ref()
+            .map(|(cached_periods, _)| cached_periods.as_ref() != periods_i32)
+            .unwrap_or(true);
+        if needs_refresh {
+            *cached = Some((
+                periods_i32.to_vec().into_boxed_slice(),
+                DeviceBuffer::from_slice(periods_i32)?,
+            ));
+        }
+        let (_, d_periods) = cached
+            .as_ref()
+            .ok_or_else(|| CudaMaSelectorError::Backend("failed to cache sweep periods".into()))?;
+        f(d_periods)
+    }
+
+    pub fn create_sweep_plan(
+        &self,
+        start: usize,
+        end: usize,
+        step: usize,
+    ) -> Result<CudaMaSweepPlan, CudaMaSelectorError> {
+        let periods = build_sweep_periods(start, end, step)?.into_boxed_slice();
+        let periods_i32 = periods_to_i32(periods.as_ref())?;
+        let d_periods = DeviceBuffer::from_slice(periods_i32.as_ref())?;
+        Ok(CudaMaSweepPlan {
+            device_id: self.device_id as u32,
+            periods,
+            periods_i32,
+            d_periods,
+        })
+    }
+
+    #[inline]
+    pub fn device_native(&self) -> CudaMaDeviceSelector<'_> {
+        CudaMaDeviceSelector { selector: self }
     }
 
     fn ma_to_device_impl(
@@ -2475,34 +2629,31 @@ impl CudaMaSelector {
         params: Option<&HashMap<String, f64>>,
         _text_params: Option<&HashMap<String, String>>,
     ) -> Result<DeviceArrayF32, CudaMaSelectorError> {
-        let periods: Vec<usize> = if step == 0 || start == end {
-            vec![start]
-        } else if start < end {
-            (start..=end).step_by(step.max(1)).collect()
-        } else {
-            let s = step.max(1);
-            let mut v = Vec::new();
-            let mut cur = start;
-            while cur >= end {
-                v.push(cur);
-                if cur == 0 {
-                    break;
-                }
-                let next = cur.saturating_sub(s);
-                if next == cur {
-                    break;
-                }
-                cur = next;
-                if cur < end {
-                    break;
-                }
-            }
-            v
-        };
-        if periods.is_empty() {
-            return Err(CudaMaSelectorError::InvalidRange { start, end, step });
-        }
+        let periods = build_sweep_periods(start, end, step)?;
+        let periods_i32 = periods_to_i32(periods.as_slice())?;
+        self.with_cached_sweep_periods_i32(periods_i32.as_ref(), |d_periods| {
+            self.ma_sweep_periods_to_device_ref_impl(
+                ma_type,
+                data,
+                first_valid,
+                periods.as_slice(),
+                periods_i32.as_ref(),
+                d_periods,
+                params,
+            )
+        })
+    }
 
+    fn ma_sweep_periods_to_device_ref_impl(
+        &self,
+        ma_type: &str,
+        data: CudaMaDeviceDataRef<'_>,
+        first_valid: usize,
+        periods: &[usize],
+        periods_i32: &[i32],
+        d_periods: &DeviceBuffer<i32>,
+        params: Option<&HashMap<String, f64>>,
+    ) -> Result<DeviceArrayF32, CudaMaSelectorError> {
         let series_len = data.prices_len();
         if series_len == 0 {
             return Err(CudaMaSelectorError::InvalidInput(
@@ -2515,7 +2666,7 @@ impl CudaMaSelector {
                 first_valid, series_len
             )));
         }
-        for &period in &periods {
+        for &period in periods {
             if period == 0 || period > series_len {
                 return Err(CudaMaSelectorError::InvalidInput(format!(
                     "invalid period: {} for length {}",
@@ -2540,51 +2691,39 @@ impl CudaMaSelector {
             )));
         }
 
-        let periods_i32: Vec<i32> = periods
-            .iter()
-            .map(|&period| {
-                i32::try_from(period).map_err(|_| {
-                    CudaMaSelectorError::InvalidInput(format!(
-                        "period exceeds CUDA i32 range: {}",
-                        period
-                    ))
-                })
-            })
-            .collect::<Result<_, _>>()?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(periods.len() * series_len) }?;
-        let d_periods = DeviceBuffer::from_slice(periods_i32.as_slice())?;
         let borrowed = unsafe { BorrowedCudaMaInputs::from_data(data)? };
         let inputs = borrowed.as_vram_inputs();
-        let mut computer = super::vram_ma::VramMaComputer::new(device_id);
+        self.with_vram_ma(|computer| {
+            if ma_lc.eq_ignore_ascii_case("sma") {
+                computer
+                    .ensure_sma_prefix_f64(inputs.prices, series_len, first_valid)
+                    .map_err(CudaMaSelectorError::Backend)?;
+            }
+            if ma_lc.eq_ignore_ascii_case("vwma") {
+                let volume = inputs.volume.ok_or_else(|| {
+                    CudaMaSelectorError::Unsupported(
+                        "vwma requires volume input for device-native selector path".into(),
+                    )
+                })?;
+                computer
+                    .ensure_vwma_prefix_pv_vol_f64(inputs.prices, volume, series_len, first_valid)
+                    .map_err(CudaMaSelectorError::Backend)?;
+            }
 
-        if ma_lc.eq_ignore_ascii_case("sma") {
             computer
-                .ensure_sma_prefix_f64(inputs.prices, series_len, first_valid)
-                .map_err(CudaMaSelectorError::Backend)?;
-        }
-        if ma_lc.eq_ignore_ascii_case("vwma") {
-            let volume = inputs.volume.ok_or_else(|| {
-                CudaMaSelectorError::Unsupported(
-                    "vwma requires volume input for device-native selector path".into(),
+                .compute_period_ma_into(
+                    ma_type,
+                    params,
+                    &inputs,
+                    series_len,
+                    first_valid,
+                    periods_i32,
+                    d_periods,
+                    &mut d_out,
                 )
-            })?;
-            computer
-                .ensure_vwma_prefix_pv_vol_f64(inputs.prices, volume, series_len, first_valid)
-                .map_err(CudaMaSelectorError::Backend)?;
-        }
-
-        computer
-            .compute_period_ma_into(
-                ma_type,
-                params,
-                &inputs,
-                series_len,
-                first_valid,
-                periods_i32.as_slice(),
-                &d_periods,
-                &mut d_out,
-            )
-            .map_err(CudaMaSelectorError::Backend)?;
+                .map_err(CudaMaSelectorError::Backend)
+        })?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -2674,6 +2813,59 @@ impl CudaMaSelector {
         )
     }
 
+    pub fn ma_sweep_plan_to_device_ref(
+        &self,
+        ma_type: &str,
+        data: CudaMaDeviceDataRef<'_>,
+        first_valid: usize,
+        plan: &CudaMaSweepPlan,
+    ) -> Result<DeviceArrayF32, CudaMaSelectorError> {
+        self.ma_sweep_plan_to_device_ref_with_params(ma_type, data, first_valid, plan, None)
+    }
+
+    pub fn ma_sweep_plan_to_device_ref_with_params(
+        &self,
+        ma_type: &str,
+        data: CudaMaDeviceDataRef<'_>,
+        first_valid: usize,
+        plan: &CudaMaSweepPlan,
+        params: Option<&HashMap<String, f64>>,
+    ) -> Result<DeviceArrayF32, CudaMaSelectorError> {
+        if plan.device_id != self.device_id as u32 {
+            return Err(CudaMaSelectorError::DeviceMismatch {
+                buf: plan.device_id,
+                current: self.device_id as u32,
+            });
+        }
+        self.ma_sweep_periods_to_device_ref_impl(
+            ma_type,
+            data,
+            first_valid,
+            plan.periods.as_ref(),
+            plan.periods_i32.as_ref(),
+            &plan.d_periods,
+            params,
+        )
+    }
+
+    pub fn ma_sweep_plan_to_device_ref_with_typed_params(
+        &self,
+        ma_type: &str,
+        data: CudaMaDeviceDataRef<'_>,
+        first_valid: usize,
+        plan: &CudaMaSweepPlan,
+        params: &[CudaMaParamKV<'_>],
+    ) -> Result<DeviceArrayF32, CudaMaSelectorError> {
+        let (numeric, _text) = typed_params_to_maps(ma_type, params)?;
+        self.ma_sweep_plan_to_device_ref_with_params(
+            ma_type,
+            data,
+            first_valid,
+            plan,
+            Some(&numeric),
+        )
+    }
+
     pub fn ma_sweep_to_host_f32(
         &self,
         ma_type: &str,
@@ -2750,6 +2942,96 @@ impl CudaMaSelector {
         let (out32, rows, cols) =
             self.ma_sweep_to_host_f32_with_params(ma_type, data, start, end, step, params)?;
         Ok((out32.into_iter().map(|v| v as f64).collect(), rows, cols))
+    }
+}
+
+impl<'a> CudaMaDeviceSelector<'a> {
+    #[inline]
+    pub fn create_sweep_plan(
+        &self,
+        start: usize,
+        end: usize,
+        step: usize,
+    ) -> Result<CudaMaSweepPlan, CudaMaSelectorError> {
+        self.selector.create_sweep_plan(start, end, step)
+    }
+
+    #[inline]
+    pub fn ma_to_device_ref(
+        &self,
+        ma_type: &str,
+        data: CudaMaDeviceDataRef<'_>,
+        first_valid: usize,
+        period: usize,
+    ) -> Result<DeviceArrayF32, CudaMaSelectorError> {
+        self.selector
+            .ma_to_device_ref(ma_type, data, first_valid, period)
+    }
+
+    #[inline]
+    pub fn ma_sweep_to_device_ref(
+        &self,
+        ma_type: &str,
+        data: CudaMaDeviceDataRef<'_>,
+        first_valid: usize,
+        start: usize,
+        end: usize,
+        step: usize,
+    ) -> Result<DeviceArrayF32, CudaMaSelectorError> {
+        self.selector
+            .ma_sweep_to_device_ref(ma_type, data, first_valid, start, end, step)
+    }
+
+    #[inline]
+    pub fn ma_sweep_to_device_ref_with_typed_params(
+        &self,
+        ma_type: &str,
+        data: CudaMaDeviceDataRef<'_>,
+        first_valid: usize,
+        start: usize,
+        end: usize,
+        step: usize,
+        params: &[CudaMaParamKV<'_>],
+    ) -> Result<DeviceArrayF32, CudaMaSelectorError> {
+        self.selector.ma_sweep_to_device_ref_with_typed_params(
+            ma_type,
+            data,
+            first_valid,
+            start,
+            end,
+            step,
+            params,
+        )
+    }
+
+    #[inline]
+    pub fn ma_sweep_plan_to_device_ref(
+        &self,
+        ma_type: &str,
+        data: CudaMaDeviceDataRef<'_>,
+        first_valid: usize,
+        plan: &CudaMaSweepPlan,
+    ) -> Result<DeviceArrayF32, CudaMaSelectorError> {
+        self.selector
+            .ma_sweep_plan_to_device_ref(ma_type, data, first_valid, plan)
+    }
+
+    #[inline]
+    pub fn ma_sweep_plan_to_device_ref_with_typed_params(
+        &self,
+        ma_type: &str,
+        data: CudaMaDeviceDataRef<'_>,
+        first_valid: usize,
+        plan: &CudaMaSweepPlan,
+        params: &[CudaMaParamKV<'_>],
+    ) -> Result<DeviceArrayF32, CudaMaSelectorError> {
+        self.selector.ma_sweep_plan_to_device_ref_with_typed_params(
+            ma_type,
+            data,
+            first_valid,
+            plan,
+            params,
+        )
     }
 }
 
@@ -3057,6 +3339,152 @@ mod tests {
         match res {
             Ok(_) => panic!("expected error result"),
             Err(e) => e.to_string(),
+        }
+    }
+
+    fn repo_source(path: &str) -> String {
+        let full = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+        std::fs::read_to_string(&full)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", full.display(), e))
+    }
+
+    fn fn_body<'a>(source: &'a str, fn_name: &str) -> &'a str {
+        let marker = format!("fn {fn_name}");
+        let start = source
+            .find(&marker)
+            .unwrap_or_else(|| panic!("function {fn_name} not found"));
+        let body_start = source[start..]
+            .find('{')
+            .map(|offset| start + offset)
+            .unwrap_or_else(|| panic!("function {fn_name} has no body"));
+        let mut depth = 0usize;
+        for (offset, ch) in source[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[body_start..=body_start + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("function {fn_name} body did not terminate");
+    }
+
+    fn assert_fn_body_avoids(path: &str, fn_name: &str, needle: &str) {
+        let source = repo_source(path);
+        let body = fn_body(&source, fn_name);
+        assert!(
+            !body.contains(needle),
+            "found `{}` inside {}:{}",
+            needle,
+            path,
+            fn_name
+        );
+    }
+
+    fn assert_fn_body_contains(path: &str, fn_name: &str, needle: &str) {
+        let source = repo_source(path);
+        let body = fn_body(&source, fn_name);
+        assert!(
+            body.contains(needle),
+            "expected `{}` inside {}:{}",
+            needle,
+            path,
+            fn_name
+        );
+    }
+
+    #[test]
+    fn cuda_selector_borrowed_device_ref_path_avoids_host_materialization() {
+        let path = "src/cuda/moving_averages/ma_selector.rs";
+        let fn_name = "ma_sweep_to_device_ref_impl";
+        for needle in [
+            "to_prices_f32",
+            "to_vec()",
+            "copy_to(",
+            "async_copy_to(",
+            "async_copy_from(",
+            "LockedBuffer::from_slice",
+        ] {
+            assert_fn_body_avoids(path, fn_name, needle);
+        }
+    }
+
+    #[test]
+    fn cuda_selector_borrowed_device_ref_path_avoids_rebuilding_vram_ma_per_call() {
+        let path = "src/cuda/moving_averages/ma_selector.rs";
+        let fn_name = "ma_sweep_to_device_ref_impl";
+        assert_fn_body_avoids(path, fn_name, "VramMaComputer::new(");
+    }
+
+    #[test]
+    fn cuda_selector_borrowed_device_ref_path_avoids_direct_period_reupload() {
+        let path = "src/cuda/moving_averages/ma_selector.rs";
+        let fn_name = "ma_sweep_to_device_ref_impl";
+        assert_fn_body_avoids(
+            path,
+            fn_name,
+            "DeviceBuffer::from_slice(periods_i32.as_slice())",
+        );
+    }
+
+    #[test]
+    fn borrowed_device_selector_consumers_avoid_host_shaped_selector_entrypoints() {
+        for (path, fn_name) in [
+            (
+                "src/cuda/eri_wrapper.rs",
+                "eri_batch_dev_from_device_inputs",
+            ),
+            (
+                "src/cuda/kaufmanstop_wrapper.rs",
+                "kaufmanstop_batch_dev_from_device_inputs",
+            ),
+            (
+                "src/cuda/stoch_wrapper.rs",
+                "stoch_batch_dev_from_device_ptrs",
+            ),
+            (
+                "src/cuda/moving_averages/ott_wrapper.rs",
+                "ott_batch_dev_from_device_prices",
+            ),
+            (
+                "src/cuda/moving_averages/mab_wrapper.rs",
+                "mab_batch_dev_from_device_prices",
+            ),
+        ] {
+            assert_fn_body_avoids(path, fn_name, "ma_to_device(");
+            assert_fn_body_avoids(path, fn_name, "ma_sweep_to_device(");
+        }
+    }
+
+    #[test]
+    fn borrowed_device_selector_consumers_use_device_native_selector_surface() {
+        for (path, fn_name) in [
+            (
+                "src/cuda/eri_wrapper.rs",
+                "eri_batch_dev_from_device_inputs",
+            ),
+            (
+                "src/cuda/kaufmanstop_wrapper.rs",
+                "kaufmanstop_batch_dev_from_device_inputs",
+            ),
+            (
+                "src/cuda/moving_averages/ott_wrapper.rs",
+                "ott_batch_dev_from_device_prices",
+            ),
+            (
+                "src/cuda/moving_averages/mab_wrapper.rs",
+                "mab_batch_dev_from_device_prices",
+            ),
+            (
+                "src/cuda/stoch_wrapper.rs",
+                "stoch_batch_dev_from_device_ptrs",
+            ),
+        ] {
+            assert_fn_body_contains(path, fn_name, "device_native()");
         }
     }
 
@@ -4271,5 +4699,178 @@ mod tests {
         assert_eq!(dev.rows, host.rows);
         assert_eq!(dev.cols, host.cols);
         assert_series_eq_f32(&got, &direct, 5e-5);
+    }
+
+    #[test]
+    fn cuda_selector_device_ref_reuses_cached_vram_ma_without_output_drift() {
+        if !crate::cuda::cuda_available() {
+            return;
+        }
+
+        let prices = sample_prices(256);
+        let prices_f32: Vec<f32> = prices.iter().map(|&v| v as f32).collect();
+        let runtime = crate::cuda::CudaRuntime::new(0).unwrap();
+        let d_prices = runtime.upload_f32(&prices_f32).unwrap();
+        let selector = CudaMaSelector::new(0);
+
+        let first_dev = selector
+            .ma_sweep_to_device_ref(
+                "alma",
+                CudaMaDeviceDataRef::Slice(d_prices.as_view()),
+                0,
+                8,
+                14,
+                2,
+            )
+            .unwrap();
+        let mut first_got = vec![0f32; first_dev.rows * first_dev.cols];
+        first_dev.buf.copy_to(&mut first_got).unwrap();
+
+        let second_dev = selector
+            .ma_sweep_to_device_ref(
+                "alma",
+                CudaMaDeviceDataRef::Slice(d_prices.as_view()),
+                0,
+                16,
+                22,
+                2,
+            )
+            .unwrap();
+        let mut second_got = vec![0f32; second_dev.rows * second_dev.cols];
+        second_dev.buf.copy_to(&mut second_got).unwrap();
+
+        let first_host = selector
+            .ma_sweep_to_device("alma", CudaMaData::SliceF32(&prices_f32), 8, 14, 2)
+            .unwrap();
+        let mut first_direct = vec![0f32; first_host.rows * first_host.cols];
+        first_host.buf.copy_to(&mut first_direct).unwrap();
+
+        let second_host = selector
+            .ma_sweep_to_device("alma", CudaMaData::SliceF32(&prices_f32), 16, 22, 2)
+            .unwrap();
+        let mut second_direct = vec![0f32; second_host.rows * second_host.cols];
+        second_host.buf.copy_to(&mut second_direct).unwrap();
+
+        assert_eq!(first_dev.rows, first_host.rows);
+        assert_eq!(first_dev.cols, first_host.cols);
+        assert_series_eq_f32(&first_got, &first_direct, 5e-5);
+
+        assert_eq!(second_dev.rows, second_host.rows);
+        assert_eq!(second_dev.cols, second_host.cols);
+        assert_series_eq_f32(&second_got, &second_direct, 5e-5);
+    }
+
+    #[test]
+    fn cuda_selector_device_ref_reuses_cached_period_buffer_without_output_drift() {
+        if !crate::cuda::cuda_available() {
+            return;
+        }
+
+        let prices = sample_prices(256);
+        let prices_f32: Vec<f32> = prices.iter().map(|&v| v as f32).collect();
+        let runtime = crate::cuda::CudaRuntime::new(0).unwrap();
+        let d_prices = runtime.upload_f32(&prices_f32).unwrap();
+        let selector = CudaMaSelector::new(0);
+
+        let first_dev = selector
+            .ma_sweep_to_device_ref(
+                "alma",
+                CudaMaDeviceDataRef::Slice(d_prices.as_view()),
+                0,
+                8,
+                14,
+                2,
+            )
+            .unwrap();
+        let mut first_got = vec![0f32; first_dev.rows * first_dev.cols];
+        first_dev.buf.copy_to(&mut first_got).unwrap();
+
+        let second_dev = selector
+            .ma_sweep_to_device_ref(
+                "alma",
+                CudaMaDeviceDataRef::Slice(d_prices.as_view()),
+                0,
+                8,
+                14,
+                2,
+            )
+            .unwrap();
+        let mut second_got = vec![0f32; second_dev.rows * second_dev.cols];
+        second_dev.buf.copy_to(&mut second_got).unwrap();
+
+        let host = selector
+            .ma_sweep_to_device("alma", CudaMaData::SliceF32(&prices_f32), 8, 14, 2)
+            .unwrap();
+        let mut direct = vec![0f32; host.rows * host.cols];
+        host.buf.copy_to(&mut direct).unwrap();
+
+        assert_eq!(first_dev.rows, host.rows);
+        assert_eq!(first_dev.cols, host.cols);
+        assert_eq!(second_dev.rows, host.rows);
+        assert_eq!(second_dev.cols, host.cols);
+        assert_series_eq_f32(&first_got, &direct, 5e-5);
+        assert_series_eq_f32(&second_got, &direct, 5e-5);
+    }
+
+    #[test]
+    fn cuda_selector_device_ref_explicit_sweep_plan_reuses_device_periods_without_output_drift() {
+        if !crate::cuda::cuda_available() {
+            return;
+        }
+
+        let prices_a = sample_prices(256);
+        let prices_b: Vec<f64> = sample_prices(256)
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| v + (i as f64 * 0.0005))
+            .collect();
+        let prices_a_f32: Vec<f32> = prices_a.iter().map(|&v| v as f32).collect();
+        let prices_b_f32: Vec<f32> = prices_b.iter().map(|&v| v as f32).collect();
+        let runtime = crate::cuda::CudaRuntime::new(0).unwrap();
+        let d_prices_a = runtime.upload_f32(&prices_a_f32).unwrap();
+        let d_prices_b = runtime.upload_f32(&prices_b_f32).unwrap();
+        let selector = CudaMaSelector::new(0);
+        let plan = selector.create_sweep_plan(8, 14, 2).unwrap();
+
+        let dev_a = selector
+            .ma_sweep_plan_to_device_ref(
+                "alma",
+                CudaMaDeviceDataRef::Slice(d_prices_a.as_view()),
+                0,
+                &plan,
+            )
+            .unwrap();
+        let mut got_a = vec![0f32; dev_a.rows * dev_a.cols];
+        dev_a.buf.copy_to(&mut got_a).unwrap();
+
+        let dev_b = selector
+            .ma_sweep_plan_to_device_ref(
+                "alma",
+                CudaMaDeviceDataRef::Slice(d_prices_b.as_view()),
+                0,
+                &plan,
+            )
+            .unwrap();
+        let mut got_b = vec![0f32; dev_b.rows * dev_b.cols];
+        dev_b.buf.copy_to(&mut got_b).unwrap();
+
+        let host_a = selector
+            .ma_sweep_to_device("alma", CudaMaData::SliceF32(&prices_a_f32), 8, 14, 2)
+            .unwrap();
+        let mut direct_a = vec![0f32; host_a.rows * host_a.cols];
+        host_a.buf.copy_to(&mut direct_a).unwrap();
+
+        let host_b = selector
+            .ma_sweep_to_device("alma", CudaMaData::SliceF32(&prices_b_f32), 8, 14, 2)
+            .unwrap();
+        let mut direct_b = vec![0f32; host_b.rows * host_b.cols];
+        host_b.buf.copy_to(&mut direct_b).unwrap();
+
+        assert_eq!(dev_a.rows, host_a.rows);
+        assert_eq!(dev_a.cols, host_a.cols);
+        assert_eq!(dev_b.rows, host_b.rows);
+        assert_eq!(dev_b.cols, host_b.cols);
+        assert_series_eq_f32(&got_a, &direct_a, 5e-5);
+        assert_series_eq_f32(&got_b, &direct_b, 5e-5);
     }
 }

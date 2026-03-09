@@ -94,7 +94,15 @@ fn ttm_squeeze_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>
         let gm = mo_g[idx] as f64;
         let cs = cpu.squeeze[idx];
         let gs = sq_g[idx] as f64;
-        if !(cm.is_nan() || gm.is_nan()) {
+        assert_eq!(
+            cm.is_nan(),
+            gm.is_nan(),
+            "momentum NaN mismatch at {} (cpu={} gpu={})",
+            idx,
+            cm,
+            gm
+        );
+        if !cm.is_nan() {
             assert!(
                 approx_eq(cm, gm, tol),
                 "momentum mismatch at {} (cpu={} gpu={})",
@@ -103,7 +111,15 @@ fn ttm_squeeze_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>
                 gm
             );
         }
-        if !(cs.is_nan() || gs.is_nan()) {
+        assert_eq!(
+            cs.is_nan(),
+            gs.is_nan(),
+            "squeeze NaN mismatch at {} (cpu={} gpu={})",
+            idx,
+            cs,
+            gs
+        );
+        if !cs.is_nan() {
             assert!(
                 approx_eq(cs, gs, 1e-6),
                 "squeeze mismatch at {} (cpu={} gpu={})",

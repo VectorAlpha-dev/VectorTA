@@ -39,6 +39,42 @@ namespace {
 __device__ inline bool is_finite(float x) { return !isnan(x) && !isinf(x); }
 }
 
+extern "C" __global__ void alphatrend_build_tr_f32(
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    const float* __restrict__ close,
+    int len,
+    int first_valid,
+    float* __restrict__ tr_out)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= len) return;
+    if (i < first_valid) {
+        tr_out[i] = CUDART_NAN_F;
+        return;
+    }
+    if (i == first_valid) {
+        tr_out[i] = high[i] - low[i];
+        return;
+    }
+    const float hl = high[i] - low[i];
+    const float hc = fabsf(high[i] - close[i - 1]);
+    const float lc = fabsf(low[i] - close[i - 1]);
+    tr_out[i] = fmaxf(hl, fmaxf(hc, lc));
+}
+
+extern "C" __global__ void alphatrend_build_hlc3_f32(
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    const float* __restrict__ close,
+    int len,
+    float* __restrict__ hlc3_out)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= len) return;
+    hlc3_out[i] = (high[i] + low[i] + close[i]) * (1.0f / 3.0f);
+}
+
 extern "C" __global__ void alphatrend_batch_f32(
     const float* __restrict__ high,
     const float* __restrict__ low,

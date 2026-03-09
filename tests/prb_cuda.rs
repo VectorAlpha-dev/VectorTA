@@ -172,3 +172,82 @@ fn prb_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     }
     Ok(())
 }
+
+#[cfg(feature = "cuda")]
+#[test]
+fn prb_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[prb_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 2048usize;
+    let mut data = vec![f32::NAN; len];
+    for i in 7..len {
+        let x = i as f32;
+        data[i] = (x * 0.0023).sin() + 0.0004 * x;
+    }
+    data[311] = f32::NAN;
+    data[777] = f32::NAN;
+
+    let sweep = PrbBatchRange {
+        smooth_period: (10, 14, 4),
+        regression_period: (48, 64, 16),
+        polynomial_order: (2, 2, 0),
+        regression_offset: (0, 0, 0),
+    };
+    let first_valid = data.iter().position(|v| !v.is_nan()).expect("first_valid");
+    let cuda = CudaPrb::new(0).expect("CudaPrb::new");
+    let d_prices = cust::memory::DeviceBuffer::from_slice(&data)?;
+
+    let (legacy_main, legacy_up, legacy_lo) = cuda
+        .prb_batch_dev(&data, &sweep, true)
+        .expect("legacy batch");
+    let (device_main, device_up, device_lo) = cuda
+        .prb_batch_dev_from_device_prices(&d_prices, data.len(), first_valid, &sweep, true)
+        .expect("device batch");
+    cuda.synchronize().expect("sync");
+
+    let mut legacy_main_host = vec![0f32; legacy_main.len()];
+    let mut legacy_up_host = vec![0f32; legacy_up.len()];
+    let mut legacy_lo_host = vec![0f32; legacy_lo.len()];
+    let mut device_main_host = vec![0f32; device_main.len()];
+    let mut device_up_host = vec![0f32; device_up.len()];
+    let mut device_lo_host = vec![0f32; device_lo.len()];
+    legacy_main.buf.copy_to(&mut legacy_main_host)?;
+    legacy_up.buf.copy_to(&mut legacy_up_host)?;
+    legacy_lo.buf.copy_to(&mut legacy_lo_host)?;
+    device_main.buf.copy_to(&mut device_main_host)?;
+    device_up.buf.copy_to(&mut device_up_host)?;
+    device_lo.buf.copy_to(&mut device_lo_host)?;
+
+    for (lhs, rhs) in legacy_main_host.iter().zip(device_main_host.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!(
+            (*lhs - *rhs).abs() < 1e-4,
+            "main mismatch lhs={lhs} rhs={rhs}"
+        );
+    }
+    for (lhs, rhs) in legacy_up_host.iter().zip(device_up_host.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!(
+            (*lhs - *rhs).abs() < 1e-4,
+            "upper mismatch lhs={lhs} rhs={rhs}"
+        );
+    }
+    for (lhs, rhs) in legacy_lo_host.iter().zip(device_lo_host.iter()) {
+        if lhs.is_nan() && rhs.is_nan() {
+            continue;
+        }
+        assert!(
+            (*lhs - *rhs).abs() < 1e-4,
+            "lower mismatch lhs={lhs} rhs={rhs}"
+        );
+    }
+
+    Ok(())
+}

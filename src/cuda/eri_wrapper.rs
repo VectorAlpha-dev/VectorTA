@@ -3,6 +3,7 @@
 use crate::cuda::moving_averages::ma_selector::{CudaMaData, CudaMaDeviceDataRef, CudaMaSelector};
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::cuda::moving_averages::{CudaEmaError, CudaSmaError, CudaWmaError, CudaZlemaError};
+use crate::cuda::runtime::CudaSession;
 use crate::cuda::CudaDeviceSliceF32Ref;
 use crate::indicators::eri::{EriBatchRange, EriParams};
 use cust::context::Context;
@@ -90,7 +91,7 @@ pub enum CudaEriError {
 
 pub struct CudaEri {
     module: Module,
-    stream: Stream,
+    stream: Arc<Stream>,
     context: Arc<Context>,
     device_id: u32,
     policy: CudaEriPolicy,
@@ -119,12 +120,40 @@ impl CudaEri {
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
+        let stream = Arc::new(Stream::new(StreamFlags::NON_BLOCKING, None)?);
         Ok(Self {
             module,
             stream,
             context,
             device_id: device_id as u32,
+            policy: CudaEriPolicy::default(),
+            debug_batch_logged: false,
+            debug_many_logged: false,
+        })
+    }
+
+    pub fn from_session(session: Arc<CudaSession>) -> Result<Self, CudaEriError> {
+        let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/eri_kernel.ptx"));
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])?
+                }
+            }
+        };
+        Ok(Self {
+            module,
+            stream: session.stream_arc(),
+            context: session.context_arc(),
+            device_id: session.device_id(),
             policy: CudaEriPolicy::default(),
             debug_batch_logged: false,
             debug_many_logged: false,
@@ -145,6 +174,15 @@ impl CudaEri {
     }
     pub fn device_id(&self) -> u32 {
         self.device_id
+    }
+
+    #[inline]
+    fn shared_session(&self) -> Arc<CudaSession> {
+        Arc::new(CudaSession::from_parts(
+            self.context.clone(),
+            self.stream.clone(),
+            self.device_id,
+        ))
     }
 
     #[inline]
@@ -592,8 +630,9 @@ impl CudaEri {
             return Err(CudaEriError::InvalidInput("not enough valid data".into()));
         }
 
-        let selector = CudaMaSelector::new(self.device_id as usize);
-        let ma_rm = selector
+        let selector = CudaMaSelector::from_session(self.shared_session());
+        let device_selector = selector.device_native();
+        let ma_rm = device_selector
             .ma_sweep_to_device_ref(
                 &sweep.ma_type,
                 CudaMaDeviceDataRef::Slice(source),

@@ -3,6 +3,7 @@
 use super::alma_wrapper::DeviceArrayF32;
 use crate::cuda::device_types::CudaDeviceSliceF32Ref;
 use crate::cuda::moving_averages::ma_selector::{CudaMaDeviceDataRef, CudaMaSelector};
+use crate::cuda::runtime::CudaSession;
 use crate::indicators::mab::{MabBatchRange, MabParams};
 use cust::context::Context;
 use cust::device::Device;
@@ -66,7 +67,7 @@ impl DeviceArrayF32Triplet {
 
 pub struct CudaMab {
     module: Module,
-    stream: Stream,
+    stream: std::sync::Arc<Stream>,
     context: std::sync::Arc<Context>,
     device_id: u32,
 }
@@ -93,13 +94,47 @@ impl CudaMab {
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
+        let stream = std::sync::Arc::new(Stream::new(StreamFlags::NON_BLOCKING, None)?);
         Ok(Self {
             module,
             stream,
             context,
             device_id: device_id as u32,
         })
+    }
+
+    pub fn from_session(session: std::sync::Arc<CudaSession>) -> Result<Self, CudaMabError> {
+        let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/mab_kernel.ptx"));
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])?
+                }
+            }
+        };
+        Ok(Self {
+            module,
+            stream: session.stream_arc(),
+            context: session.context_arc(),
+            device_id: session.device_id(),
+        })
+    }
+
+    #[inline]
+    fn shared_session(&self) -> std::sync::Arc<CudaSession> {
+        std::sync::Arc::new(CudaSession::from_parts(
+            self.context.clone(),
+            self.stream.clone(),
+            self.device_id,
+        ))
     }
 
     fn compute_ma_host(
@@ -745,7 +780,8 @@ impl CudaMab {
         }
         .map_err(|e| CudaMabError::InvalidInput(e.to_string()))?;
         let price_data = CudaMaDeviceDataRef::Slice(prices_view);
-        let selector = CudaMaSelector::new(self.device_id as usize);
+        let selector = CudaMaSelector::from_session(self.shared_session());
+        let device_selector = selector.device_native();
 
         if all_sma && !all_same_ma {
             let (d_pcs, d_pcn) = self.build_prefixes_device(d_prices, len)?;
@@ -798,7 +834,7 @@ impl CudaMab {
         }
 
         if all_same_ma && rows > 1 {
-            let d_fast = selector
+            let d_fast = device_selector
                 .ma_to_device_ref(
                     p0.fast_ma_type.as_deref().unwrap_or("sma"),
                     price_data,
@@ -806,7 +842,7 @@ impl CudaMab {
                     p0.fast_period.unwrap(),
                 )
                 .map_err(|e| CudaMabError::InvalidInput(format!("fast ma_to_device_ref: {}", e)))?;
-            let d_slow = selector
+            let d_slow = device_selector
                 .ma_to_device_ref(
                     p0.slow_ma_type.as_deref().unwrap_or("sma"),
                     price_data,
@@ -919,7 +955,7 @@ impl CudaMab {
                 name: "mab_single_row_from_ma_f32",
             })?;
         for (row, p) in combos.iter().enumerate() {
-            let d_fast = selector
+            let d_fast = device_selector
                 .ma_to_device_ref(
                     p.fast_ma_type.as_deref().unwrap_or("sma"),
                     price_data,
@@ -927,7 +963,7 @@ impl CudaMab {
                     p.fast_period.unwrap(),
                 )
                 .map_err(|e| CudaMabError::InvalidInput(format!("fast ma_to_device_ref: {}", e)))?;
-            let d_slow = selector
+            let d_slow = device_selector
                 .ma_to_device_ref(
                     p.slow_ma_type.as_deref().unwrap_or("sma"),
                     price_data,

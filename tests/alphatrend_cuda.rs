@@ -4,7 +4,7 @@ use vector_ta::indicators::alphatrend::{
 use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
-use cust::memory::CopyDestination;
+use cust::memory::{CopyDestination, DeviceBuffer};
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::alphatrend_wrapper::CudaAlphaTrend;
 #[cfg(feature = "cuda")]
@@ -200,5 +200,91 @@ fn alphatrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std
         assert!(approx_eq(c1, g1, tol), "k1 mismatch at {}", idx);
         assert!(approx_eq(c2, g2, tol), "k2 mismatch at {}", idx);
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn alphatrend_cuda_device_inputs_match_legacy_batch() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[alphatrend_cuda_device_inputs_match_legacy_batch] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 4096usize;
+    let first_valid = 5usize;
+    let mut high = vec![f32::NAN; len];
+    let mut low = vec![f32::NAN; len];
+    let mut close = vec![f32::NAN; len];
+    let mut volume = vec![f32::NAN; len];
+    for i in first_valid..len {
+        let x = i as f32;
+        high[i] = (x * 0.0091).sin() + 4.0;
+        low[i] = high[i] - 0.22 - (x * 0.0037).cos().abs() * 0.08;
+        close[i] = (high[i] + low[i]) * 0.5 + (x * 0.0023).sin() * 0.03;
+        volume[i] = (x * 0.0041).cos().abs() * 150.0 + 50.0;
+    }
+    let sweep = AlphaTrendBatchRange {
+        coeff: (0.8, 1.2, 0.2),
+        period: (10, 20, 5),
+        no_volume: false,
+    };
+
+    let cuda = CudaAlphaTrend::new(0).expect("CudaAlphaTrend::new");
+    let legacy = cuda
+        .alphatrend_batch_dev(&high, &low, &close, &volume, &sweep)
+        .expect("legacy alphatrend_batch_dev");
+
+    let d_high = DeviceBuffer::from_slice(&high)?;
+    let d_low = DeviceBuffer::from_slice(&low)?;
+    let d_close = DeviceBuffer::from_slice(&close)?;
+    let d_volume = DeviceBuffer::from_slice(&volume)?;
+    let borrowed = cuda
+        .alphatrend_batch_dev_from_device_inputs(
+            &d_high,
+            &d_low,
+            &d_close,
+            &d_volume,
+            len,
+            first_valid,
+            &sweep,
+        )
+        .expect("borrowed-device alphatrend path");
+    cuda.synchronize()?;
+
+    assert_eq!(legacy.combos.len(), borrowed.combos.len());
+    for (lhs, rhs) in legacy.combos.iter().zip(borrowed.combos.iter()) {
+        assert_eq!(lhs.coeff, rhs.coeff);
+        assert_eq!(lhs.period, rhs.period);
+        assert_eq!(lhs.no_volume, rhs.no_volume);
+    }
+
+    let mut legacy_k1 = vec![0f32; legacy.k1.len()];
+    let mut legacy_k2 = vec![0f32; legacy.k2.len()];
+    let mut borrowed_k1 = vec![0f32; borrowed.k1.len()];
+    let mut borrowed_k2 = vec![0f32; borrowed.k2.len()];
+    legacy.k1.buf.copy_to(&mut legacy_k1)?;
+    legacy.k2.buf.copy_to(&mut legacy_k2)?;
+    borrowed.k1.buf.copy_to(&mut borrowed_k1)?;
+    borrowed.k2.buf.copy_to(&mut borrowed_k2)?;
+
+    let tol = 1e-4;
+    for i in 0..legacy_k1.len() {
+        assert!(
+            approx_eq(legacy_k1[i] as f64, borrowed_k1[i] as f64, tol),
+            "k1 mismatch at {}: legacy={} borrowed={}",
+            i,
+            legacy_k1[i],
+            borrowed_k1[i]
+        );
+        assert!(
+            approx_eq(legacy_k2[i] as f64, borrowed_k2[i] as f64, tol),
+            "k2 mismatch at {}: legacy={} borrowed={}",
+            i,
+            legacy_k2[i],
+            borrowed_k2[i]
+        );
+    }
+
     Ok(())
 }

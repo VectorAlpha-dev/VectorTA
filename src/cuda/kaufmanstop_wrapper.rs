@@ -6,6 +6,7 @@ use crate::cuda::moving_averages::ma_selector::{
     CudaMaData, CudaMaDeviceDataRef, CudaMaSelector, CudaMaSelectorError,
 };
 use crate::cuda::moving_averages::CudaSmaError;
+use crate::cuda::runtime::CudaSession;
 use crate::indicators::kaufmanstop::{
     expand_grid_wrapper, KaufmanstopBatchRange, KaufmanstopParams,
 };
@@ -16,6 +17,7 @@ use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffe
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use std::collections::HashMap;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
@@ -96,7 +98,7 @@ impl Default for ManySeriesKernelPolicy {
 
 pub struct CudaKaufmanstop {
     module: Module,
-    stream: Stream,
+    stream: Arc<Stream>,
     _context: Arc<Context>,
     policy: CudaKaufmanstopPolicy,
     device_id: u32,
@@ -124,7 +126,7 @@ impl CudaKaufmanstop {
                 }
             }
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
+        let stream = Arc::new(Stream::new(StreamFlags::NON_BLOCKING, None)?);
 
         Ok(Self {
             module,
@@ -135,6 +137,33 @@ impl CudaKaufmanstop {
         })
     }
 
+    pub fn from_session(session: Arc<CudaSession>) -> Result<Self, CudaKaufmanstopError> {
+        let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/kaufmanstop_kernel.ptx"));
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = match Module::from_ptx(ptx, jit_opts) {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
+                    m
+                } else {
+                    Module::from_ptx(ptx, &[])?
+                }
+            }
+        };
+
+        Ok(Self {
+            module,
+            stream: session.stream_arc(),
+            _context: session.context_arc(),
+            policy: CudaKaufmanstopPolicy::default(),
+            device_id: session.device_id(),
+        })
+    }
+
     pub fn new_with_policy(
         device_id: usize,
         policy: CudaKaufmanstopPolicy,
@@ -142,6 +171,15 @@ impl CudaKaufmanstop {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
+    }
+
+    #[inline]
+    fn shared_session(&self) -> Arc<CudaSession> {
+        Arc::new(CudaSession::from_parts(
+            self._context.clone(),
+            self.stream.clone(),
+            self.device_id,
+        ))
     }
 
     #[inline]
@@ -356,8 +394,21 @@ impl CudaKaufmanstop {
         };
         max_tile_params = max_tile_params.min(combos.len()).max(1);
 
-        let selector = CudaMaSelector::new(self.device_id as usize);
+        let selector = CudaMaSelector::from_session(self.shared_session());
+        let device_selector = selector.device_native();
         let range_data = CudaMaDeviceDataRef::Slice(range_view);
+        let sweep_plan = device_selector
+            .create_sweep_plan(sweep.period.0, sweep.period.1, sweep.period.2)
+            .ok();
+        let period_row_by_value: Option<HashMap<usize, usize>> = sweep_plan.as_ref().map(|plan| {
+            plan.periods()
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(row, period)| (period, row))
+                .collect()
+        });
+        let mut ma_dev_by_type: HashMap<String, DeviceArrayF32> = HashMap::new();
 
         let mut p0 = 0usize;
         while p0 < combos.len() {
@@ -426,13 +477,65 @@ impl CudaKaufmanstop {
                 })
             };
 
-            let mut ma_dev_tile: Option<DeviceArrayF32> = None;
+            let mut ma_dev_tile_ptr: Option<u64> = None;
+            let mut ma_dev_tile_owned: Option<DeviceArrayF32> = None;
             if same_ma_type && periods_are_progression {
-                if let Ok(dev) = selector
-                    .ma_sweep_to_device_ref(ma_type0, range_data, first, p_first, p_last, step)
+                let ma_key = ma_type0.to_ascii_lowercase();
+                if let (Some(plan), Some(period_rows)) =
+                    (sweep_plan.as_ref(), period_row_by_value.as_ref())
                 {
-                    if dev.rows == tile_n && dev.cols == len {
-                        ma_dev_tile = Some(dev);
+                    if !ma_dev_by_type.contains_key(&ma_key) {
+                        if let Ok(dev) = device_selector
+                            .ma_sweep_plan_to_device_ref(ma_type0, range_data, first, plan)
+                        {
+                            if dev.cols == len {
+                                ma_dev_by_type.insert(ma_key.clone(), dev);
+                            }
+                        }
+                    }
+                    if let Some(dev) = ma_dev_by_type.get(&ma_key) {
+                        if let (Some(&row_start), Some(&row_end)) =
+                            (period_rows.get(&p_first), period_rows.get(&p_last))
+                        {
+                            let expected_rows = if row_end >= row_start {
+                                row_end - row_start + 1
+                            } else {
+                                row_start - row_end + 1
+                            };
+                            let contiguous = if row_end >= row_start {
+                                plan.periods()[row_start..=row_end]
+                                    .iter()
+                                    .copied()
+                                    .eq(tile.iter().map(|prm| prm.period.unwrap_or(0)))
+                            } else {
+                                plan.periods()[row_end..=row_start]
+                                    .iter()
+                                    .rev()
+                                    .copied()
+                                    .eq(tile.iter().map(|prm| prm.period.unwrap_or(0)))
+                            };
+                            if expected_rows == tile_n && contiguous {
+                                let row_base =
+                                    row_start.min(row_end).checked_mul(len).ok_or_else(|| {
+                                        CudaKaufmanstopError::InvalidInput(
+                                            "ma row offset overflow".into(),
+                                        )
+                                    })?;
+                                ma_dev_tile_ptr = Some(unsafe {
+                                    dev.buf.as_device_ptr().offset(row_base as isize).as_raw()
+                                });
+                            }
+                        }
+                    }
+                }
+                if ma_dev_tile_ptr.is_none() {
+                    if let Ok(dev) = device_selector
+                        .ma_sweep_to_device_ref(ma_type0, range_data, first, p_first, p_last, step)
+                    {
+                        if dev.rows == tile_n && dev.cols == len {
+                            ma_dev_tile_ptr = Some(dev.buf.as_device_ptr().as_raw());
+                            ma_dev_tile_owned = Some(dev);
+                        }
                     }
                 }
             }
@@ -455,11 +558,12 @@ impl CudaKaufmanstop {
             let shmem = (bx as usize) * std::mem::size_of::<f32>();
 
             let out_offset = p0 * len;
-            let launch_res = if let Some(ma_dev) = ma_dev_tile.as_ref() {
+            let _keep_ma_tile_alive = &ma_dev_tile_owned;
+            let launch_res = if let Some(ma_ptr_raw) = ma_dev_tile_ptr {
                 unsafe {
                     let mut hp = d_high.as_device_ptr().as_raw();
                     let mut lp = d_low.as_device_ptr().as_raw();
-                    let mut mp = ma_dev.buf.as_device_ptr().as_raw();
+                    let mut mp = ma_ptr_raw;
                     let mut wp = d_warm.as_device_ptr().as_raw();
                     let mut sp = d_signed.as_device_ptr().as_raw();
                     let mut rows_i = len as i32;
@@ -515,17 +619,47 @@ impl CudaKaufmanstop {
                     let base_is_low = if is_long { 1i32 } else { 0i32 };
                     let warm = (first + period - 1) as i32;
                     let ma_type = prm.ma_type.as_deref().unwrap_or("sma");
+                    let ma_key = ma_type.to_ascii_lowercase();
+                    if let (Some(plan), Some(period_rows)) =
+                        (sweep_plan.as_ref(), period_row_by_value.as_ref())
+                    {
+                        if !ma_dev_by_type.contains_key(&ma_key) {
+                            if let Ok(dev) = device_selector
+                                .ma_sweep_plan_to_device_ref(ma_type, range_data, first, plan)
+                            {
+                                if dev.cols == len {
+                                    ma_dev_by_type.insert(ma_key.clone(), dev);
+                                }
+                            }
+                        }
+                    }
 
-                    let ma_dev = selector
-                        .ma_to_device_ref(ma_type, range_data, first, period)
-                        .map_err(|e| {
-                            CudaKaufmanstopError::InvalidInput(format!("ma_to_device_ref: {}", e))
+                    let ma_ptr_raw = if let (Some(dev), Some(period_rows)) =
+                        (ma_dev_by_type.get(&ma_key), period_row_by_value.as_ref())
+                    {
+                        let row_idx = *period_rows.get(&period).ok_or_else(|| {
+                            CudaKaufmanstopError::InvalidInput(format!(
+                                "period {} missing from kaufmanstop sweep plan",
+                                period
+                            ))
                         })?;
+                        unsafe { dev.buf.as_device_ptr().add(row_idx * len).as_raw() }
+                    } else {
+                        let ma_dev = device_selector
+                            .ma_to_device_ref(ma_type, range_data, first, period)
+                            .map_err(|e| {
+                                CudaKaufmanstopError::InvalidInput(format!(
+                                    "ma_to_device_ref: {}",
+                                    e
+                                ))
+                            })?;
+                        ma_dev.buf.as_device_ptr().as_raw()
+                    };
 
                     unsafe {
                         let mut hp = d_high.as_device_ptr().as_raw();
                         let mut lp = d_low.as_device_ptr().as_raw();
-                        let mut mp = ma_dev.buf.as_device_ptr().as_raw();
+                        let mut mp = ma_ptr_raw;
                         let mut n = len as i32;
                         let mut sm = signed_mult;
                         let mut w = warm;

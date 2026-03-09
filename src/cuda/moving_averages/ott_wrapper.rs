@@ -9,6 +9,7 @@ use crate::cuda::moving_averages::{
 use crate::cuda::moving_averages::{
     CudaMaData, CudaMaDeviceDataRef, CudaMaSelector, CudaMaSelectorError,
 };
+use crate::cuda::runtime::CudaSession;
 use crate::cuda::CudaDeviceSliceF32Ref;
 use crate::indicators::ott::{OttBatchRange, OttParams};
 use cust::context::Context;
@@ -18,9 +19,11 @@ use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::env;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -33,6 +36,99 @@ fn ott_batch_var_block_x() -> u32 {
 }
 
 const OTT_VCMO_SHARED_MIN_COMBOS: usize = 96;
+
+#[cfg(test)]
+static OTT_SINGLE_PERIOD_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static OTT_SINGLE_PERCENT_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static OTT_BATCH_PERIOD_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static OTT_BATCH_PERCENT_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static OTT_VCMO_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Default)]
+struct CudaOttScratch {
+    single_period: Option<DeviceBuffer<i32>>,
+    single_percent: Option<DeviceBuffer<f32>>,
+    batch_periods: Option<DeviceBuffer<i32>>,
+    batch_percents: Option<DeviceBuffer<f32>>,
+    batch_len: usize,
+    vcmo: Option<DeviceBuffer<f32>>,
+    vcmo_len: usize,
+}
+
+impl CudaOttScratch {
+    fn ensure_single_params(
+        &mut self,
+        stream: &Stream,
+        period: i32,
+        percent: f32,
+    ) -> Result<(), CudaOttError> {
+        if self.single_period.is_none() {
+            #[cfg(test)]
+            OTT_SINGLE_PERIOD_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            self.single_period = Some(unsafe { DeviceBuffer::uninitialized(1) }?);
+        }
+        if self.single_percent.is_none() {
+            #[cfg(test)]
+            OTT_SINGLE_PERCENT_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            self.single_percent = Some(unsafe { DeviceBuffer::uninitialized(1) }?);
+        }
+        unsafe {
+            self.single_period
+                .as_mut()
+                .expect("single_period")
+                .async_copy_from(&[period], stream)?;
+            self.single_percent
+                .as_mut()
+                .expect("single_percent")
+                .async_copy_from(&[percent], stream)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_batch_params(
+        &mut self,
+        stream: &Stream,
+        periods: &[i32],
+        percents: &[f32],
+    ) -> Result<(), CudaOttError> {
+        let rows = periods.len();
+        if self.batch_len != rows || self.batch_periods.is_none() || self.batch_percents.is_none() {
+            #[cfg(test)]
+            {
+                OTT_BATCH_PERIOD_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+                OTT_BATCH_PERCENT_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            }
+            self.batch_periods = Some(unsafe { DeviceBuffer::uninitialized(rows) }?);
+            self.batch_percents = Some(unsafe { DeviceBuffer::uninitialized(rows) }?);
+            self.batch_len = rows;
+        }
+        unsafe {
+            self.batch_periods
+                .as_mut()
+                .expect("batch_periods")
+                .async_copy_from(periods, stream)?;
+            self.batch_percents
+                .as_mut()
+                .expect("batch_percents")
+                .async_copy_from(percents, stream)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_vcmo(&mut self, len: usize) -> Result<(), CudaOttError> {
+        if self.vcmo_len != len || self.vcmo.is_none() {
+            #[cfg(test)]
+            OTT_VCMO_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            self.vcmo = Some(unsafe { DeviceBuffer::uninitialized(len) }?);
+            self.vcmo_len = len;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum CudaOttError {
@@ -98,9 +194,10 @@ pub enum ManySeriesKernelSelected {
 
 pub struct CudaOtt {
     module: Module,
-    stream: Stream,
+    stream: Arc<Stream>,
     context: Arc<Context>,
     device_id: u32,
+    scratch: RefCell<CudaOttScratch>,
     policy: CudaOttPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -123,13 +220,38 @@ impl CudaOtt {
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
             .or_else(|_| Module::from_ptx(ptx, &[]))?;
 
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
+        let stream = Arc::new(Stream::new(StreamFlags::NON_BLOCKING, None)?);
 
         Ok(Self {
             module,
             stream,
             context,
             device_id: device_id as u32,
+            scratch: RefCell::new(CudaOttScratch::default()),
+            policy: CudaOttPolicy::default(),
+            last_batch: None,
+            last_many: None,
+            debug_batch_logged: false,
+            debug_many_logged: false,
+        })
+    }
+
+    pub fn from_session(session: Arc<CudaSession>) -> Result<Self, CudaOttError> {
+        let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ott_kernel.ptx"));
+        let jit_opts = &[
+            ModuleJitOption::DetermineTargetFromContext,
+            ModuleJitOption::OptLevel(OptLevel::O2),
+        ];
+        let module = Module::from_ptx(ptx, jit_opts)
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
+            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+
+        Ok(Self {
+            module,
+            stream: session.stream_arc(),
+            context: session.context_arc(),
+            device_id: session.device_id(),
+            scratch: RefCell::new(CudaOttScratch::default()),
             policy: CudaOttPolicy::default(),
             last_batch: None,
             last_many: None,
@@ -143,6 +265,26 @@ impl CudaOtt {
         Ok(())
     }
 
+    #[cfg(test)]
+    fn debug_reset_scratch_alloc_counters() {
+        OTT_SINGLE_PERIOD_ALLOCATIONS.store(0, Ordering::Relaxed);
+        OTT_SINGLE_PERCENT_ALLOCATIONS.store(0, Ordering::Relaxed);
+        OTT_BATCH_PERIOD_ALLOCATIONS.store(0, Ordering::Relaxed);
+        OTT_BATCH_PERCENT_ALLOCATIONS.store(0, Ordering::Relaxed);
+        OTT_VCMO_ALLOCATIONS.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn debug_scratch_alloc_counters() -> (usize, usize, usize, usize, usize) {
+        (
+            OTT_SINGLE_PERIOD_ALLOCATIONS.load(Ordering::Relaxed),
+            OTT_SINGLE_PERCENT_ALLOCATIONS.load(Ordering::Relaxed),
+            OTT_BATCH_PERIOD_ALLOCATIONS.load(Ordering::Relaxed),
+            OTT_BATCH_PERCENT_ALLOCATIONS.load(Ordering::Relaxed),
+            OTT_VCMO_ALLOCATIONS.load(Ordering::Relaxed),
+        )
+    }
+
     #[inline]
     pub fn context_arc(&self) -> Arc<Context> {
         self.context.clone()
@@ -151,6 +293,15 @@ impl CudaOtt {
     #[inline]
     pub fn device_id(&self) -> u32 {
         self.device_id
+    }
+
+    #[inline]
+    fn shared_session(&self) -> Arc<CudaSession> {
+        Arc::new(CudaSession::from_parts(
+            self.context.clone(),
+            self.stream.clone(),
+            self.device_id,
+        ))
     }
 
     #[inline]
@@ -357,21 +508,23 @@ impl CudaOtt {
                 percents_host.push(percent);
             }
 
-            let mut d_periods: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(rows) }?;
-            let mut d_percents: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows) }?;
-            unsafe { d_periods.async_copy_from(&periods_host, &self.stream) }?;
-            unsafe { d_percents.async_copy_from(&percents_host, &self.stream) }?;
+            let mut scratch = self.scratch.borrow_mut();
+            scratch.ensure_batch_params(&self.stream, &periods_host, &percents_host)?;
 
             if all_finite && rows >= OTT_VCMO_SHARED_MIN_COMBOS {
                 if let (Some(cmo_func), Some(var_vcmo_func)) =
                     (f_cmo_all_finite.as_mut(), f_var_vcmo_all_finite.as_mut())
                 {
-                    let mut d_vcmo: DeviceBuffer<f32> =
-                        unsafe { DeviceBuffer::uninitialized(cols) }?;
+                    scratch.ensure_vcmo(cols)?;
                     unsafe {
                         let mut prices_ptr = d_prices.as_device_ptr().as_raw();
                         let mut series_len_i = cols as i32;
-                        let mut vcmo_ptr = d_vcmo.as_device_ptr().as_raw();
+                        let mut vcmo_ptr = scratch
+                            .vcmo
+                            .as_ref()
+                            .expect("vcmo")
+                            .as_device_ptr()
+                            .as_raw();
                         let cmo_args: &mut [*mut c_void] = &mut [
                             &mut prices_ptr as *mut _ as *mut c_void,
                             &mut series_len_i as *mut _ as *mut c_void,
@@ -384,9 +537,24 @@ impl CudaOtt {
                             .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
 
                         let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-                        let mut vcmo_ptr = d_vcmo.as_device_ptr().as_raw();
-                        let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-                        let mut percents_ptr = d_percents.as_device_ptr().as_raw();
+                        let mut vcmo_ptr = scratch
+                            .vcmo
+                            .as_ref()
+                            .expect("vcmo")
+                            .as_device_ptr()
+                            .as_raw();
+                        let mut periods_ptr = scratch
+                            .batch_periods
+                            .as_ref()
+                            .expect("batch_periods")
+                            .as_device_ptr()
+                            .as_raw();
+                        let mut percents_ptr = scratch
+                            .batch_percents
+                            .as_ref()
+                            .expect("batch_percents")
+                            .as_device_ptr()
+                            .as_raw();
                         let mut series_len_i = cols as i32;
                         let mut n_combos_i = rows as i32;
                         let mut out_ptr = d_out.as_device_ptr().as_raw();
@@ -429,8 +597,18 @@ impl CudaOtt {
             if let Some(func) = var_func {
                 unsafe {
                     let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-                    let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-                    let mut percents_ptr = d_percents.as_device_ptr().as_raw();
+                    let mut periods_ptr = scratch
+                        .batch_periods
+                        .as_ref()
+                        .expect("batch_periods")
+                        .as_device_ptr()
+                        .as_raw();
+                    let mut percents_ptr = scratch
+                        .batch_percents
+                        .as_ref()
+                        .expect("batch_percents")
+                        .as_device_ptr()
+                        .as_raw();
                     let mut series_len_i = cols as i32;
                     let mut n_combos_i = rows as i32;
                     let mut out_ptr = d_out.as_device_ptr().as_raw();
@@ -460,12 +638,8 @@ impl CudaOtt {
             }
         }
 
-        let mut d_period = unsafe { DeviceBuffer::<i32>::uninitialized(1) }
-            .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
-        let mut d_percent = unsafe { DeviceBuffer::<f32>::uninitialized(1) }
-            .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
-
-        let selector = CudaMaSelector::new(self.device_id as usize);
+        let selector = CudaMaSelector::from_session(self.shared_session());
+        let device_selector = selector.device_native();
         let prices_view = unsafe {
             CudaDeviceSliceF32Ref::from_raw_parts(
                 d_prices.as_device_ptr().as_raw(),
@@ -476,7 +650,7 @@ impl CudaOtt {
         };
 
         let selector_dev = |ma_type: &str, period: usize| -> Result<DeviceArrayF32, CudaOttError> {
-            match selector.ma_to_device_ref(
+            match device_selector.ma_to_device_ref(
                 ma_type,
                 CudaMaDeviceDataRef::Slice(prices_view),
                 first_valid,
@@ -501,15 +675,23 @@ impl CudaOtt {
 
             if ma_type.eq_ignore_ascii_case("VAR") {
                 if let Some(ref mut func) = f_var {
-                    unsafe { d_period.async_copy_from(&[period as i32], &self.stream) }
-                        .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
-                    unsafe { d_percent.async_copy_from(&[percent], &self.stream) }
-                        .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+                    let mut scratch = self.scratch.borrow_mut();
+                    scratch.ensure_single_params(&self.stream, period as i32, percent)?;
 
                     unsafe {
                         let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-                        let mut periods_ptr = d_period.as_device_ptr().as_raw();
-                        let mut percents_ptr = d_percent.as_device_ptr().as_raw();
+                        let mut periods_ptr = scratch
+                            .single_period
+                            .as_ref()
+                            .expect("single_period")
+                            .as_device_ptr()
+                            .as_raw();
+                        let mut percents_ptr = scratch
+                            .single_percent
+                            .as_ref()
+                            .expect("single_percent")
+                            .as_device_ptr()
+                            .as_raw();
                         let mut series_len_i = cols as i32;
                         let mut n_combos_i = 1i32;
                         let mut out_ptr = out_row_ptr.as_raw();
@@ -664,17 +846,23 @@ impl CudaOtt {
             }
 
             if let Some(func) = f_var.as_mut() {
-                let mut d_periods: DeviceBuffer<i32> =
-                    unsafe { DeviceBuffer::uninitialized(rows) }?;
-                let mut d_percents: DeviceBuffer<f32> =
-                    unsafe { DeviceBuffer::uninitialized(rows) }?;
-                unsafe { d_periods.async_copy_from(&periods_host, &self.stream) }?;
-                unsafe { d_percents.async_copy_from(&percents_host, &self.stream) }?;
+                let mut scratch = self.scratch.borrow_mut();
+                scratch.ensure_batch_params(&self.stream, &periods_host, &percents_host)?;
 
                 unsafe {
                     let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-                    let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-                    let mut percents_ptr = d_percents.as_device_ptr().as_raw();
+                    let mut periods_ptr = scratch
+                        .batch_periods
+                        .as_ref()
+                        .expect("batch_periods")
+                        .as_device_ptr()
+                        .as_raw();
+                    let mut percents_ptr = scratch
+                        .batch_percents
+                        .as_ref()
+                        .expect("batch_percents")
+                        .as_device_ptr()
+                        .as_raw();
                     let mut series_len_i = series_len as i32;
                     let mut n_combos_i = rows as i32;
                     let mut out_ptr = d_out.as_device_ptr().as_raw();
@@ -703,7 +891,8 @@ impl CudaOtt {
             }
         }
 
-        let selector = CudaMaSelector::new(self.device_id as usize);
+        let selector = CudaMaSelector::from_session(self.shared_session());
+        let device_selector = selector.device_native();
         let prices_view = unsafe {
             CudaDeviceSliceF32Ref::from_raw_parts(
                 d_prices.as_device_ptr().as_raw(),
@@ -712,14 +901,26 @@ impl CudaOtt {
             )
             .map_err(|e| CudaOttError::InvalidInput(e.to_string()))?
         };
-        let selector_dev = |ma_type: &str, period: usize| -> Result<DeviceArrayF32, CudaOttError> {
-            selector
-                .ma_to_device_ref(
-                    ma_type,
-                    CudaMaDeviceDataRef::Slice(prices_view),
-                    first_valid,
-                    period,
-                )
+        let selector_data = CudaMaDeviceDataRef::Slice(prices_view);
+        let sweep_plan = device_selector
+            .create_sweep_plan(sweep.period.0, sweep.period.1, sweep.period.2)
+            .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+        let mut period_row_by_value = HashMap::with_capacity(sweep_plan.len());
+        for (row_idx, &period) in sweep_plan.periods().iter().enumerate() {
+            period_row_by_value.insert(period, row_idx);
+        }
+        let mut selector_ma_rows: HashMap<String, DeviceArrayF32> = HashMap::new();
+        for ma_type in combos
+            .iter()
+            .filter_map(|combo| combo.ma_type.as_deref())
+            .filter(|ma_type| !ma_type.eq_ignore_ascii_case("VAR"))
+        {
+            let key = ma_type.to_ascii_lowercase();
+            if selector_ma_rows.contains_key(&key) {
+                continue;
+            }
+            let dev = device_selector
+                .ma_sweep_plan_to_device_ref(ma_type, selector_data, first_valid, &sweep_plan)
                 .map_err(|e| match e {
                     CudaMaSelectorError::Unsupported(reason) => CudaOttError::InvalidInput(
                         format!(
@@ -728,13 +929,9 @@ impl CudaOtt {
                         ),
                     ),
                     other => CudaOttError::Cuda(other.to_string()),
-                })
-        };
-
-        let mut d_period = unsafe { DeviceBuffer::<i32>::uninitialized(1) }
-            .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
-        let mut d_percent = unsafe { DeviceBuffer::<f32>::uninitialized(1) }
-            .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+                })?;
+            selector_ma_rows.insert(key, dev);
+        }
 
         for (row_idx, combo) in combos.iter().enumerate() {
             let period = combo.period.unwrap_or(2);
@@ -751,14 +948,22 @@ impl CudaOtt {
                         "ott VAR device path requires ott_from_var_batch_f32 kernel".into(),
                     )
                 })?;
-                unsafe { d_period.async_copy_from(&[period as i32], &self.stream) }
-                    .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
-                unsafe { d_percent.async_copy_from(&[percent], &self.stream) }
-                    .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+                let mut scratch = self.scratch.borrow_mut();
+                scratch.ensure_single_params(&self.stream, period as i32, percent)?;
                 unsafe {
                     let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-                    let mut periods_ptr = d_period.as_device_ptr().as_raw();
-                    let mut percents_ptr = d_percent.as_device_ptr().as_raw();
+                    let mut periods_ptr = scratch
+                        .single_period
+                        .as_ref()
+                        .expect("single_period")
+                        .as_device_ptr()
+                        .as_raw();
+                    let mut percents_ptr = scratch
+                        .single_percent
+                        .as_ref()
+                        .expect("single_percent")
+                        .as_device_ptr()
+                        .as_raw();
                     let mut series_len_i = series_len as i32;
                     let mut n_combos_i = 1i32;
                     let mut out_ptr = out_row_ptr.as_raw();
@@ -777,10 +982,30 @@ impl CudaOtt {
                         .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
                 }
             } else {
-                let dev = selector_dev(ma_type, period)?;
-                self.launch_apply_single(
+                let ma_rows = selector_ma_rows
+                    .get(&ma_type.to_ascii_lowercase())
+                    .ok_or_else(|| {
+                        CudaOttError::InvalidInput(format!(
+                            "missing borrowed-device MA sweep rows for ma_type '{}'",
+                            ma_type
+                        ))
+                    })?;
+                let row_idx_in_ma = period_row_by_value.get(&period).copied().ok_or_else(|| {
+                    CudaOttError::InvalidInput(format!(
+                        "period {} missing from OTT borrowed-device sweep plan",
+                        period
+                    ))
+                })?;
+                let ma_row_ptr = unsafe {
+                    ma_rows
+                        .buf
+                        .as_device_ptr()
+                        .add(row_idx_in_ma * series_len)
+                        .as_raw()
+                };
+                self.launch_apply_single_from_ptr(
                     &mut f_apply,
-                    &dev.buf,
+                    ma_row_ptr,
                     series_len,
                     percent,
                     out_row_ptr.as_raw(),
@@ -803,8 +1028,25 @@ impl CudaOtt {
         percent: f32,
         out_ptr_raw: u64,
     ) -> Result<(), CudaOttError> {
+        self.launch_apply_single_from_ptr(
+            func,
+            d_ma.as_device_ptr().as_raw(),
+            len,
+            percent,
+            out_ptr_raw,
+        )
+    }
+
+    fn launch_apply_single_from_ptr(
+        &self,
+        func: &mut Function,
+        ma_ptr_raw: u64,
+        len: usize,
+        percent: f32,
+        out_ptr_raw: u64,
+    ) -> Result<(), CudaOttError> {
         unsafe {
-            let mut ma_ptr = d_ma.as_device_ptr().as_raw();
+            let mut ma_ptr = ma_ptr_raw;
             let mut series_len_i = len as i32;
             let mut pct = percent;
             let mut out_ptr = out_ptr_raw;
@@ -1175,6 +1417,50 @@ pub mod benches {
         })
     }
 
+    struct OttBorrowedDeviceBatchState {
+        cuda: CudaOtt,
+        d_prices: DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: crate::indicators::ott::OttBatchRange,
+    }
+    impl CudaBenchState for OttBorrowedDeviceBatchState {
+        fn launch(&mut self) {
+            let out = self
+                .cuda
+                .ott_batch_dev_from_device_prices(
+                    &self.d_prices,
+                    self.series_len,
+                    self.first_valid,
+                    &self.sweep,
+                )
+                .expect("ott_batch_dev_from_device_prices");
+            std::hint::black_box((out.rows, out.cols));
+            self.cuda.stream.synchronize().expect("ott borrowed sync");
+        }
+    }
+
+    fn prep_one_series_many_params_borrowed_device() -> Box<dyn CudaBenchState> {
+        let cuda = CudaOtt::new(0).expect("cuda ott");
+        let prices = gen_series(ONE_SERIES_LEN);
+        let d_prices = DeviceBuffer::from_slice(&prices).expect("d_prices");
+        let first_valid = prices.iter().position(|v| v.is_finite()).unwrap_or(0);
+        let sweep = crate::indicators::ott::OttBatchRange {
+            period: (2, 2 + PARAM_SWEEP - 1, 1),
+            percent: (1.4, 1.4, 0.0),
+            ma_types: vec!["VAR".to_string()],
+        };
+        cuda.stream.synchronize().expect("sync after borrowed prep");
+
+        Box::new(OttBorrowedDeviceBatchState {
+            cuda,
+            d_prices,
+            series_len: ONE_SERIES_LEN,
+            first_valid,
+            sweep,
+        })
+    }
+
     struct OttManyVarDevState {
         cuda: CudaOtt,
         d_in: DeviceBuffer<f32>,
@@ -1258,6 +1544,15 @@ pub mod benches {
                 "ott_cuda_batch_dev",
                 "1m_x_250",
                 prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "ott",
+                "one_series_many_params",
+                "ott_cuda_batch_dev_from_device_prices",
+                "1m_x_250",
+                prep_one_series_many_params_borrowed_device,
             )
             .with_sample_size(10)
             .with_mem_required(bytes_one_series_many_params()),
@@ -1366,4 +1661,65 @@ fn expand_combos(range: &OttBatchRange) -> Result<Vec<OttParams>, CudaOttError> 
         ));
     }
     Ok(combos)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cuda::CudaRuntime;
+
+    #[test]
+    fn borrowed_device_ott_reuses_wrapper_scratch_for_repeated_var_sweeps() {
+        if !crate::cuda::cuda_available() {
+            return;
+        }
+
+        let len = 2048usize;
+        let prices: Vec<f32> = (0..len)
+            .map(|i| {
+                let x = i as f32;
+                (x * 0.00123).sin() + 0.00017 * x
+            })
+            .collect();
+        let first_valid = prices.iter().position(|v| v.is_finite()).unwrap_or(0);
+        let sweep = OttBatchRange {
+            period: (2, 2 + OTT_VCMO_SHARED_MIN_COMBOS - 1, 1),
+            percent: (1.4, 1.4, 0.0),
+            ma_types: vec!["VAR".to_string()],
+        };
+        let runtime = CudaRuntime::new(0).expect("runtime");
+        let d_prices = runtime.upload_f32(&prices).expect("upload");
+        let cuda = CudaOtt::new(0).expect("CudaOtt::new");
+
+        CudaOtt::debug_reset_scratch_alloc_counters();
+        let first = cuda
+            .ott_batch_dev_from_device_prices(d_prices.buffer(), len, first_valid, &sweep)
+            .expect("first borrowed-device ott sweep");
+        cuda.synchronize().expect("sync first borrowed ott");
+        let first_counts = CudaOtt::debug_scratch_alloc_counters();
+        assert_eq!(first_counts.2, 1, "expected one batch-period allocation");
+        assert_eq!(first_counts.3, 1, "expected one batch-percent allocation");
+        assert_eq!(
+            first_counts.4, 0,
+            "borrowed-device OTT path currently should not allocate VCMO scratch"
+        );
+
+        let second = cuda
+            .ott_batch_dev_from_device_prices(d_prices.buffer(), len, first_valid, &sweep)
+            .expect("second borrowed-device ott sweep");
+        cuda.synchronize().expect("sync second borrowed ott");
+        let second_counts = CudaOtt::debug_scratch_alloc_counters();
+        assert_eq!(
+            second_counts, first_counts,
+            "repeated same-shape borrowed-device ott sweep should reuse scratch buffers"
+        );
+
+        let mut first_host = vec![0f32; first.len()];
+        let mut second_host = vec![0f32; second.len()];
+        first.buf.copy_to(&mut first_host).expect("copy first");
+        second.buf.copy_to(&mut second_host).expect("copy second");
+        assert_eq!(first.rows, second.rows);
+        assert_eq!(first.cols, second.cols);
+        assert_eq!(first_host, second_host);
+    }
 }
