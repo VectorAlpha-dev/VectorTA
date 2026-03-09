@@ -1220,7 +1220,6 @@ pub mod benches {
         let cuda = CudaDamianiVolatmeter::new(0).expect("cuda damiani");
         let close = synth_close(ONE_SERIES_LEN);
         let sweep = DamianiVolatmeterBatchRange {
-            // 25 * 10 = 250 combos
             vis_atr: (13, 37, 1),
             vis_std: (20, 38, 2),
             sed_atr: (40, 40, 0),

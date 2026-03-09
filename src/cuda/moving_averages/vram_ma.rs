@@ -1135,7 +1135,6 @@ impl VramMaComputer {
 
             "mwdx" => {
                 self.ensure_mwdx()?;
-                // mwdx factor = 2/(period+1)
                 self.host_f32.clear();
                 self.host_f32
                     .extend(periods.iter().map(|&p| 2.0f32 / (p as f32 + 1.0f32)));

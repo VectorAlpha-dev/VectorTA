@@ -992,7 +992,6 @@ pub mod benches {
         let close = gen_series(len);
         let (high, low) = synth_hlc_from_close(&close);
         let sweep = KeltnerBatchRange {
-            // 50 * 5 = 250 combos
             period: (10, 59, 1),
             multiplier: (1.0, 2.0, 0.25),
         };

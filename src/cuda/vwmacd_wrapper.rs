@@ -855,7 +855,6 @@ pub mod benches {
                         }
                     }
                     let sweep = VwmacdBatchRange {
-                        // 50 * 5 = 250 combos
                         fast: (8, 57, 1),
                         slow: (16, 20, 1),
                         signal: (9, 9, 0),

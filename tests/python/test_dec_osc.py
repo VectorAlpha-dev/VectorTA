@@ -105,9 +105,6 @@ class TestDecOsc:
 
     def test_dec_osc_invalid_k(self):
         """Test DEC_OSC fails with invalid k value"""
-        # Ensure the dataset is long enough that parameter validation hits `k`
-        # (otherwise the indicator may fail earlier due to insufficient data
-        # for the selected hp_period).
         data = np.arange(1.0, 256.0, dtype=np.float64)
 
 

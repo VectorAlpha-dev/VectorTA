@@ -698,7 +698,6 @@ pub mod benches {
         let cuda = CudaNetMyrsi::new(0).expect("cuda");
         let data = gen_prices(LEN_1M);
         let sweep = NetMyrsiBatchRange {
-            // 250 combos: 8..=2000 step 8
             period: (8, 2000, 8),
         };
         let (combos, first_valid, series_len, max_p) =

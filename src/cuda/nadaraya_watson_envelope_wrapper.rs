@@ -782,7 +782,6 @@ pub mod benches {
             let sweep = NweBatchRange {
                 bandwidth: (8.0, 8.0, 0.0),
                 multiplier: (3.0, 3.0, 0.0),
-                // 250 combos
                 lookback: (500, 749, 1),
             };
             let (_combos, first_valid, len, lookbacks, multipliers, weights_flat, max_lb) =

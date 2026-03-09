@@ -1100,10 +1100,6 @@ impl CudaStoch {
             .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
             d_k_sm
         } else {
-            // Compatibility-only many-series fallback:
-            // the selector still expects contiguous borrowed device series, so
-            // non-SMA/non-EMA time-major smoothing stages download/reupload
-            // per-series rows instead of pretending to be device-native.
             let selector = CudaMaSelector::new(0);
 
             let mut k_tm_host = vec![0f32; total];
@@ -1163,10 +1159,6 @@ impl CudaStoch {
             .map_err(|e| CudaStochError::InvalidInput(e.to_string()))?;
             d_d_sm
         } else {
-            // Compatibility-only many-series fallback:
-            // the selector still expects contiguous borrowed device series, so
-            // non-SMA/non-EMA time-major smoothing stages download/reupload
-            // per-series rows instead of pretending to be device-native.
             let selector = CudaMaSelector::new(0);
             let mut k_tm_host = vec![0f32; total];
             k_tm.copy_to(&mut k_tm_host).map_err(CudaStochError::Cuda)?;

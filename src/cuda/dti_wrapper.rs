@@ -891,7 +891,6 @@ pub mod benches {
         }
 
         let sweep = DtiBatchRange {
-            // 10 * 5 * 5 = 250 combos
             r: (8, 26, 2),
             s: (6, 14, 2),
             u: (3, 11, 2),

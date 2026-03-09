@@ -1063,7 +1063,6 @@ pub mod benches {
         let close = gen_series(len);
         let (high, low) = synth_hlc_from_close(&close);
         let sweep = ChandeBatchRange {
-            // 50 * 5 = 250 combos
             period: (10, 59, 1),
             mult: (2.0, 4.0, 0.5),
         };

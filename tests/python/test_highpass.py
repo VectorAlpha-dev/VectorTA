@@ -265,8 +265,6 @@ class TestHighPass:
         result = ta_indicators.highpass(close, 48)
         assert len(result) == len(close)
 
-        # Leading NaNs should remain NaN, but once valid data begins the filter should
-        # produce finite outputs (it should not permanently poison the IIR state).
         assert np.all(np.isnan(result[:5])), "Expected leading NaNs to be preserved"
         assert not np.any(np.isnan(result[5:])), "Unexpected NaN after first valid input"
 

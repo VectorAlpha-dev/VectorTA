@@ -190,8 +190,6 @@ class TestMacz:
 
         assert len(result) == len(close)
 
-        # Warmup for MAC-Z is data-dependent; mirror the Rust tests by finding the first
-        # non-NaN and asserting it is within a reasonable range for the default params.
         first_valid = next((i for i, v in enumerate(result) if not np.isnan(v)), None)
         assert first_valid is not None, "No valid MAC-Z output produced"
         assert first_valid >= expected['default_params']['slow_length']

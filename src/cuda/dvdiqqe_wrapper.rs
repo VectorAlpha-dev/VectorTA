@@ -908,7 +908,6 @@ pub mod benches {
         let len = 1_000_000usize;
         let (open, close, volume) = synth_ohlcv(len);
         let sweep = DvdiqqeBatchRange {
-            // 50 * 5 = 250 combos
             period: (10, 59, 1),
             smoothing_period: (3, 7, 1),
             fast_multiplier: (2.618, 2.618, 0.0),

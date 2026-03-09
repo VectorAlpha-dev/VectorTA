@@ -809,7 +809,6 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    // 250 x 1 grid for standardized 1m_x_250 benchmark shape
     const PARAM_SWEEP_L: usize = 250;
     const PARAM_SWEEP_V: usize = 1;
     const MANY_SERIES_COLS: usize = 256;

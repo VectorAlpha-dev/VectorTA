@@ -895,7 +895,6 @@ pub mod benches {
         let close = gen_series(ONE_SERIES_LEN);
         let (high, low) = synth_hlc_from_close(&close);
         let sweep = CeBatchRange {
-            // 50 * 5 = 250 combos
             period: (10, 59, 1),
             mult: (2.0, 4.0, 0.5),
             use_close: (true, true, false),
