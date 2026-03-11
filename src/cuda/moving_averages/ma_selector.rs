@@ -1022,6 +1022,17 @@ impl CudaMaSelector {
                 cuda.sqwma_batch_dev(ensure_prices!(), &sweep)
                     .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
             }
+            "sgf" => {
+                let poly_order = get_param_usize(params, ma_type, "poly_order")?.unwrap_or(2);
+                let sweep = crate::indicators::moving_averages::sgf::SgfBatchRange {
+                    period: (period, period, 0),
+                    poly_order: (poly_order, poly_order, 0),
+                };
+                let cuda = CudaSgf::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.sgf_batch_dev(ensure_prices!(), &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
             "swma" => {
                 let sweep = crate::indicators::moving_averages::swma::SwmaBatchRange {
                     period: (period, period, 0),
@@ -1883,6 +1894,17 @@ impl CudaMaSelector {
                 let cuda = CudaSqwma::new(self.device_id)
                     .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
                 cuda.sqwma_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "sgf" => {
+                let poly_order = get_param_usize(params, ma_type, "poly_order")?.unwrap_or(2);
+                let sweep = crate::indicators::moving_averages::sgf::SgfBatchRange {
+                    period: period_range,
+                    poly_order: (poly_order, poly_order, 0),
+                };
+                let cuda = CudaSgf::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.sgf_batch_dev(&prices, &sweep)
                     .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
             }
             "swma" => {

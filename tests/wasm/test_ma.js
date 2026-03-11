@@ -82,6 +82,16 @@ test('MA dispatcher - ALMA with defaults', () => {
     assertArrayClose(result, directResult, 1e-10, "MA dispatcher ALMA mismatch");
 });
 
+test('MA dispatcher - SGF with defaults', () => {
+    const close = new Float64Array(testData.close);
+
+    const result = wasm.ma(close, "sgf", 9);
+    assert.strictEqual(result.length, close.length);
+
+    const directResult = wasm.sgf_js(close, 9, 2);
+    assertArrayClose(result, directResult, 1e-10, "MA dispatcher SGF mismatch");
+});
+
 test('MA dispatcher - DEMA', () => {
     const close = new Float64Array(testData.close);
 
@@ -184,7 +194,7 @@ test('MA dispatcher - multiple MA types', () => {
         "sma", "ema", "dema", "tema", "smma", "zlema", "alma", "cwma",
         "edcf", "fwma", "gaussian", "highpass", "highpass2", "hma",
         "jma", "jsa", "kama", "linreg", "nma", "pwma", "reflex",
-        "sinwma", "sqwma", "srwma", "supersmoother", "supersmoother_3_pole",
+        "sinwma", "sqwma", "srwma", "sgf", "supersmoother", "supersmoother_3_pole",
         "swma", "tilson", "trendflex", "trima", "wilders", "wma"
     ];
 

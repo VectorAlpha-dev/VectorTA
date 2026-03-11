@@ -35,6 +35,8 @@ pub mod pwma_wrapper;
 pub mod reflex_wrapper;
 #[cfg(feature = "cuda")]
 pub mod sama_wrapper;
+#[cfg(feature = "cuda")]
+pub mod sgf_wrapper;
 pub mod smma_wrapper;
 pub mod sqwma_wrapper;
 #[cfg(feature = "cuda")]
@@ -193,6 +195,8 @@ pub use reflex_wrapper::CudaReflex;
 pub use rsmk_wrapper::{CudaRsmk, CudaRsmkError};
 #[cfg(feature = "cuda")]
 pub use sama_wrapper::{CudaSama, CudaSamaError};
+#[cfg(feature = "cuda")]
+pub use sgf_wrapper::CudaSgf;
 #[cfg(feature = "cuda")]
 pub use sinwma_wrapper::CudaSinwma;
 pub use sma_wrapper::{CudaSma, CudaSmaError};

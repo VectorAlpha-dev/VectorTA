@@ -40,6 +40,7 @@ use crate::indicators::mwdx::{mwdx, MwdxData, MwdxInput, MwdxParams};
 use crate::indicators::nma::{nma, NmaData, NmaInput, NmaParams};
 use crate::indicators::pwma::{pwma, PwmaData, PwmaInput, PwmaParams};
 use crate::indicators::reflex::{reflex, ReflexData, ReflexInput, ReflexParams};
+use crate::indicators::sgf::{sgf, SgfData, SgfInput, SgfParams};
 use crate::indicators::sinwma::{sinwma, SinWmaData, SinWmaInput, SinWmaParams};
 use crate::indicators::sma::{sma, SmaData, SmaInput, SmaParams};
 use crate::indicators::smma::{smma, SmmaData, SmmaInput, SmmaParams};
@@ -99,6 +100,7 @@ use crate::indicators::mwdx::mwdx_with_kernel;
 use crate::indicators::nma::nma_with_kernel;
 use crate::indicators::pwma::pwma_with_kernel;
 use crate::indicators::reflex::reflex_with_kernel;
+use crate::indicators::sgf::sgf_with_kernel;
 use crate::indicators::sinwma::sinwma_with_kernel;
 use crate::indicators::sma::sma_with_kernel;
 use crate::indicators::smma::smma_with_kernel;
@@ -781,6 +783,27 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
                 },
             };
             let output = supersmoother_3_pole(&input)?;
+            Ok(output.values)
+        }
+
+        "sgf" => {
+            let input = match data {
+                MaData::Candles { candles, source } => SgfInput {
+                    data: SgfData::Candles { candles, source },
+                    params: SgfParams {
+                        period: Some(period),
+                        poly_order: Some(2),
+                    },
+                },
+                MaData::Slice(s) => SgfInput {
+                    data: SgfData::Slice(s),
+                    params: SgfParams {
+                        period: Some(period),
+                        poly_order: Some(2),
+                    },
+                },
+            };
+            let output = sgf(&input)?;
             Ok(output.values)
         }
 
@@ -1857,6 +1880,27 @@ pub fn ma_with_kernel<'a>(
             Ok(output.values)
         }
 
+        "sgf" => {
+            let input = match data {
+                MaData::Candles { candles, source } => SgfInput {
+                    data: SgfData::Candles { candles, source },
+                    params: SgfParams {
+                        period: Some(period),
+                        poly_order: Some(2),
+                    },
+                },
+                MaData::Slice(slice) => SgfInput {
+                    data: SgfData::Slice(slice),
+                    params: SgfParams {
+                        period: Some(period),
+                        poly_order: Some(2),
+                    },
+                },
+            };
+            let output = sgf_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
         "swma" => {
             let input = match data {
                 MaData::Candles { candles, source } => SwmaInput {
@@ -2366,6 +2410,7 @@ mod tests {
             "sinwma",
             "sqwma",
             "srwma",
+            "sgf",
             "supersmoother",
             "supersmoother_3_pole",
             "swma",

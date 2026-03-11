@@ -35,6 +35,7 @@ pub mod pwma;
 pub mod reflex;
 pub mod registry;
 pub mod sama;
+pub mod sgf;
 pub mod sinwma;
 pub mod sma;
 pub mod smma;
@@ -99,6 +100,13 @@ pub use sama::{
     SamaError, SamaInput, SamaOutput, SamaParams, SamaStream,
 };
 
+pub use sgf::{
+    expand_grid as expand_grid_sgf, sgf, sgf_batch_into_slice, sgf_batch_par_slice,
+    sgf_batch_slice, sgf_batch_with_kernel, sgf_into_slice, sgf_with_kernel, SgfBatchBuilder,
+    SgfBatchOutput, SgfBatchRange, SgfBuilder, SgfData, SgfError, SgfInput, SgfOutput, SgfParams,
+    SgfStream,
+};
+
 #[cfg(feature = "python")]
 pub use dma::{dma_batch_py, dma_py, DmaStreamPy};
 
@@ -111,5 +119,11 @@ pub use nama::{nama_batch_py, nama_py, NamaStreamPy};
 #[cfg(feature = "python")]
 pub use sama::{sama_batch_py, sama_py, SamaStreamPy};
 
+#[cfg(feature = "python")]
+pub use sgf::{sgf_batch_py, sgf_py, SgfStreamPy};
+
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 pub use nama::{nama_alloc, nama_batch_unified_js, nama_free, nama_into, nama_js};
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use sgf::{sgf_alloc, sgf_batch_into, sgf_batch_unified_js, sgf_free, sgf_into, sgf_js};

@@ -1,5 +1,8 @@
+pub mod accumulation_swing_index;
 pub mod acosc;
 pub mod ad;
+pub mod adaptive_bounds_rsi;
+pub mod adjustable_ma_alternating_extremities;
 pub mod adosc;
 pub mod adx;
 pub mod adxr;
@@ -7,11 +10,30 @@ pub mod alligator;
 pub mod alphatrend;
 pub mod dispatch;
 pub use alphatrend::{alphatrend, AlphaTrendInput, AlphaTrendOutput, AlphaTrendParams};
+pub mod andean_oscillator;
 pub mod ao;
 pub mod apo;
 pub mod aroon;
 pub mod aroonosc;
 pub mod aso;
+pub use adaptive_bounds_rsi::{
+    adaptive_bounds_rsi, adaptive_bounds_rsi_batch_with_kernel, adaptive_bounds_rsi_into,
+    adaptive_bounds_rsi_into_slices, adaptive_bounds_rsi_with_kernel,
+    AdaptiveBoundsRsiBatchBuilder, AdaptiveBoundsRsiBatchOutput, AdaptiveBoundsRsiBatchRange,
+    AdaptiveBoundsRsiBuilder, AdaptiveBoundsRsiData, AdaptiveBoundsRsiError,
+    AdaptiveBoundsRsiInput, AdaptiveBoundsRsiOutput, AdaptiveBoundsRsiParams,
+    AdaptiveBoundsRsiStream,
+};
+pub use adjustable_ma_alternating_extremities::{
+    adjustable_ma_alternating_extremities, adjustable_ma_alternating_extremities_batch_with_kernel,
+    adjustable_ma_alternating_extremities_into, adjustable_ma_alternating_extremities_into_slices,
+    adjustable_ma_alternating_extremities_with_kernel,
+    AdjustableMaAlternatingExtremitiesBatchBuilder, AdjustableMaAlternatingExtremitiesBatchOutput,
+    AdjustableMaAlternatingExtremitiesBatchRange, AdjustableMaAlternatingExtremitiesBuilder,
+    AdjustableMaAlternatingExtremitiesData, AdjustableMaAlternatingExtremitiesError,
+    AdjustableMaAlternatingExtremitiesInput, AdjustableMaAlternatingExtremitiesOutput,
+    AdjustableMaAlternatingExtremitiesParams, AdjustableMaAlternatingExtremitiesStream,
+};
 pub use aso::{aso, AsoInput, AsoOutput, AsoParams};
 pub mod atr;
 pub mod avsl;
@@ -24,6 +46,7 @@ pub mod bandpass;
 pub mod bollinger_bands;
 pub mod bollinger_bands_width;
 pub mod bop;
+pub mod bulls_v_bears;
 pub mod cci;
 pub mod cci_cycle;
 pub use cci_cycle::{cci_cycle, CciCycleInput, CciCycleOutput, CciCycleParams};
@@ -55,6 +78,8 @@ pub use cvi::{
     cvi, CviBatchBuilder, CviBatchOutput, CviBatchRange, CviBuilder, CviData, CviError, CviInput,
     CviOutput, CviParams, CviStream,
 };
+pub mod cycle_channel_oscillator;
+pub mod daily_factor;
 pub mod damiani_volatmeter;
 pub mod dec_osc;
 pub mod decycler;
@@ -81,19 +106,26 @@ pub use dvdiqqe::{
 };
 pub mod dx;
 pub mod efi;
+pub mod ehlers_adaptive_cyber_cycle;
+pub mod ehlers_simple_cycle_indicator;
+pub mod ehlers_smoothed_adaptive_momentum;
 pub mod emd;
 pub mod emv;
 pub mod er;
 pub mod eri;
+pub mod ewma_volatility;
 pub mod fisher;
+pub mod forward_backward_exponential_oscillator;
 pub mod fosc;
 pub mod fvg_trailing_stop;
+pub mod l1_ehlers_phasor;
 pub use fvg_trailing_stop::{
     fvg_trailing_stop, FvgTrailingStopInput, FvgTrailingStopOutput, FvgTrailingStopParams,
 };
 pub mod gatorosc;
 pub mod halftrend;
 pub use halftrend::{halftrend, HalfTrendInput, HalfTrendOutput, HalfTrendParams};
+pub mod ichimoku_oscillator;
 pub mod ift_rsi;
 pub mod kaufmanstop;
 pub mod kdj;
@@ -101,10 +133,36 @@ pub mod keltner;
 pub mod kst;
 pub mod kurtosis;
 pub mod kvo;
+pub mod l2_ehlers_signal_to_noise;
 pub mod linearreg_angle;
 pub mod linearreg_intercept;
 pub mod linearreg_slope;
 pub mod lpc;
+pub use l2_ehlers_signal_to_noise::expand_grid as l2_ehlers_signal_to_noise_expand_grid;
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use l2_ehlers_signal_to_noise::l2_ehlers_signal_to_noise_into;
+pub use l2_ehlers_signal_to_noise::{
+    l2_ehlers_signal_to_noise, l2_ehlers_signal_to_noise_batch_into_slice,
+    l2_ehlers_signal_to_noise_batch_par_slice, l2_ehlers_signal_to_noise_batch_slice,
+    l2_ehlers_signal_to_noise_batch_with_kernel, l2_ehlers_signal_to_noise_into_slice,
+    l2_ehlers_signal_to_noise_with_kernel, L2EhlersSignalToNoiseBatchBuilder,
+    L2EhlersSignalToNoiseBatchOutput, L2EhlersSignalToNoiseBatchRange,
+    L2EhlersSignalToNoiseBuilder, L2EhlersSignalToNoiseData, L2EhlersSignalToNoiseError,
+    L2EhlersSignalToNoiseInput, L2EhlersSignalToNoiseOutput, L2EhlersSignalToNoiseParams,
+    L2EhlersSignalToNoiseStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use l2_ehlers_signal_to_noise::{
+    l2_ehlers_signal_to_noise_alloc, l2_ehlers_signal_to_noise_batch_into,
+    l2_ehlers_signal_to_noise_batch_js, l2_ehlers_signal_to_noise_free,
+    l2_ehlers_signal_to_noise_into_wasm as l2_ehlers_signal_to_noise_into,
+    l2_ehlers_signal_to_noise_js,
+};
+#[cfg(feature = "python")]
+pub use l2_ehlers_signal_to_noise::{
+    l2_ehlers_signal_to_noise_batch_py, l2_ehlers_signal_to_noise_py,
+    register_l2_ehlers_signal_to_noise_module, L2EhlersSignalToNoiseStreamPy,
+};
 pub use lpc::{lpc, LpcInput, LpcOutput, LpcParams};
 pub mod lrsi;
 pub mod mab;
@@ -116,6 +174,7 @@ pub mod mass;
 pub mod mean_ad;
 pub mod medium_ad;
 pub mod medprice;
+pub mod mesa_stochastic_multi_length;
 pub mod mfi;
 pub mod midpoint;
 pub mod midprice;
@@ -162,6 +221,7 @@ pub use percentile_nearest_rank::{
 pub mod pivot;
 pub mod pma;
 pub mod ppo;
+pub mod price_moving_average_ratio_percentile;
 pub use ppo::{ppo, PpoInput, PpoOutput, PpoParams};
 pub mod prb;
 pub use prb::{
@@ -171,14 +231,40 @@ pub use prb::{
 };
 pub mod pvi;
 pub mod qqe;
+pub mod qqe_weighted_oscillator;
 pub mod qstick;
+pub mod random_walk_index;
 pub mod range_filter;
+pub mod market_structure_confluence;
+pub mod range_filtered_trend_signals;
+pub mod range_oscillator;
 pub mod registry;
+pub mod volume_weighted_relative_strength_index;
 pub use range_filter::{
     range_filter, range_filter_batch_par_slice, range_filter_batch_slice, range_filter_into_slice,
     range_filter_with_kernel, RangeFilterBatchBuilder, RangeFilterBatchOutput,
     RangeFilterBatchRange, RangeFilterBuilder, RangeFilterData, RangeFilterError, RangeFilterInput,
     RangeFilterOutput, RangeFilterParams, RangeFilterStream,
+};
+pub use market_structure_confluence::{
+    market_structure_confluence, market_structure_confluence_batch_with_kernel,
+    market_structure_confluence_into, market_structure_confluence_into_slices,
+    market_structure_confluence_with_kernel, MarketStructureConfluenceBatchBuilder,
+    MarketStructureConfluenceBatchOutput, MarketStructureConfluenceBatchRange,
+    MarketStructureConfluenceBosConfirmation, MarketStructureConfluenceBuilder,
+    MarketStructureConfluenceData, MarketStructureConfluenceError,
+    MarketStructureConfluenceInput, MarketStructureConfluenceOutput,
+    MarketStructureConfluenceParams, MarketStructureConfluenceStream,
+};
+pub use range_filtered_trend_signals::{
+    range_filtered_trend_signals, range_filtered_trend_signals_batch_with_kernel,
+    range_filtered_trend_signals_into, range_filtered_trend_signals_into_slices,
+    range_filtered_trend_signals_with_kernel, RangeFilteredTrendSignalsBatchBuilder,
+    RangeFilteredTrendSignalsBatchOutput, RangeFilteredTrendSignalsBatchRange,
+    RangeFilteredTrendSignalsBuilder, RangeFilteredTrendSignalsData,
+    RangeFilteredTrendSignalsError, RangeFilteredTrendSignalsInput,
+    RangeFilteredTrendSignalsOutput, RangeFilteredTrendSignalsParams,
+    RangeFilteredTrendSignalsStream,
 };
 pub mod roc;
 pub use roc::{
@@ -188,7 +274,52 @@ pub use roc::{
 pub mod reverse_rsi;
 pub mod rocp;
 pub mod rocr;
+pub use forward_backward_exponential_oscillator::{
+    forward_backward_exponential_oscillator,
+    forward_backward_exponential_oscillator_batch_with_kernel,
+    forward_backward_exponential_oscillator_into,
+    forward_backward_exponential_oscillator_into_slices,
+    forward_backward_exponential_oscillator_with_kernel,
+    ForwardBackwardExponentialOscillatorBatchBuilder,
+    ForwardBackwardExponentialOscillatorBatchOutput,
+    ForwardBackwardExponentialOscillatorBatchRange, ForwardBackwardExponentialOscillatorBuilder,
+    ForwardBackwardExponentialOscillatorData, ForwardBackwardExponentialOscillatorError,
+    ForwardBackwardExponentialOscillatorInput, ForwardBackwardExponentialOscillatorOutput,
+    ForwardBackwardExponentialOscillatorParams, ForwardBackwardExponentialOscillatorStream,
+};
+pub use qqe_weighted_oscillator::{
+    qqe_weighted_oscillator, qqe_weighted_oscillator_batch_with_kernel,
+    qqe_weighted_oscillator_into, qqe_weighted_oscillator_into_slices,
+    qqe_weighted_oscillator_with_kernel, QqeWeightedOscillatorBatchBuilder,
+    QqeWeightedOscillatorBatchOutput, QqeWeightedOscillatorBatchRange,
+    QqeWeightedOscillatorBuilder, QqeWeightedOscillatorData, QqeWeightedOscillatorError,
+    QqeWeightedOscillatorInput, QqeWeightedOscillatorOutput, QqeWeightedOscillatorParams,
+    QqeWeightedOscillatorStream,
+};
+pub use range_oscillator::{
+    range_oscillator, range_oscillator_batch_with_kernel, range_oscillator_into,
+    range_oscillator_into_slices, range_oscillator_with_kernel, RangeOscillatorBatchBuilder,
+    RangeOscillatorBatchOutput, RangeOscillatorBatchRange, RangeOscillatorBuilder,
+    RangeOscillatorData, RangeOscillatorError, RangeOscillatorInput, RangeOscillatorOutput,
+    RangeOscillatorParams, RangeOscillatorStream,
+};
 pub use reverse_rsi::{reverse_rsi, ReverseRsiInput, ReverseRsiOutput, ReverseRsiParams};
+pub use volume_weighted_relative_strength_index::{
+    volume_weighted_relative_strength_index,
+    volume_weighted_relative_strength_index_batch_with_kernel,
+    volume_weighted_relative_strength_index_into,
+    volume_weighted_relative_strength_index_into_slices,
+    volume_weighted_relative_strength_index_with_kernel,
+    VolumeWeightedRelativeStrengthIndexBatchBuilder,
+    VolumeWeightedRelativeStrengthIndexBatchOutput, VolumeWeightedRelativeStrengthIndexBatchRange,
+    VolumeWeightedRelativeStrengthIndexBuilder, VolumeWeightedRelativeStrengthIndexData,
+    VolumeWeightedRelativeStrengthIndexError, VolumeWeightedRelativeStrengthIndexInput,
+    VolumeWeightedRelativeStrengthIndexOutput, VolumeWeightedRelativeStrengthIndexParams,
+    VolumeWeightedRelativeStrengthIndexStream,
+};
+pub mod moving_average_cross_probability;
+pub mod regression_slope_oscillator;
+pub mod relative_strength_index_wave_indicator;
 pub mod rsi;
 pub mod rsmk;
 pub mod rsx;
@@ -198,14 +329,17 @@ pub use rsx::{
 pub mod rvi;
 pub mod safezonestop;
 pub mod sar;
+pub mod spearman_correlation;
 pub mod squeeze_momentum;
 pub mod srsi;
 pub mod stc;
 pub mod stddev;
 pub use stddev::{stddev, StdDevInput, StdDevOutput, StdDevParams};
+pub mod smooth_theil_sen;
 pub mod stoch;
 pub mod stochf;
 pub mod supertrend;
+pub mod trend_trigger_factor;
 pub mod trix;
 pub mod tsf;
 pub mod tsi;
@@ -218,10 +352,13 @@ pub mod var;
 pub mod vi;
 pub mod vidya;
 pub mod vlma;
+pub mod volatility_quality_index;
+pub mod volume_zone_oscillator;
 pub mod vosc;
 pub mod voss;
 pub mod vpci;
 pub mod vpt;
+pub mod vwap_deviation_oscillator;
 pub use vpt::{vpt, VptInput, VptOutput, VptParams};
 pub mod vwmacd;
 pub mod wad;
@@ -249,11 +386,230 @@ pub use avsl::{avsl_batch_py, avsl_py, AvslStreamPy};
 #[cfg(feature = "python")]
 pub use range_filter::{range_filter_batch_py, range_filter_py, RangeFilterStreamPy};
 
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use accumulation_swing_index::accumulation_swing_index_into;
+pub use accumulation_swing_index::{
+    accumulation_swing_index, accumulation_swing_index_batch_into_slice,
+    accumulation_swing_index_batch_par_slice, accumulation_swing_index_batch_slice,
+    accumulation_swing_index_batch_with_kernel, accumulation_swing_index_into_slice,
+    accumulation_swing_index_with_kernel, AccumulationSwingIndexBatchBuilder,
+    AccumulationSwingIndexBatchOutput, AccumulationSwingIndexBatchRange,
+    AccumulationSwingIndexBuilder, AccumulationSwingIndexData, AccumulationSwingIndexError,
+    AccumulationSwingIndexInput, AccumulationSwingIndexOutput, AccumulationSwingIndexParams,
+    AccumulationSwingIndexStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use accumulation_swing_index::{
+    accumulation_swing_index_alloc, accumulation_swing_index_batch_into,
+    accumulation_swing_index_batch_js, accumulation_swing_index_free,
+    accumulation_swing_index_into, accumulation_swing_index_js,
+};
+#[cfg(feature = "python")]
+pub use accumulation_swing_index::{
+    accumulation_swing_index_batch_py, accumulation_swing_index_py,
+    register_accumulation_swing_index_module, AccumulationSwingIndexStreamPy,
+};
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use andean_oscillator::andean_oscillator_into;
+pub use andean_oscillator::expand_grid as andean_oscillator_expand_grid;
+pub use andean_oscillator::{
+    andean_oscillator, andean_oscillator_batch_into_slice, andean_oscillator_batch_par_slice,
+    andean_oscillator_batch_slice, andean_oscillator_batch_with_kernel,
+    andean_oscillator_into_slice, andean_oscillator_with_kernel, AndeanOscillatorBatchBuilder,
+    AndeanOscillatorBatchOutput, AndeanOscillatorBatchRange, AndeanOscillatorBuilder,
+    AndeanOscillatorData, AndeanOscillatorError, AndeanOscillatorInput, AndeanOscillatorOutput,
+    AndeanOscillatorParams, AndeanOscillatorStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use andean_oscillator::{
+    andean_oscillator_alloc, andean_oscillator_batch_into, andean_oscillator_batch_js,
+    andean_oscillator_free, andean_oscillator_into, andean_oscillator_js,
+};
+#[cfg(feature = "python")]
+pub use andean_oscillator::{
+    andean_oscillator_batch_py, andean_oscillator_py, register_andean_oscillator_module,
+    AndeanOscillatorStreamPy,
+};
 pub use apo::{apo, ApoInput, ApoOutput, ApoParams};
+pub use bulls_v_bears::bulls_v_bears_expand_grid;
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use bulls_v_bears::bulls_v_bears_into;
+pub use bulls_v_bears::{
+    bulls_v_bears, bulls_v_bears_batch_into_slice, bulls_v_bears_batch_par_slice,
+    bulls_v_bears_batch_slice, bulls_v_bears_batch_with_kernel, bulls_v_bears_into_slice,
+    bulls_v_bears_with_kernel, BullsVBearsBatchBuilder, BullsVBearsBatchOutput,
+    BullsVBearsBatchRange, BullsVBearsBuilder, BullsVBearsCalculationMethod, BullsVBearsData,
+    BullsVBearsError, BullsVBearsInput, BullsVBearsMaType, BullsVBearsOutput, BullsVBearsParams,
+    BullsVBearsStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use bulls_v_bears::{
+    bulls_v_bears_alloc, bulls_v_bears_batch_into, bulls_v_bears_batch_js, bulls_v_bears_free,
+    bulls_v_bears_into, bulls_v_bears_js,
+};
+#[cfg(feature = "python")]
+pub use bulls_v_bears::{
+    bulls_v_bears_batch_py, bulls_v_bears_py, register_bulls_v_bears_module, BullsVBearsStreamPy,
+};
 pub use cci::{cci, CciInput, CciOutput, CciParams};
 pub use cfo::{cfo, CfoInput, CfoOutput, CfoParams};
 pub use coppock::{coppock, CoppockInput, CoppockOutput, CoppockParams};
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use cycle_channel_oscillator::cycle_channel_oscillator_into;
+pub use cycle_channel_oscillator::expand_grid as cycle_channel_oscillator_expand_grid;
+pub use cycle_channel_oscillator::{
+    cycle_channel_oscillator, cycle_channel_oscillator_batch_into_slice,
+    cycle_channel_oscillator_batch_par_slice, cycle_channel_oscillator_batch_slice,
+    cycle_channel_oscillator_batch_with_kernel, cycle_channel_oscillator_into_slice,
+    cycle_channel_oscillator_with_kernel, CycleChannelOscillatorBatchBuilder,
+    CycleChannelOscillatorBatchOutput, CycleChannelOscillatorBatchRange,
+    CycleChannelOscillatorBuilder, CycleChannelOscillatorData, CycleChannelOscillatorError,
+    CycleChannelOscillatorInput, CycleChannelOscillatorOutput, CycleChannelOscillatorParams,
+    CycleChannelOscillatorStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use cycle_channel_oscillator::{
+    cycle_channel_oscillator_alloc, cycle_channel_oscillator_batch_into,
+    cycle_channel_oscillator_batch_js, cycle_channel_oscillator_free,
+    cycle_channel_oscillator_into, cycle_channel_oscillator_js,
+};
+#[cfg(feature = "python")]
+pub use cycle_channel_oscillator::{
+    cycle_channel_oscillator_batch_py, cycle_channel_oscillator_py,
+    register_cycle_channel_oscillator_module, CycleChannelOscillatorStreamPy,
+};
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use daily_factor::daily_factor_into;
+pub use daily_factor::expand_grid as daily_factor_expand_grid;
+pub use daily_factor::{
+    daily_factor, daily_factor_batch_into_slice, daily_factor_batch_par_slice,
+    daily_factor_batch_slice, daily_factor_batch_with_kernel, daily_factor_into_slice,
+    daily_factor_with_kernel, DailyFactorBatchBuilder, DailyFactorBatchOutput,
+    DailyFactorBatchRange, DailyFactorBuilder, DailyFactorData, DailyFactorError, DailyFactorInput,
+    DailyFactorOutput, DailyFactorParams, DailyFactorStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use daily_factor::{
+    daily_factor_alloc, daily_factor_batch_into, daily_factor_batch_js, daily_factor_free,
+    daily_factor_into, daily_factor_js,
+};
+#[cfg(feature = "python")]
+pub use daily_factor::{
+    daily_factor_batch_py, daily_factor_py, register_daily_factor_module, DailyFactorStreamPy,
+};
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use ehlers_adaptive_cyber_cycle::ehlers_adaptive_cyber_cycle_into;
+pub use ehlers_adaptive_cyber_cycle::expand_grid as ehlers_adaptive_cyber_cycle_expand_grid;
+pub use ehlers_adaptive_cyber_cycle::{
+    ehlers_adaptive_cyber_cycle, ehlers_adaptive_cyber_cycle_batch_into_slice,
+    ehlers_adaptive_cyber_cycle_batch_par_slice, ehlers_adaptive_cyber_cycle_batch_slice,
+    ehlers_adaptive_cyber_cycle_batch_with_kernel, ehlers_adaptive_cyber_cycle_into_slice,
+    ehlers_adaptive_cyber_cycle_with_kernel, EhlersAdaptiveCyberCycleBatchBuilder,
+    EhlersAdaptiveCyberCycleBatchOutput, EhlersAdaptiveCyberCycleBatchRange,
+    EhlersAdaptiveCyberCycleBuilder, EhlersAdaptiveCyberCycleData, EhlersAdaptiveCyberCycleError,
+    EhlersAdaptiveCyberCycleInput, EhlersAdaptiveCyberCycleOutput, EhlersAdaptiveCyberCycleParams,
+    EhlersAdaptiveCyberCycleStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use ehlers_adaptive_cyber_cycle::{
+    ehlers_adaptive_cyber_cycle_alloc, ehlers_adaptive_cyber_cycle_batch_into,
+    ehlers_adaptive_cyber_cycle_batch_js, ehlers_adaptive_cyber_cycle_free,
+    ehlers_adaptive_cyber_cycle_into, ehlers_adaptive_cyber_cycle_js,
+};
+#[cfg(feature = "python")]
+pub use ehlers_adaptive_cyber_cycle::{
+    ehlers_adaptive_cyber_cycle_batch_py, ehlers_adaptive_cyber_cycle_py,
+    register_ehlers_adaptive_cyber_cycle_module, EhlersAdaptiveCyberCycleStreamPy,
+};
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use ehlers_simple_cycle_indicator::ehlers_simple_cycle_indicator_into;
+pub use ehlers_simple_cycle_indicator::expand_grid as ehlers_simple_cycle_indicator_expand_grid;
+pub use ehlers_simple_cycle_indicator::{
+    ehlers_simple_cycle_indicator, ehlers_simple_cycle_indicator_batch_into_slice,
+    ehlers_simple_cycle_indicator_batch_par_slice, ehlers_simple_cycle_indicator_batch_slice,
+    ehlers_simple_cycle_indicator_batch_with_kernel, ehlers_simple_cycle_indicator_into_slice,
+    ehlers_simple_cycle_indicator_with_kernel, EhlersSimpleCycleIndicatorBatchBuilder,
+    EhlersSimpleCycleIndicatorBatchOutput, EhlersSimpleCycleIndicatorBatchRange,
+    EhlersSimpleCycleIndicatorBuilder, EhlersSimpleCycleIndicatorData,
+    EhlersSimpleCycleIndicatorError, EhlersSimpleCycleIndicatorInput,
+    EhlersSimpleCycleIndicatorOutput, EhlersSimpleCycleIndicatorParams,
+    EhlersSimpleCycleIndicatorStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use ehlers_simple_cycle_indicator::{
+    ehlers_simple_cycle_indicator_alloc, ehlers_simple_cycle_indicator_batch_into,
+    ehlers_simple_cycle_indicator_batch_js, ehlers_simple_cycle_indicator_free,
+    ehlers_simple_cycle_indicator_into, ehlers_simple_cycle_indicator_js,
+};
+#[cfg(feature = "python")]
+pub use ehlers_simple_cycle_indicator::{
+    ehlers_simple_cycle_indicator_batch_py, ehlers_simple_cycle_indicator_py,
+    register_ehlers_simple_cycle_indicator_module, EhlersSimpleCycleIndicatorStreamPy,
+};
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use ehlers_smoothed_adaptive_momentum::ehlers_smoothed_adaptive_momentum_into;
+pub use ehlers_smoothed_adaptive_momentum::expand_grid as ehlers_smoothed_adaptive_momentum_expand_grid;
+pub use ehlers_smoothed_adaptive_momentum::{
+    ehlers_smoothed_adaptive_momentum, ehlers_smoothed_adaptive_momentum_batch_into_slice,
+    ehlers_smoothed_adaptive_momentum_batch_par_slice,
+    ehlers_smoothed_adaptive_momentum_batch_slice,
+    ehlers_smoothed_adaptive_momentum_batch_with_kernel,
+    ehlers_smoothed_adaptive_momentum_into_slice, ehlers_smoothed_adaptive_momentum_with_kernel,
+    EhlersSmoothedAdaptiveMomentumBatchBuilder, EhlersSmoothedAdaptiveMomentumBatchOutput,
+    EhlersSmoothedAdaptiveMomentumBatchRange, EhlersSmoothedAdaptiveMomentumBuilder,
+    EhlersSmoothedAdaptiveMomentumData, EhlersSmoothedAdaptiveMomentumError,
+    EhlersSmoothedAdaptiveMomentumInput, EhlersSmoothedAdaptiveMomentumOutput,
+    EhlersSmoothedAdaptiveMomentumParams, EhlersSmoothedAdaptiveMomentumStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use ehlers_smoothed_adaptive_momentum::{
+    ehlers_smoothed_adaptive_momentum_alloc, ehlers_smoothed_adaptive_momentum_batch_into,
+    ehlers_smoothed_adaptive_momentum_batch_js, ehlers_smoothed_adaptive_momentum_free,
+    ehlers_smoothed_adaptive_momentum_into, ehlers_smoothed_adaptive_momentum_js,
+};
+#[cfg(feature = "python")]
+pub use ehlers_smoothed_adaptive_momentum::{
+    ehlers_smoothed_adaptive_momentum_batch_py, ehlers_smoothed_adaptive_momentum_py,
+    register_ehlers_smoothed_adaptive_momentum_module, EhlersSmoothedAdaptiveMomentumStreamPy,
+};
 pub use er::{er, ErInput, ErOutput, ErParams};
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use ewma_volatility::ewma_volatility_into;
+pub use ewma_volatility::{
+    ewma_volatility, ewma_volatility_batch_into_slice, ewma_volatility_batch_par_slice,
+    ewma_volatility_batch_slice, ewma_volatility_batch_with_kernel, ewma_volatility_into_slice,
+    ewma_volatility_with_kernel, EwmaVolatilityBatchBuilder, EwmaVolatilityBatchOutput,
+    EwmaVolatilityBatchRange, EwmaVolatilityBuilder, EwmaVolatilityData, EwmaVolatilityError,
+    EwmaVolatilityInput, EwmaVolatilityOutput, EwmaVolatilityParams, EwmaVolatilityStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use ewma_volatility::{
+    ewma_volatility_alloc, ewma_volatility_batch_into, ewma_volatility_batch_js,
+    ewma_volatility_free, ewma_volatility_into, ewma_volatility_js,
+};
+#[cfg(feature = "python")]
+pub use ewma_volatility::{ewma_volatility_batch_py, ewma_volatility_py, EwmaVolatilityStreamPy};
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use ichimoku_oscillator::ichimoku_oscillator_into;
+pub use ichimoku_oscillator::{
+    ichimoku_oscillator, ichimoku_oscillator_batch_into_slice, ichimoku_oscillator_batch_par_slice,
+    ichimoku_oscillator_batch_slice, ichimoku_oscillator_batch_with_kernel,
+    ichimoku_oscillator_into_slice, ichimoku_oscillator_with_kernel,
+    IchimokuOscillatorBatchBuilder, IchimokuOscillatorBatchOutput, IchimokuOscillatorBatchRange,
+    IchimokuOscillatorBuilder, IchimokuOscillatorData, IchimokuOscillatorError,
+    IchimokuOscillatorInput, IchimokuOscillatorNormalizeMode, IchimokuOscillatorOutput,
+    IchimokuOscillatorParams, IchimokuOscillatorStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use ichimoku_oscillator::{
+    ichimoku_oscillator_alloc, ichimoku_oscillator_batch_into, ichimoku_oscillator_batch_js,
+    ichimoku_oscillator_free, ichimoku_oscillator_into, ichimoku_oscillator_js,
+};
+#[cfg(feature = "python")]
+pub use ichimoku_oscillator::{
+    ichimoku_oscillator_batch_py, ichimoku_oscillator_py, register_ichimoku_oscillator_module,
+    IchimokuOscillatorStreamPy,
+};
 pub use ift_rsi::{
     ift_rsi, IftRsiBatchBuilder, IftRsiBatchOutput, IftRsiBatchRange, IftRsiBuilder, IftRsiError,
     IftRsiInput, IftRsiOutput, IftRsiParams, IftRsiStream,
@@ -264,19 +620,238 @@ pub use ift_rsi::{
 };
 #[cfg(feature = "python")]
 pub use ift_rsi::{ift_rsi_batch_py, ift_rsi_py, IftRsiStreamPy};
+pub use l1_ehlers_phasor::expand_grid as l1_ehlers_phasor_expand_grid;
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use l1_ehlers_phasor::l1_ehlers_phasor_into;
+pub use l1_ehlers_phasor::{
+    l1_ehlers_phasor, l1_ehlers_phasor_batch_into_slice, l1_ehlers_phasor_batch_par_slice,
+    l1_ehlers_phasor_batch_slice, l1_ehlers_phasor_batch_with_kernel, l1_ehlers_phasor_into_slice,
+    l1_ehlers_phasor_with_kernel, L1EhlersPhasorBatchBuilder, L1EhlersPhasorBatchOutput,
+    L1EhlersPhasorBatchRange, L1EhlersPhasorBuilder, L1EhlersPhasorData, L1EhlersPhasorError,
+    L1EhlersPhasorInput, L1EhlersPhasorOutput, L1EhlersPhasorParams, L1EhlersPhasorStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use l1_ehlers_phasor::{
+    l1_ehlers_phasor_alloc, l1_ehlers_phasor_batch_into, l1_ehlers_phasor_batch_js,
+    l1_ehlers_phasor_free, l1_ehlers_phasor_into_wasm as l1_ehlers_phasor_into,
+    l1_ehlers_phasor_js,
+};
+#[cfg(feature = "python")]
+pub use l1_ehlers_phasor::{
+    l1_ehlers_phasor_batch_py, l1_ehlers_phasor_py, register_l1_ehlers_phasor_module,
+    L1EhlersPhasorStreamPy,
+};
 pub use linearreg_angle::{
     linearreg_angle, Linearreg_angleInput, Linearreg_angleOutput, Linearreg_angleParams,
 };
 pub use mean_ad::{mean_ad, MeanAdInput, MeanAdOutput, MeanAdParams};
+pub use mesa_stochastic_multi_length::expand_grid as mesa_stochastic_multi_length_expand_grid;
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use mesa_stochastic_multi_length::mesa_stochastic_multi_length_into;
+pub use mesa_stochastic_multi_length::{
+    mesa_stochastic_multi_length, mesa_stochastic_multi_length_batch_into_slice,
+    mesa_stochastic_multi_length_batch_par_slice, mesa_stochastic_multi_length_batch_slice,
+    mesa_stochastic_multi_length_batch_with_kernel, mesa_stochastic_multi_length_into_slice,
+    mesa_stochastic_multi_length_with_kernel, MesaStochasticMultiLengthBatchBuilder,
+    MesaStochasticMultiLengthBatchOutput, MesaStochasticMultiLengthBatchRange,
+    MesaStochasticMultiLengthBuilder, MesaStochasticMultiLengthData,
+    MesaStochasticMultiLengthError, MesaStochasticMultiLengthInput,
+    MesaStochasticMultiLengthOutput, MesaStochasticMultiLengthParams,
+    MesaStochasticMultiLengthStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use mesa_stochastic_multi_length::{
+    mesa_stochastic_multi_length_alloc, mesa_stochastic_multi_length_batch_into,
+    mesa_stochastic_multi_length_batch_js, mesa_stochastic_multi_length_free,
+    mesa_stochastic_multi_length_into, mesa_stochastic_multi_length_js,
+};
+#[cfg(feature = "python")]
+pub use mesa_stochastic_multi_length::{
+    mesa_stochastic_multi_length_batch_py, mesa_stochastic_multi_length_py,
+    register_mesa_stochastic_multi_length_module, MesaStochasticMultiLengthStreamPy,
+};
 pub use mom::{mom, MomInput, MomOutput, MomParams};
+pub use moving_average_cross_probability::moving_average_cross_probability_expand_grid;
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use moving_average_cross_probability::moving_average_cross_probability_into;
+pub use moving_average_cross_probability::{
+    moving_average_cross_probability, moving_average_cross_probability_batch_into_slice,
+    moving_average_cross_probability_batch_par_slice, moving_average_cross_probability_batch_slice,
+    moving_average_cross_probability_batch_with_kernel,
+    moving_average_cross_probability_into_slice, moving_average_cross_probability_with_kernel,
+    MovingAverageCrossProbabilityBatchBuilder, MovingAverageCrossProbabilityBatchOutput,
+    MovingAverageCrossProbabilityBatchRange, MovingAverageCrossProbabilityBuilder,
+    MovingAverageCrossProbabilityData, MovingAverageCrossProbabilityError,
+    MovingAverageCrossProbabilityInput, MovingAverageCrossProbabilityMaType,
+    MovingAverageCrossProbabilityOutput, MovingAverageCrossProbabilityParams,
+    MovingAverageCrossProbabilityStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use moving_average_cross_probability::{
+    moving_average_cross_probability_alloc, moving_average_cross_probability_batch_into,
+    moving_average_cross_probability_batch_js, moving_average_cross_probability_free,
+    moving_average_cross_probability_into, moving_average_cross_probability_js,
+};
+#[cfg(feature = "python")]
+pub use moving_average_cross_probability::{
+    moving_average_cross_probability_batch_py, moving_average_cross_probability_py,
+    register_moving_average_cross_probability_module, MovingAverageCrossProbabilityStreamPy,
+};
 pub use moving_averages::{
     alma, buff_averages, cwma, dema, edcf, ehlers_itrend, ehlers_pma, ema, epma, frama, fwma,
     gaussian, highpass, highpass_2_pole, hma, hwma, jma, jsa, kama, linreg, maaq, mama, mwdx, nma,
-    pwma, reflex, sinwma, sma, smma, sqwma, srwma, supersmoother, supersmoother_3_pole, swma, tema,
-    tilson, tradjema, trendflex, trima, uma, volatility_adjusted_ma, volume_adjusted_ma, vpwma,
-    vwap, vwma, wilders, wma, zlema,
+    pwma, reflex, sgf, sinwma, sma, smma, sqwma, srwma, supersmoother, supersmoother_3_pole, swma,
+    tema, tilson, tradjema, trendflex, trima, uma, volatility_adjusted_ma, volume_adjusted_ma,
+    vpwma, vwap, vwma, wilders, wma, zlema,
+};
+pub use price_moving_average_ratio_percentile::expand_grid as price_moving_average_ratio_percentile_expand_grid;
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use price_moving_average_ratio_percentile::price_moving_average_ratio_percentile_into;
+pub use price_moving_average_ratio_percentile::{
+    price_moving_average_ratio_percentile, price_moving_average_ratio_percentile_batch_into_slice,
+    price_moving_average_ratio_percentile_batch_par_slice,
+    price_moving_average_ratio_percentile_batch_slice,
+    price_moving_average_ratio_percentile_batch_with_kernel,
+    price_moving_average_ratio_percentile_into_slice,
+    price_moving_average_ratio_percentile_with_kernel,
+    PriceMovingAverageRatioPercentileBatchBuilder, PriceMovingAverageRatioPercentileBatchOutput,
+    PriceMovingAverageRatioPercentileBatchRange, PriceMovingAverageRatioPercentileBuilder,
+    PriceMovingAverageRatioPercentileData, PriceMovingAverageRatioPercentileError,
+    PriceMovingAverageRatioPercentileInput, PriceMovingAverageRatioPercentileLineMode,
+    PriceMovingAverageRatioPercentileMaType, PriceMovingAverageRatioPercentileOutput,
+    PriceMovingAverageRatioPercentileParams, PriceMovingAverageRatioPercentileStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use price_moving_average_ratio_percentile::{
+    price_moving_average_ratio_percentile_alloc, price_moving_average_ratio_percentile_batch_into,
+    price_moving_average_ratio_percentile_batch_js, price_moving_average_ratio_percentile_free,
+    price_moving_average_ratio_percentile_into, price_moving_average_ratio_percentile_js,
+};
+#[cfg(feature = "python")]
+pub use price_moving_average_ratio_percentile::{
+    price_moving_average_ratio_percentile_batch_py, price_moving_average_ratio_percentile_py,
+    register_price_moving_average_ratio_percentile_module,
+    PriceMovingAverageRatioPercentileStreamPy,
+};
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use random_walk_index::random_walk_index_into;
+pub use random_walk_index::{
+    random_walk_index, random_walk_index_batch_into_slice, random_walk_index_batch_par_slice,
+    random_walk_index_batch_slice, random_walk_index_batch_with_kernel,
+    random_walk_index_into_slice, random_walk_index_with_kernel, RandomWalkIndexBatchBuilder,
+    RandomWalkIndexBatchOutput, RandomWalkIndexBatchRange, RandomWalkIndexBuilder,
+    RandomWalkIndexData, RandomWalkIndexError, RandomWalkIndexInput, RandomWalkIndexOutput,
+    RandomWalkIndexParams, RandomWalkIndexStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use random_walk_index::{
+    random_walk_index_alloc, random_walk_index_batch_into, random_walk_index_batch_js,
+    random_walk_index_free, random_walk_index_into, random_walk_index_js,
+};
+#[cfg(feature = "python")]
+pub use random_walk_index::{
+    random_walk_index_batch_py, random_walk_index_py, register_random_walk_index_module,
+    RandomWalkIndexStreamPy,
+};
+pub use regression_slope_oscillator::regression_slope_oscillator_expand_grid;
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use regression_slope_oscillator::regression_slope_oscillator_into;
+#[cfg(feature = "python")]
+pub use regression_slope_oscillator::{
+    register_regression_slope_oscillator_module, regression_slope_oscillator_batch_py,
+    regression_slope_oscillator_py, RegressionSlopeOscillatorStreamPy,
+};
+pub use regression_slope_oscillator::{
+    regression_slope_oscillator, regression_slope_oscillator_batch_into_slice,
+    regression_slope_oscillator_batch_par_slice, regression_slope_oscillator_batch_slice,
+    regression_slope_oscillator_batch_with_kernel, regression_slope_oscillator_into_slice,
+    regression_slope_oscillator_with_kernel, RegressionSlopeOscillatorBatchBuilder,
+    RegressionSlopeOscillatorBatchOutput, RegressionSlopeOscillatorBatchRange,
+    RegressionSlopeOscillatorBuilder, RegressionSlopeOscillatorData,
+    RegressionSlopeOscillatorError, RegressionSlopeOscillatorInput,
+    RegressionSlopeOscillatorOutput, RegressionSlopeOscillatorParams,
+    RegressionSlopeOscillatorStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use regression_slope_oscillator::{
+    regression_slope_oscillator_alloc, regression_slope_oscillator_batch_into,
+    regression_slope_oscillator_batch_js, regression_slope_oscillator_free,
+    regression_slope_oscillator_into, regression_slope_oscillator_js,
+};
+pub use relative_strength_index_wave_indicator::expand_grid as relative_strength_index_wave_indicator_expand_grid;
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use relative_strength_index_wave_indicator::relative_strength_index_wave_indicator_into;
+#[cfg(feature = "python")]
+pub use relative_strength_index_wave_indicator::{
+    register_relative_strength_index_wave_indicator_module,
+    relative_strength_index_wave_indicator_batch_py, relative_strength_index_wave_indicator_py,
+    RelativeStrengthIndexWaveIndicatorStreamPy,
+};
+pub use relative_strength_index_wave_indicator::{
+    relative_strength_index_wave_indicator,
+    relative_strength_index_wave_indicator_batch_into_slice,
+    relative_strength_index_wave_indicator_batch_par_slice,
+    relative_strength_index_wave_indicator_batch_slice,
+    relative_strength_index_wave_indicator_batch_with_kernel,
+    relative_strength_index_wave_indicator_into_slice,
+    relative_strength_index_wave_indicator_with_kernel,
+    RelativeStrengthIndexWaveIndicatorBatchBuilder, RelativeStrengthIndexWaveIndicatorBatchOutput,
+    RelativeStrengthIndexWaveIndicatorBatchRange, RelativeStrengthIndexWaveIndicatorBuilder,
+    RelativeStrengthIndexWaveIndicatorData, RelativeStrengthIndexWaveIndicatorError,
+    RelativeStrengthIndexWaveIndicatorInput, RelativeStrengthIndexWaveIndicatorOutput,
+    RelativeStrengthIndexWaveIndicatorParams, RelativeStrengthIndexWaveIndicatorStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use relative_strength_index_wave_indicator::{
+    relative_strength_index_wave_indicator_alloc,
+    relative_strength_index_wave_indicator_batch_into,
+    relative_strength_index_wave_indicator_batch_js, relative_strength_index_wave_indicator_free,
+    relative_strength_index_wave_indicator_into, relative_strength_index_wave_indicator_js,
 };
 pub use rsi::{rsi, RsiBatchOutput, RsiInput, RsiOutput, RsiParams, RsiStream};
+pub use smooth_theil_sen::smooth_theil_sen_expand_grid;
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use smooth_theil_sen::smooth_theil_sen_into;
+#[cfg(feature = "python")]
+pub use smooth_theil_sen::{
+    register_smooth_theil_sen_module, smooth_theil_sen_batch_py, smooth_theil_sen_py,
+    SmoothTheilSenStreamPy,
+};
+pub use smooth_theil_sen::{
+    smooth_theil_sen, smooth_theil_sen_batch_into_slice, smooth_theil_sen_batch_par_slice,
+    smooth_theil_sen_batch_slice, smooth_theil_sen_batch_with_kernel, smooth_theil_sen_into_slice,
+    smooth_theil_sen_with_kernel, SmoothTheilSenBatchBuilder, SmoothTheilSenBatchOutput,
+    SmoothTheilSenBatchRange, SmoothTheilSenBuilder, SmoothTheilSenData,
+    SmoothTheilSenDeviationType, SmoothTheilSenError, SmoothTheilSenInput, SmoothTheilSenOutput,
+    SmoothTheilSenParams, SmoothTheilSenStatStyle, SmoothTheilSenStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use smooth_theil_sen::{
+    smooth_theil_sen_alloc, smooth_theil_sen_batch_into, smooth_theil_sen_batch_js,
+    smooth_theil_sen_free, smooth_theil_sen_into, smooth_theil_sen_js,
+};
+pub use spearman_correlation::expand_grid as spearman_correlation_expand_grid;
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use spearman_correlation::spearman_correlation_into;
+#[cfg(feature = "python")]
+pub use spearman_correlation::{
+    register_spearman_correlation_module, spearman_correlation_batch_py, spearman_correlation_py,
+    SpearmanCorrelationStreamPy,
+};
+pub use spearman_correlation::{
+    spearman_correlation, spearman_correlation_batch_into_slice,
+    spearman_correlation_batch_par_slice, spearman_correlation_batch_slice,
+    spearman_correlation_batch_with_kernel, spearman_correlation_into_slice,
+    spearman_correlation_with_kernel, SpearmanCorrelationBatchBuilder,
+    SpearmanCorrelationBatchOutput, SpearmanCorrelationBatchRange, SpearmanCorrelationBuilder,
+    SpearmanCorrelationData, SpearmanCorrelationError, SpearmanCorrelationInput,
+    SpearmanCorrelationOutput, SpearmanCorrelationParams, SpearmanCorrelationStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use spearman_correlation::{
+    spearman_correlation_alloc, spearman_correlation_batch_into, spearman_correlation_batch_js,
+    spearman_correlation_free, spearman_correlation_into, spearman_correlation_js,
+};
 pub use squeeze_momentum::{
     squeeze_momentum, SqueezeMomentumBatchOutput, SqueezeMomentumBatchParams,
     SqueezeMomentumBuilder, SqueezeMomentumInput, SqueezeMomentumOutput, SqueezeMomentumParams,
@@ -290,6 +865,27 @@ pub use squeeze_momentum::{
 #[cfg(feature = "python")]
 pub use squeeze_momentum::{
     squeeze_momentum_batch_py, squeeze_momentum_py, SqueezeMomentumStreamPy,
+};
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use trend_trigger_factor::trend_trigger_factor_into;
+#[cfg(feature = "python")]
+pub use trend_trigger_factor::{
+    register_trend_trigger_factor_module, trend_trigger_factor_batch_py, trend_trigger_factor_py,
+    TrendTriggerFactorStreamPy,
+};
+pub use trend_trigger_factor::{
+    trend_trigger_factor, trend_trigger_factor_batch_into_slice,
+    trend_trigger_factor_batch_par_slice, trend_trigger_factor_batch_slice,
+    trend_trigger_factor_batch_with_kernel, trend_trigger_factor_into_slice,
+    trend_trigger_factor_with_kernel, TrendTriggerFactorBatchBuilder,
+    TrendTriggerFactorBatchOutput, TrendTriggerFactorBatchRange, TrendTriggerFactorBuilder,
+    TrendTriggerFactorData, TrendTriggerFactorError, TrendTriggerFactorInput,
+    TrendTriggerFactorOutput, TrendTriggerFactorParams, TrendTriggerFactorStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use trend_trigger_factor::{
+    trend_trigger_factor_alloc, trend_trigger_factor_batch_into, trend_trigger_factor_batch_js,
+    trend_trigger_factor_free, trend_trigger_factor_into, trend_trigger_factor_js,
 };
 pub use trix::{trix, TrixBatchOutput, TrixInput, TrixOutput, TrixParams, TrixStream};
 #[cfg(feature = "python")]
@@ -311,9 +907,75 @@ pub use vidya::{
 pub use vidya::{vidya_alloc, vidya_batch_into, vidya_batch_js, vidya_free, vidya_into, vidya_js};
 #[cfg(feature = "python")]
 pub use vidya::{vidya_batch_py, vidya_py, VidyaStreamPy};
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use volatility_quality_index::volatility_quality_index_into;
+pub use volatility_quality_index::{
+    volatility_quality_index, volatility_quality_index_batch_into_slice,
+    volatility_quality_index_batch_par_slice, volatility_quality_index_batch_slice,
+    volatility_quality_index_batch_with_kernel, volatility_quality_index_into_slice,
+    volatility_quality_index_with_kernel, VolatilityQualityIndexBatchBuilder,
+    VolatilityQualityIndexBatchOutput, VolatilityQualityIndexBatchRange,
+    VolatilityQualityIndexBuilder, VolatilityQualityIndexData, VolatilityQualityIndexError,
+    VolatilityQualityIndexInput, VolatilityQualityIndexOutput, VolatilityQualityIndexParams,
+    VolatilityQualityIndexStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use volatility_quality_index::{
+    volatility_quality_index_alloc, volatility_quality_index_batch_into,
+    volatility_quality_index_batch_js, volatility_quality_index_free,
+    volatility_quality_index_into, volatility_quality_index_js,
+};
+#[cfg(feature = "python")]
+pub use volatility_quality_index::{
+    volatility_quality_index_batch_py, volatility_quality_index_py, VolatilityQualityIndexStreamPy,
+};
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use volume_zone_oscillator::volume_zone_oscillator_into;
+pub use volume_zone_oscillator::{
+    volume_zone_oscillator, volume_zone_oscillator_batch_into_slice,
+    volume_zone_oscillator_batch_par_slice, volume_zone_oscillator_batch_slice,
+    volume_zone_oscillator_batch_with_kernel, volume_zone_oscillator_into_slice,
+    volume_zone_oscillator_with_kernel, VolumeZoneOscillatorBatchBuilder,
+    VolumeZoneOscillatorBatchOutput, VolumeZoneOscillatorBatchRange, VolumeZoneOscillatorBuilder,
+    VolumeZoneOscillatorData, VolumeZoneOscillatorError, VolumeZoneOscillatorInput,
+    VolumeZoneOscillatorOutput, VolumeZoneOscillatorParams, VolumeZoneOscillatorStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use volume_zone_oscillator::{
+    volume_zone_oscillator_alloc, volume_zone_oscillator_batch_into,
+    volume_zone_oscillator_batch_js, volume_zone_oscillator_free, volume_zone_oscillator_into,
+    volume_zone_oscillator_js,
+};
+#[cfg(feature = "python")]
+pub use volume_zone_oscillator::{
+    volume_zone_oscillator_batch_py, volume_zone_oscillator_py, VolumeZoneOscillatorStreamPy,
+};
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 pub use vpci::{
     vpci_alloc, vpci_batch_into, vpci_batch_unified_js, vpci_free, vpci_into, vpci_js, VpciContext,
+};
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use vwap_deviation_oscillator::vwap_deviation_oscillator_into;
+#[cfg(feature = "python")]
+pub use vwap_deviation_oscillator::{
+    register_vwap_deviation_oscillator_module, vwap_deviation_oscillator_batch_py,
+    vwap_deviation_oscillator_py, VwapDeviationOscillatorStreamPy,
+};
+pub use vwap_deviation_oscillator::{
+    vwap_deviation_oscillator, vwap_deviation_oscillator_batch_into_slice,
+    vwap_deviation_oscillator_batch_par_slice, vwap_deviation_oscillator_batch_slice,
+    vwap_deviation_oscillator_batch_with_kernel, vwap_deviation_oscillator_into_slice,
+    vwap_deviation_oscillator_with_kernel, VwapDeviationMode, VwapDeviationOscillatorBatchBuilder,
+    VwapDeviationOscillatorBatchOutput, VwapDeviationOscillatorBatchRange,
+    VwapDeviationOscillatorBuilder, VwapDeviationOscillatorData, VwapDeviationOscillatorError,
+    VwapDeviationOscillatorInput, VwapDeviationOscillatorOutput, VwapDeviationOscillatorParams,
+    VwapDeviationOscillatorStream, VwapDeviationSessionMode,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use vwap_deviation_oscillator::{
+    vwap_deviation_oscillator_alloc, vwap_deviation_oscillator_batch_into,
+    vwap_deviation_oscillator_batch_js, vwap_deviation_oscillator_free,
+    vwap_deviation_oscillator_into, vwap_deviation_oscillator_js,
 };
 #[cfg(feature = "python")]
 pub use wto::{wto_batch_py, wto_py, WtoStreamPy};

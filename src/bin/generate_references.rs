@@ -2,6 +2,13 @@ extern crate vector_ta as my_project;
 
 use my_project::indicators::acosc::{acosc, AcoscData, AcoscInput, AcoscParams};
 use my_project::indicators::ad::{ad, AdData, AdInput, AdParams};
+use my_project::indicators::adaptive_bounds_rsi::{
+    adaptive_bounds_rsi, AdaptiveBoundsRsiInput, AdaptiveBoundsRsiParams,
+};
+use my_project::indicators::adjustable_ma_alternating_extremities::{
+    adjustable_ma_alternating_extremities, AdjustableMaAlternatingExtremitiesInput,
+    AdjustableMaAlternatingExtremitiesParams,
+};
 use my_project::indicators::adosc::{adosc, AdoscData, AdoscInput, AdoscParams};
 use my_project::indicators::adx::{adx, AdxData, AdxInput, AdxParams};
 use my_project::indicators::adxr::{adxr, AdxrData, AdxrInput, AdxrParams};
@@ -40,6 +47,10 @@ use my_project::indicators::emv::{emv, EmvInput};
 use my_project::indicators::er::{er, ErInput, ErParams};
 use my_project::indicators::eri::{eri, EriData, EriInput, EriParams};
 use my_project::indicators::fisher::{fisher, FisherInput, FisherParams};
+use my_project::indicators::forward_backward_exponential_oscillator::{
+    forward_backward_exponential_oscillator, ForwardBackwardExponentialOscillatorInput,
+    ForwardBackwardExponentialOscillatorParams,
+};
 use my_project::indicators::kst::{kst, KstInput, KstParams};
 use my_project::indicators::kurtosis::{kurtosis, KurtosisInput, KurtosisParams};
 use my_project::indicators::linearreg_intercept::{
@@ -118,6 +129,18 @@ use my_project::indicators::moving_averages::wma::{wma, WmaInput, WmaParams};
 use my_project::indicators::moving_averages::zlema::{zlema, ZlemaInput, ZlemaParams};
 use my_project::indicators::pma::{pma, PmaInput, PmaParams};
 use my_project::indicators::ppo::{ppo, PpoInput, PpoParams};
+use my_project::indicators::qqe_weighted_oscillator::{
+    qqe_weighted_oscillator, QqeWeightedOscillatorInput, QqeWeightedOscillatorParams,
+};
+use my_project::indicators::range_filtered_trend_signals::{
+    range_filtered_trend_signals, RangeFilteredTrendSignalsInput, RangeFilteredTrendSignalsParams,
+};
+use my_project::indicators::market_structure_confluence::{
+    market_structure_confluence, MarketStructureConfluenceInput, MarketStructureConfluenceParams,
+};
+use my_project::indicators::range_oscillator::{
+    range_oscillator, RangeOscillatorInput, RangeOscillatorParams,
+};
 use my_project::indicators::roc::{roc, RocInput, RocParams};
 use my_project::indicators::rocp::{rocp, RocpInput, RocpParams};
 use my_project::indicators::rsi::{rsi, RsiInput, RsiParams};
@@ -130,6 +153,10 @@ use my_project::indicators::stddev::{stddev, StdDevInput, StdDevParams};
 use my_project::indicators::tsf::{tsf, TsfInput, TsfParams};
 use my_project::indicators::ui::{ui, UiInput, UiParams};
 use my_project::indicators::var::{var, VarInput, VarParams};
+use my_project::indicators::volume_weighted_relative_strength_index::{
+    volume_weighted_relative_strength_index, VolumeWeightedRelativeStrengthIndexInput,
+    VolumeWeightedRelativeStrengthIndexParams,
+};
 use my_project::indicators::vpci::{vpci, VpciInput, VpciParams};
 use my_project::indicators::vpt::{vpt, VptInput};
 use my_project::indicators::wclprice::{wclprice, WclpriceInput};
@@ -141,7 +168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: {} <indicator_name> [source]", args[0]);
-        eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, chop, cwma, decycler, dema, devstop, di, edcf, ehlers_itrend, ema, epma, eri, fisher, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, kst, kurtosis, linreg, maaq, macz, mama, marketefi, midpoint, midprice, mfi, mwdx, nma, pma, ppo, rsx, pwma, reflex, roc, rocp, rsi, rvi, rvi, sama, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, stddev, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, var, vpci, tsf, ui, vwap, vwma, vpwma, wclprice, wilders, wma, zlema");
+        eprintln!("Available indicators: ad, acosc, adx, adosc, adxr, adaptive_bounds_rsi, adjustable_ma_alternating_extremities, alligator, alma, ao, apo, aroon, aroonosc, atr, bandpass, bollinger_bands, bollinger_bands_width, bop, cci, cfo, cg, chop, cwma, decycler, dema, devstop, di, edcf, ehlers_itrend, ema, epma, eri, fisher, forward_backward_exponential_oscillator, frama, fwma, gaussian, highpass_2_pole, highpass, hma, hwma, jma, jsa, kama, kst, kurtosis, linreg, maaq, macz, mama, market_structure_confluence, marketefi, midpoint, midprice, mfi, mwdx, nma, pma, ppo, qqe_weighted_oscillator, range_filtered_trend_signals, range_oscillator, rsx, pwma, reflex, roc, rocp, rsi, rvi, rvi, sama, sinwma, sma, smma, squeeze_momentum, sqwma, srwma, stddev, supersmoother_3_pole, supersmoother, swma, tema, tilson, trendflex, trima, var, volume_weighted_relative_strength_index, vpci, tsf, ui, vwap, vwma, vpwma, wclprice, wilders, wma, zlema");
         eprintln!("Available sources: open, high, low, close, volume, hl2, hlc3, ohlc4, hlcc4");
         std::process::exit(1);
     }
@@ -152,6 +179,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let candles = read_candles_from_csv("src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv")?;
 
     let output = match indicator.as_str() {
+        "adaptive_bounds_rsi" => {
+            let params = AdaptiveBoundsRsiParams::default();
+            let rsi_length = params.rsi_length.unwrap_or(14);
+            let alpha = params.alpha.unwrap_or(0.1);
+            let input = AdaptiveBoundsRsiInput::from_candles(&candles, source, params);
+            let result = adaptive_bounds_rsi(&input)?;
+            json!({
+                "indicator": "adaptive_bounds_rsi",
+                "source": source,
+                "params": {
+                    "rsi_length": rsi_length,
+                    "alpha": alpha
+                },
+                "rsi": result.rsi,
+                "lower_bound": result.lower_bound,
+                "lower_mid": result.lower_mid,
+                "mid": result.mid,
+                "upper_mid": result.upper_mid,
+                "upper_bound": result.upper_bound,
+                "regime": result.regime,
+                "regime_flip": result.regime_flip,
+                "lower_signal": result.lower_signal,
+                "upper_signal": result.upper_signal,
+                "length": candles.close.len()
+            })
+        }
+        "adjustable_ma_alternating_extremities" => {
+            let params = AdjustableMaAlternatingExtremitiesParams::default();
+            let length = params.length.unwrap_or(50);
+            let mult = params.mult.unwrap_or(2.0);
+            let alpha = params.alpha.unwrap_or(1.0);
+            let beta = params.beta.unwrap_or(0.5);
+            let input = AdjustableMaAlternatingExtremitiesInput::from_slices(
+                candles.select_candle_field("high")?,
+                candles.select_candle_field("low")?,
+                candles.select_candle_field("close")?,
+                params,
+            );
+            let result = adjustable_ma_alternating_extremities(&input)?;
+            json!({
+                "indicator": "adjustable_ma_alternating_extremities",
+                "source": "ohlc",
+                "params": {
+                    "length": length,
+                    "mult": mult,
+                    "alpha": alpha,
+                    "beta": beta
+                },
+                "ma": result.ma,
+                "upper": result.upper,
+                "lower": result.lower,
+                "extremity": result.extremity,
+                "state": result.state,
+                "changed": result.changed,
+                "smoothed_open": result.smoothed_open,
+                "smoothed_high": result.smoothed_high,
+                "smoothed_low": result.smoothed_low,
+                "smoothed_close": result.smoothed_close,
+                "length": candles.close.len()
+            })
+        }
         "alma" => {
             let params = AlmaParams::default();
             let period = params.period.unwrap_or(9);
@@ -169,6 +257,201 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 "values": result.values,
                 "length": result.values.len()
+            })
+        }
+        "qqe_weighted_oscillator" => {
+            let params = QqeWeightedOscillatorParams::default();
+            let length = params.length.unwrap_or(14);
+            let factor = params.factor.unwrap_or(4.236);
+            let smooth = params.smooth.unwrap_or(5);
+            let weight = params.weight.unwrap_or(2.0);
+            let input = QqeWeightedOscillatorInput::from_candles(&candles, source, params);
+            let result = qqe_weighted_oscillator(&input)?;
+            json!({
+                "indicator": "qqe_weighted_oscillator",
+                "source": source,
+                "params": {
+                    "length": length,
+                    "factor": factor,
+                    "smooth": smooth,
+                    "weight": weight
+                },
+                "rsi": result.rsi,
+                "trailing_stop": result.trailing_stop,
+                "length": candles.close.len()
+            })
+        }
+        "range_oscillator" => {
+            let params = RangeOscillatorParams::default();
+            let length = params.length.unwrap_or(50);
+            let mult = params.mult.unwrap_or(2.0);
+            let input = RangeOscillatorInput::from_slices(
+                candles.select_candle_field("high")?,
+                candles.select_candle_field("low")?,
+                candles.select_candle_field("close")?,
+                params,
+            );
+            let result = range_oscillator(&input)?;
+            json!({
+                "indicator": "range_oscillator",
+                "source": "ohlc",
+                "params": {
+                    "length": length,
+                    "mult": mult
+                },
+                "oscillator": result.oscillator,
+                "ma": result.ma,
+                "upper_band": result.upper_band,
+                "lower_band": result.lower_band,
+                "range_width": result.range_width,
+                "in_range": result.in_range,
+                "trend": result.trend,
+                "break_up": result.break_up,
+                "break_down": result.break_down,
+                "length": candles.close.len()
+            })
+        }
+        "market_structure_confluence" => {
+            let params = MarketStructureConfluenceParams::default();
+            let swing_size = params.swing_size.unwrap_or(10);
+            let bos_confirmation = params
+                .bos_confirmation
+                .clone()
+                .unwrap_or_else(|| "Candle Close".to_string());
+            let basis_length = params.basis_length.unwrap_or(100);
+            let atr_length = params.atr_length.unwrap_or(14);
+            let atr_smooth = params.atr_smooth.unwrap_or(21);
+            let vol_mult = params.vol_mult.unwrap_or(2.0);
+            let input = MarketStructureConfluenceInput::from_slices(
+                candles.select_candle_field("high")?,
+                candles.select_candle_field("low")?,
+                candles.select_candle_field("close")?,
+                params,
+            );
+            let result = market_structure_confluence(&input)?;
+            json!({
+                "indicator": "market_structure_confluence",
+                "source": "ohlc",
+                "params": {
+                    "swing_size": swing_size,
+                    "bos_confirmation": bos_confirmation,
+                    "basis_length": basis_length,
+                    "atr_length": atr_length,
+                    "atr_smooth": atr_smooth,
+                    "vol_mult": vol_mult
+                },
+                "basis": result.basis,
+                "upper_band": result.upper_band,
+                "lower_band": result.lower_band,
+                "structure_direction": result.structure_direction,
+                "bullish_arrow": result.bullish_arrow,
+                "bearish_arrow": result.bearish_arrow,
+                "bullish_change": result.bullish_change,
+                "bearish_change": result.bearish_change,
+                "hh": result.hh,
+                "lh": result.lh,
+                "hl": result.hl,
+                "ll": result.ll,
+                "bullish_bos": result.bullish_bos,
+                "bullish_choch": result.bullish_choch,
+                "bearish_bos": result.bearish_bos,
+                "bearish_choch": result.bearish_choch,
+                "length": candles.close.len()
+            })
+        }
+        "range_filtered_trend_signals" => {
+            let params = RangeFilteredTrendSignalsParams::default();
+            let kalman_alpha = params.kalman_alpha.unwrap_or(0.01);
+            let kalman_beta = params.kalman_beta.unwrap_or(0.1);
+            let kalman_period = params.kalman_period.unwrap_or(77);
+            let dev = params.dev.unwrap_or(1.2);
+            let supertrend_factor = params.supertrend_factor.unwrap_or(0.7);
+            let supertrend_atr_period = params.supertrend_atr_period.unwrap_or(7);
+            let input = RangeFilteredTrendSignalsInput::from_slices(
+                candles.select_candle_field("high")?,
+                candles.select_candle_field("low")?,
+                candles.select_candle_field("close")?,
+                params,
+            );
+            let result = range_filtered_trend_signals(&input)?;
+            json!({
+                "indicator": "range_filtered_trend_signals",
+                "source": "ohlc",
+                "params": {
+                    "kalman_alpha": kalman_alpha,
+                    "kalman_beta": kalman_beta,
+                    "kalman_period": kalman_period,
+                    "dev": dev,
+                    "supertrend_factor": supertrend_factor,
+                    "supertrend_atr_period": supertrend_atr_period
+                },
+                "kalman": result.kalman,
+                "supertrend": result.supertrend,
+                "upper_band": result.upper_band,
+                "lower_band": result.lower_band,
+                "trend": result.trend,
+                "kalman_trend": result.kalman_trend,
+                "state": result.state,
+                "market_trending": result.market_trending,
+                "market_ranging": result.market_ranging,
+                "short_term_bullish": result.short_term_bullish,
+                "short_term_bearish": result.short_term_bearish,
+                "long_term_bullish": result.long_term_bullish,
+                "long_term_bearish": result.long_term_bearish,
+                "length": candles.close.len()
+            })
+        }
+        "volume_weighted_relative_strength_index" => {
+            if source != "close_volume" {
+                eprintln!("volume_weighted_relative_strength_index requires 'close_volume' source");
+                std::process::exit(1);
+            }
+            let params = VolumeWeightedRelativeStrengthIndexParams::default();
+            let rsi_length = params.rsi_length.unwrap_or(14);
+            let range_length = params.range_length.unwrap_or(10);
+            let ma_length = params.ma_length.unwrap_or(14);
+            let ma_type = params.ma_type.clone().unwrap_or_else(|| "EMA".to_string());
+            let input = VolumeWeightedRelativeStrengthIndexInput::from_slices(
+                candles.select_candle_field("close")?,
+                candles.select_candle_field("volume")?,
+                params,
+            );
+            let result = volume_weighted_relative_strength_index(&input)?;
+            json!({
+                "indicator": "volume_weighted_relative_strength_index",
+                "source": "close_volume",
+                "params": {
+                    "rsi_length": rsi_length,
+                    "range_length": range_length,
+                    "ma_length": ma_length,
+                    "ma_type": ma_type
+                },
+                "rsi": result.rsi,
+                "consolidation_strength": result.consolidation_strength,
+                "rsi_ma": result.rsi_ma,
+                "bearish_tp": result.bearish_tp,
+                "bullish_tp": result.bullish_tp,
+                "length": candles.close.len()
+            })
+        }
+        "forward_backward_exponential_oscillator" => {
+            let params = ForwardBackwardExponentialOscillatorParams::default();
+            let length = params.length.unwrap_or(20);
+            let smooth = params.smooth.unwrap_or(10);
+            let input =
+                ForwardBackwardExponentialOscillatorInput::from_candles(&candles, source, params);
+            let result = forward_backward_exponential_oscillator(&input)?;
+            json!({
+                "indicator": "forward_backward_exponential_oscillator",
+                "source": source,
+                "params": {
+                    "length": length,
+                    "smooth": smooth
+                },
+                "forward_backward": result.forward_backward,
+                "backward": result.backward,
+                "histogram": result.histogram,
+                "length": candles.close.len()
             })
         }
         "cwma" => {

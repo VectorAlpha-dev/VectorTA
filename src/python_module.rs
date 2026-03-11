@@ -1,14 +1,12 @@
-
-
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
 #[cfg(feature = "python")]
 #[pymodule]
 fn ta_indicators(m: &Bound<'_, PyModule>) -> PyResult<()> {
-
     crate::indicators::zscore::register_zscore_module(m)?;
     crate::indicators::moving_averages::alma::register_alma_module(m)?;
+    crate::indicators::moving_averages::sgf::register_sgf_module(m)?;
     crate::indicators::moving_averages::cwma::register_cwma_module(m)?;
     crate::indicators::moving_averages::edcf::register_edcf_module(m)?;
     crate::indicators::moving_averages::ehlers_kama::register_ehlers_kama_module(m)?;
@@ -37,6 +35,41 @@ fn ta_indicators(m: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::indicators::lpc::register_lpc_module(m)?;
     crate::indicators::linearreg_angle::register_linearreg_angle_module(m)?;
     crate::indicators::kst::register_kst_module(m)?;
+    crate::indicators::accumulation_swing_index::register_accumulation_swing_index_module(m)?;
+    crate::indicators::adaptive_bounds_rsi::register_adaptive_bounds_rsi_module(m)?;
+    crate::indicators::market_structure_confluence::register_market_structure_confluence_module(
+        m,
+    )?;
+    crate::indicators::range_filtered_trend_signals::register_range_filtered_trend_signals_module(
+        m,
+    )?;
+    crate::indicators::range_oscillator::register_range_oscillator_module(m)?;
+    crate::indicators::volume_weighted_relative_strength_index::register_volume_weighted_relative_strength_index_module(m)?;
+    crate::indicators::andean_oscillator::register_andean_oscillator_module(m)?;
+    crate::indicators::l2_ehlers_signal_to_noise::register_l2_ehlers_signal_to_noise_module(m)?;
+    crate::indicators::cycle_channel_oscillator::register_cycle_channel_oscillator_module(m)?;
+    crate::indicators::daily_factor::register_daily_factor_module(m)?;
+    crate::indicators::bulls_v_bears::register_bulls_v_bears_module(m)?;
+    crate::indicators::moving_average_cross_probability::register_moving_average_cross_probability_module(m)?;
+    crate::indicators::ehlers_adaptive_cyber_cycle::register_ehlers_adaptive_cyber_cycle_module(m)?;
+    crate::indicators::ehlers_simple_cycle_indicator::register_ehlers_simple_cycle_indicator_module(m)?;
+    crate::indicators::l1_ehlers_phasor::register_l1_ehlers_phasor_module(m)?;
+    crate::indicators::ehlers_smoothed_adaptive_momentum::register_ehlers_smoothed_adaptive_momentum_module(m)?;
+    crate::indicators::smooth_theil_sen::register_smooth_theil_sen_module(m)?;
+    crate::indicators::regression_slope_oscillator::register_regression_slope_oscillator_module(m)?;
+    crate::indicators::ewma_volatility::register_ewma_volatility_module(m)?;
+    crate::indicators::ichimoku_oscillator::register_ichimoku_oscillator_module(m)?;
+    crate::indicators::mesa_stochastic_multi_length::register_mesa_stochastic_multi_length_module(
+        m,
+    )?;
+    crate::indicators::random_walk_index::register_random_walk_index_module(m)?;
+    crate::indicators::relative_strength_index_wave_indicator::register_relative_strength_index_wave_indicator_module(m)?;
+    crate::indicators::spearman_correlation::register_spearman_correlation_module(m)?;
+    crate::indicators::price_moving_average_ratio_percentile::register_price_moving_average_ratio_percentile_module(m)?;
+    crate::indicators::trend_trigger_factor::register_trend_trigger_factor_module(m)?;
+    crate::indicators::volatility_quality_index::register_volatility_quality_index_module(m)?;
+    crate::indicators::vwap_deviation_oscillator::register_vwap_deviation_oscillator_module(m)?;
+    crate::indicators::volume_zone_oscillator::register_volume_zone_oscillator_module(m)?;
     crate::indicators::yang_zhang_volatility::register_yang_zhang_volatility_module(m)?;
     Ok(())
 }

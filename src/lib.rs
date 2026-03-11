@@ -66,6 +66,14 @@ pub fn read_f64_array(ptr: *const f64, len: usize) -> Vec<f64> {
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
+pub fn write_f64_array(ptr: *mut f64, data: &[f64]) {
+    unsafe {
+        std::slice::from_raw_parts_mut(ptr, data.len()).copy_from_slice(data);
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
 pub fn allocate_f64_matrix(rows: usize, cols: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(rows * cols);
     let ptr = v.as_mut_ptr();

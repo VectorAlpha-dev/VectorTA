@@ -3,7 +3,7 @@
 use crate::cuda::moving_averages::{
     CudaAlma, CudaCoraWave, CudaCwma, CudaDema, CudaEdcf, CudaEhlersITrend, CudaEma, CudaEpma,
     CudaFrama, CudaFwma, CudaHighpass, CudaHma, CudaJma, CudaJsa, CudaMaaq, CudaMwdx, CudaNma,
-    CudaPwma, CudaSinwma, CudaSma, CudaSmma, CudaSqwma, CudaSrwma, CudaSuperSmoother,
+    CudaPwma, CudaSgf, CudaSinwma, CudaSma, CudaSmma, CudaSqwma, CudaSrwma, CudaSuperSmoother,
     CudaSupersmoother3Pole, CudaSwma, CudaTema, CudaTrima, CudaVpwma, CudaVwma, CudaWilders,
     CudaWma, CudaZlema,
 };
@@ -78,6 +78,7 @@ pub fn supports_vram_kernel_ma(ma_type: &str) -> bool {
         | "smma"
         | "sqwma"
         | "highpass"
+        | "sgf"
         | "swma"
         | "trima"
         | "sinwma"
@@ -133,6 +134,7 @@ pub struct VramMaComputer {
     smma: Option<CudaSmma>,
     sqwma: Option<CudaSqwma>,
     highpass: Option<CudaHighpass>,
+    sgf: Option<CudaSgf>,
     swma: Option<CudaSwma>,
     trima: Option<CudaTrima>,
     sinwma: Option<CudaSinwma>,
@@ -208,6 +210,7 @@ impl VramMaComputer {
             smma: None,
             sqwma: None,
             highpass: None,
+            sgf: None,
             swma: None,
             trima: None,
             sinwma: None,
@@ -353,6 +356,13 @@ impl VramMaComputer {
     fn ensure_swma(&mut self) -> Result<(), String> {
         if self.swma.is_none() {
             self.swma = Some(CudaSwma::new(self.device_id as usize).map_err(|e| e.to_string())?);
+        }
+        Ok(())
+    }
+
+    fn ensure_sgf(&mut self) -> Result<(), String> {
+        if self.sgf.is_none() {
+            self.sgf = Some(CudaSgf::new(self.device_id as usize).map_err(|e| e.to_string())?);
         }
         Ok(())
     }
@@ -905,6 +915,66 @@ impl VramMaComputer {
                     )
                     .map_err(|e| e.to_string())?;
                 highpass.synchronize().map_err(|e| e.to_string())?;
+                Ok(())
+            }
+
+            "sgf" => {
+                self.ensure_sgf()?;
+                let poly_order = Self::get_param_f64(params, "poly_order").unwrap_or(2.0) as usize;
+                let max_period = periods
+                    .iter()
+                    .copied()
+                    .map(|p| crate::indicators::moving_averages::sgf::effective_period(p as usize))
+                    .max()
+                    .unwrap_or(0);
+                self.host_i32.clear();
+                self.host_i32.extend(periods.iter().map(|&p| {
+                    let eff = crate::indicators::moving_averages::sgf::effective_period(p as usize);
+                    (first_valid + eff - 1) as i32
+                }));
+                Self::ensure_len_i32(&mut self.d_i32, n_combos)?;
+                self.d_i32
+                    .as_mut()
+                    .unwrap()
+                    .copy_from(&self.host_i32)
+                    .map_err(|e| e.to_string())?;
+
+                self.host_f32.clear();
+                self.host_f32.resize(n_combos * max_period, 0.0);
+                for (combo_idx, &p_i32) in periods.iter().enumerate() {
+                    let weights =
+                        crate::indicators::moving_averages::sgf::build_endpoint_sgf_weights(
+                            p_i32 as usize,
+                            poly_order,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    let eff =
+                        crate::indicators::moving_averages::sgf::effective_period(p_i32 as usize);
+                    let row_off = combo_idx * max_period;
+                    for k in 0..eff {
+                        self.host_f32[row_off + k] = weights[k] as f32;
+                    }
+                }
+                Self::ensure_len_f32(&mut self.d_f32, self.host_f32.len())?;
+                self.d_f32
+                    .as_mut()
+                    .unwrap()
+                    .copy_from(&self.host_f32)
+                    .map_err(|e| e.to_string())?;
+
+                let sgf = self.sgf.as_ref().unwrap();
+                sgf.sgf_batch_device(
+                    d_prices,
+                    self.d_f32.as_ref().unwrap(),
+                    d_periods,
+                    self.d_i32.as_ref().unwrap(),
+                    series_len,
+                    n_combos,
+                    max_period,
+                    d_out,
+                )
+                .map_err(|e| e.to_string())?;
+                sgf.synchronize().map_err(|e| e.to_string())?;
                 Ok(())
             }
 
