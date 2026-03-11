@@ -160,7 +160,27 @@ const BUCKET_B_INDICATORS: &[&str] = &[
 
 const EMPTY_ENUM_VALUES: &[&str] = &[];
 const ENUM_VALUES_TRUE_FALSE: &[&str] = &["true", "false"];
-const ENUM_VALUES_CLOSE_WICK: &[&str] = &["close", "wick"];
+const ENUM_VALUES_DEMAND_INDEX_MA_TYPE: &[&str] = &["ema", "sma", "wma", "rma"];
+const ENUM_VALUES_EHLERS_LINEAR_EXTRAPOLATION_SIGNAL_MODE: &[&str] = &[
+    "predict_filter_crosses",
+    "predict_middle_crosses",
+    "filter_middle_crosses",
+];
+const ENUM_VALUES_GROVER_LLORENS_CYCLE_OSCILLATOR_SOURCE: &[&str] = &[
+    "open", "high", "low", "close", "hl2", "hlc3", "ohlc4", "hlcc4",
+];
+const ENUM_VALUES_HALF_CAUSAL_ESTIMATOR_SOURCE: &[&str] = &["volume", "tr", "change", "test"];
+const ENUM_VALUES_HALF_CAUSAL_ESTIMATOR_KERNEL_TYPE: &[&str] =
+    &["gaussian", "epanechnikov", "triangular", "sinc"];
+const ENUM_VALUES_HALF_CAUSAL_ESTIMATOR_CONFIDENCE_ADJUST: &[&str] =
+    &["symmetric", "linear", "none"];
+const ENUM_VALUES_FIBONACCI_TRAILING_STOP_TRIGGER: &[&str] = &["close", "wick"];
+const ENUM_VALUES_FIBONACCI_ENTRY_BANDS_SOURCE: &[&str] = &[
+    "open", "high", "low", "close", "hl2", "hlc3", "ohlc4", "hlcc4",
+];
+const ENUM_VALUES_FIBONACCI_ENTRY_BANDS_TP_AGGRESSIVENESS: &[&str] = &["low", "medium", "high"];
+const ENUM_VALUES_MULTI_LENGTH_STOCHASTIC_AVERAGE_METHOD: &[&str] = &["none", "sma", "tma", "lsma"];
+const ENUM_VALUES_MONOTONICITY_INDEX_MODE: &[&str] = &["complexity", "efficiency"];
 const ENUM_VALUES_MA_OUTPUT: &[&str] = &["mama", "fama"];
 const ENUM_VALUES_PMA_OUTPUT: &[&str] = &["predict", "trigger"];
 const ENUM_VALUES_EHLERS_ADAPTIVE_CG_OUTPUT: &[&str] = &["cg", "trigger"];
@@ -207,24 +227,179 @@ const OUTPUT_SIGNAL: IndicatorOutputInfo = IndicatorOutputInfo {
     label: "Signal",
     value_type: IndicatorValueType::F64,
 };
-const OUTPUT_EMA: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "ema",
-    label: "EMA",
+const OUTPUT_INDEX: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "index",
+    label: "Index",
     value_type: IndicatorValueType::F64,
 };
-const OUTPUT_CG: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "cg",
-    label: "CG",
+const OUTPUT_CUMULATIVE_MEAN: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "cumulative_mean",
+    label: "Cumulative Mean",
     value_type: IndicatorValueType::F64,
 };
-const OUTPUT_AMO: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "amo",
-    label: "AMO",
+const OUTPUT_TRAILING_STOP: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "trailing_stop",
+    label: "Trailing Stop",
     value_type: IndicatorValueType::F64,
 };
-const OUTPUT_AMA: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "ama",
-    label: "AMA",
+const OUTPUT_DIRECTION: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "direction",
+    label: "Direction",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_UPPER_BOUND: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "upper_bound",
+    label: "Upper Bound",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_IN_PHASE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "in_phase",
+    label: "In Phase",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_LEAD_SERIES: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "lead",
+    label: "Lead",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_SHORT: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "short",
+    label: "Short",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_LONG: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "long",
+    label: "Long",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_CROSSOVER: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "crossover",
+    label: "Crossover",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_CROSSUNDER: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "crossunder",
+    label: "Crossunder",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_DEMAND_INDEX: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "demand_index",
+    label: "Demand Index",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_ZVWAP: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "zvwap",
+    label: "ZVWAP",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_SUPPORT_SIGNAL: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "support_signal",
+    label: "Support Signal",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_RESISTANCE_SIGNAL: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "resistance_signal",
+    label: "Resistance Signal",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_DIFF: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "diff",
+    label: "DIFF",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_DEA: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "dea",
+    label: "DEA",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_LINE_CONVERGENCE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "line_convergence",
+    label: "Line Convergence",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_BUY_SIGNAL: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "buy_signal",
+    label: "Buy Signal",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_SELL_SIGNAL: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "sell_signal",
+    label: "Sell Signal",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_OSCILLATOR: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "oscillator",
+    label: "Oscillator",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_MAX_PEAK_VALUE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "max_peak_value",
+    label: "Max Peak Value",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_MIN_PEAK_VALUE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "min_peak_value",
+    label: "Min Peak Value",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_MARKET_EXTREME: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "market_extreme",
+    label: "Market Extreme",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_REGULAR_BULLISH: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "regular_bullish",
+    label: "Regular Bullish",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_HIDDEN_BULLISH: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "hidden_bullish",
+    label: "Hidden Bullish",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_REGULAR_BEARISH: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "regular_bearish",
+    label: "Regular Bearish",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_HIDDEN_BEARISH: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "hidden_bearish",
+    label: "Hidden Bearish",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_GO_LONG: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "go_long",
+    label: "Go Long",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_GO_SHORT: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "go_short",
+    label: "Go Short",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_DOMINANT_CYCLE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "dominant_cycle",
+    label: "Dominant Cycle",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_NORMALIZED_POWER: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "normalized_power",
+    label: "Normalized Power",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_IMI: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "imi",
+    label: "IMI",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_UPPER_HIT: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "upper_hit",
+    label: "Upper Hit",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_LOWER_HIT: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "lower_hit",
+    label: "Lower Hit",
     value_type: IndicatorValueType::F64,
 };
 const OUTPUT_HIST: IndicatorOutputInfo = IndicatorOutputInfo {
@@ -277,9 +452,29 @@ const OUTPUT_MOMENTUM: IndicatorOutputInfo = IndicatorOutputInfo {
     label: "Momentum",
     value_type: IndicatorValueType::F64,
 };
-const OUTPUT_ZSCORE: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "zscore",
-    label: "Z-Score",
+const OUTPUT_RESERVOIR: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "reservoir",
+    label: "Reservoir",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_SQUEEZE_ACTIVE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "squeeze_active",
+    label: "Squeeze Active",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_SQUEEZE_START: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "squeeze_start",
+    label: "Squeeze Start",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_RANGE_HIGH: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "range_high",
+    label: "Range High",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_RANGE_LOW: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "range_low",
+    label: "Range Low",
     value_type: IndicatorValueType::F64,
 };
 const OUTPUT_SQUEEZE: IndicatorOutputInfo = IndicatorOutputInfo {
@@ -297,9 +492,24 @@ const OUTPUT_FAMA: IndicatorOutputInfo = IndicatorOutputInfo {
     label: "FAMA",
     value_type: IndicatorValueType::F64,
 };
+const OUTPUT_PREDICTION: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "prediction",
+    label: "Prediction",
+    value_type: IndicatorValueType::F64,
+};
 const OUTPUT_PREDICT: IndicatorOutputInfo = IndicatorOutputInfo {
     id: "predict",
     label: "Predict",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_FILTER: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "filter",
+    label: "Filter",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_STATE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "state",
+    label: "State",
     value_type: IndicatorValueType::F64,
 };
 const OUTPUT_TRIGGER: IndicatorOutputInfo = IndicatorOutputInfo {
@@ -462,179 +672,14 @@ const OUTPUT_RS: IndicatorOutputInfo = IndicatorOutputInfo {
     label: "RS",
     value_type: IndicatorValueType::F64,
 };
-const OUTPUT_LONG_ULCER: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "long_ulcer",
-    label: "Long Ulcer",
+const OUTPUT_ESTIMATE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "estimate",
+    label: "Estimate",
     value_type: IndicatorValueType::F64,
 };
-const OUTPUT_SHORT_ULCER: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "short_ulcer",
-    label: "Short Ulcer",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_THRESHOLD: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "threshold",
-    label: "Threshold",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_PBO: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "pbo",
-    label: "PBO",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_FILTERED: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "filtered",
-    label: "Filtered",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_CORRELATION: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "correlation",
-    label: "Correlation",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_WAVE: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "wave",
-    label: "Wave",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_SKEWNESS: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "skewness",
-    label: "Skewness",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_KURTOSIS: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "kurtosis",
-    label: "Excess Kurtosis",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_DS_RSI: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "ds_rsi",
-    label: "Data Sampling RSI",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_ORIGINAL_RSI: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "original_rsi",
-    label: "Original RSI",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_VACD: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "vacd",
-    label: "VACD",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_OSCILLATOR: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "oscillator",
-    label: "Oscillator",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_BUY_LEVEL: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "buy_level",
-    label: "Buy Level",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_SELL_LEVEL: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "sell_level",
-    label: "Sell Level",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_LONG_SIGNAL_VALUE: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "long_signal",
-    label: "Long Signal",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_SHORT_SIGNAL_VALUE: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "short_signal",
-    label: "Short Signal",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_STATE_VALUE: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "state",
-    label: "State",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_TRAILING_STOP: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "trailing_stop",
-    label: "Trailing Stop",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_DIRECTION_VALUE: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "direction",
-    label: "Direction",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_AVERAGE: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "average",
-    label: "Average",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_STRUCTURE_VALUE: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "structure",
-    label: "Structure",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_BULL_AVERAGE: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "bull_average",
-    label: "Bull Average",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_BEAR_AVERAGE: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "bear_average",
-    label: "Bear Average",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_BULL_MID: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "bull_mid",
-    label: "Bull Mid",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_BEAR_MID: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "bear_mid",
-    label: "Bear Mid",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_BAND: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "band",
-    label: "Band",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_NOISY: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "noisy",
-    label: "Noisy",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_VALUE_TREND: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "value_trend",
-    label: "Value Trend",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_VALUE_TREND_LAG: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "value_trend_lag",
-    label: "Value Trend Lag",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_DEVIATION_INDEX: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "deviation_index",
-    label: "Deviation Index",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_OVERBOUGHT_SIGNAL: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "overbought_signal",
-    label: "Overbought Signal",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_BUY_SIGNAL: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "buy_signal",
-    label: "Buy Signal",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_SELL_SIGNAL: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "sell_signal",
-    label: "Sell Signal",
-    value_type: IndicatorValueType::F64,
-};
-const OUTPUT_STEPPED_MA: IndicatorOutputInfo = IndicatorOutputInfo {
-    id: "stepped_ma",
-    label: "Stepped MA",
+const OUTPUT_EXPECTED_VALUE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "expected_value",
+    label: "Expected Value",
     value_type: IndicatorValueType::F64,
 };
 
@@ -887,119 +932,8 @@ const OUTPUTS_WTO: &[IndicatorOutputInfo] =
 const OUTPUTS_WAVETREND: &[IndicatorOutputInfo] = &[OUTPUT_WT1, OUTPUT_WT2, OUTPUT_WT_DIFF];
 const OUTPUTS_MOD_GOD_MODE: &[IndicatorOutputInfo] =
     &[OUTPUT_WAVETREND, OUTPUT_SIGNAL, OUTPUT_HISTOGRAM];
-const OUTPUTS_RS_SIGNAL: &[IndicatorOutputInfo] = &[OUTPUT_RS, OUTPUT_SIGNAL];
-const OUTPUTS_HISTORICAL_VOLATILITY_RANK: &[IndicatorOutputInfo] = &[OUTPUT_HVR, OUTPUT_HV];
-const OUTPUTS_DUAL_ULCER_INDEX: &[IndicatorOutputInfo] =
-    &[OUTPUT_LONG_ULCER, OUTPUT_SHORT_ULCER, OUTPUT_THRESHOLD];
-const OUTPUTS_FRACTAL_DIMENSION_INDEX: &[IndicatorOutputInfo] = &[OUTPUT_VALUE_F64];
-const OUTPUTS_DYNAMIC_MOMENTUM_INDEX: &[IndicatorOutputInfo] = &[OUTPUT_VALUE_F64];
-const OUTPUTS_DONCHIAN_CHANNEL_WIDTH: &[IndicatorOutputInfo] = &[OUTPUT_VALUE_F64];
-const OUTPUTS_PROJECTION_OSCILLATOR: &[IndicatorOutputInfo] = &[OUTPUT_PBO, OUTPUT_SIGNAL];
-const OUTPUTS_FVG_POSITIONING_AVERAGE: &[IndicatorOutputInfo] = &[
-    OUTPUT_BULL_AVERAGE,
-    OUTPUT_BEAR_AVERAGE,
-    OUTPUT_BULL_MID,
-    OUTPUT_BEAR_MID,
-];
-const OUTPUTS_CYBERPUNK_VALUE_TREND_ANALYZER: &[IndicatorOutputInfo] = &[
-    OUTPUT_VALUE_TREND,
-    OUTPUT_VALUE_TREND_LAG,
-    OUTPUT_DEVIATION_INDEX,
-    OUTPUT_OVERBOUGHT_SIGNAL,
-    OUTPUT_BUY_SIGNAL,
-    OUTPUT_SELL_SIGNAL,
-];
-const OUTPUTS_EVASIVE_SUPERTREND: &[IndicatorOutputInfo] = &[
-    OUTPUT_BAND,
-    OUTPUT_STATE_VALUE,
-    OUTPUT_NOISY,
-    OUTPUT_CHANGED,
-];
-const OUTPUTS_REVERSAL_SIGNALS: &[IndicatorOutputInfo] = &[
-    OUTPUT_BUY_SIGNAL,
-    OUTPUT_SELL_SIGNAL,
-    OUTPUT_STEPPED_MA,
-    OUTPUT_STATE_VALUE,
-];
-const OUTPUTS_MARKET_STRUCTURE_TRAILING_STOP: &[IndicatorOutputInfo] = &[
-    OUTPUT_TRAILING_STOP,
-    OUTPUT_STATE_VALUE,
-    OUTPUT_STRUCTURE_VALUE,
-];
-const OUTPUTS_EMD_TREND: &[IndicatorOutputInfo] = &[
-    OUTPUT_DIRECTION_VALUE,
-    OUTPUT_AVERAGE,
-    OUTPUT_UPPER,
-    OUTPUT_LOWER,
-];
-const OUTPUTS_ZIG_ZAG_CHANNELS: &[IndicatorOutputInfo] =
-    &[OUTPUT_MIDDLE, OUTPUT_UPPER, OUTPUT_LOWER];
-const OUTPUTS_CANDLE_STRENGTH_OSCILLATOR: &[IndicatorOutputInfo] = &[
-    IndicatorOutputInfo {
-        id: "strength",
-        label: "Strength",
-        value_type: IndicatorValueType::F64,
-    },
-    IndicatorOutputInfo {
-        id: "highs",
-        label: "Highs",
-        value_type: IndicatorValueType::F64,
-    },
-    IndicatorOutputInfo {
-        id: "lows",
-        label: "Lows",
-        value_type: IndicatorValueType::F64,
-    },
-    IndicatorOutputInfo {
-        id: "mid",
-        label: "Mid",
-        value_type: IndicatorValueType::F64,
-    },
-    OUTPUT_LONG_SIGNAL_VALUE,
-    OUTPUT_SHORT_SIGNAL_VALUE,
-];
-const OUTPUTS_DIRECTIONAL_IMBALANCE_INDEX: &[IndicatorOutputInfo] = &[
-    OUTPUT_UP,
-    OUTPUT_DOWN,
-    IndicatorOutputInfo {
-        id: "bulls",
-        label: "Bulls",
-        value_type: IndicatorValueType::F64,
-    },
-    IndicatorOutputInfo {
-        id: "bears",
-        label: "Bears",
-        value_type: IndicatorValueType::F64,
-    },
-    OUTPUT_UPPER,
-    OUTPUT_LOWER,
-];
-const OUTPUTS_AUTOCORRELATION_INDICATOR: &[IndicatorOutputInfo] =
-    &[OUTPUT_FILTERED, OUTPUT_CORRELATION];
-const OUTPUTS_GOERTZEL_CYCLE_COMPOSITE_WAVE: &[IndicatorOutputInfo] = &[OUTPUT_WAVE];
-const OUTPUTS_ROLLING_Z_SCORE_TREND: &[IndicatorOutputInfo] = &[OUTPUT_ZSCORE, OUTPUT_MOMENTUM];
-const OUTPUTS_ROLLING_SKEWNESS_KURTOSIS: &[IndicatorOutputInfo] =
-    &[OUTPUT_SKEWNESS, OUTPUT_KURTOSIS];
-const OUTPUTS_EHLERS_DATA_SAMPLING_RELATIVE_STRENGTH_INDICATOR: &[IndicatorOutputInfo] =
-    &[OUTPUT_DS_RSI, OUTPUT_ORIGINAL_RSI, OUTPUT_SIGNAL];
-const OUTPUTS_VELOCITY_ACCELERATION_CONVERGENCE_DIVERGENCE_INDICATOR: &[IndicatorOutputInfo] =
-    &[OUTPUT_VACD, OUTPUT_SIGNAL];
-const OUTPUTS_GMMA_OSCILLATOR: &[IndicatorOutputInfo] = &[OUTPUT_OSCILLATOR, OUTPUT_SIGNAL];
-const OUTPUTS_NONLINEAR_REGRESSION_ZERO_LAG_MOVING_AVERAGE: &[IndicatorOutputInfo] = &[
-    OUTPUT_VALUE_F64,
-    OUTPUT_SIGNAL,
-    OUTPUT_LONG_SIGNAL_VALUE,
-    OUTPUT_SHORT_SIGNAL_VALUE,
-];
-const OUTPUTS_POSSIBLE_RSI: &[IndicatorOutputInfo] = &[
-    OUTPUT_VALUE_F64,
-    OUTPUT_BUY_LEVEL,
-    OUTPUT_SELL_LEVEL,
-    OUTPUT_MIDDLE,
-    OUTPUT_STATE_VALUE,
-    OUTPUT_LONG_SIGNAL_VALUE,
-    OUTPUT_SHORT_SIGNAL_VALUE,
-];
+const OUTPUTS_HALF_CAUSAL_ESTIMATOR: &[IndicatorOutputInfo] =
+    &[OUTPUT_ESTIMATE, OUTPUT_EXPECTED_VALUE];
 const OUTPUTS_YANG_ZHANG: &[IndicatorOutputInfo] = &[OUTPUT_YZ, OUTPUT_RS];
 const OUTPUTS_PARKINSON: &[IndicatorOutputInfo] = &[OUTPUT_VOLATILITY, OUTPUT_VARIANCE];
 const OUTPUTS_TWIGGS_MONEY_FLOW: &[IndicatorOutputInfo] = &[OUTPUT_TMF, OUTPUT_SMOOTHED];
@@ -2005,6 +1939,232 @@ const OUTPUTS_INDICATOR_SIGNAL: &[IndicatorOutputInfo] = &[
         value_type: IndicatorValueType::F64,
     },
     OUTPUT_SIGNAL,
+];
+const OUTPUTS_OSCILLATOR_SIGNAL: &[IndicatorOutputInfo] = &[OUTPUT_OSCILLATOR, OUTPUT_SIGNAL];
+const OUTPUTS_HULL_BUTTERFLY_OSCILLATOR: &[IndicatorOutputInfo] =
+    &[OUTPUT_OSCILLATOR, OUTPUT_CUMULATIVE_MEAN, OUTPUT_SIGNAL];
+const OUTPUTS_FIBONACCI_TRAILING_STOP: &[IndicatorOutputInfo] = &[
+    OUTPUT_TRAILING_STOP,
+    IndicatorOutputInfo {
+        id: "long_stop",
+        label: "Long Stop",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "short_stop",
+        label: "Short Stop",
+        value_type: IndicatorValueType::F64,
+    },
+    OUTPUT_DIRECTION,
+];
+const OUTPUTS_FIBONACCI_ENTRY_BANDS: &[IndicatorOutputInfo] = &[
+    OUTPUT_MIDDLE,
+    OUTPUT_TREND,
+    IndicatorOutputInfo {
+        id: "upper_0618",
+        label: "Upper 0.618",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "upper_1000",
+        label: "Upper 1.0",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "upper_1618",
+        label: "Upper 1.618",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "upper_2618",
+        label: "Upper 2.618",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "lower_0618",
+        label: "Lower 0.618",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "lower_1000",
+        label: "Lower 1.0",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "lower_1618",
+        label: "Lower 1.618",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "lower_2618",
+        label: "Lower 2.618",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "tp_long_band",
+        label: "TP Long Band",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "tp_short_band",
+        label: "TP Short Band",
+        value_type: IndicatorValueType::F64,
+    },
+    OUTPUT_GO_LONG,
+    OUTPUT_GO_SHORT,
+    IndicatorOutputInfo {
+        id: "rejection_long",
+        label: "Rejection Long",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "rejection_short",
+        label: "Rejection Short",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "long_bounce",
+        label: "Long Bounce",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "short_bounce",
+        label: "Short Bounce",
+        value_type: IndicatorValueType::F64,
+    },
+];
+const OUTPUTS_VOLUME_ENERGY_RESERVOIRS: &[IndicatorOutputInfo] = &[
+    OUTPUT_MOMENTUM,
+    OUTPUT_RESERVOIR,
+    OUTPUT_SQUEEZE_ACTIVE,
+    OUTPUT_SQUEEZE_START,
+    OUTPUT_RANGE_HIGH,
+    OUTPUT_RANGE_LOW,
+];
+const OUTPUTS_NEIGHBORING_TRAILING_STOP: &[IndicatorOutputInfo] = &[
+    OUTPUT_TRAILING_STOP,
+    IndicatorOutputInfo {
+        id: "bullish_band",
+        label: "Bullish Band",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "bearish_band",
+        label: "Bearish Band",
+        value_type: IndicatorValueType::F64,
+    },
+    OUTPUT_DIRECTION,
+    IndicatorOutputInfo {
+        id: "discovery_bull",
+        label: "Discovery Bull",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "discovery_bear",
+        label: "Discovery Bear",
+        value_type: IndicatorValueType::F64,
+    },
+];
+const OUTPUTS_MACD_WAVE_SIGNAL_PRO: &[IndicatorOutputInfo] = &[
+    OUTPUT_DIFF,
+    OUTPUT_DEA,
+    IndicatorOutputInfo {
+        id: "macd_histogram",
+        label: "MACD Histogram",
+        value_type: IndicatorValueType::F64,
+    },
+    OUTPUT_LINE_CONVERGENCE,
+    OUTPUT_BUY_SIGNAL,
+    OUTPUT_SELL_SIGNAL,
+];
+const OUTPUTS_HEMA_TREND_LEVELS: &[IndicatorOutputInfo] = &[
+    IndicatorOutputInfo {
+        id: "fast_hema",
+        label: "Fast HEMA",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "slow_hema",
+        label: "Slow HEMA",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "trend_direction",
+        label: "Trend Direction",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "bar_state",
+        label: "Bar State",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "bullish_crossover",
+        label: "Bullish Crossover",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "bearish_crossunder",
+        label: "Bearish Crossunder",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "box_offset",
+        label: "Box Offset",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "bull_box_top",
+        label: "Bull Box Top",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "bull_box_bottom",
+        label: "Bull Box Bottom",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "bear_box_top",
+        label: "Bear Box Top",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "bear_box_bottom",
+        label: "Bear Box Bottom",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "bullish_test",
+        label: "Bullish Test",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "bearish_test",
+        label: "Bearish Test",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "bullish_test_level",
+        label: "Bullish Test Level",
+        value_type: IndicatorValueType::F64,
+    },
+    IndicatorOutputInfo {
+        id: "bearish_test_level",
+        label: "Bearish Test Level",
+        value_type: IndicatorValueType::F64,
+    },
+];
+const OUTPUTS_MONOTONICITY_INDEX: &[IndicatorOutputInfo] =
+    &[OUTPUT_INDEX, OUTPUT_CUMULATIVE_MEAN, OUTPUT_UPPER_BOUND];
+const OUTPUTS_IN_PHASE_LEAD: &[IndicatorOutputInfo] = &[OUTPUT_IN_PHASE, OUTPUT_LEAD_SERIES];
+const OUTPUTS_OSCILLATOR_SIGNAL_HISTOGRAM: &[IndicatorOutputInfo] = &[
+    IndicatorOutputInfo {
+        id: "oscillator",
+        label: "Oscillator",
+        value_type: IndicatorValueType::F64,
+    },
+    OUTPUT_SIGNAL,
+    OUTPUT_HISTOGRAM,
 ];
 const OUTPUTS_VOSS: &[IndicatorOutputInfo] = &[
     IndicatorOutputInfo {
@@ -6018,37 +6178,36 @@ const PARAM_YANG_ZHANG: &[IndicatorParamInfo] = &[
     },
 ];
 
-const PARAM_ROGERS_SATCHELL: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "lookback",
-        label: "Lookback",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(8)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: None,
-    },
-    IndicatorParamInfo {
-        key: "signal_length",
-        label: "Signal Length",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(8)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: None,
-    },
-];
+const PARAM_GARMAN_KLASS: &[IndicatorParamInfo] = &[IndicatorParamInfo {
+    key: "lookback",
+    label: "Lookback",
+    kind: IndicatorParamKind::Int,
+    required: false,
+    default: Some(ParamValueStatic::Int(14)),
+    min: Some(1.0),
+    max: None,
+    step: Some(1.0),
+    enum_values: EMPTY_ENUM_VALUES,
+    notes: None,
+}];
 
-const PARAM_HISTORICAL_VOLATILITY_RANK: &[IndicatorParamInfo] = &[
+const PARAM_GOPALAKRISHNAN_RANGE_INDEX: &[IndicatorParamInfo] = &[IndicatorParamInfo {
+    key: "length",
+    label: "Length",
+    kind: IndicatorParamKind::Int,
+    required: false,
+    default: Some(ParamValueStatic::Int(5)),
+    min: Some(2.0),
+    max: None,
+    step: Some(1.0),
+    enum_values: EMPTY_ENUM_VALUES,
+    notes: None,
+}];
+
+const PARAM_ATR_PERCENTILE: &[IndicatorParamInfo] = &[
     IndicatorParamInfo {
-        key: "hv_length",
-        label: "HV Length",
+        key: "atr_length",
+        label: "ATR Length",
         kind: IndicatorParamKind::Int,
         required: false,
         default: Some(ParamValueStatic::Int(10)),
@@ -6059,1239 +6218,47 @@ const PARAM_HISTORICAL_VOLATILITY_RANK: &[IndicatorParamInfo] = &[
         notes: None,
     },
     IndicatorParamInfo {
-        key: "rank_length",
-        label: "Rank Length",
+        key: "percentile_length",
+        label: "Percentile Length",
         kind: IndicatorParamKind::Int,
         required: false,
-        default: Some(ParamValueStatic::Int(364)),
+        default: Some(ParamValueStatic::Int(50)),
         min: Some(1.0),
         max: None,
         step: Some(1.0),
         enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Measured in bars; the TradingView default 52 weeks maps to 364 bars."),
+        notes: None,
+    },
+];
+
+const PARAM_HISTORICAL_VOLATILITY: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "lookback",
+        label: "Lookback",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(20)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
     },
     IndicatorParamInfo {
         key: "annualization_days",
         label: "Annualization Days",
         kind: IndicatorParamKind::Float,
         required: false,
-        default: Some(ParamValueStatic::Float(365.0)),
+        default: Some(ParamValueStatic::Float(250.0)),
         min: Some(0.0),
         max: None,
         step: None,
         enum_values: EMPTY_ENUM_VALUES,
         notes: None,
     },
-    IndicatorParamInfo {
-        key: "bar_days",
-        label: "Bar Days",
-        kind: IndicatorParamKind::Float,
-        required: false,
-        default: Some(ParamValueStatic::Float(1.0)),
-        min: Some(0.0),
-        max: None,
-        step: None,
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Use 1.0 for daily or intraday bars, 7.0 for weekly bars."),
-    },
 ];
 
-const PARAM_DUAL_ULCER_INDEX: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "period",
-        label: "Period",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(5)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: None,
-    },
-    IndicatorParamInfo {
-        key: "auto_threshold",
-        label: "Auto Threshold",
-        kind: IndicatorParamKind::Bool,
-        required: false,
-        default: Some(ParamValueStatic::Bool(true)),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: ENUM_VALUES_TRUE_FALSE,
-        notes: None,
-    },
-    IndicatorParamInfo {
-        key: "threshold",
-        label: "Threshold",
-        kind: IndicatorParamKind::Float,
-        required: false,
-        default: Some(ParamValueStatic::Float(0.1)),
-        min: Some(0.0),
-        max: None,
-        step: Some(0.01),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Used when auto_threshold is false."),
-    },
-];
-
-const PARAM_FRACTAL_DIMENSION_INDEX: &[IndicatorParamInfo] = &[IndicatorParamInfo {
-    key: "length",
-    label: "Length",
-    kind: IndicatorParamKind::Int,
-    required: false,
-    default: Some(ParamValueStatic::Int(30)),
-    min: Some(2.0),
-    max: None,
-    step: Some(1.0),
-    enum_values: EMPTY_ENUM_VALUES,
-    notes: Some("Matches the rolling window length used by the standard FDI path-length formula."),
-}];
-
-const PARAM_DYNAMIC_MOMENTUM_INDEX: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "rsi_period",
-        label: "RSI Period",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(14)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Base period used in the dynamic length calculation."),
-    },
-    IndicatorParamInfo {
-        key: "volatility_period",
-        label: "Volatility Period",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(5)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Rolling standard deviation length on close."),
-    },
-    IndicatorParamInfo {
-        key: "volatility_sma_period",
-        label: "Volatility SMA Period",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(10)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("SMA length applied to the rolling standard deviation."),
-    },
-    IndicatorParamInfo {
-        key: "upper_limit",
-        label: "Upper Limit",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(30)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Maximum dynamic RSI period."),
-    },
-    IndicatorParamInfo {
-        key: "lower_limit",
-        label: "Lower Limit",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(5)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Minimum dynamic RSI period."),
-    },
-];
-
-const PARAM_DISPARITY_INDEX: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "ema_period",
-        label: "EMA Period",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(14)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("EMA length used for the base disparity calculation."),
-    },
-    IndicatorParamInfo {
-        key: "lookback_period",
-        label: "Lookback Period",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(14)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Rolling window used to normalize disparity into a 0-100 range."),
-    },
-    IndicatorParamInfo {
-        key: "smoothing_period",
-        label: "Smoothing Period",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(9)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Smoothing length applied to the scaled disparity series."),
-    },
-    IndicatorParamInfo {
-        key: "smoothing_type",
-        label: "Smoothing Type",
-        kind: IndicatorParamKind::EnumString,
-        required: false,
-        default: Some(ParamValueStatic::EnumString("ema")),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: &["ema", "sma"],
-        notes: None,
-    },
-];
-
-const PARAM_DONCHIAN_CHANNEL_WIDTH: &[IndicatorParamInfo] = &[IndicatorParamInfo {
-    key: "period",
-    label: "Period",
-    kind: IndicatorParamKind::Int,
-    required: false,
-    default: Some(ParamValueStatic::Int(20)),
-    min: Some(1.0),
-    max: None,
-    step: Some(1.0),
-    enum_values: EMPTY_ENUM_VALUES,
-    notes: Some("Rolling lookback used for highest high minus lowest low."),
-}];
-
-const PARAM_KAIRI_RELATIVE_INDEX: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "length",
-        label: "Length",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(50)),
-        min: Some(2.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Lookback length used by the selected moving average."),
-    },
-    IndicatorParamInfo {
-        key: "ma_type",
-        label: "MA Type",
-        kind: IndicatorParamKind::EnumString,
-        required: false,
-        default: Some(ParamValueStatic::EnumString("SMA")),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: &[
-            "SMA", "EMA", "WMA", "TMA", "VIDYA", "WWMA", "ZLEMA", "TSF", "HMA", "VWMA",
-        ],
-        notes: Some("VWMA uses the supplied source series weighted by volume."),
-    },
-];
-
-const PARAM_PROJECTION_OSCILLATOR: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "length",
-        label: "Length",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(14)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Projection lookback length used for projected upper and lower bands."),
-    },
-    IndicatorParamInfo {
-        key: "smooth_length",
-        label: "Smooth Length",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(4)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("WMA smoothing length applied to the raw oscillator and signal."),
-    },
-];
-
-const PARAM_FVG_POSITIONING_AVERAGE: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "lookback",
-        label: "Lookback",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(30)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Window size used to retain active fair value gaps for averaging."),
-    },
-    IndicatorParamInfo {
-        key: "lookback_type",
-        label: "Lookback Type",
-        kind: IndicatorParamKind::EnumString,
-        required: false,
-        default: Some(ParamValueStatic::EnumString("Bar Count")),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: ENUM_VALUES_FVG_POSITIONING_AVERAGE_LOOKBACK_TYPE,
-        notes: Some("Bar Count keeps gaps whose origin bar is within the lookback; FVG Count keeps the most recent gap count."),
-    },
-    IndicatorParamInfo {
-        key: "atr_multiplier",
-        label: "ATR Multiplier",
-        kind: IndicatorParamKind::Float,
-        required: false,
-        default: Some(ParamValueStatic::Float(0.25)),
-        min: Some(0.0),
-        max: None,
-        step: Some(0.25),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Minimum gap-size filter applied against ATR(200) when available, with Pine-style fallback on early bars."),
-    },
-];
-
-const PARAM_CYBERPUNK_VALUE_TREND_ANALYZER: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "entry_level",
-        label: "Entry Level",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(30)),
-        min: Some(1.0),
-        max: Some(100.0),
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Buy trigger threshold crossed upward by the value trend series."),
-    },
-    IndicatorParamInfo {
-        key: "exit_level",
-        label: "Exit Level",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(75)),
-        min: Some(1.0),
-        max: Some(100.0),
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Sell trigger threshold crossed downward by the value trend series."),
-    },
-];
-
-const PARAM_EVASIVE_SUPERTREND: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "atr_length",
-        label: "ATR Length",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(10)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("ATR lookback used for the adaptive supertrend band."),
-    },
-    IndicatorParamInfo {
-        key: "base_multiplier",
-        label: "Base Multiplier",
-        kind: IndicatorParamKind::Float,
-        required: false,
-        default: Some(ParamValueStatic::Float(3.0)),
-        min: Some(0.1),
-        max: None,
-        step: Some(0.1),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("ATR multiple used to form the baseline upper and lower bands."),
-    },
-    IndicatorParamInfo {
-        key: "noise_threshold",
-        label: "Noise Threshold",
-        kind: IndicatorParamKind::Float,
-        required: false,
-        default: Some(ParamValueStatic::Float(1.0)),
-        min: Some(0.1),
-        max: None,
-        step: Some(0.1),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("If close is nearer to the prior band than ATR times this threshold, evasive expansion activates."),
-    },
-    IndicatorParamInfo {
-        key: "expansion_alpha",
-        label: "Expansion Alpha",
-        kind: IndicatorParamKind::Float,
-        required: false,
-        default: Some(ParamValueStatic::Float(0.5)),
-        min: Some(0.0),
-        max: None,
-        step: Some(0.1),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("ATR multiple used to push the band away from price during noisy conditions."),
-    },
-];
-
-const PARAM_EMD_TREND: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "source",
-        label: "Source",
-        kind: IndicatorParamKind::EnumString,
-        required: false,
-        default: Some(ParamValueStatic::EnumString("close")),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: ENUM_VALUES_EMD_TREND_SOURCE,
-        notes: Some("Price source fed into the selected moving average and EMD band calculation."),
-    },
-    IndicatorParamInfo {
-        key: "avg_type",
-        label: "Average Type",
-        kind: IndicatorParamKind::EnumString,
-        required: false,
-        default: Some(ParamValueStatic::EnumString("SMA")),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: ENUM_VALUES_EMD_TREND_AVG_TYPE,
-        notes: Some("Moving average family used as the benchmark for exponential moving deviation."),
-    },
-    IndicatorParamInfo {
-        key: "length",
-        label: "Length",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(28)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Lookback length shared by the selected benchmark average and the EMA deviation."),
-    },
-    IndicatorParamInfo {
-        key: "mult",
-        label: "Multiplier",
-        kind: IndicatorParamKind::Float,
-        required: false,
-        default: Some(ParamValueStatic::Float(1.0)),
-        min: Some(0.05),
-        max: None,
-        step: Some(0.05),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Multiplier applied to the exponential moving deviation to produce upper and lower bands."),
-    },
-];
-
-const PARAM_ZIG_ZAG_CHANNELS: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "length",
-        label: "Length",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(100)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Lookahead confirmation length used to confirm swing pivots and build channel segments."),
-    },
-    IndicatorParamInfo {
-        key: "extend",
-        label: "Extend",
-        kind: IndicatorParamKind::Bool,
-        required: false,
-        default: Some(ParamValueStatic::Bool(true)),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: ENUM_VALUES_TRUE_FALSE,
-        notes: Some("When true, extend the active channel from the latest confirmed pivot to the last bar."),
-    },
-];
-
-const PARAM_REVERSAL_SIGNALS: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "lookback_period",
-        label: "Candle Lookback",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(12)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Number of candles used to test the current close against prior highs/lows for reversal candidacy."),
-    },
-    IndicatorParamInfo {
-        key: "confirmation_period",
-        label: "Confirm Within",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(3)),
-        min: Some(0.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Maximum number of bars after a reversal candidate forms before the breakout confirmation expires."),
-    },
-    IndicatorParamInfo {
-        key: "use_volume_confirmation",
-        label: "Use Volume Confirmation",
-        kind: IndicatorParamKind::Bool,
-        required: false,
-        default: Some(ParamValueStatic::Bool(true)),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: ENUM_VALUES_TRUE_FALSE,
-        notes: Some("When true, only emit buy/sell signals when volume is above SMA(volume, 20)."),
-    },
-    IndicatorParamInfo {
-        key: "trend_ma_period",
-        label: "Trend MA Period",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(50)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Lookback used by the selected stepped moving average."),
-    },
-    IndicatorParamInfo {
-        key: "trend_ma_type",
-        label: "MA Type",
-        kind: IndicatorParamKind::EnumString,
-        required: false,
-        default: Some(ParamValueStatic::EnumString("EMA")),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: &["SMA", "EMA", "WMA", "VWMA"],
-        notes: Some("Stepped trend line average type. VWMA uses the supplied volume series."),
-    },
-    IndicatorParamInfo {
-        key: "ma_step_period",
-        label: "MA Step Period",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(33)),
-        min: Some(0.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Number of bars between stepped-MA ratchet updates while the current regime remains intact."),
-    },
-];
-
-const PARAM_MARKET_STRUCTURE_TRAILING_STOP: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "length",
-        label: "Length",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(14)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Centered pivot lookback used to confirm market-structure highs and lows."),
-    },
-    IndicatorParamInfo {
-        key: "increment_factor",
-        label: "Increment Factor",
-        kind: IndicatorParamKind::Float,
-        required: false,
-        default: Some(ParamValueStatic::Float(100.0)),
-        min: Some(0.0),
-        max: None,
-        step: Some(0.1),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Percent of new trailing max/min extension added to the active stop each bar."),
-    },
-    IndicatorParamInfo {
-        key: "reset_on",
-        label: "Reset On",
-        kind: IndicatorParamKind::EnumString,
-        required: false,
-        default: Some(ParamValueStatic::EnumString("CHoCH")),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: ENUM_VALUES_MS_TS_RESET_ON,
-        notes: Some(
-            "CHoCH resets only on change-of-character events; All resets on every structure break.",
-        ),
-    },
-];
-
-const PARAM_CANDLE_STRENGTH_OSCILLATOR: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "period",
-        label: "Period",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(50)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some(
-            "Lookback used by the HMA strength series and the Bollinger/Donchian envelope stage.",
-        ),
-    },
-    IndicatorParamInfo {
-        key: "atr_enabled",
-        label: "ATR Enabled",
-        kind: IndicatorParamKind::Bool,
-        required: false,
-        default: Some(ParamValueStatic::Bool(false)),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: ENUM_VALUES_TRUE_FALSE,
-        notes: Some("When true, scales the candle body/full-range score by ATR before smoothing."),
-    },
-    IndicatorParamInfo {
-        key: "atr_length",
-        label: "ATR Length",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(50)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("ATR period used when atr_enabled is true."),
-    },
-    IndicatorParamInfo {
-        key: "mode",
-        label: "Mode",
-        kind: IndicatorParamKind::EnumString,
-        required: false,
-        default: Some(ParamValueStatic::EnumString("bollinger")),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: ENUM_VALUES_CANDLE_STRENGTH_OSCILLATOR_MODE,
-        notes: Some("Envelope style for the strength series: Bollinger or Donchian."),
-    },
-];
-
-const PARAM_DIRECTIONAL_IMBALANCE_INDEX: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "length",
-        label: "Highest/Lowest Length",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(10)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Lookback of the highest-high and lowest-low windows. The effective window width is length + 1 bars."),
-    },
-    IndicatorParamInfo {
-        key: "period",
-        label: "Calculation Period",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(70)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Rolling count length used for the directional high/low hit totals."),
-    },
-];
-
-const PARAM_GMMA_OSCILLATOR: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "gmma_type",
-        label: "GMMA Type",
-        kind: IndicatorParamKind::EnumString,
-        required: false,
-        default: Some(ParamValueStatic::EnumString("guppy")),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: ENUM_VALUES_GMMA_TYPE,
-        notes: Some("Choose between the standard 6x6 Guppy set and the Super Guppy 11x16 set."),
-    },
-    IndicatorParamInfo {
-        key: "smooth_length",
-        label: "Smooth Length",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(1)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("SMA length applied to the raw GMMA oscillator. Use 1 to disable smoothing."),
-    },
-    IndicatorParamInfo {
-        key: "signal_length",
-        label: "Signal Length",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(13)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("EMA length applied to the raw oscillator to produce the signal line."),
-    },
-    IndicatorParamInfo {
-        key: "anchor_minutes",
-        label: "Anchor Minutes",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(0)),
-        min: Some(0.0),
-        max: Some(1440.0),
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Optional intraday anchor timeframe in minutes. Use 0 to disable period scaling."),
-    },
-    IndicatorParamInfo {
-        key: "interval_minutes",
-        label: "Interval Minutes",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: None,
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Required when anchor_minutes is used with plain slices; candles infer this from timestamps when possible."),
-    },
-];
-
-const PARAM_NONLINEAR_REGRESSION_ZERO_LAG_MOVING_AVERAGE: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "zlma_period",
-        label: "ZLMA Period",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(15)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Period of the corrected zero-lag LWMA stage."),
-    },
-    IndicatorParamInfo {
-        key: "regression_period",
-        label: "Regression Period",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(15)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Lookback of the quadratic nonlinear regression stage."),
-    },
-];
-
-const PARAM_POSSIBLE_RSI: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "period",
-        label: "Period",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(32)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Base RSI period used by the selected RSI variety."),
-    },
-    IndicatorParamInfo {
-        key: "rsi_mode",
-        label: "RSI Mode",
-        kind: IndicatorParamKind::EnumString,
-        required: false,
-        default: Some(ParamValueStatic::EnumString("regular")),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: &[
-            "rsx",
-            "regular",
-            "slow",
-            "rapid",
-            "harris",
-            "cutler",
-            "ehlers_smoothed",
-        ],
-        notes: Some("Repo-native approximation of the visible Possible RSI mode selection."),
-    },
-    IndicatorParamInfo {
-        key: "norm_period",
-        label: "Norm Period",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(100)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Rolling min/max normalization lookback for the RSI series."),
-    },
-    IndicatorParamInfo {
-        key: "normalization_mode",
-        label: "Normalization Mode",
-        kind: IndicatorParamKind::EnumString,
-        required: false,
-        default: Some(ParamValueStatic::EnumString("gaussian_fisher")),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: &["gaussian_fisher", "softmax", "regular_norm"],
-        notes: Some("Secondary normalization applied after min/max scaling."),
-    },
-    IndicatorParamInfo {
-        key: "normalization_length",
-        label: "Normalization Length",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(15)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Lookback used by the selected secondary normalization."),
-    },
-    IndicatorParamInfo {
-        key: "nonlag_period",
-        label: "Non-Lag Period",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(15)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Non-lag smoother length applied to the normalized oscillator."),
-    },
-    IndicatorParamInfo {
-        key: "dynamic_zone_period",
-        label: "Dynamic Zone Period",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(20)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Rolling window used to compute dynamic buy, sell, and middle levels."),
-    },
-    IndicatorParamInfo {
-        key: "buy_probability",
-        label: "Buy Probability",
-        kind: IndicatorParamKind::Float,
-        required: false,
-        default: Some(ParamValueStatic::Float(0.2)),
-        min: Some(0.0),
-        max: Some(0.5),
-        step: None,
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Nearest-rank lower-tail probability used for the dynamic buy level."),
-    },
-    IndicatorParamInfo {
-        key: "sell_probability",
-        label: "Sell Probability",
-        kind: IndicatorParamKind::Float,
-        required: false,
-        default: Some(ParamValueStatic::Float(0.2)),
-        min: Some(0.0),
-        max: Some(0.5),
-        step: None,
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Nearest-rank upper-tail probability used for the dynamic sell level."),
-    },
-    IndicatorParamInfo {
-        key: "signal_type",
-        label: "Signal Type",
-        kind: IndicatorParamKind::EnumString,
-        required: false,
-        default: Some(ParamValueStatic::EnumString("zeroline_crossover")),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: &[
-            "slope",
-            "dynamic_middle_crossover",
-            "levels_crossover",
-            "zeroline_crossover",
-        ],
-        notes: Some(
-            "Selects how trend state and long/short events are derived from the oscillator.",
-        ),
-    },
-    IndicatorParamInfo {
-        key: "run_highpass",
-        label: "Run Highpass",
-        kind: IndicatorParamKind::Bool,
-        required: false,
-        default: Some(ParamValueStatic::Bool(false)),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: ENUM_VALUES_TRUE_FALSE,
-        notes: Some(
-            "Apply the Ehlers-style high-pass filter to the source before RSI calculation.",
-        ),
-    },
-    IndicatorParamInfo {
-        key: "highpass_period",
-        label: "Highpass Period",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(15)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Period of the optional source high-pass filter."),
-    },
-];
-
-const PARAM_STOCHASTIC_MONEY_FLOW_INDEX: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "stoch_k_length",
-        label: "Stoch K Length",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(14)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Lookback used to stochastic-normalize the Money Flow Index series."),
-    },
-    IndicatorParamInfo {
-        key: "stoch_k_smooth",
-        label: "Stoch K Smooth",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(3)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("SMA smoothing length applied to the raw stochastic MFI K series."),
-    },
-    IndicatorParamInfo {
-        key: "stoch_d_smooth",
-        label: "Stoch D Smooth",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(3)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("SMA smoothing length applied to the smoothed K series to produce D."),
-    },
-    IndicatorParamInfo {
-        key: "mfi_length",
-        label: "MFI Length",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(14)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Money Flow Index lookback length applied to source and volume."),
-    },
-];
-
-const PARAM_AUTOCORRELATION_INDICATOR: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "length",
-        label: "Length",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(20)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Autocorrelation window length and Ultimate Smoother period."),
-    },
-    IndicatorParamInfo {
-        key: "lag",
-        label: "Lag",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(1)),
-        min: Some(1.0),
-        max: Some(99.0),
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Used by the generic dispatcher when output_id = correlation."),
-    },
-    IndicatorParamInfo {
-        key: "use_test_signal",
-        label: "Use Test Signal",
-        kind: IndicatorParamKind::Bool,
-        required: false,
-        default: Some(ParamValueStatic::Bool(false)),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: ENUM_VALUES_TRUE_FALSE,
-        notes: Some("Use a 30-bar sine wave instead of the input source."),
-    },
-];
-
-const PARAM_ROLLING_SKEWNESS_KURTOSIS: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "length",
-        label: "Length",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(50)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some(
-            "Rolling window length used to compute population skewness and excess kurtosis.",
-        ),
-    },
-    IndicatorParamInfo {
-        key: "smooth_length",
-        label: "Smooth Length",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(3)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("SMA smoothing length applied to the raw skewness and excess kurtosis series."),
-    },
-];
-
-const PARAM_ROLLING_Z_SCORE_TREND: &[IndicatorParamInfo] = &[IndicatorParamInfo {
-    key: "lookback_period",
-    label: "Lookback Period",
-    kind: IndicatorParamKind::Int,
-    required: false,
-    default: Some(ParamValueStatic::Int(20)),
-    min: Some(1.0),
-    max: None,
-    step: Some(1.0),
-    enum_values: EMPTY_ENUM_VALUES,
-    notes: Some("Rolling window length used for the mean, standard deviation, and z-score."),
-}];
-
-const ENUM_VALUES_GOERTZEL_DETREND_MODE: &[&str] = &[
-    "none",
-    "hodrick_prescott_smoothing",
-    "zero_lag_smoothing",
-    "hodrick_prescott_detrending",
-    "zero_lag_detrending",
-    "log_zero_lag_regression_detrending",
-];
-
-const PARAM_GOERTZEL_CYCLE_COMPOSITE_WAVE: &[IndicatorParamInfo] = &[
-    IndicatorParamInfo {
-        key: "max_period",
-        label: "Max Period",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(120)),
-        min: Some(2.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Maximum cycle period scanned by the Goertzel extractor."),
-    },
-    IndicatorParamInfo {
-        key: "start_at_cycle",
-        label: "Start At Cycle",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(1)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("1-based rank of the first extracted cycle included in the composite wave."),
-    },
-    IndicatorParamInfo {
-        key: "use_top_cycles",
-        label: "Use Top Cycles",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(2)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Number of ranked cycles summed into the composite wave."),
-    },
-    IndicatorParamInfo {
-        key: "bar_to_calculate",
-        label: "Bar To Calculate",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(1)),
-        min: Some(0.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Offset used when building the extracted-cycle snapshot."),
-    },
-    IndicatorParamInfo {
-        key: "detrend_mode",
-        label: "Detrend Mode",
-        kind: IndicatorParamKind::EnumString,
-        required: false,
-        default: Some(ParamValueStatic::EnumString("hodrick_prescott_detrending")),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: ENUM_VALUES_GOERTZEL_DETREND_MODE,
-        notes: Some("Preprocessing mode applied before cycle extraction."),
-    },
-    IndicatorParamInfo {
-        key: "filter_bartels",
-        label: "Filter Bartels",
-        kind: IndicatorParamKind::Bool,
-        required: false,
-        default: Some(ParamValueStatic::Bool(false)),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: ENUM_VALUES_TRUE_FALSE,
-        notes: Some("Filter extracted cycles using Bartels significance."),
-    },
-    IndicatorParamInfo {
-        key: "bart_no_cycles",
-        label: "Bartels Cycle Count",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(5)),
-        min: Some(1.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Number of repetitions used in the Bartels significance test."),
-    },
-    IndicatorParamInfo {
-        key: "bart_sig_limit",
-        label: "Bartels Signal Limit",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(50)),
-        min: Some(0.0),
-        max: Some(100.0),
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Minimum significance threshold when Bartels filtering is enabled."),
-    },
-    IndicatorParamInfo {
-        key: "squared_amp",
-        label: "Squared Amplitude",
-        kind: IndicatorParamKind::Bool,
-        required: false,
-        default: Some(ParamValueStatic::Bool(true)),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: ENUM_VALUES_TRUE_FALSE,
-        notes: Some("Use squared amplitudes instead of linear amplitudes."),
-    },
-    IndicatorParamInfo {
-        key: "use_cosine",
-        label: "Use Cosine",
-        kind: IndicatorParamKind::Bool,
-        required: false,
-        default: Some(ParamValueStatic::Bool(true)),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: ENUM_VALUES_TRUE_FALSE,
-        notes: Some("Reconstruct the composite wave with cosine instead of sine."),
-    },
-    IndicatorParamInfo {
-        key: "subtract_noise",
-        label: "Subtract Noise",
-        kind: IndicatorParamKind::Bool,
-        required: false,
-        default: Some(ParamValueStatic::Bool(false)),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: ENUM_VALUES_TRUE_FALSE,
-        notes: Some("Subtract unselected lower-ranked cycles from the composite wave."),
-    },
-    IndicatorParamInfo {
-        key: "use_cycle_strength",
-        label: "Use Cycle Strength",
-        kind: IndicatorParamKind::Bool,
-        required: false,
-        default: Some(ParamValueStatic::Bool(true)),
-        min: None,
-        max: None,
-        step: None,
-        enum_values: ENUM_VALUES_TRUE_FALSE,
-        notes: Some("Normalize amplitudes by cycle length before ranking."),
-    },
-];
-
-const PARAM_TREND_DIRECTION_FORCE_INDEX: &[IndicatorParamInfo] = &[IndicatorParamInfo {
-    key: "length",
-    label: "Length",
-    kind: IndicatorParamKind::Int,
-    required: false,
-    default: Some(ParamValueStatic::Int(10)),
-    min: Some(1.0),
-    max: None,
-    step: Some(1.0),
-    enum_values: EMPTY_ENUM_VALUES,
-    notes: Some("Base length used for the two EMAs and the 3x normalization window."),
-}];
-
-const PARAM_EHLERS_DATA_SAMPLING_RELATIVE_STRENGTH_INDICATOR: &[IndicatorParamInfo] =
-    &[IndicatorParamInfo {
-        key: "length",
-        label: "Length",
-        kind: IndicatorParamKind::Int,
-        required: false,
-        default: Some(ParamValueStatic::Int(14)),
-        min: Some(2.0),
-        max: None,
-        step: Some(1.0),
-        enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("RSI lookback used for both close RSI and midpoint RSI."),
-    }];
-
-const PARAM_VELOCITY_ACCELERATION_CONVERGENCE_DIVERGENCE_INDICATOR: &[IndicatorParamInfo] = &[
+const PARAM_VELOCITY_ACCELERATION_INDICATOR: &[IndicatorParamInfo] = &[
     IndicatorParamInfo {
         key: "length",
         label: "Length",
@@ -7302,7 +6269,7 @@ const PARAM_VELOCITY_ACCELERATION_CONVERGENCE_DIVERGENCE_INDICATOR: &[IndicatorP
         max: None,
         step: Some(1.0),
         enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("Velocity and acceleration lookback used by the Pine-style averaged difference operator."),
+        notes: None,
     },
     IndicatorParamInfo {
         key: "smooth_length",
@@ -7314,7 +6281,1310 @@ const PARAM_VELOCITY_ACCELERATION_CONVERGENCE_DIVERGENCE_INDICATOR: &[IndicatorP
         max: None,
         step: Some(1.0),
         enum_values: EMPTY_ENUM_VALUES,
-        notes: Some("WMA smoothing length applied to the raw velocity before acceleration is measured."),
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "source",
+        label: "Source",
+        kind: IndicatorParamKind::EnumString,
+        required: false,
+        default: Some(ParamValueStatic::EnumString("hlcc4")),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_GROVER_LLORENS_CYCLE_OSCILLATOR_SOURCE,
+        notes: None,
+    },
+];
+
+const PARAM_NORMALIZED_RESONATOR: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "period",
+        label: "Period",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(100)),
+        min: Some(2.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "delta",
+        label: "Delta",
+        kind: IndicatorParamKind::Float,
+        required: false,
+        default: Some(ParamValueStatic::Float(0.5)),
+        min: Some(0.01),
+        max: Some(1.0),
+        step: Some(0.05),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "lookback_mult",
+        label: "Lookback Multiplier",
+        kind: IndicatorParamKind::Float,
+        required: false,
+        default: Some(ParamValueStatic::Float(1.0)),
+        min: Some(0.1),
+        max: None,
+        step: Some(0.1),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "signal_length",
+        label: "Signal Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(9)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "source",
+        label: "Source",
+        kind: IndicatorParamKind::EnumString,
+        required: false,
+        default: Some(ParamValueStatic::EnumString("hl2")),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_GROVER_LLORENS_CYCLE_OSCILLATOR_SOURCE,
+        notes: None,
+    },
+];
+
+const PARAM_MONOTONICITY_INDEX: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "length",
+        label: "Period",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(20)),
+        min: Some(2.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "mode",
+        label: "Mode",
+        kind: IndicatorParamKind::EnumString,
+        required: false,
+        default: Some(ParamValueStatic::EnumString("efficiency")),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_MONOTONICITY_INDEX_MODE,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "index_smooth",
+        label: "Index Smoothing",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(5)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "source",
+        label: "Source",
+        kind: IndicatorParamKind::EnumString,
+        required: false,
+        default: Some(ParamValueStatic::EnumString("close")),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_GROVER_LLORENS_CYCLE_OSCILLATOR_SOURCE,
+        notes: None,
+    },
+];
+
+const PARAM_HALF_CAUSAL_ESTIMATOR: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "slots_per_day",
+        label: "Slots Per Day",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: None,
+        min: Some(2.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: Some("Required for raw-slice dispatch; candle dispatch infers this when omitted."),
+    },
+    IndicatorParamInfo {
+        key: "data_period",
+        label: "Data Period",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(5)),
+        min: Some(0.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "filter_length",
+        label: "Filter Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(20)),
+        min: Some(2.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "kernel_width",
+        label: "Kernel Width",
+        kind: IndicatorParamKind::Float,
+        required: false,
+        default: Some(ParamValueStatic::Float(20.0)),
+        min: Some(0.125),
+        max: None,
+        step: Some(0.125),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "kernel_type",
+        label: "Kernel Type",
+        kind: IndicatorParamKind::EnumString,
+        required: false,
+        default: Some(ParamValueStatic::EnumString("epanechnikov")),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_HALF_CAUSAL_ESTIMATOR_KERNEL_TYPE,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "confidence_adjust",
+        label: "Confidence Adjust",
+        kind: IndicatorParamKind::EnumString,
+        required: false,
+        default: Some(ParamValueStatic::EnumString("symmetric")),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_HALF_CAUSAL_ESTIMATOR_CONFIDENCE_ADJUST,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "maximum_confidence_adjust",
+        label: "Maximum Confidence Adjust",
+        kind: IndicatorParamKind::Float,
+        required: false,
+        default: Some(ParamValueStatic::Float(100.0)),
+        min: Some(0.0),
+        max: Some(100.0),
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "enable_expected_value",
+        label: "Enable Expected Value",
+        kind: IndicatorParamKind::Bool,
+        required: false,
+        default: Some(ParamValueStatic::Bool(false)),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_TRUE_FALSE,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "extra_smoothing",
+        label: "Extra Smoothing",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(0)),
+        min: Some(0.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "source",
+        label: "Source",
+        kind: IndicatorParamKind::EnumString,
+        required: false,
+        default: Some(ParamValueStatic::EnumString("volume")),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_HALF_CAUSAL_ESTIMATOR_SOURCE,
+        notes: None,
+    },
+];
+
+const PARAM_ABSOLUTE_STRENGTH_INDEX_OSCILLATOR: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "ema_length",
+        label: "EMA Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(21)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "signal_length",
+        label: "Signal Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(34)),
+        min: Some(2.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+];
+
+const PARAM_PREMIER_RSI_OSCILLATOR: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "rsi_length",
+        label: "RSI Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(14)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "stoch_length",
+        label: "Stoch Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(8)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "smooth_length",
+        label: "Smooth Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(25)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+];
+
+const PARAM_MULTI_LENGTH_STOCHASTIC_AVERAGE: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "length",
+        label: "Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(14)),
+        min: Some(4.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "presmooth",
+        label: "Pre-Smoothing",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(10)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "premethod",
+        label: "Pre-Smoothing Method",
+        kind: IndicatorParamKind::EnumString,
+        required: false,
+        default: Some(ParamValueStatic::EnumString("sma")),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_MULTI_LENGTH_STOCHASTIC_AVERAGE_METHOD,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "postsmooth",
+        label: "Post-Smoothing",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(10)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "postmethod",
+        label: "Post-Smoothing Method",
+        kind: IndicatorParamKind::EnumString,
+        required: false,
+        default: Some(ParamValueStatic::EnumString("sma")),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_MULTI_LENGTH_STOCHASTIC_AVERAGE_METHOD,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "source",
+        label: "Source",
+        kind: IndicatorParamKind::EnumString,
+        required: false,
+        default: Some(ParamValueStatic::EnumString("close")),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_GROVER_LLORENS_CYCLE_OSCILLATOR_SOURCE,
+        notes: None,
+    },
+];
+
+const PARAM_HULL_BUTTERFLY_OSCILLATOR: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "length",
+        label: "Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(14)),
+        min: Some(2.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "mult",
+        label: "Levels Multiplier",
+        kind: IndicatorParamKind::Float,
+        required: false,
+        default: Some(ParamValueStatic::Float(2.0)),
+        min: None,
+        max: None,
+        step: Some(0.1),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "source",
+        label: "Source",
+        kind: IndicatorParamKind::EnumString,
+        required: false,
+        default: Some(ParamValueStatic::EnumString("close")),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_GROVER_LLORENS_CYCLE_OSCILLATOR_SOURCE,
+        notes: None,
+    },
+];
+
+const PARAM_FIBONACCI_TRAILING_STOP: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "left_bars",
+        label: "Left Bars",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(20)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "right_bars",
+        label: "Right Bars",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(1)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "level",
+        label: "Level",
+        kind: IndicatorParamKind::Float,
+        required: false,
+        default: Some(ParamValueStatic::Float(-0.382)),
+        min: None,
+        max: None,
+        step: Some(0.001),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: Some("Finite Fibonacci extension/retracement factor"),
+    },
+    IndicatorParamInfo {
+        key: "trigger",
+        label: "Trigger",
+        kind: IndicatorParamKind::EnumString,
+        required: false,
+        default: Some(ParamValueStatic::EnumString("close")),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_FIBONACCI_TRAILING_STOP_TRIGGER,
+        notes: None,
+    },
+];
+const PARAM_FIBONACCI_ENTRY_BANDS: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "source",
+        label: "Source",
+        kind: IndicatorParamKind::EnumString,
+        required: false,
+        default: Some(ParamValueStatic::EnumString("hlc3")),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_FIBONACCI_ENTRY_BANDS_SOURCE,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "length",
+        label: "Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(21)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "atr_length",
+        label: "ATR Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(14)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "use_atr",
+        label: "Use ATR",
+        kind: IndicatorParamKind::Bool,
+        required: false,
+        default: Some(ParamValueStatic::Bool(true)),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_TRUE_FALSE,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "tp_aggressiveness",
+        label: "TP Aggressiveness",
+        kind: IndicatorParamKind::EnumString,
+        required: false,
+        default: Some(ParamValueStatic::EnumString("low")),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_FIBONACCI_ENTRY_BANDS_TP_AGGRESSIVENESS,
+        notes: None,
+    },
+];
+
+const PARAM_VOLUME_ENERGY_RESERVOIRS: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "length",
+        label: "Energy Horizon",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(20)),
+        min: Some(5.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: Some("Lookback for price stability and midpoint range."),
+    },
+    IndicatorParamInfo {
+        key: "sensitivity",
+        label: "Energy Sensitivity",
+        kind: IndicatorParamKind::Float,
+        required: false,
+        default: Some(ParamValueStatic::Float(1.5)),
+        min: Some(0.5),
+        max: None,
+        step: Some(0.1),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: Some("Controls how quickly reservoir energy is released on volume spikes."),
+    },
+];
+
+const PARAM_NEIGHBORING_TRAILING_STOP: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "buffer_size",
+        label: "Historical Buffer",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(200)),
+        min: Some(100.0),
+        max: Some(20000.0),
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: Some("Number of historical closes retained in the sorted neighborhood buffer."),
+    },
+    IndicatorParamInfo {
+        key: "k",
+        label: "Neighboring Range",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(50)),
+        min: Some(5.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: Some("Number of neighboring closes examined on each side of the insertion point."),
+    },
+    IndicatorParamInfo {
+        key: "percentile",
+        label: "Percentile",
+        kind: IndicatorParamKind::Float,
+        required: false,
+        default: Some(ParamValueStatic::Float(90.0)),
+        min: Some(1.0),
+        max: Some(99.0),
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: Some("Percentile rank used for the lower and upper neighborhood bands."),
+    },
+    IndicatorParamInfo {
+        key: "smooth",
+        label: "Smoothing",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(5)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: Some("SMA smoothing applied to the neighborhood bands before stop updates."),
+    },
+];
+
+const PARAM_GROVER_LLORENS_CYCLE_OSCILLATOR: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "length",
+        label: "Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(100)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "mult",
+        label: "Multiplier",
+        kind: IndicatorParamKind::Float,
+        required: false,
+        default: Some(ParamValueStatic::Float(10.0)),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "source",
+        label: "Source",
+        kind: IndicatorParamKind::EnumString,
+        required: false,
+        default: Some(ParamValueStatic::EnumString("close")),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_GROVER_LLORENS_CYCLE_OSCILLATOR_SOURCE,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "smooth",
+        label: "Smooth",
+        kind: IndicatorParamKind::Bool,
+        required: false,
+        default: Some(ParamValueStatic::Bool(true)),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_TRUE_FALSE,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "rsi_period",
+        label: "RSI Period",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(20)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+];
+
+const PARAM_EHLERS_LINEAR_EXTRAPOLATION_PREDICTOR: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "high_pass_length",
+        label: "High-Pass Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(125)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "low_pass_length",
+        label: "Low-Pass Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(12)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "gain",
+        label: "Gain",
+        kind: IndicatorParamKind::Float,
+        required: false,
+        default: Some(ParamValueStatic::Float(0.7)),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "bars_forward",
+        label: "Bars Forward",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(5)),
+        min: Some(0.0),
+        max: Some(10.0),
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: Some("Faithful core supports 0..10 forward bars."),
+    },
+    IndicatorParamInfo {
+        key: "signal_mode",
+        label: "Signal Mode",
+        kind: IndicatorParamKind::EnumString,
+        required: false,
+        default: Some(ParamValueStatic::EnumString("predict_filter_crosses")),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_EHLERS_LINEAR_EXTRAPOLATION_SIGNAL_MODE,
+        notes: None,
+    },
+];
+
+const PARAM_BULL_POWER_VS_BEAR_POWER: &[IndicatorParamInfo] = &[IndicatorParamInfo {
+    key: "period",
+    label: "Period",
+    kind: IndicatorParamKind::Int,
+    required: false,
+    default: Some(ParamValueStatic::Int(5)),
+    min: Some(1.0),
+    max: None,
+    step: Some(1.0),
+    enum_values: EMPTY_ENUM_VALUES,
+    notes: None,
+}];
+
+const PARAM_VERTICAL_HORIZONTAL_FILTER: &[IndicatorParamInfo] = &[IndicatorParamInfo {
+    key: "length",
+    label: "Length",
+    kind: IndicatorParamKind::Int,
+    required: false,
+    default: Some(ParamValueStatic::Int(28)),
+    min: Some(1.0),
+    max: None,
+    step: Some(1.0),
+    enum_values: EMPTY_ENUM_VALUES,
+    notes: None,
+}];
+
+const PARAM_SQUEEZE_INDEX: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "conv",
+        label: "Convergence Factor",
+        kind: IndicatorParamKind::Float,
+        required: false,
+        default: Some(ParamValueStatic::Float(50.0)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "length",
+        label: "Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(20)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+];
+
+const PARAM_STOCHASTIC_DISTANCE: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "lookback_length",
+        label: "Lookback Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(200)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "length1",
+        label: "Length 1",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(12)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "length2",
+        label: "Length 2",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(3)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "ob_level",
+        label: "Overbought Level",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(40)),
+        min: Some(0.0),
+        max: Some(100.0),
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "os_level",
+        label: "Oversold Level",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(-40)),
+        min: Some(-100.0),
+        max: Some(0.0),
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+];
+
+const PARAM_ADAPTIVE_BANDPASS_TRIGGER_OSCILLATOR: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "delta",
+        label: "Delta",
+        kind: IndicatorParamKind::Float,
+        required: false,
+        default: Some(ParamValueStatic::Float(0.1)),
+        min: Some(0.0000001),
+        max: Some(0.9999999),
+        step: Some(0.01),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "alpha",
+        label: "Alpha",
+        kind: IndicatorParamKind::Float,
+        required: false,
+        default: Some(ParamValueStatic::Float(0.07)),
+        min: Some(0.0000001),
+        max: Some(0.9999999),
+        step: Some(0.01),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+];
+
+const PARAM_DIDI_INDEX: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "short_length",
+        label: "Short Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(3)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "medium_length",
+        label: "Medium Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(8)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "long_length",
+        label: "Long Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(20)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+];
+
+const PARAM_EHLERS_AUTOCORRELATION_PERIODOGRAM: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "min_period",
+        label: "Min Period",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(8)),
+        min: Some(3.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "max_period",
+        label: "Max Period",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(48)),
+        min: Some(4.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "avg_length",
+        label: "Autocorrelation Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(3)),
+        min: Some(0.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "enhance",
+        label: "Enhance Resolution",
+        kind: IndicatorParamKind::Bool,
+        required: false,
+        default: Some(ParamValueStatic::Bool(true)),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_TRUE_FALSE,
+        notes: None,
+    },
+];
+
+const PARAM_KASE_PEAK_OSCILLATOR_WITH_DIVERGENCES: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "deviations",
+        label: "Deviations",
+        kind: IndicatorParamKind::Float,
+        required: false,
+        default: Some(ParamValueStatic::Float(2.0)),
+        min: Some(0.0),
+        max: None,
+        step: None,
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "short_cycle",
+        label: "Short Cycle",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(8)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "long_cycle",
+        label: "Long Cycle",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(65)),
+        min: Some(2.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "sensitivity",
+        label: "Sensitivity",
+        kind: IndicatorParamKind::Float,
+        required: false,
+        default: Some(ParamValueStatic::Float(40.0)),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "all_peaks_mode",
+        label: "All Peaks Mode",
+        kind: IndicatorParamKind::Bool,
+        required: false,
+        default: Some(ParamValueStatic::Bool(true)),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_TRUE_FALSE,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "lb_r",
+        label: "Pivot Right",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(5)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "lb_l",
+        label: "Pivot Left",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(5)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "range_upper",
+        label: "Range Upper",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(60)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "range_lower",
+        label: "Range Lower",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(5)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "plot_bull",
+        label: "Plot Bull",
+        kind: IndicatorParamKind::Bool,
+        required: false,
+        default: Some(ParamValueStatic::Bool(true)),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_TRUE_FALSE,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "plot_hidden_bull",
+        label: "Plot Hidden Bull",
+        kind: IndicatorParamKind::Bool,
+        required: false,
+        default: Some(ParamValueStatic::Bool(false)),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_TRUE_FALSE,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "plot_bear",
+        label: "Plot Bear",
+        kind: IndicatorParamKind::Bool,
+        required: false,
+        default: Some(ParamValueStatic::Bool(true)),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_TRUE_FALSE,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "plot_hidden_bear",
+        label: "Plot Hidden Bear",
+        kind: IndicatorParamKind::Bool,
+        required: false,
+        default: Some(ParamValueStatic::Bool(false)),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_TRUE_FALSE,
+        notes: None,
+    },
+];
+
+const PARAM_INTRADAY_MOMENTUM_INDEX: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "length",
+        label: "IMI Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(14)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "length_ma",
+        label: "Signal Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(6)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "mult",
+        label: "Band StdDev Mult",
+        kind: IndicatorParamKind::Float,
+        required: false,
+        default: Some(ParamValueStatic::Float(2.0)),
+        min: Some(0.0),
+        max: None,
+        step: None,
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "length_bb",
+        label: "Band Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(20)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "apply_smoothing",
+        label: "Apply Smoothing",
+        kind: IndicatorParamKind::Bool,
+        required: false,
+        default: Some(ParamValueStatic::Bool(false)),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_TRUE_FALSE,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "low_band",
+        label: "Smoothing Lower Band",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(10)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+];
+
+const PARAM_DEMAND_INDEX: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "len_bs",
+        label: "Buy/Sell Power Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(19)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "len_bs_ma",
+        label: "Buy/Sell Power MA Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(19)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "len_di_ma",
+        label: "Demand Index SMA Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(19)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "ma_type",
+        label: "MA Type",
+        kind: IndicatorParamKind::EnumString,
+        required: false,
+        default: Some(ParamValueStatic::EnumString("ema")),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_DEMAND_INDEX_MA_TYPE,
+        notes: None,
+    },
+];
+
+const PARAM_VWAP_ZSCORE_WITH_SIGNALS: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "length",
+        label: "Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(20)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "upper_bottom",
+        label: "Upper Threshold",
+        kind: IndicatorParamKind::Float,
+        required: false,
+        default: Some(ParamValueStatic::Float(2.5)),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "lower_bottom",
+        label: "Lower Threshold",
+        kind: IndicatorParamKind::Float,
+        required: false,
+        default: Some(ParamValueStatic::Float(-2.5)),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
     },
 ];
 
@@ -8315,6 +8585,33 @@ const PARAM_MOD_GOD_MODE: &[IndicatorParamInfo] = &[
         max: None,
         step: None,
         enum_values: ENUM_VALUES_TRUE_FALSE,
+        notes: None,
+    },
+];
+
+const PARAM_HEMA_TREND_LEVELS: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "fast_length",
+        label: "Fast Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(20)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "slow_length",
+        label: "Slow Length",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(40)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
         notes: None,
     },
 ];
@@ -10382,236 +10679,300 @@ const SUPPLEMENTAL_INDICATORS: &[SupplementalIndicatorSeed] = &[
         params: PARAM_YANG_ZHANG,
     },
     SupplementalIndicatorSeed {
-        id: "rogers_satchell_volatility",
-        label: "Rogers-Satchell Volatility",
+        id: "garman_klass_volatility",
+        label: "Garman-Klass Volatility",
         category: "volatility",
         input_kind: IndicatorInputKind::Ohlc,
-        outputs: OUTPUTS_RS_SIGNAL,
-        params: PARAM_ROGERS_SATCHELL,
+        outputs: OUTPUTS_VALUE_F64,
+        params: PARAM_GARMAN_KLASS,
     },
     SupplementalIndicatorSeed {
-        id: "historical_volatility_rank",
-        label: "Historical Volatility Rank",
+        id: "atr_percentile",
+        label: "ATR Percentile",
         category: "volatility",
-        input_kind: IndicatorInputKind::Slice,
-        outputs: OUTPUTS_HISTORICAL_VOLATILITY_RANK,
-        params: PARAM_HISTORICAL_VOLATILITY_RANK,
+        input_kind: IndicatorInputKind::Ohlc,
+        outputs: OUTPUTS_VALUE_F64,
+        params: PARAM_ATR_PERCENTILE,
     },
     SupplementalIndicatorSeed {
-        id: "dual_ulcer_index",
-        label: "Dual Ulcer Index",
-        category: "volatility",
-        input_kind: IndicatorInputKind::Slice,
-        outputs: OUTPUTS_DUAL_ULCER_INDEX,
-        params: PARAM_DUAL_ULCER_INDEX,
-    },
-    SupplementalIndicatorSeed {
-        id: "fractal_dimension_index",
-        label: "Fractal Dimension Index",
-        category: "volatility",
-        input_kind: IndicatorInputKind::Slice,
-        outputs: OUTPUTS_FRACTAL_DIMENSION_INDEX,
-        params: PARAM_FRACTAL_DIMENSION_INDEX,
-    },
-    SupplementalIndicatorSeed {
-        id: "dynamic_momentum_index",
-        label: "Dynamic Momentum Index",
-        category: "momentum",
-        input_kind: IndicatorInputKind::Slice,
-        outputs: OUTPUTS_DYNAMIC_MOMENTUM_INDEX,
-        params: PARAM_DYNAMIC_MOMENTUM_INDEX,
-    },
-    SupplementalIndicatorSeed {
-        id: "disparity_index",
-        label: "Disparity Index",
-        category: "momentum",
+        id: "advance_decline_line",
+        label: "Advance-Decline Line",
+        category: "breadth",
         input_kind: IndicatorInputKind::Slice,
         outputs: OUTPUTS_VALUE_F64,
-        params: PARAM_DISPARITY_INDEX,
+        params: PARAM_NONE,
     },
     SupplementalIndicatorSeed {
-        id: "donchian_channel_width",
-        label: "Donchian Channel Width",
-        category: "volatility",
+        id: "decisionpoint_breadth_swenlin_trading_oscillator",
+        label: "DecisionPoint Breadth Swenlin Trading Oscillator",
+        category: "breadth",
         input_kind: IndicatorInputKind::HighLow,
-        outputs: OUTPUTS_DONCHIAN_CHANNEL_WIDTH,
-        params: PARAM_DONCHIAN_CHANNEL_WIDTH,
+        outputs: OUTPUTS_VALUE_F64,
+        params: PARAM_NONE,
     },
     SupplementalIndicatorSeed {
-        id: "kairi_relative_index",
-        label: "Kairi Relative Index",
+        id: "velocity_acceleration_indicator",
+        label: "Velocity Acceleration Indicator",
         category: "momentum",
         input_kind: IndicatorInputKind::Candles,
         outputs: OUTPUTS_VALUE_F64,
-        params: PARAM_KAIRI_RELATIVE_INDEX,
+        params: PARAM_VELOCITY_ACCELERATION_INDICATOR,
     },
     SupplementalIndicatorSeed {
-        id: "projection_oscillator",
-        label: "Projection Oscillator",
-        category: "momentum",
-        input_kind: IndicatorInputKind::Ohlc,
-        outputs: OUTPUTS_PROJECTION_OSCILLATOR,
-        params: PARAM_PROJECTION_OSCILLATOR,
-    },
-    SupplementalIndicatorSeed {
-        id: "fvg_positioning_average",
-        label: "FVG Positioning Average",
-        category: "price",
-        input_kind: IndicatorInputKind::Ohlc,
-        outputs: OUTPUTS_FVG_POSITIONING_AVERAGE,
-        params: PARAM_FVG_POSITIONING_AVERAGE,
-    },
-    SupplementalIndicatorSeed {
-        id: "cyberpunk_value_trend_analyzer",
-        label: "Cyberpunk Value Trend Analyzer",
-        category: "momentum",
-        input_kind: IndicatorInputKind::Ohlc,
-        outputs: OUTPUTS_CYBERPUNK_VALUE_TREND_ANALYZER,
-        params: PARAM_CYBERPUNK_VALUE_TREND_ANALYZER,
-    },
-    SupplementalIndicatorSeed {
-        id: "evasive_supertrend",
-        label: "Evasive SuperTrend",
-        category: "trend",
-        input_kind: IndicatorInputKind::Ohlc,
-        outputs: OUTPUTS_EVASIVE_SUPERTREND,
-        params: PARAM_EVASIVE_SUPERTREND,
-    },
-    SupplementalIndicatorSeed {
-        id: "emd_trend",
-        label: "EMD Trend",
-        category: "trend",
-        input_kind: IndicatorInputKind::Ohlc,
-        outputs: OUTPUTS_EMD_TREND,
-        params: PARAM_EMD_TREND,
-    },
-    SupplementalIndicatorSeed {
-        id: "reversal_signals",
-        label: "Reversal Signals",
-        category: "trend",
-        input_kind: IndicatorInputKind::Ohlcv,
-        outputs: OUTPUTS_REVERSAL_SIGNALS,
-        params: PARAM_REVERSAL_SIGNALS,
-    },
-    SupplementalIndicatorSeed {
-        id: "market_structure_trailing_stop",
-        label: "Market Structure Trailing Stop",
-        category: "trend",
-        input_kind: IndicatorInputKind::Ohlc,
-        outputs: OUTPUTS_MARKET_STRUCTURE_TRAILING_STOP,
-        params: PARAM_MARKET_STRUCTURE_TRAILING_STOP,
-    },
-    SupplementalIndicatorSeed {
-        id: "zig_zag_channels",
-        label: "Zig Zag Channels",
-        category: "price",
-        input_kind: IndicatorInputKind::Ohlc,
-        outputs: OUTPUTS_ZIG_ZAG_CHANNELS,
-        params: PARAM_ZIG_ZAG_CHANNELS,
-    },
-    SupplementalIndicatorSeed {
-        id: "directional_imbalance_index",
-        label: "Directional Imbalance Index",
-        category: "momentum",
-        input_kind: IndicatorInputKind::HighLow,
-        outputs: OUTPUTS_DIRECTIONAL_IMBALANCE_INDEX,
-        params: PARAM_DIRECTIONAL_IMBALANCE_INDEX,
-    },
-    SupplementalIndicatorSeed {
-        id: "candle_strength_oscillator",
-        label: "Candle Strength Oscillator",
-        category: "momentum",
-        input_kind: IndicatorInputKind::Ohlc,
-        outputs: OUTPUTS_CANDLE_STRENGTH_OSCILLATOR,
-        params: PARAM_CANDLE_STRENGTH_OSCILLATOR,
-    },
-    SupplementalIndicatorSeed {
-        id: "gmma_oscillator",
-        label: "GMMA Oscillator",
-        category: "momentum",
+        id: "normalized_resonator",
+        label: "Normalized Resonator",
+        category: "cycle",
         input_kind: IndicatorInputKind::Candles,
-        outputs: OUTPUTS_GMMA_OSCILLATOR,
-        params: PARAM_GMMA_OSCILLATOR,
+        outputs: OUTPUTS_OSCILLATOR_SIGNAL,
+        params: PARAM_NORMALIZED_RESONATOR,
     },
     SupplementalIndicatorSeed {
-        id: "nonlinear_regression_zero_lag_moving_average",
-        label: "Nonlinear Regression Zero-Lag Moving Average",
-        category: "trend",
-        input_kind: IndicatorInputKind::Slice,
-        outputs: OUTPUTS_NONLINEAR_REGRESSION_ZERO_LAG_MOVING_AVERAGE,
-        params: PARAM_NONLINEAR_REGRESSION_ZERO_LAG_MOVING_AVERAGE,
-    },
-    SupplementalIndicatorSeed {
-        id: "possible_rsi",
-        label: "Possible RSI",
-        category: "momentum",
-        input_kind: IndicatorInputKind::Slice,
-        outputs: OUTPUTS_POSSIBLE_RSI,
-        params: PARAM_POSSIBLE_RSI,
-    },
-    SupplementalIndicatorSeed {
-        id: "stochastic_money_flow_index",
-        label: "Stochastic Money Flow Index",
-        category: "momentum",
-        input_kind: IndicatorInputKind::CloseVolume,
-        outputs: OUTPUTS_STOCH,
-        params: PARAM_STOCHASTIC_MONEY_FLOW_INDEX,
-    },
-    SupplementalIndicatorSeed {
-        id: "autocorrelation_indicator",
-        label: "Autocorrelation Indicator",
+        id: "monotonicity_index",
+        label: "Monotonicity Index",
         category: "statistics",
-        input_kind: IndicatorInputKind::Slice,
-        outputs: OUTPUTS_AUTOCORRELATION_INDICATOR,
-        params: PARAM_AUTOCORRELATION_INDICATOR,
+        input_kind: IndicatorInputKind::Candles,
+        outputs: OUTPUTS_MONOTONICITY_INDEX,
+        params: PARAM_MONOTONICITY_INDEX,
     },
     SupplementalIndicatorSeed {
-        id: "goertzel_cycle_composite_wave",
-        label: "Goertzel Cycle Composite Wave",
+        id: "half_causal_estimator",
+        label: "Half Causal Estimator",
+        category: "statistics",
+        input_kind: IndicatorInputKind::Candles,
+        outputs: OUTPUTS_HALF_CAUSAL_ESTIMATOR,
+        params: PARAM_HALF_CAUSAL_ESTIMATOR,
+    },
+    SupplementalIndicatorSeed {
+        id: "bull_power_vs_bear_power",
+        label: "Bull Power vs Bear Power",
+        category: "momentum",
+        input_kind: IndicatorInputKind::Ohlc,
+        outputs: OUTPUTS_VALUE_F64,
+        params: PARAM_BULL_POWER_VS_BEAR_POWER,
+    },
+    SupplementalIndicatorSeed {
+        id: "historical_volatility",
+        label: "Historical Volatility",
+        category: "volatility",
+        input_kind: IndicatorInputKind::Slice,
+        outputs: OUTPUTS_VALUE_F64,
+        params: PARAM_HISTORICAL_VOLATILITY,
+    },
+    SupplementalIndicatorSeed {
+        id: "absolute_strength_index_oscillator",
+        label: "Absolute Strength Index Oscillator",
+        category: "momentum",
+        input_kind: IndicatorInputKind::Slice,
+        outputs: OUTPUTS_OSCILLATOR_SIGNAL_HISTOGRAM,
+        params: PARAM_ABSOLUTE_STRENGTH_INDEX_OSCILLATOR,
+    },
+    SupplementalIndicatorSeed {
+        id: "adaptive_bandpass_trigger_oscillator",
+        label: "Adaptive Bandpass Trigger Oscillator",
         category: "cycle",
         input_kind: IndicatorInputKind::Slice,
-        outputs: OUTPUTS_GOERTZEL_CYCLE_COMPOSITE_WAVE,
-        params: PARAM_GOERTZEL_CYCLE_COMPOSITE_WAVE,
+        outputs: OUTPUTS_IN_PHASE_LEAD,
+        params: PARAM_ADAPTIVE_BANDPASS_TRIGGER_OSCILLATOR,
     },
     SupplementalIndicatorSeed {
-        id: "rolling_skewness_kurtosis",
-        label: "Rolling Skewness Kurtosis",
-        category: "statistics",
-        input_kind: IndicatorInputKind::Slice,
-        outputs: OUTPUTS_ROLLING_SKEWNESS_KURTOSIS,
-        params: PARAM_ROLLING_SKEWNESS_KURTOSIS,
-    },
-    SupplementalIndicatorSeed {
-        id: "rolling_z_score_trend",
-        label: "Rolling Z-Score Trend",
-        category: "trend",
-        input_kind: IndicatorInputKind::Slice,
-        outputs: OUTPUTS_ROLLING_Z_SCORE_TREND,
-        params: PARAM_ROLLING_Z_SCORE_TREND,
-    },
-    SupplementalIndicatorSeed {
-        id: "ehlers_data_sampling_relative_strength_indicator",
-        label: "Ehlers Data Sampling Relative Strength Indicator",
-        category: "momentum",
-        input_kind: IndicatorInputKind::Ohlc,
-        outputs: OUTPUTS_EHLERS_DATA_SAMPLING_RELATIVE_STRENGTH_INDICATOR,
-        params: PARAM_EHLERS_DATA_SAMPLING_RELATIVE_STRENGTH_INDICATOR,
-    },
-    SupplementalIndicatorSeed {
-        id: "velocity_acceleration_convergence_divergence_indicator",
-        label: "Velocity Acceleration Convergence Divergence Indicator",
-        category: "momentum",
-        input_kind: IndicatorInputKind::Candles,
-        outputs: OUTPUTS_VELOCITY_ACCELERATION_CONVERGENCE_DIVERGENCE_INDICATOR,
-        params: PARAM_VELOCITY_ACCELERATION_CONVERGENCE_DIVERGENCE_INDICATOR,
-    },
-    SupplementalIndicatorSeed {
-        id: "trend_direction_force_index",
-        label: "Trend Direction Force Index",
+        id: "premier_rsi_oscillator",
+        label: "Premier RSI Oscillator",
         category: "momentum",
         input_kind: IndicatorInputKind::Slice,
         outputs: OUTPUTS_VALUE_F64,
-        params: PARAM_TREND_DIRECTION_FORCE_INDEX,
+        params: PARAM_PREMIER_RSI_OSCILLATOR,
+    },
+    SupplementalIndicatorSeed {
+        id: "multi_length_stochastic_average",
+        label: "Multi-Length Stochastic Average",
+        category: "momentum",
+        input_kind: IndicatorInputKind::Candles,
+        outputs: OUTPUTS_VALUE_F64,
+        params: PARAM_MULTI_LENGTH_STOCHASTIC_AVERAGE,
+    },
+    SupplementalIndicatorSeed {
+        id: "hull_butterfly_oscillator",
+        label: "Hull Butterfly Oscillator",
+        category: "momentum",
+        input_kind: IndicatorInputKind::Candles,
+        outputs: OUTPUTS_HULL_BUTTERFLY_OSCILLATOR,
+        params: PARAM_HULL_BUTTERFLY_OSCILLATOR,
+    },
+    SupplementalIndicatorSeed {
+        id: "fibonacci_trailing_stop",
+        label: "Fibonacci Trailing Stop",
+        category: "trend",
+        input_kind: IndicatorInputKind::Ohlc,
+        outputs: OUTPUTS_FIBONACCI_TRAILING_STOP,
+        params: PARAM_FIBONACCI_TRAILING_STOP,
+    },
+    SupplementalIndicatorSeed {
+        id: "fibonacci_entry_bands",
+        label: "Fibonacci Entry Bands",
+        category: "trend",
+        input_kind: IndicatorInputKind::Ohlc,
+        outputs: OUTPUTS_FIBONACCI_ENTRY_BANDS,
+        params: PARAM_FIBONACCI_ENTRY_BANDS,
+    },
+    SupplementalIndicatorSeed {
+        id: "volume_energy_reservoirs",
+        label: "Volume Energy Reservoirs",
+        category: "volume",
+        input_kind: IndicatorInputKind::Ohlcv,
+        outputs: OUTPUTS_VOLUME_ENERGY_RESERVOIRS,
+        params: PARAM_VOLUME_ENERGY_RESERVOIRS,
+    },
+    SupplementalIndicatorSeed {
+        id: "neighboring_trailing_stop",
+        label: "Neighboring Trailing Stop",
+        category: "trend",
+        input_kind: IndicatorInputKind::Ohlc,
+        outputs: OUTPUTS_NEIGHBORING_TRAILING_STOP,
+        params: PARAM_NEIGHBORING_TRAILING_STOP,
+    },
+    SupplementalIndicatorSeed {
+        id: "macd_wave_signal_pro",
+        label: "MACD Wave Signal Pro",
+        category: "momentum",
+        input_kind: IndicatorInputKind::Ohlc,
+        outputs: OUTPUTS_MACD_WAVE_SIGNAL_PRO,
+        params: PARAM_NONE,
+    },
+    SupplementalIndicatorSeed {
+        id: "hema_trend_levels",
+        label: "HEMA Trend Levels",
+        category: "trend",
+        input_kind: IndicatorInputKind::Ohlc,
+        outputs: OUTPUTS_HEMA_TREND_LEVELS,
+        params: PARAM_HEMA_TREND_LEVELS,
+    },
+    SupplementalIndicatorSeed {
+        id: "grover_llorens_cycle_oscillator",
+        label: "Grover Llorens Cycle Oscillator",
+        category: "cycle",
+        input_kind: IndicatorInputKind::Ohlc,
+        outputs: OUTPUTS_VALUE_F64,
+        params: PARAM_GROVER_LLORENS_CYCLE_OSCILLATOR,
+    },
+    SupplementalIndicatorSeed {
+        id: "squeeze_index",
+        label: "Squeeze Index",
+        category: "volatility",
+        input_kind: IndicatorInputKind::Slice,
+        outputs: OUTPUTS_VALUE_F64,
+        params: PARAM_SQUEEZE_INDEX,
+    },
+    SupplementalIndicatorSeed {
+        id: "stochastic_distance",
+        label: "Stochastic Distance",
+        category: "momentum",
+        input_kind: IndicatorInputKind::Slice,
+        outputs: OUTPUTS_OSCILLATOR_SIGNAL,
+        params: PARAM_STOCHASTIC_DISTANCE,
+    },
+    SupplementalIndicatorSeed {
+        id: "vertical_horizontal_filter",
+        label: "Vertical Horizontal Filter",
+        category: "trend",
+        input_kind: IndicatorInputKind::Slice,
+        outputs: OUTPUTS_VALUE_F64,
+        params: PARAM_VERTICAL_HORIZONTAL_FILTER,
+    },
+    SupplementalIndicatorSeed {
+        id: "intraday_momentum_index",
+        label: "Intraday Momentum Index",
+        category: "momentum",
+        input_kind: IndicatorInputKind::Ohlc,
+        outputs: &[
+            OUTPUT_IMI,
+            OUTPUT_UPPER_HIT,
+            OUTPUT_LOWER_HIT,
+            OUTPUT_SIGNAL,
+        ],
+        params: PARAM_INTRADAY_MOMENTUM_INDEX,
+    },
+    SupplementalIndicatorSeed {
+        id: "vwap_zscore_with_signals",
+        label: "VWAP Z-Score With Signals",
+        category: "volume",
+        input_kind: IndicatorInputKind::CloseVolume,
+        outputs: &[
+            OUTPUT_ZVWAP,
+            OUTPUT_SUPPORT_SIGNAL,
+            OUTPUT_RESISTANCE_SIGNAL,
+        ],
+        params: PARAM_VWAP_ZSCORE_WITH_SIGNALS,
+    },
+    SupplementalIndicatorSeed {
+        id: "demand_index",
+        label: "Demand Index",
+        category: "volume",
+        input_kind: IndicatorInputKind::Ohlcv,
+        outputs: &[OUTPUT_DEMAND_INDEX, OUTPUT_SIGNAL],
+        params: PARAM_DEMAND_INDEX,
+    },
+    SupplementalIndicatorSeed {
+        id: "didi_index",
+        label: "Didi Index",
+        category: "momentum",
+        input_kind: IndicatorInputKind::Slice,
+        outputs: &[
+            OUTPUT_SHORT,
+            OUTPUT_LONG,
+            OUTPUT_CROSSOVER,
+            OUTPUT_CROSSUNDER,
+        ],
+        params: PARAM_DIDI_INDEX,
+    },
+    SupplementalIndicatorSeed {
+        id: "ehlers_autocorrelation_periodogram",
+        label: "Ehlers Autocorrelation Periodogram",
+        category: "cycle",
+        input_kind: IndicatorInputKind::Slice,
+        outputs: &[OUTPUT_DOMINANT_CYCLE, OUTPUT_NORMALIZED_POWER],
+        params: PARAM_EHLERS_AUTOCORRELATION_PERIODOGRAM,
+    },
+    SupplementalIndicatorSeed {
+        id: "ehlers_linear_extrapolation_predictor",
+        label: "Ehlers Linear Extrapolation Predictor",
+        category: "cycle",
+        input_kind: IndicatorInputKind::Slice,
+        outputs: &[
+            OUTPUT_PREDICTION,
+            OUTPUT_FILTER,
+            OUTPUT_STATE,
+            OUTPUT_GO_LONG,
+            OUTPUT_GO_SHORT,
+        ],
+        params: PARAM_EHLERS_LINEAR_EXTRAPOLATION_PREDICTOR,
+    },
+    SupplementalIndicatorSeed {
+        id: "kase_peak_oscillator_with_divergences",
+        label: "Kase Peak Oscillator With Divergences",
+        category: "momentum",
+        input_kind: IndicatorInputKind::Ohlc,
+        outputs: &[
+            OUTPUT_OSCILLATOR,
+            OUTPUT_HIST,
+            OUTPUT_MAX_PEAK_VALUE,
+            OUTPUT_MIN_PEAK_VALUE,
+            OUTPUT_MARKET_EXTREME,
+            OUTPUT_REGULAR_BULLISH,
+            OUTPUT_HIDDEN_BULLISH,
+            OUTPUT_REGULAR_BEARISH,
+            OUTPUT_HIDDEN_BEARISH,
+            OUTPUT_GO_LONG,
+            OUTPUT_GO_SHORT,
+        ],
+        params: PARAM_KASE_PEAK_OSCILLATOR_WITH_DIVERGENCES,
+    },
+    SupplementalIndicatorSeed {
+        id: "gopalakrishnan_range_index",
+        label: "Gopalakrishnan Range Index",
+        category: "volatility",
+        input_kind: IndicatorInputKind::HighLow,
+        outputs: OUTPUTS_VALUE_F64,
+        params: PARAM_GOPALAKRISHNAN_RANGE_INDEX,
     },
     SupplementalIndicatorSeed {
         id: "atr",
@@ -11749,6 +12110,7 @@ fn supplemental_supports_cpu_batch(id: &str) -> bool {
         "adx"
             | "adxr"
             | "atr"
+            | "atr_percentile"
             | "ad"
             | "adosc"
             | "ao"
@@ -11768,35 +12130,38 @@ fn supplemental_supports_cpu_batch(id: &str) -> bool {
             | "squeeze_momentum"
             | "wavetrend"
             | "wto"
-            | "rogers_satchell_volatility"
-            | "historical_volatility_rank"
-            | "dual_ulcer_index"
-            | "fractal_dimension_index"
-            | "dynamic_momentum_index"
-            | "disparity_index"
-            | "donchian_channel_width"
-            | "kairi_relative_index"
-            | "projection_oscillator"
-            | "fvg_positioning_average"
-            | "cyberpunk_value_trend_analyzer"
-            | "evasive_supertrend"
-            | "emd_trend"
-            | "reversal_signals"
-            | "market_structure_trailing_stop"
-            | "zig_zag_channels"
-            | "directional_imbalance_index"
-            | "candle_strength_oscillator"
-            | "gmma_oscillator"
-            | "nonlinear_regression_zero_lag_moving_average"
-            | "possible_rsi"
-            | "stochastic_money_flow_index"
-            | "autocorrelation_indicator"
-            | "goertzel_cycle_composite_wave"
-            | "rolling_skewness_kurtosis"
-            | "rolling_z_score_trend"
-            | "ehlers_data_sampling_relative_strength_indicator"
-            | "velocity_acceleration_convergence_divergence_indicator"
-            | "trend_direction_force_index"
+            | "garman_klass_volatility"
+            | "historical_volatility"
+            | "absolute_strength_index_oscillator"
+            | "adaptive_bandpass_trigger_oscillator"
+            | "premier_rsi_oscillator"
+            | "multi_length_stochastic_average"
+            | "hull_butterfly_oscillator"
+            | "fibonacci_trailing_stop"
+            | "fibonacci_entry_bands"
+            | "volume_energy_reservoirs"
+            | "neighboring_trailing_stop"
+            | "macd_wave_signal_pro"
+            | "hema_trend_levels"
+            | "grover_llorens_cycle_oscillator"
+            | "squeeze_index"
+            | "stochastic_distance"
+            | "advance_decline_line"
+            | "decisionpoint_breadth_swenlin_trading_oscillator"
+            | "velocity_acceleration_indicator"
+            | "normalized_resonator"
+            | "monotonicity_index"
+            | "half_causal_estimator"
+            | "bull_power_vs_bear_power"
+            | "vertical_horizontal_filter"
+            | "intraday_momentum_index"
+            | "vwap_zscore_with_signals"
+            | "demand_index"
+            | "didi_index"
+            | "ehlers_autocorrelation_periodogram"
+            | "ehlers_linear_extrapolation_predictor"
+            | "kase_peak_oscillator_with_divergences"
+            | "gopalakrishnan_range_index"
             | "yang_zhang_volatility"
             | "historical_volatility_percentile"
             | "ehlers_detrending_filter"
@@ -12110,7 +12475,7 @@ fn supplemental_supports_cuda_batch(id: &str) -> bool {
             | "wclprice"
             | "willr"
             | "wto"
-            | "rogers_satchell_volatility"
+            | "garman_klass_volatility"
             | "yang_zhang_volatility"
             | "parkinson_volatility"
             | "zscore"
@@ -12431,5 +12796,684 @@ mod tests {
         assert!(lrsi.capabilities.supports_cpu_batch);
         assert!(lrsi.capabilities.supports_cuda_batch);
         assert!(lrsi.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn garman_klass_volatility_is_registered_for_cpu_and_cuda_batch() {
+        assert!(supplemental_supports_cpu_batch("garman_klass_volatility"));
+        assert!(supplemental_supports_cuda_batch("garman_klass_volatility"));
+        let info = get_indicator("garman_klass_volatility").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Ohlc);
+        assert_eq!(info.outputs.len(), 1);
+        assert_eq!(info.outputs[0].id, "value");
+        assert_eq!(info.params.len(), 1);
+        assert_eq!(info.params[0].key, "lookback");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(info.capabilities.supports_cuda_batch);
+        assert!(info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn historical_volatility_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("historical_volatility"));
+        assert!(!supplemental_supports_cuda_batch("historical_volatility"));
+        let info = get_indicator("historical_volatility").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Slice);
+        assert_eq!(info.outputs.len(), 1);
+        assert_eq!(info.outputs[0].id, "value");
+        assert_eq!(info.params.len(), 2);
+        assert_eq!(info.params[0].key, "lookback");
+        assert_eq!(info.params[1].key, "annualization_days");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn advance_decline_line_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("advance_decline_line"));
+        assert!(!supplemental_supports_cuda_batch("advance_decline_line"));
+        let info = get_indicator("advance_decline_line").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Slice);
+        assert_eq!(info.outputs.len(), 1);
+        assert_eq!(info.outputs[0].id, "value");
+        assert!(info.params.is_empty());
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn decisionpoint_breadth_swenlin_trading_oscillator_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch(
+            "decisionpoint_breadth_swenlin_trading_oscillator"
+        ));
+        assert!(!supplemental_supports_cuda_batch(
+            "decisionpoint_breadth_swenlin_trading_oscillator"
+        ));
+        let info = get_indicator("decisionpoint_breadth_swenlin_trading_oscillator").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::HighLow);
+        assert_eq!(info.outputs.len(), 1);
+        assert_eq!(info.outputs[0].id, "value");
+        assert!(info.params.is_empty());
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn velocity_acceleration_indicator_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch(
+            "velocity_acceleration_indicator"
+        ));
+        assert!(!supplemental_supports_cuda_batch(
+            "velocity_acceleration_indicator"
+        ));
+        let info = get_indicator("velocity_acceleration_indicator").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Candles);
+        assert_eq!(info.outputs.len(), 1);
+        assert_eq!(info.outputs[0].id, "value");
+        assert_eq!(info.params.len(), 3);
+        assert_eq!(info.params[0].key, "length");
+        assert_eq!(info.params[1].key, "smooth_length");
+        assert_eq!(info.params[2].key, "source");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn normalized_resonator_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("normalized_resonator"));
+        assert!(!supplemental_supports_cuda_batch("normalized_resonator"));
+        let info = get_indicator("normalized_resonator").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Candles);
+        assert_eq!(info.outputs.len(), 2);
+        assert_eq!(info.outputs[0].id, "oscillator");
+        assert_eq!(info.outputs[1].id, "signal");
+        assert_eq!(info.params.len(), 5);
+        assert_eq!(info.params[0].key, "period");
+        assert_eq!(info.params[1].key, "delta");
+        assert_eq!(info.params[2].key, "lookback_mult");
+        assert_eq!(info.params[3].key, "signal_length");
+        assert_eq!(info.params[4].key, "source");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn monotonicity_index_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("monotonicity_index"));
+        assert!(!supplemental_supports_cuda_batch("monotonicity_index"));
+        let info = get_indicator("monotonicity_index").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Candles);
+        assert_eq!(info.outputs.len(), 3);
+        assert_eq!(info.outputs[0].id, "index");
+        assert_eq!(info.outputs[1].id, "cumulative_mean");
+        assert_eq!(info.outputs[2].id, "upper_bound");
+        assert_eq!(info.params.len(), 4);
+        assert_eq!(info.params[0].key, "length");
+        assert_eq!(info.params[1].key, "mode");
+        assert_eq!(info.params[2].key, "index_smooth");
+        assert_eq!(info.params[3].key, "source");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn half_causal_estimator_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("half_causal_estimator"));
+        assert!(!supplemental_supports_cuda_batch("half_causal_estimator"));
+        let info = get_indicator("half_causal_estimator").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Candles);
+        assert_eq!(info.outputs.len(), 2);
+        assert_eq!(info.outputs[0].id, "estimate");
+        assert_eq!(info.outputs[1].id, "expected_value");
+        assert_eq!(info.params.len(), 10);
+        assert_eq!(info.params[0].key, "slots_per_day");
+        assert_eq!(info.params[1].key, "data_period");
+        assert_eq!(info.params[9].key, "source");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn bull_power_vs_bear_power_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("bull_power_vs_bear_power"));
+        assert!(!supplemental_supports_cuda_batch(
+            "bull_power_vs_bear_power"
+        ));
+        let info = get_indicator("bull_power_vs_bear_power").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Ohlc);
+        assert_eq!(info.outputs.len(), 1);
+        assert_eq!(info.outputs[0].id, "value");
+        assert_eq!(info.params.len(), 1);
+        assert_eq!(info.params[0].key, "period");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn didi_index_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("didi_index"));
+        assert!(!supplemental_supports_cuda_batch("didi_index"));
+        let info = get_indicator("didi_index").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Slice);
+        assert_eq!(info.outputs.len(), 4);
+        assert_eq!(info.outputs[0].id, "short");
+        assert_eq!(info.outputs[1].id, "long");
+        assert_eq!(info.outputs[2].id, "crossover");
+        assert_eq!(info.outputs[3].id, "crossunder");
+        assert_eq!(info.params.len(), 3);
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn ehlers_autocorrelation_periodogram_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch(
+            "ehlers_autocorrelation_periodogram"
+        ));
+        assert!(!supplemental_supports_cuda_batch(
+            "ehlers_autocorrelation_periodogram"
+        ));
+        let info = get_indicator("ehlers_autocorrelation_periodogram").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Slice);
+        assert_eq!(info.outputs.len(), 2);
+        assert_eq!(info.outputs[0].id, "dominant_cycle");
+        assert_eq!(info.outputs[1].id, "normalized_power");
+        assert_eq!(info.params.len(), 4);
+        assert_eq!(info.params[0].key, "min_period");
+        assert_eq!(info.params[1].key, "max_period");
+        assert_eq!(info.params[2].key, "avg_length");
+        assert_eq!(info.params[3].key, "enhance");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn ehlers_linear_extrapolation_predictor_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch(
+            "ehlers_linear_extrapolation_predictor"
+        ));
+        assert!(!supplemental_supports_cuda_batch(
+            "ehlers_linear_extrapolation_predictor"
+        ));
+        let info = get_indicator("ehlers_linear_extrapolation_predictor").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Slice);
+        assert_eq!(info.outputs.len(), 5);
+        assert_eq!(info.outputs[0].id, "prediction");
+        assert_eq!(info.outputs[1].id, "filter");
+        assert_eq!(info.outputs[2].id, "state");
+        assert_eq!(info.outputs[3].id, "go_long");
+        assert_eq!(info.outputs[4].id, "go_short");
+        assert_eq!(info.params.len(), 5);
+        assert_eq!(info.params[0].key, "high_pass_length");
+        assert_eq!(info.params[1].key, "low_pass_length");
+        assert_eq!(info.params[2].key, "gain");
+        assert_eq!(info.params[3].key, "bars_forward");
+        assert_eq!(info.params[4].key, "signal_mode");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn vertical_horizontal_filter_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch(
+            "vertical_horizontal_filter"
+        ));
+        assert!(!supplemental_supports_cuda_batch(
+            "vertical_horizontal_filter"
+        ));
+        let info = get_indicator("vertical_horizontal_filter").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Slice);
+        assert_eq!(info.outputs.len(), 1);
+        assert_eq!(info.outputs[0].id, "value");
+        assert_eq!(info.params.len(), 1);
+        assert_eq!(info.params[0].key, "length");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn squeeze_index_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("squeeze_index"));
+        assert!(!supplemental_supports_cuda_batch("squeeze_index"));
+        let info = get_indicator("squeeze_index").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Slice);
+        assert_eq!(info.outputs.len(), 1);
+        assert_eq!(info.outputs[0].id, "value");
+        assert_eq!(info.params.len(), 2);
+        assert_eq!(info.params[0].key, "conv");
+        assert_eq!(info.params[1].key, "length");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn stochastic_distance_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("stochastic_distance"));
+        assert!(!supplemental_supports_cuda_batch("stochastic_distance"));
+        let info = get_indicator("stochastic_distance").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Slice);
+        assert_eq!(info.outputs.len(), 2);
+        assert_eq!(info.outputs[0].id, "oscillator");
+        assert_eq!(info.outputs[1].id, "signal");
+        assert_eq!(info.params.len(), 5);
+        assert_eq!(info.params[0].key, "lookback_length");
+        assert_eq!(info.params[1].key, "length1");
+        assert_eq!(info.params[2].key, "length2");
+        assert_eq!(info.params[3].key, "ob_level");
+        assert_eq!(info.params[4].key, "os_level");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn adaptive_bandpass_trigger_oscillator_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch(
+            "adaptive_bandpass_trigger_oscillator"
+        ));
+        assert!(!supplemental_supports_cuda_batch(
+            "adaptive_bandpass_trigger_oscillator"
+        ));
+        let info = get_indicator("adaptive_bandpass_trigger_oscillator").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Slice);
+        assert_eq!(info.outputs.len(), 2);
+        assert_eq!(info.outputs[0].id, "in_phase");
+        assert_eq!(info.outputs[1].id, "lead");
+        assert_eq!(info.params.len(), 2);
+        assert_eq!(info.params[0].key, "delta");
+        assert_eq!(info.params[1].key, "alpha");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn absolute_strength_index_oscillator_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch(
+            "absolute_strength_index_oscillator"
+        ));
+        assert!(!supplemental_supports_cuda_batch(
+            "absolute_strength_index_oscillator"
+        ));
+        let info = get_indicator("absolute_strength_index_oscillator").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Slice);
+        assert_eq!(info.outputs.len(), 3);
+        assert_eq!(info.outputs[0].id, "oscillator");
+        assert_eq!(info.outputs[1].id, "signal");
+        assert_eq!(info.outputs[2].id, "histogram");
+        assert_eq!(info.params.len(), 2);
+        assert_eq!(info.params[0].key, "ema_length");
+        assert_eq!(info.params[1].key, "signal_length");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn premier_rsi_oscillator_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("premier_rsi_oscillator"));
+        assert!(!supplemental_supports_cuda_batch("premier_rsi_oscillator"));
+        let info = get_indicator("premier_rsi_oscillator").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Slice);
+        assert_eq!(info.outputs.len(), 1);
+        assert_eq!(info.outputs[0].id, "value");
+        assert_eq!(info.params.len(), 3);
+        assert_eq!(info.params[0].key, "rsi_length");
+        assert_eq!(info.params[1].key, "stoch_length");
+        assert_eq!(info.params[2].key, "smooth_length");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn multi_length_stochastic_average_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch(
+            "multi_length_stochastic_average"
+        ));
+        assert!(!supplemental_supports_cuda_batch(
+            "multi_length_stochastic_average"
+        ));
+        let info = get_indicator("multi_length_stochastic_average").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Candles);
+        assert_eq!(info.outputs.len(), 1);
+        assert_eq!(info.outputs[0].id, "value");
+        assert_eq!(info.params.len(), 6);
+        assert_eq!(info.params[0].key, "length");
+        assert_eq!(info.params[1].key, "presmooth");
+        assert_eq!(info.params[2].key, "premethod");
+        assert_eq!(info.params[3].key, "postsmooth");
+        assert_eq!(info.params[4].key, "postmethod");
+        assert_eq!(info.params[5].key, "source");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn hull_butterfly_oscillator_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("hull_butterfly_oscillator"));
+        assert!(!supplemental_supports_cuda_batch(
+            "hull_butterfly_oscillator"
+        ));
+        let info = get_indicator("hull_butterfly_oscillator").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Candles);
+        assert_eq!(info.outputs.len(), 3);
+        assert_eq!(info.outputs[0].id, "oscillator");
+        assert_eq!(info.outputs[1].id, "cumulative_mean");
+        assert_eq!(info.outputs[2].id, "signal");
+        assert_eq!(info.params.len(), 3);
+        assert_eq!(info.params[0].key, "length");
+        assert_eq!(info.params[1].key, "mult");
+        assert_eq!(info.params[2].key, "source");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn fibonacci_trailing_stop_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("fibonacci_trailing_stop"));
+        assert!(!supplemental_supports_cuda_batch("fibonacci_trailing_stop"));
+        let info = get_indicator("fibonacci_trailing_stop").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Ohlc);
+        assert_eq!(info.outputs.len(), 4);
+        assert_eq!(info.outputs[0].id, "trailing_stop");
+        assert_eq!(info.outputs[1].id, "long_stop");
+        assert_eq!(info.outputs[2].id, "short_stop");
+        assert_eq!(info.outputs[3].id, "direction");
+        assert_eq!(info.params.len(), 4);
+        assert_eq!(info.params[0].key, "left_bars");
+        assert_eq!(info.params[1].key, "right_bars");
+        assert_eq!(info.params[2].key, "level");
+        assert_eq!(info.params[3].key, "trigger");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn fibonacci_entry_bands_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("fibonacci_entry_bands"));
+        assert!(!supplemental_supports_cuda_batch("fibonacci_entry_bands"));
+        let info = get_indicator("fibonacci_entry_bands").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Ohlc);
+        assert_eq!(info.outputs.len(), 18);
+        assert_eq!(info.outputs[0].id, "middle");
+        assert_eq!(info.outputs[1].id, "trend");
+        assert_eq!(info.outputs[10].id, "tp_long_band");
+        assert_eq!(info.outputs[11].id, "tp_short_band");
+        assert_eq!(info.outputs[12].id, "go_long");
+        assert_eq!(info.outputs[13].id, "go_short");
+        assert_eq!(info.params.len(), 5);
+        assert_eq!(info.params[0].key, "source");
+        assert_eq!(info.params[1].key, "length");
+        assert_eq!(info.params[2].key, "atr_length");
+        assert_eq!(info.params[3].key, "use_atr");
+        assert_eq!(info.params[4].key, "tp_aggressiveness");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn volume_energy_reservoirs_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("volume_energy_reservoirs"));
+        assert!(!supplemental_supports_cuda_batch(
+            "volume_energy_reservoirs"
+        ));
+        let info = get_indicator("volume_energy_reservoirs").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Ohlcv);
+        assert_eq!(info.outputs.len(), 6);
+        assert_eq!(info.outputs[0].id, "momentum");
+        assert_eq!(info.outputs[1].id, "reservoir");
+        assert_eq!(info.outputs[2].id, "squeeze_active");
+        assert_eq!(info.outputs[3].id, "squeeze_start");
+        assert_eq!(info.outputs[4].id, "range_high");
+        assert_eq!(info.outputs[5].id, "range_low");
+        assert_eq!(info.params.len(), 2);
+        assert_eq!(info.params[0].key, "length");
+        assert_eq!(info.params[1].key, "sensitivity");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn neighboring_trailing_stop_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("neighboring_trailing_stop"));
+        assert!(!supplemental_supports_cuda_batch(
+            "neighboring_trailing_stop"
+        ));
+        let info = get_indicator("neighboring_trailing_stop").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Ohlc);
+        assert_eq!(info.outputs.len(), 6);
+        assert_eq!(info.outputs[0].id, "trailing_stop");
+        assert_eq!(info.outputs[1].id, "bullish_band");
+        assert_eq!(info.outputs[2].id, "bearish_band");
+        assert_eq!(info.outputs[3].id, "direction");
+        assert_eq!(info.outputs[4].id, "discovery_bull");
+        assert_eq!(info.outputs[5].id, "discovery_bear");
+        assert_eq!(info.params.len(), 4);
+        assert_eq!(info.params[0].key, "buffer_size");
+        assert_eq!(info.params[1].key, "k");
+        assert_eq!(info.params[2].key, "percentile");
+        assert_eq!(info.params[3].key, "smooth");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn macd_wave_signal_pro_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("macd_wave_signal_pro"));
+        assert!(!supplemental_supports_cuda_batch("macd_wave_signal_pro"));
+        let info = get_indicator("macd_wave_signal_pro").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Ohlc);
+        assert_eq!(info.outputs.len(), 6);
+        assert_eq!(info.outputs[0].id, "diff");
+        assert_eq!(info.outputs[1].id, "dea");
+        assert_eq!(info.outputs[2].id, "macd_histogram");
+        assert_eq!(info.outputs[3].id, "line_convergence");
+        assert_eq!(info.outputs[4].id, "buy_signal");
+        assert_eq!(info.outputs[5].id, "sell_signal");
+        assert!(info.params.is_empty());
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn hema_trend_levels_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("hema_trend_levels"));
+        assert!(!supplemental_supports_cuda_batch("hema_trend_levels"));
+        let info = get_indicator("hema_trend_levels").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Ohlc);
+        assert_eq!(info.outputs.len(), 15);
+        assert_eq!(info.outputs[0].id, "fast_hema");
+        assert_eq!(info.outputs[1].id, "slow_hema");
+        assert_eq!(info.outputs[2].id, "trend_direction");
+        assert_eq!(info.outputs[3].id, "bar_state");
+        assert_eq!(info.outputs[4].id, "bullish_crossover");
+        assert_eq!(info.outputs[5].id, "bearish_crossunder");
+        assert_eq!(info.outputs[6].id, "box_offset");
+        assert_eq!(info.outputs[7].id, "bull_box_top");
+        assert_eq!(info.outputs[8].id, "bull_box_bottom");
+        assert_eq!(info.outputs[9].id, "bear_box_top");
+        assert_eq!(info.outputs[10].id, "bear_box_bottom");
+        assert_eq!(info.outputs[11].id, "bullish_test");
+        assert_eq!(info.outputs[12].id, "bearish_test");
+        assert_eq!(info.outputs[13].id, "bullish_test_level");
+        assert_eq!(info.outputs[14].id, "bearish_test_level");
+        assert_eq!(info.params.len(), 2);
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn grover_llorens_cycle_oscillator_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch(
+            "grover_llorens_cycle_oscillator"
+        ));
+        assert!(!supplemental_supports_cuda_batch(
+            "grover_llorens_cycle_oscillator"
+        ));
+        let info = get_indicator("grover_llorens_cycle_oscillator").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Ohlc);
+        assert_eq!(info.outputs.len(), 1);
+        assert_eq!(info.outputs[0].id, "value");
+        assert_eq!(info.params.len(), 5);
+        assert_eq!(info.params[0].key, "length");
+        assert_eq!(info.params[1].key, "mult");
+        assert_eq!(info.params[2].key, "source");
+        assert_eq!(info.params[3].key, "smooth");
+        assert_eq!(info.params[4].key, "rsi_period");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn intraday_momentum_index_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("intraday_momentum_index"));
+        assert!(!supplemental_supports_cuda_batch("intraday_momentum_index"));
+        let info = get_indicator("intraday_momentum_index").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Ohlc);
+        assert_eq!(info.outputs.len(), 4);
+        assert_eq!(info.outputs[0].id, "imi");
+        assert_eq!(info.outputs[1].id, "upper_hit");
+        assert_eq!(info.outputs[2].id, "lower_hit");
+        assert_eq!(info.outputs[3].id, "signal");
+        assert_eq!(info.params.len(), 6);
+        assert_eq!(info.params[0].key, "length");
+        assert_eq!(info.params[1].key, "length_ma");
+        assert_eq!(info.params[2].key, "mult");
+        assert_eq!(info.params[3].key, "length_bb");
+        assert_eq!(info.params[4].key, "apply_smoothing");
+        assert_eq!(info.params[5].key, "low_band");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn vwap_zscore_with_signals_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("vwap_zscore_with_signals"));
+        assert!(!supplemental_supports_cuda_batch(
+            "vwap_zscore_with_signals"
+        ));
+        let info = get_indicator("vwap_zscore_with_signals").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::CloseVolume);
+        assert_eq!(info.outputs.len(), 3);
+        assert_eq!(info.outputs[0].id, "zvwap");
+        assert_eq!(info.outputs[1].id, "support_signal");
+        assert_eq!(info.outputs[2].id, "resistance_signal");
+        assert_eq!(info.params.len(), 3);
+        assert_eq!(info.params[0].key, "length");
+        assert_eq!(info.params[1].key, "upper_bottom");
+        assert_eq!(info.params[2].key, "lower_bottom");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn atr_percentile_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("atr_percentile"));
+        assert!(!supplemental_supports_cuda_batch("atr_percentile"));
+        let info = get_indicator("atr_percentile").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Ohlc);
+        assert_eq!(info.outputs.len(), 1);
+        assert_eq!(info.outputs[0].id, "value");
+        assert_eq!(info.params.len(), 2);
+        assert_eq!(info.params[0].key, "atr_length");
+        assert_eq!(info.params[1].key, "percentile_length");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn gopalakrishnan_range_index_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch(
+            "gopalakrishnan_range_index"
+        ));
+        assert!(!supplemental_supports_cuda_batch(
+            "gopalakrishnan_range_index"
+        ));
+        let info = get_indicator("gopalakrishnan_range_index").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::HighLow);
+        assert_eq!(info.outputs.len(), 1);
+        assert_eq!(info.outputs[0].id, "value");
+        assert_eq!(info.params.len(), 1);
+        assert_eq!(info.params[0].key, "length");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn demand_index_is_registered_for_cpu_batch_only() {
+        assert!(supplemental_supports_cpu_batch("demand_index"));
+        assert!(!supplemental_supports_cuda_batch("demand_index"));
+        let info = get_indicator("demand_index").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::Ohlcv);
+        assert_eq!(info.outputs.len(), 2);
+        assert_eq!(info.outputs[0].id, "demand_index");
+        assert_eq!(info.outputs[1].id, "signal");
+        assert_eq!(info.params.len(), 4);
+        assert_eq!(info.params[0].key, "len_bs");
+        assert_eq!(info.params[1].key, "len_bs_ma");
+        assert_eq!(info.params[2].key, "len_di_ma");
+        assert_eq!(info.params[3].key, "ma_type");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(!info.capabilities.supports_cuda_batch);
+        assert!(!info.capabilities.supports_cuda_vram);
     }
 }

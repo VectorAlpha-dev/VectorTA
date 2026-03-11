@@ -734,8 +734,8 @@ fn dispatch_cuda_device_supported(
     if normalized_id.eq_ignore_ascii_case("yang_zhang_volatility") {
         return compute_yang_zhang_cuda_device(req, info);
     }
-    if normalized_id.eq_ignore_ascii_case("rogers_satchell_volatility") {
-        return compute_rogers_satchell_cuda_device(req, info);
+    if normalized_id.eq_ignore_ascii_case("garman_klass_volatility") {
+        return compute_garman_klass_cuda_device(req, info);
     }
     if normalized_id.eq_ignore_ascii_case("wavetrend") {
         return compute_wavetrend_cuda_device(req, info);
@@ -1047,7 +1047,7 @@ fn supports_cuda_device_dispatch(indicator_id: &str) -> bool {
             | "cvi"
             | "parkinson_volatility"
             | "yang_zhang_volatility"
-            | "rogers_satchell_volatility"
+            | "garman_klass_volatility"
             | "wavetrend"
             | "wto"
             | "alma"
@@ -1184,7 +1184,7 @@ fn upload_host_cuda_data_for_device_core(
                 .upload_ohlc(open, high, low, close, source)
                 .map_err(map_cuda_runtime_error)?;
             let first_valid = if indicator.eq_ignore_ascii_case("yang_zhang_volatility")
-                || indicator.eq_ignore_ascii_case("rogers_satchell_volatility")
+                || indicator.eq_ignore_ascii_case("garman_klass_volatility")
             {
                 first_valid_in_ohlc_positive(open, high, low, close)
             } else {
@@ -1215,7 +1215,7 @@ fn upload_host_cuda_data_for_device_core(
                 .upload_ohlcv(timestamp, open, high, low, close, volume, source)
                 .map_err(map_cuda_runtime_error)?;
             let first_valid = if indicator.eq_ignore_ascii_case("yang_zhang_volatility")
-                || indicator.eq_ignore_ascii_case("rogers_satchell_volatility")
+                || indicator.eq_ignore_ascii_case("garman_klass_volatility")
             {
                 first_valid_in_ohlc_positive(open, high, low, close)
             } else {
@@ -4937,7 +4937,7 @@ fn compute_yang_zhang_cuda_device(
     finalize_cuda_device_output(output_id, owner, None, req.target, device_id)
 }
 
-fn compute_rogers_satchell_cuda_device(
+fn compute_garman_klass_cuda_device(
     req: IndicatorCudaDeviceRequest<'_>,
     info: &IndicatorInfo,
 ) -> Result<IndicatorCudaOutput, IndicatorDispatchError> {
@@ -4949,28 +4949,23 @@ fn compute_rogers_satchell_cuda_device(
     }
 
     let output_id = resolve_output_id(info, req.output_id)?;
-    let output_index = resolve_output_index(info, output_id).unwrap_or(0);
     let (open, high, low, close, device_id) = cuda_device_ohlc_from_req(info.id, req.data)?;
     let device_id = resolve_device_runtime_id(info.id, req.params, device_id)?;
     let first_valid = resolve_device_first_valid(info.id, req.params)?;
-    let lookback = resolve_usize_range_param_device(req.params, "lookback", (8, 252, 1), info.id)?;
-    let signal_length =
-        resolve_usize_range_param_device(req.params, "signal_length", (8, 8, 0), info.id)?;
-    let sweep = crate::indicators::rogers_satchell_volatility::RogersSatchellVolatilityBatchRange {
-        lookback,
-        signal_length,
-    };
+    let lookback = resolve_usize_range_param_device(req.params, "lookback", (14, 252, 1), info.id)?;
+    let sweep =
+        crate::indicators::garman_klass_volatility::GarmanKlassVolatilityBatchRange { lookback };
     let open_buf = unsafe { BorrowedCudaDeviceSeries::from_view(open) };
     let high_buf = unsafe { BorrowedCudaDeviceSeries::from_view(high) };
     let low_buf = unsafe { BorrowedCudaDeviceSeries::from_view(low) };
     let close_buf = unsafe { BorrowedCudaDeviceSeries::from_view(close) };
-    let cuda = crate::cuda::CudaRogersSatchellVolatility::new(device_id as usize).map_err(|e| {
+    let cuda = crate::cuda::CudaGarmanKlassVolatility::new(device_id as usize).map_err(|e| {
         IndicatorDispatchError::KernelUnavailable {
             details: e.to_string(),
         }
     })?;
     let result = cuda
-        .rogers_satchell_volatility_batch_from_device(
+        .garman_klass_volatility_batch_from_device(
             open_buf.as_buffer(),
             high_buf.as_buffer(),
             low_buf.as_buffer(),
@@ -4982,17 +4977,7 @@ fn compute_rogers_satchell_cuda_device(
             indicator: info.id.to_string(),
             details: e.to_string(),
         })?;
-    let owner = match output_index {
-        0 => result.outputs.rs,
-        1 => result.outputs.signal,
-        _ => {
-            return Err(IndicatorDispatchError::UnknownOutput {
-                indicator: info.id.to_string(),
-                output: output_id.to_string(),
-            });
-        }
-    };
-    finalize_cuda_device_output(output_id, owner, None, req.target, device_id)
+    finalize_cuda_device_output(output_id, result.outputs, None, req.target, device_id)
 }
 
 fn compute_wavetrend_cuda_device(
@@ -24175,6 +24160,145 @@ mod tests {
         let device_out = compute_cuda_device(IndicatorCudaDeviceRequest {
             indicator_id: "yang_zhang_volatility",
             output_id: Some("yz"),
+            data: IndicatorCudaDeviceDataRef::Ohlc(device_ohlc.as_view()),
+            params: &device_params,
+            kernel: Kernel::Auto,
+            target: CudaOutputTarget::HostF32,
+        })
+        .expect("device path");
+
+        assert_eq!(host_out.rows, device_out.rows);
+        assert_eq!(host_out.cols, device_out.cols);
+        let host_values = match host_out.series {
+            IndicatorCudaSeries::HostF32(values) => values,
+            other => panic!("expected host output, got {other:?}"),
+        };
+        let device_values = match device_out.series {
+            IndicatorCudaSeries::HostF32(values) => values,
+            other => panic!("expected host output, got {other:?}"),
+        };
+        for (lhs, rhs) in host_values.iter().zip(device_values.iter()) {
+            if lhs.is_nan() && rhs.is_nan() {
+                continue;
+            }
+            assert!((lhs - rhs).abs() < 5e-4, "lhs={lhs} rhs={rhs}");
+        }
+    }
+
+    #[test]
+    fn host_output_matches_cpu_for_garman_klass_when_cuda_available() {
+        if !crate::cuda::cuda_available() {
+            return;
+        }
+
+        let (open, high, low, close) = sample_ohlc(192);
+        let params = [ParamKV {
+            key: "lookback",
+            value: ParamValue::Int(21),
+        }];
+        let req_cuda = IndicatorCudaRequest {
+            indicator_id: "garman_klass_volatility",
+            output_id: Some("value"),
+            data: IndicatorCudaDataRef::Ohlc {
+                open: &open,
+                high: &high,
+                low: &low,
+                close: &close,
+                source: None,
+            },
+            params: &params,
+            kernel: Kernel::Auto,
+            target: CudaOutputTarget::HostF32,
+        };
+
+        let out_cuda = compute_cuda(req_cuda).unwrap();
+        assert_eq!(out_cuda.rows, 1);
+        assert_eq!(out_cuda.cols, close.len());
+        let cuda = match out_cuda.series {
+            IndicatorCudaSeries::HostF32(values) => values,
+            _ => panic!("expected HostF32"),
+        };
+
+        let open_f64 = to_f64(&open);
+        let high_f64 = to_f64(&high);
+        let low_f64 = to_f64(&low);
+        let close_f64 = to_f64(&close);
+        let combos = [IndicatorParamSet { params: &params }];
+        let req_cpu = IndicatorBatchRequest {
+            indicator_id: "garman_klass_volatility",
+            output_id: Some("value"),
+            data: IndicatorDataRef::Ohlc {
+                open: &open_f64,
+                high: &high_f64,
+                low: &low_f64,
+                close: &close_f64,
+            },
+            combos: &combos,
+            kernel: Kernel::Auto,
+        };
+        let out_cpu = compute_cpu_batch(req_cpu).unwrap();
+        let cpu = out_cpu.values_f64.unwrap();
+        assert_eq!(cuda.len(), cpu.len());
+        for i in 0..cuda.len() {
+            let a = cuda[i] as f64;
+            let b = cpu[i];
+            if a.is_nan() && b.is_nan() {
+                continue;
+            }
+            assert!((a - b).abs() <= 1e-3, "mismatch at index {i}: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn garman_klass_device_path_matches_host_cuda_when_gpu_available() {
+        if !crate::cuda::cuda_available() {
+            return;
+        }
+
+        let (mut open, mut high, mut low, mut close) = sample_ohlc(128);
+        for idx in 0..3 {
+            open[idx] = f32::NAN;
+            high[idx] = f32::NAN;
+            low[idx] = f32::NAN;
+            close[idx] = f32::NAN;
+        }
+        let runtime = CudaRuntime::new(0).expect("runtime");
+        let device_ohlc = runtime
+            .upload_ohlc(&open, &high, &low, &close, None)
+            .expect("upload ohlc");
+        let host_params = [ParamKV {
+            key: "lookback",
+            value: ParamValue::Int(14),
+        }];
+        let device_params = [
+            ParamKV {
+                key: "lookback",
+                value: ParamValue::Int(14),
+            },
+            ParamKV {
+                key: "first_valid",
+                value: ParamValue::Int(3),
+            },
+        ];
+
+        let host_out = compute_cuda(IndicatorCudaRequest {
+            indicator_id: "garman_klass_volatility",
+            output_id: Some("value"),
+            data: IndicatorCudaDataRef::Ohlc {
+                open: &open,
+                high: &high,
+                low: &low,
+                close: &close,
+                source: None,
+            },
+            params: &host_params,
+            kernel: Kernel::Auto,
+            target: CudaOutputTarget::HostF32,
+        })
+        .expect("host path");
+        let device_out = compute_cuda_device(IndicatorCudaDeviceRequest {
+            indicator_id: "garman_klass_volatility",
+            output_id: Some("value"),
             data: IndicatorCudaDeviceDataRef::Ohlc(device_ohlc.as_view()),
             params: &device_params,
             kernel: Kernel::Auto,

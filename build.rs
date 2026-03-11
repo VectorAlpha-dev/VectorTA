@@ -744,8 +744,8 @@ fn compile_cuda_kernels() {
     );
     compile_kernel(
         &cuda_path,
-        "kernels/cuda/parkinson_volatility_kernel.cu",
-        "parkinson_volatility_kernel.ptx",
+        "kernels/cuda/garman_klass_volatility_kernel.cu",
+        "garman_klass_volatility_kernel.ptx",
     );
     compile_kernel(&cuda_path, "kernels/cuda/voss_kernel.cu", "voss_kernel.ptx");
     compile_kernel(&cuda_path, "kernels/cuda/cksp_kernel.cu", "cksp_kernel.ptx");
