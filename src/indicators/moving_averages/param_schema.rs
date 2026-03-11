@@ -43,6 +43,17 @@ pub fn ma_param_schema(ma_type: &str) -> &'static [MaParamInfo] {
                 notes: None,
             },
         ],
+        "corrected_moving_average" | "cma" => &[],
+        "n_order_ema" => &[MaParamInfo {
+            key: "order",
+            label: "Order",
+            kind: MaParamKind::Int,
+            default: 1.0,
+            min: Some(1.0),
+            max: Some(64.0),
+            step: Some(1.0),
+            notes: Some("Additional enum params: ema_style and iir_style."),
+        }],
         "epma" => &[MaParamInfo {
             key: "offset",
             label: "Offset",

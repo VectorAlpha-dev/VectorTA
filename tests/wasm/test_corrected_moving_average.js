@@ -20,39 +20,85 @@ test.before(async () => {
 });
 
 test('corrected_moving_average_js output contract', () => {
-    const source = new Float64Array(testData.close.slice(0, 256));
-    const result = wasm.corrected_moving_average_js(source, 35);
-
-    assert.strictEqual(result.length, source.length);
-    assert(Array.from(result.slice(0, 34)).every(v => isNaN(v)));
-    assert(Array.from(result.slice(34)).some(v => !isNaN(v)));
+    const data = new Float64Array([1, 2, 3, 4, 5]);
+    const result = wasm.corrected_moving_average_js(data, 3);
+    assert.strictEqual(result.length, data.length);
+    assert(isNaN(result[0]));
+    assert(isNaN(result[1]));
+    assert(Math.abs(result[2] - 2.0) <= 1e-12);
 });
 
-test('corrected_moving_average_into_host pointer path matches safe API', () => {
-    const source = new Float64Array(testData.close.slice(0, 220));
-    const safe = wasm.corrected_moving_average_js(source, 20);
-    const outPtr = wasm.corrected_moving_average_alloc(source.length);
+test('corrected_moving_average_js rejects invalid params', () => {
+    const close = new Float64Array(testData.close.slice(0, 32));
+    assert.throws(() => {
+        wasm.corrected_moving_average_js(close, 0);
+    }, /Invalid period/);
+});
+
+test('corrected_moving_average_into pointer path matches safe API', () => {
+    const close = new Float64Array(testData.close.slice(0, 220));
+    const safe = wasm.corrected_moving_average_js(close, 17);
+    const memory = wasm.wasm_memory
+        ? wasm.wasm_memory()
+        : (wasm.__wasm?.memory || (wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory));
+    assert(memory && memory.buffer, 'raw wasm memory is not exposed by this package build');
+
+    const inPtr = wasm.allocate_f64_array(close.length);
+    const outPtr = wasm.corrected_moving_average_alloc(close.length);
 
     try {
-        wasm.corrected_moving_average_into_host(source, outPtr, 20);
-        const out = wasm.read_f64_array(outPtr, source.length);
-        assertArrayClose(out, safe, 1e-10, 'pointer path mismatch');
+        new Float64Array(memory.buffer, inPtr, close.length).set(close);
+        wasm.corrected_moving_average_into(inPtr, outPtr, close.length, 17);
+        const out = Array.from(new Float64Array(memory.buffer, outPtr, close.length));
+        assertArrayClose(out, safe, 1e-12, 'pointer output mismatch');
     } finally {
-        wasm.corrected_moving_average_free(outPtr, source.length);
+        wasm.corrected_moving_average_free(outPtr, close.length);
+        wasm.deallocate_f64_array(inPtr);
     }
 });
 
-test('corrected_moving_average_batch_js single parameter set matches safe API', () => {
-    const source = new Float64Array(testData.close.slice(0, 220));
-    const batch = wasm.corrected_moving_average_batch_js(source, {
-        period_range: [35, 35, 0],
+test('corrected_moving_average_batch_js single parameter matches safe API', () => {
+    const close = new Float64Array(testData.close.slice(0, 220));
+    const batch = wasm.corrected_moving_average_batch_js(close, {
+        period_range: [17, 17, 0],
     });
-    const single = wasm.corrected_moving_average_js(source, 35);
-
+    const single = wasm.corrected_moving_average_js(close, 17);
     assert.strictEqual(batch.rows, 1);
-    assert.strictEqual(batch.cols, source.length);
-    assert.strictEqual(batch.periods.length, 1);
-    assert.strictEqual(batch.periods[0], 35);
-    assert.strictEqual(batch.values.length, source.length);
-    assertArrayClose(batch.values, single, 1e-10, 'batch mismatch');
+    assert.strictEqual(batch.cols, close.length);
+    assert.strictEqual(batch.combos[0].period, 17);
+    assertArrayClose(batch.values, single, 1e-12, 'batch output mismatch');
+});
+
+test('corrected_moving_average_batch_into matches safe batch output', () => {
+    const close = new Float64Array(testData.close.slice(0, 180));
+    const memory = wasm.wasm_memory
+        ? wasm.wasm_memory()
+        : (wasm.__wasm?.memory || (wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory));
+    assert(memory && memory.buffer, 'raw wasm memory is not exposed by this package build');
+
+    const rows = 3;
+    const total = rows * close.length;
+    const inPtr = wasm.allocate_f64_array(close.length);
+    const outPtr = wasm.corrected_moving_average_alloc(total);
+
+    try {
+        new Float64Array(memory.buffer, inPtr, close.length).set(close);
+        const actualRows = wasm.corrected_moving_average_batch_into(
+            inPtr,
+            outPtr,
+            close.length,
+            10,
+            14,
+            2,
+        );
+        assert.strictEqual(actualRows, rows);
+        const flat = Array.from(new Float64Array(memory.buffer, outPtr, total));
+        const jsBatch = wasm.corrected_moving_average_batch_js(close, {
+            period_range: [10, 14, 2],
+        });
+        assertArrayClose(flat, jsBatch.values, 1e-12, 'batch_into mismatch');
+    } finally {
+        wasm.corrected_moving_average_free(outPtr, total);
+        wasm.deallocate_f64_array(inPtr);
+    }
 });

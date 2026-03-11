@@ -21,16 +21,14 @@ use crate::indicators::kama::{KamaParams, KamaStream};
 use crate::indicators::linreg::{LinRegParams, LinRegStream};
 use crate::indicators::maaq::{MaaqParams, MaaqStream};
 use crate::indicators::mama::{MamaParams, MamaStream};
+use crate::indicators::moving_averages::corrected_moving_average::{
+    CorrectedMovingAverageParams, CorrectedMovingAverageStream,
+};
 use crate::indicators::moving_averages::dma::{DmaParams, DmaStream};
 use crate::indicators::moving_averages::ehlers_ecema::{EhlersEcemaParams, EhlersEcemaStream};
 use crate::indicators::moving_averages::ehlers_kama::{EhlersKamaParams, EhlersKamaStream};
 use crate::indicators::moving_averages::ehma::{EhmaParams, EhmaStream};
-use crate::indicators::moving_averages::ema_deviation_corrected_t3::{
-    EmaDeviationCorrectedT3Params, EmaDeviationCorrectedT3Stream,
-};
-use crate::indicators::moving_averages::elastic_volume_weighted_moving_average::{
-    ElasticVolumeWeightedMovingAverageParams, ElasticVolumeWeightedMovingAverageStream,
-};
+use crate::indicators::moving_averages::n_order_ema::{NOrderEmaParams, NOrderEmaStream};
 use crate::indicators::moving_averages::nama::{NamaParams, NamaStream};
 use crate::indicators::moving_averages::sama::{SamaParams, SamaStream};
 use crate::indicators::moving_averages::volatility_adjusted_ma::{VamaParams, VamaStream};
@@ -74,6 +72,7 @@ pub enum MaStream {
     EmaDeviationCorrectedT3(EmaDeviationCorrectedT3Stream),
     WaveSmoother(WaveSmootherStream),
     Cwma(CwmaStream),
+    CorrectedMovingAverage(CorrectedMovingAverageStream),
     Edcf(EdcfStream),
     Fwma(FwmaStream),
     Gaussian(GaussianStream),
@@ -89,6 +88,7 @@ pub enum MaStream {
     Mama(MamaStream),
     Mwdx(MwdxStream),
     Nma(NmaStream),
+    NOrderEma(NOrderEmaStream),
     Pwma(PwmaStream),
     Reflex(ReflexStream),
     SinWma(SinWmaStream),
@@ -134,6 +134,7 @@ impl MaStream {
             MaStream::EmaDeviationCorrectedT3(s) => s.update(value).map(|(_, corrected)| corrected),
             MaStream::WaveSmoother(s) => s.update(value),
             MaStream::Cwma(s) => s.update(value),
+            MaStream::CorrectedMovingAverage(s) => s.update(value),
             MaStream::Edcf(s) => s.update(value),
             MaStream::Fwma(s) => s.update(value),
             MaStream::Gaussian(s) => Some(s.update(value)),
@@ -149,6 +150,7 @@ impl MaStream {
             MaStream::Mama(s) => s.update(value).map(|(mama, _fama)| mama),
             MaStream::Mwdx(s) => Some(s.update(value)),
             MaStream::Nma(s) => s.update(value),
+            MaStream::NOrderEma(s) => s.update(value),
             MaStream::Pwma(s) => s.update(value),
             MaStream::Reflex(s) => s.update(value),
             MaStream::SinWma(s) => s.update(value),
@@ -246,27 +248,11 @@ pub fn ma_stream(ma_type: &str, period: usize) -> Result<MaStream, Box<dyn Error
             Ok(MaStream::Alma(stream))
         }
 
-        "corrected_moving_average" => {
+        "corrected_moving_average" | "cma" => {
             let stream = CorrectedMovingAverageStream::try_new(CorrectedMovingAverageParams {
                 period: Some(period),
             })?;
             Ok(MaStream::CorrectedMovingAverage(stream))
-        }
-
-        "ema_deviation_corrected_t3" => {
-            let stream = EmaDeviationCorrectedT3Stream::try_new(EmaDeviationCorrectedT3Params {
-                period: Some(period),
-                ..Default::default()
-            })?;
-            Ok(MaStream::EmaDeviationCorrectedT3(stream))
-        }
-
-        "wave_smoother" => {
-            let stream = WaveSmootherStream::try_new(WaveSmootherParams {
-                period: Some(period),
-                phase: None,
-            })?;
-            Ok(MaStream::WaveSmoother(stream))
         }
 
         "cwma" => {
@@ -580,6 +566,16 @@ pub fn ma_stream(ma_type: &str, period: usize) -> Result<MaStream, Box<dyn Error
                 ..Default::default()
             })?;
             Ok(MaStream::Nama(stream))
+        }
+
+        "n_order_ema" => {
+            let stream = NOrderEmaStream::try_new(NOrderEmaParams {
+                period: Some(period as f64),
+                order: Some(1),
+                ema_style: Some("ema".to_string()),
+                iir_style: Some("impulse_matched".to_string()),
+            })?;
+            Ok(MaStream::NOrderEma(stream))
         }
 
         "sama" => {

@@ -257,6 +257,8 @@ pub mod prb_wrapper;
 #[cfg(feature = "cuda")]
 pub mod range_filter_wrapper;
 #[cfg(feature = "cuda")]
+pub mod rogers_satchell_volatility_wrapper;
+#[cfg(feature = "cuda")]
 pub mod safezonestop_wrapper;
 #[cfg(feature = "cuda")]
 pub mod sar_wrapper;
@@ -366,6 +368,12 @@ pub use percentile_nearest_rank_wrapper::{CudaPercentileNearestRank, CudaPnrErro
 pub use prb_wrapper::{CudaPrb, CudaPrbError};
 #[cfg(feature = "cuda")]
 pub use range_filter_wrapper::{CudaRangeFilter, CudaRangeFilterError, DeviceRangeFilterTrio};
+#[cfg(feature = "cuda")]
+pub use rogers_satchell_volatility_wrapper::{
+    CudaRogersSatchellBatchResult, CudaRogersSatchellManySeriesResult,
+    CudaRogersSatchellVolatility, CudaRogersSatchellVolatilityError,
+    DeviceArrayF32Pair as RogersSatchellDeviceArrayF32Pair,
+};
 #[cfg(feature = "cuda")]
 pub use sar_wrapper::{CudaSar, CudaSarError};
 #[cfg(feature = "cuda")]

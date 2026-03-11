@@ -26,6 +26,10 @@ use crate::indicators::kama::{kama, KamaData, KamaInput, KamaParams};
 use crate::indicators::linreg::{linreg, LinRegData, LinRegInput, LinRegParams};
 use crate::indicators::maaq::{maaq, MaaqData, MaaqInput, MaaqParams};
 use crate::indicators::mama::{mama, MamaData, MamaInput, MamaParams};
+use crate::indicators::moving_averages::corrected_moving_average::{
+    corrected_moving_average, corrected_moving_average_with_kernel, CorrectedMovingAverageData,
+    CorrectedMovingAverageInput, CorrectedMovingAverageParams,
+};
 use crate::indicators::moving_averages::dma::{dma, DmaData, DmaInput, DmaParams};
 use crate::indicators::moving_averages::ehlers_ecema::{
     ehlers_ecema, EhlersEcemaData, EhlersEcemaInput, EhlersEcemaParams,
@@ -44,6 +48,10 @@ use crate::indicators::moving_averages::elastic_volume_weighted_moving_average::
     ElasticVolumeWeightedMovingAverageParams,
 };
 use crate::indicators::moving_averages::frama::{frama, FramaInput, FramaParams};
+use crate::indicators::moving_averages::n_order_ema::{
+    n_order_ema, n_order_ema_with_kernel, NOrderEmaData, NOrderEmaIirStyle, NOrderEmaInput,
+    NOrderEmaParams, NOrderEmaStyle,
+};
 use crate::indicators::moving_averages::nama::{nama, NamaData, NamaInput, NamaParams};
 use crate::indicators::moving_averages::sama::{sama, SamaData, SamaInput, SamaParams};
 use crate::indicators::moving_averages::volatility_adjusted_ma::{
@@ -254,6 +262,25 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
                 },
             };
             let output = cwma(&input)?;
+            Ok(output.values)
+        }
+
+        "corrected_moving_average" | "cma" => {
+            let input = match data {
+                MaData::Candles { candles, source } => CorrectedMovingAverageInput {
+                    data: CorrectedMovingAverageData::Candles { candles, source },
+                    params: CorrectedMovingAverageParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => CorrectedMovingAverageInput {
+                    data: CorrectedMovingAverageData::Slice(slice),
+                    params: CorrectedMovingAverageParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = corrected_moving_average(&input)?;
             Ok(output.values)
         }
 
@@ -1315,6 +1342,31 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
             Ok(output.values)
         }
 
+        "n_order_ema" => {
+            let input = match data {
+                MaData::Candles { candles, source } => NOrderEmaInput {
+                    data: NOrderEmaData::Candles { candles, source },
+                    params: NOrderEmaParams {
+                        period: Some(period as f64),
+                        order: Some(1),
+                        ema_style: Some(NOrderEmaStyle::Ema.as_str().to_string()),
+                        iir_style: Some(NOrderEmaIirStyle::ImpulseMatched.as_str().to_string()),
+                    },
+                },
+                MaData::Slice(s) => NOrderEmaInput {
+                    data: NOrderEmaData::Slice(s),
+                    params: NOrderEmaParams {
+                        period: Some(period as f64),
+                        order: Some(1),
+                        ema_style: Some(NOrderEmaStyle::Ema.as_str().to_string()),
+                        iir_style: Some(NOrderEmaIirStyle::ImpulseMatched.as_str().to_string()),
+                    },
+                },
+            };
+            let output = n_order_ema(&input)?;
+            Ok(output.values)
+        }
+
         "sama" => {
             let input = match data {
                 MaData::Candles { candles, source } => SamaInput {
@@ -1450,6 +1502,25 @@ pub fn ma_with_kernel<'a>(
                 },
             };
             let output = cwma_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "corrected_moving_average" | "cma" => {
+            let input = match data {
+                MaData::Candles { candles, source } => CorrectedMovingAverageInput {
+                    data: CorrectedMovingAverageData::Candles { candles, source },
+                    params: CorrectedMovingAverageParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => CorrectedMovingAverageInput {
+                    data: CorrectedMovingAverageData::Slice(slice),
+                    params: CorrectedMovingAverageParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = corrected_moving_average_with_kernel(&input, kernel)?;
             Ok(output.values)
         }
 
@@ -2464,6 +2535,31 @@ pub fn ma_with_kernel<'a>(
             Ok(output.values)
         }
 
+        "n_order_ema" => {
+            let input = match data {
+                MaData::Candles { candles, source } => NOrderEmaInput {
+                    data: NOrderEmaData::Candles { candles, source },
+                    params: NOrderEmaParams {
+                        period: Some(period as f64),
+                        order: Some(1),
+                        ema_style: Some(NOrderEmaStyle::Ema.as_str().to_string()),
+                        iir_style: Some(NOrderEmaIirStyle::ImpulseMatched.as_str().to_string()),
+                    },
+                },
+                MaData::Slice(slice) => NOrderEmaInput {
+                    data: NOrderEmaData::Slice(slice),
+                    params: NOrderEmaParams {
+                        period: Some(period as f64),
+                        order: Some(1),
+                        ema_style: Some(NOrderEmaStyle::Ema.as_str().to_string()),
+                        iir_style: Some(NOrderEmaIirStyle::ImpulseMatched.as_str().to_string()),
+                    },
+                },
+            };
+            let output = n_order_ema_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
         "sama" => {
             let input = match data {
                 MaData::Candles { candles, source } => SamaInput {
@@ -2608,6 +2704,7 @@ mod tests {
             "zlema",
             "alma",
             "cwma",
+            "corrected_moving_average",
             "edcf",
             "fwma",
             "gaussian",

@@ -128,6 +128,16 @@ test('MA dispatcher - HMA', () => {
     assertArrayClose(result, directResult, 1e-10, "MA dispatcher HMA mismatch");
 });
 
+test('MA dispatcher - N Order EMA defaults', () => {
+    const close = new Float64Array(testData.close);
+
+    const result = wasm.ma(close, "n_order_ema", 9);
+    assert.strictEqual(result.length, close.length);
+
+    const directResult = wasm.n_order_ema_js(close, 9.0, 1, 'ema', 'impulse_matched');
+    assertArrayClose(result, directResult, 1e-10, "MA dispatcher N Order EMA mismatch");
+});
+
 test('MA dispatcher - case insensitive', () => {
     const close = new Float64Array(testData.close);
 
@@ -193,6 +203,7 @@ test('MA dispatcher - multiple MA types', () => {
     const maTypes = [
         "sma", "ema", "dema", "tema", "smma", "zlema", "alma", "cwma",
         "edcf", "fwma", "gaussian", "highpass", "highpass2", "hma",
+        "n_order_ema",
         "jma", "jsa", "kama", "linreg", "nma", "pwma", "reflex",
         "sinwma", "sqwma", "srwma", "sgf", "supersmoother", "supersmoother_3_pole",
         "swma", "tilson", "trendflex", "trima", "wilders", "wma"

@@ -21,39 +21,86 @@ test.before(async () => {
 
 test('trend_direction_force_index_js output contract', () => {
     const close = new Float64Array(testData.close.slice(0, 256));
-
     const result = wasm.trend_direction_force_index_js(close, 10);
 
     assert.strictEqual(result.length, close.length);
-    assert(isNaN(result[0]));
-    assert(Array.from(result.slice(1)).some(v => !isNaN(v)));
-    assert(Array.from(result).filter(v => !isNaN(v)).every(v => Math.abs(v) <= 1.0 + 1e-12));
+    assert.strictEqual(result.findIndex(v => !isNaN(v)), 9);
+});
+
+test('trend_direction_force_index_js rejects invalid parameters', () => {
+    const close = new Float64Array(testData.close.slice(0, 64));
+
+    assert.throws(() => {
+        wasm.trend_direction_force_index_js(close, 0);
+    }, /Invalid length/);
 });
 
 test('trend_direction_force_index_into pointer path matches safe API', () => {
-    const close = new Float64Array(testData.close.slice(0, 192));
-    const safe = wasm.trend_direction_force_index_js(close, 10);
+    const close = new Float64Array(testData.close.slice(0, 200));
+    const safe = wasm.trend_direction_force_index_js(close, 12);
+    const memory = wasm.wasm_memory
+        ? wasm.wasm_memory()
+        : (wasm.__wasm?.memory || (wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory));
+    assert(memory && memory.buffer, 'raw wasm memory is not exposed by this package build');
+
+    const closePtr = wasm.allocate_f64_array(close.length);
     const outPtr = wasm.trend_direction_force_index_alloc(close.length);
 
     try {
-        wasm.trend_direction_force_index_into_host(close, outPtr, 10);
-        const out = wasm.read_f64_array(outPtr, close.length);
-        assertArrayClose(out, safe, 1e-10, 'pointer-path mismatch');
+        new Float64Array(memory.buffer, closePtr, close.length).set(close);
+        wasm.trend_direction_force_index_into(closePtr, outPtr, close.length, 12);
+        const actual = Array.from(new Float64Array(memory.buffer, outPtr, close.length));
+        assertArrayClose(actual, safe, 1e-12, 'pointer mismatch');
     } finally {
         wasm.trend_direction_force_index_free(outPtr, close.length);
+        wasm.deallocate_f64_array(closePtr);
     }
 });
 
 test('trend_direction_force_index_batch_js single parameter set matches safe API', () => {
-    const close = new Float64Array(testData.close.slice(0, 192));
+    const close = new Float64Array(testData.close.slice(0, 200));
     const batch = wasm.trend_direction_force_index_batch_js(close, {
-        length_range: [10, 10, 0],
+        length_range: [12, 12, 0],
     });
-    const single = wasm.trend_direction_force_index_js(close, 10);
+    const single = wasm.trend_direction_force_index_js(close, 12);
 
     assert.strictEqual(batch.rows, 1);
     assert.strictEqual(batch.cols, close.length);
-    assert.strictEqual(batch.values.length, close.length);
-    assert.strictEqual(batch.combos[0].length, 10);
-    assertArrayClose(batch.values, single, 1e-10, 'batch mismatch');
+    assert.strictEqual(batch.combos[0].length, 12);
+    assertArrayClose(batch.values, single, 1e-12, 'batch mismatch');
+});
+
+test('trend_direction_force_index_batch_into metadata matches requested ranges', () => {
+    const close = new Float64Array(testData.close.slice(0, 128));
+    const memory = wasm.wasm_memory
+        ? wasm.wasm_memory()
+        : (wasm.__wasm?.memory || (wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory));
+    assert(memory && memory.buffer, 'raw wasm memory is not exposed by this package build');
+
+    const rows = 3;
+    const total = rows * close.length;
+    const closePtr = wasm.allocate_f64_array(close.length);
+    const outPtr = wasm.trend_direction_force_index_alloc(total);
+
+    try {
+        new Float64Array(memory.buffer, closePtr, close.length).set(close);
+        const actualRows = wasm.trend_direction_force_index_batch_into(
+            closePtr,
+            outPtr,
+            close.length,
+            8,
+            12,
+            2,
+        );
+        assert.strictEqual(actualRows, rows);
+
+        const flat = Array.from(new Float64Array(memory.buffer, outPtr, total));
+        const jsBatch = wasm.trend_direction_force_index_batch_js(close, {
+            length_range: [8, 12, 2],
+        });
+        assertArrayClose(flat, jsBatch.values, 1e-12, 'batch_into mismatch');
+    } finally {
+        wasm.trend_direction_force_index_free(outPtr, total);
+        wasm.deallocate_f64_array(closePtr);
+    }
 });

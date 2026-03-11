@@ -5463,6 +5463,60 @@ pub(super) fn try_dispatch_non_ma_cuda(
             };
             finalize_cuda_matrix_output(output_id, owner, req.target, device_id as u32, None)
         })()),
+        "rogers_satchell_volatility" => Some((|| {
+            let indicator = "rogers_satchell_volatility";
+            let fallback_outputs: &[&str] = &["rs", "signal"];
+            let (output_id, output_index) =
+                resolve_output_with_fallback(indicator, info, req.output_id, fallback_outputs)?;
+            let open_f32 = required_open_f32(req.data, indicator)?;
+            let high_f32 = required_high_f32(req.data, indicator)?;
+            let low_f32 = required_low_f32(req.data, indicator)?;
+            let close_f32 = required_close_f32(req.data, indicator)?;
+            let mut sweep: crate::indicators::rogers_satchell_volatility::RogersSatchellVolatilityBatchRange =
+                Default::default();
+            sweep.lookback =
+                resolve_usize_range_param(req.params, "lookback", sweep.lookback, indicator)?;
+            sweep.signal_length = resolve_usize_range_param(
+                req.params,
+                "signal_length",
+                sweep.signal_length,
+                indicator,
+            )?;
+            let mut cuda =
+                crate::cuda::CudaRogersSatchellVolatility::new(device_id).map_err(|e| {
+                    IndicatorDispatchError::KernelUnavailable {
+                        details: e.to_string(),
+                    }
+                })?;
+            let result = cuda
+                .rogers_satchell_volatility_batch_dev(
+                    open_f32.as_slice(),
+                    high_f32.as_slice(),
+                    low_f32.as_slice(),
+                    close_f32.as_slice(),
+                    &sweep,
+                )
+                .map_err(|e| map_non_ma_compute_error(indicator, e.to_string()))?;
+            let owner = match output_index {
+                0 => crate::cuda::moving_averages::DeviceArrayF32 {
+                    buf: result.outputs.rs.buf,
+                    rows: result.outputs.rs.rows,
+                    cols: result.outputs.rs.cols,
+                },
+                1 => crate::cuda::moving_averages::DeviceArrayF32 {
+                    buf: result.outputs.signal.buf,
+                    rows: result.outputs.signal.rows,
+                    cols: result.outputs.signal.cols,
+                },
+                _ => {
+                    return Err(IndicatorDispatchError::UnknownOutput {
+                        indicator: indicator.to_string(),
+                        output: output_id.clone(),
+                    });
+                }
+            };
+            finalize_cuda_matrix_output(output_id, owner, req.target, device_id as u32, None)
+        })()),
         "zscore" => Some((|| {
             let indicator = "zscore";
             let fallback_outputs: &[&str] = &["value"];
