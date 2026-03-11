@@ -1124,6 +1124,20 @@ pub fn ma_batch_with_kernel_and_params<'a>(
                 cols: out.cols,
             })
         }
+        "sgf" => {
+            let poly_order = get_usize(params, "sgf", "poly_order")?.unwrap_or(2);
+            let sweep = super::sgf::SgfBatchRange {
+                period: period_range,
+                poly_order: (poly_order, poly_order, 0),
+            };
+            let out = super::sgf::sgf_batch_with_kernel(prices, &sweep, kernel)?;
+            Ok(MaBatchOutput {
+                periods: map_periods(&out.combos, |p| p.period.unwrap_or(21)),
+                values: out.values,
+                rows: out.rows,
+                cols: out.cols,
+            })
+        }
         "swma" => {
             let sweep = super::swma::SwmaBatchRange {
                 period: period_range,
@@ -1894,6 +1908,7 @@ mod tests {
             "sinwma",
             "sqwma",
             "srwma",
+            "sgf",
             "swma",
             "supersmoother",
             "supersmoother_3_pole",

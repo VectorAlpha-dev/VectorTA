@@ -53,6 +53,16 @@ pub fn ma_param_schema(ma_type: &str) -> &'static [MaParamInfo] {
             step: Some(1.0),
             notes: Some("Must be < period."),
         }],
+        "sgf" => &[MaParamInfo {
+            key: "poly_order",
+            label: "Poly Order",
+            kind: MaParamKind::Int,
+            default: 2.0,
+            min: Some(0.0),
+            max: Some(16.0),
+            step: Some(1.0),
+            notes: Some("Must be an integer >= 0 and < effective period."),
+        }],
         "gaussian" => &[MaParamInfo {
             key: "poles",
             label: "Poles",

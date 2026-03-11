@@ -32,6 +32,7 @@ use crate::indicators::mwdx::{MwdxParams, MwdxStream};
 use crate::indicators::nma::{NmaParams, NmaStream};
 use crate::indicators::pwma::{PwmaParams, PwmaStream};
 use crate::indicators::reflex::{ReflexParams, ReflexStream};
+use crate::indicators::sgf::{SgfParams, SgfStream};
 use crate::indicators::sinwma::{SinWmaParams, SinWmaStream};
 use crate::indicators::sma::{SmaParams, SmaStream};
 use crate::indicators::smma::{SmmaParams, SmmaStream};
@@ -83,6 +84,7 @@ pub enum MaStream {
     SinWma(SinWmaStream),
     SqWma(SqwmaStream),
     SrWma(SrwmaStream),
+    Sgf(SgfStream),
     SuperSmoother(SuperSmootherStream),
     SuperSmoother3Pole(SuperSmoother3PoleStream),
     Swma(SwmaStream),
@@ -139,6 +141,7 @@ impl MaStream {
             MaStream::SinWma(s) => s.update(value),
             MaStream::SqWma(s) => s.update(value),
             MaStream::SrWma(s) => s.update(value),
+            MaStream::Sgf(s) => s.update(value),
             MaStream::SuperSmoother(s) => s.update(value, None),
             MaStream::SuperSmoother3Pole(s) => Some(s.update(value)),
             MaStream::Swma(s) => s.update(value),
@@ -385,6 +388,14 @@ pub fn ma_stream(ma_type: &str, period: usize) -> Result<MaStream, Box<dyn Error
             Ok(MaStream::SrWma(stream))
         }
 
+        "sgf" => {
+            let stream = SgfStream::try_new(SgfParams {
+                period: Some(period),
+                poly_order: Some(2),
+            })?;
+            Ok(MaStream::Sgf(stream))
+        }
+
         "supersmoother" => {
             let stream = SuperSmootherStream::try_new(SuperSmootherParams {
                 period: Some(period),
@@ -595,6 +606,7 @@ mod tests {
             "sinwma",
             "sqwma",
             "srwma",
+            "sgf",
             "supersmoother",
             "supersmoother_3_pole",
             "swma",

@@ -279,6 +279,11 @@ fn compile_cuda_kernels() {
     );
     compile_kernel(
         &cuda_path,
+        "kernels/cuda/moving_averages/sgf_kernel.cu",
+        "sgf_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
         "kernels/cuda/moving_averages/sma_kernel.cu",
         "sma_kernel.ptx",
     );

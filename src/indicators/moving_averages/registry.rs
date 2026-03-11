@@ -417,6 +417,18 @@ pub fn list_moving_averages() -> &'static [MovingAverageInfo] {
             notes: None,
         },
         MovingAverageInfo {
+            id: "sgf",
+            label: "SGF",
+            requires_candles: false,
+            period_based: true,
+            single_output: true,
+            supports_cpu_single: true,
+            supports_cpu_batch: true,
+            supports_cuda_single: true,
+            supports_cuda_sweep: true,
+            notes: Some("Savitzky-Golay endpoint smoother; even periods use period-1."),
+        },
+        MovingAverageInfo {
             id: "swma",
             label: "SWMA",
             requires_candles: false,

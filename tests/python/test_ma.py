@@ -72,6 +72,16 @@ class TestMaDispatcher:
         direct_result = ta_indicators.alma(close, 9, 0.85, 6.0)
         assert_close(result, direct_result, rtol=1e-10, msg="MA dispatcher ALMA mismatch")
 
+    def test_ma_sgf(self, test_data):
+        """Test MA dispatcher with SGF default polynomial order"""
+        close = test_data['close']
+
+        result = ta_indicators.ma(close, "sgf", 9)
+        assert len(result) == len(close)
+
+        direct_result = ta_indicators.sgf(close, 9, 2)
+        assert_close(result, direct_result, rtol=1e-10, msg="MA dispatcher SGF mismatch")
+
     def test_ma_dema(self, test_data):
         """Test MA dispatcher with DEMA"""
         close = test_data['close']
@@ -207,7 +217,7 @@ class TestMaDispatcher:
             "sma", "ema", "dema", "tema", "smma", "zlema", "alma", "cwma",
             "edcf", "fwma", "gaussian", "highpass", "highpass2", "hma",
             "jma", "jsa", "kama", "linreg", "nma", "pwma", "reflex",
-            "sinwma", "sqwma", "srwma", "supersmoother", "supersmoother_3_pole",
+            "sinwma", "sqwma", "srwma", "sgf", "supersmoother", "supersmoother_3_pole",
             "swma", "tilson", "trendflex", "trima", "wilders", "wma"
         ]
 
