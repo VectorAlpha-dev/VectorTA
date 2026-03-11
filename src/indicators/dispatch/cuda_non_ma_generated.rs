@@ -1122,6 +1122,45 @@ pub(super) fn try_dispatch_non_ma_cuda(
             };
             finalize_cuda_matrix_output(output_id, owner, req.target, device_id as u32, None)
         })()),
+        "parkinson_volatility" => Some((|| {
+            let indicator = "parkinson_volatility";
+            let fallback_outputs: &[&str] = &["volatility", "variance"];
+            let (output_id, output_index) =
+                resolve_output_with_fallback(indicator, info, req.output_id, fallback_outputs)?;
+            let high_f32 = required_high_f32(req.data, indicator)?;
+            let low_f32 = required_low_f32(req.data, indicator)?;
+            let mut sweep: crate::indicators::parkinson_volatility::ParkinsonVolatilityBatchRange =
+                Default::default();
+            sweep.period =
+                resolve_usize_range_param(req.params, "period", sweep.period, indicator)?;
+            let mut cuda = crate::cuda::CudaParkinsonVolatility::new(device_id).map_err(|e| {
+                IndicatorDispatchError::KernelUnavailable {
+                    details: e.to_string(),
+                }
+            })?;
+            let result = cuda
+                .parkinson_volatility_batch_dev(high_f32.as_slice(), low_f32.as_slice(), &sweep)
+                .map_err(|e| map_non_ma_compute_error(indicator, e.to_string()))?;
+            let owner = match output_index {
+                0 => crate::cuda::moving_averages::DeviceArrayF32 {
+                    buf: result.outputs.volatility.buf,
+                    rows: result.outputs.volatility.rows,
+                    cols: result.outputs.volatility.cols,
+                },
+                1 => crate::cuda::moving_averages::DeviceArrayF32 {
+                    buf: result.outputs.variance.buf,
+                    rows: result.outputs.variance.rows,
+                    cols: result.outputs.variance.cols,
+                },
+                _ => {
+                    return Err(IndicatorDispatchError::UnknownOutput {
+                        indicator: indicator.to_string(),
+                        output: output_id.clone(),
+                    });
+                }
+            };
+            finalize_cuda_matrix_output(output_id, owner, req.target, device_id as u32, None)
+        })()),
         "correlation_cycle" => Some((|| {
             let indicator = "correlation_cycle";
             let fallback_outputs: &[&str] = &["real", "imag", "angle", "state"];

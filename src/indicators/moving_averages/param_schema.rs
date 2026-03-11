@@ -115,6 +115,38 @@ pub fn ma_param_schema(ma_type: &str) -> &'static [MaParamInfo] {
             step: Some(0.1),
             notes: Some("Must be finite."),
         }],
+        "ema_deviation_corrected_t3" => &[
+            MaParamInfo {
+                key: "hot",
+                label: "Hot",
+                kind: MaParamKind::Float,
+                default: 0.7,
+                min: Some(-16.0),
+                max: Some(16.0),
+                step: Some(0.01),
+                notes: Some("T3 hot coefficient. Must be finite."),
+            },
+            MaParamInfo {
+                key: "t3_mode",
+                label: "T3 Mode",
+                kind: MaParamKind::Int,
+                default: 0.0,
+                min: Some(0.0),
+                max: Some(1.0),
+                step: Some(1.0),
+                notes: Some("0 = T3 New, 1 = T3 Original."),
+            },
+        ],
+        "wave_smoother" => &[MaParamInfo {
+            key: "phase",
+            label: "Phase",
+            kind: MaParamKind::Float,
+            default: 70.0,
+            min: Some(0.0),
+            max: Some(119.0),
+            step: Some(0.1),
+            notes: Some("Wave phase in degrees. Valid range: 0..119."),
+        }],
         "maaq" => &[
             MaParamInfo {
                 key: "fast_period",
