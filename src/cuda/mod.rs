@@ -245,6 +245,8 @@ pub mod net_myrsi_wrapper;
 #[cfg(feature = "cuda")]
 pub mod obv_wrapper;
 #[cfg(feature = "cuda")]
+pub mod parkinson_volatility_wrapper;
+#[cfg(feature = "cuda")]
 pub mod pattern_recognition_wrapper;
 #[cfg(feature = "cuda")]
 pub mod percentile_nearest_rank_wrapper;
@@ -349,6 +351,11 @@ pub use oscillators::macd_wrapper::{CudaMacd, CudaMacdError};
 pub use oscillators::ppo_wrapper::{CudaPpo, CudaPpoError};
 #[cfg(feature = "cuda")]
 pub use oscillators::tsi_wrapper::{CudaTsi, CudaTsiError};
+#[cfg(feature = "cuda")]
+pub use parkinson_volatility_wrapper::{
+    CudaParkinsonVolatility, CudaParkinsonVolatilityBatchResult, CudaParkinsonVolatilityError,
+    ParkinsonDeviceArrayF32Pair,
+};
 #[cfg(feature = "cuda")]
 pub use pattern_recognition_wrapper::{
     CudaPatternRecognition, CudaPatternRecognitionError, DevicePatternFeatures, NativeSubsetRows,

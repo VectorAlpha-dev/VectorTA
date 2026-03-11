@@ -25,11 +25,11 @@ use crate::cuda::{
     CudaFvgTs, CudaHalftrend, CudaIftRsi, CudaKaufmanstop, CudaKdj, CudaKeltner, CudaKurtosis,
     CudaKvo, CudaLinearregAngle, CudaLpc, CudaMarketefi, CudaMass, CudaMeanAd, CudaMediumAd,
     CudaMedprice, CudaMfi, CudaMinmax, CudaModGodMode, CudaMsw, CudaNatr, CudaNetMyrsi, CudaNwe,
-    CudaPercentileNearestRank, CudaPfe, CudaPivot, CudaPpo, CudaPrb, CudaQstick, CudaRangeFilter,
-    CudaReverseRsi, CudaRocr, CudaRuntime, CudaRuntimeError, CudaRvi, CudaSafeZoneStop, CudaSar,
-    CudaSqueezeMomentum, CudaStddev, CudaSupertrend, CudaTsi, CudaTtmSqueeze, CudaTtmTrend, CudaUi,
-    CudaVar, CudaVi, CudaVidya, CudaVosc, CudaVoss, CudaVpci, CudaVpt, CudaVwmacd, CudaWad,
-    CudaWclprice, CudaZscore, DeviceArrayF32,
+    CudaParkinsonVolatility, CudaPercentileNearestRank, CudaPfe, CudaPivot, CudaPpo, CudaPrb,
+    CudaQstick, CudaRangeFilter, CudaReverseRsi, CudaRocr, CudaRuntime, CudaRuntimeError, CudaRvi,
+    CudaSafeZoneStop, CudaSar, CudaSqueezeMomentum, CudaStddev, CudaSupertrend, CudaTsi,
+    CudaTtmSqueeze, CudaTtmTrend, CudaUi, CudaVar, CudaVi, CudaVidya, CudaVosc, CudaVoss, CudaVpci,
+    CudaVpt, CudaVwmacd, CudaWad, CudaWclprice, CudaZscore, DeviceArrayF32,
 };
 use crate::indicators::adx::AdxBatchRange;
 use crate::indicators::adxr::AdxrBatchRange;
@@ -120,6 +120,7 @@ use crate::indicators::natr::NatrBatchRange;
 use crate::indicators::net_myrsi::NetMyrsiBatchRange;
 use crate::indicators::ott::OttBatchRange;
 use crate::indicators::otto::OttoBatchRange;
+use crate::indicators::parkinson_volatility::ParkinsonVolatilityBatchRange;
 use crate::indicators::percentile_nearest_rank::PercentileNearestRankBatchRange;
 use crate::indicators::pfe::PfeBatchRange;
 use crate::indicators::pivot::PivotBatchRange;
@@ -604,6 +605,9 @@ fn dispatch_cuda_device_supported(
     if normalized_id.eq_ignore_ascii_case("correl_hl") {
         return compute_correl_hl_cuda_device(req, info);
     }
+    if normalized_id.eq_ignore_ascii_case("parkinson_volatility") {
+        return compute_parkinson_volatility_cuda_device(req, info);
+    }
     if normalized_id.eq_ignore_ascii_case("pivot") {
         return compute_pivot_cuda_device(req, info);
     }
@@ -998,6 +1002,7 @@ fn supports_cuda_device_dispatch(indicator_id: &str) -> bool {
             | "deviation"
             | "kurtosis"
             | "correl_hl"
+            | "parkinson_volatility"
             | "pivot"
             | "mass"
             | "mod_god_mode"
@@ -1037,6 +1042,7 @@ fn supports_cuda_device_dispatch(indicator_id: &str) -> bool {
             | "macd"
             | "kst"
             | "cvi"
+            | "parkinson_volatility"
             | "yang_zhang_volatility"
             | "wavetrend"
             | "wto"
@@ -1297,6 +1303,13 @@ fn first_valid_in_high_low(high: &[f32], low: &[f32]) -> usize {
         .unwrap_or(high.len().min(low.len()))
 }
 
+fn first_valid_in_high_low_positive(high: &[f32], low: &[f32]) -> usize {
+    high.iter()
+        .zip(low.iter())
+        .position(|(high, low)| high.is_finite() && low.is_finite() && *high > 0.0 && *low > 0.0)
+        .unwrap_or(high.len().min(low.len()))
+}
+
 fn first_valid_in_ohlc_positive(open: &[f32], high: &[f32], low: &[f32], close: &[f32]) -> usize {
     open.iter()
         .zip(high.iter())
@@ -1488,6 +1501,12 @@ fn host_first_valid_for_indicator(
             .or_else(|| hlc.map(|(high, low, _)| (high, low)))
             .expect("cvi requires high/low");
         return first_valid_in_high_low(high, low);
+    }
+    if indicator.eq_ignore_ascii_case("parkinson_volatility") {
+        let (high, low) = high_low
+            .or_else(|| hlc.map(|(high, low, _)| (high, low)))
+            .expect("parkinson_volatility requires high/low");
+        return first_valid_in_high_low_positive(high, low);
     }
     if indicator.eq_ignore_ascii_case("mass") {
         let (high, low) = high_low
@@ -4243,6 +4262,57 @@ fn compute_correl_hl_cuda_device(
     }
     let warmup = Some(first_valid + sweep.period.0.min(sweep.period.1).saturating_sub(1));
     finalize_cuda_device_output(output_id, dev, warmup, req.target, device_id)
+}
+
+fn compute_parkinson_volatility_cuda_device(
+    req: IndicatorCudaDeviceRequest<'_>,
+    info: &IndicatorInfo,
+) -> Result<IndicatorCudaOutput, IndicatorDispatchError> {
+    if !info.capabilities.supports_cuda_batch {
+        return Err(IndicatorDispatchError::UnsupportedCapability {
+            indicator: info.id.to_string(),
+            capability: "cuda_device_batch",
+        });
+    }
+
+    let output_id = resolve_output_id(info, req.output_id)?;
+    let output_index = resolve_output_index(info, output_id).unwrap_or(0);
+    let (high, low, data_device_id) = cuda_device_high_low_from_req(info.id, req.data)?;
+    let device_id = resolve_device_runtime_id(info.id, req.params, data_device_id)?;
+    let first_valid = resolve_device_first_valid(info.id, req.params)?;
+    let sweep = ParkinsonVolatilityBatchRange {
+        period: resolve_usize_range_param_device(req.params, "period", (8, 256, 1), info.id)?,
+    };
+    let high_buf = unsafe { BorrowedCudaDeviceSeries::from_view(high) };
+    let low_buf = unsafe { BorrowedCudaDeviceSeries::from_view(low) };
+    let cuda = CudaParkinsonVolatility::new(device_id as usize).map_err(|e| {
+        IndicatorDispatchError::KernelUnavailable {
+            details: e.to_string(),
+        }
+    })?;
+    let result = cuda
+        .parkinson_volatility_batch_dev_from_device_inputs(
+            high_buf.as_buffer(),
+            low_buf.as_buffer(),
+            high.len(),
+            first_valid,
+            &sweep,
+        )
+        .map_err(|e| IndicatorDispatchError::ComputeFailed {
+            indicator: info.id.to_string(),
+            details: e.to_string(),
+        })?;
+    let owner = match output_index {
+        0 => result.outputs.volatility,
+        1 => result.outputs.variance,
+        _ => {
+            return Err(IndicatorDispatchError::UnknownOutput {
+                indicator: info.id.to_string(),
+                output: output_id.to_string(),
+            });
+        }
+    };
+    finalize_cuda_device_output(output_id, owner, None, req.target, device_id)
 }
 
 fn compute_pivot_cuda_device(
@@ -21191,6 +21261,32 @@ mod tests {
             value: ParamValue::Int(21),
         }];
         assert_high_low_device_path_matches_host_cuda("correl_hl", &params);
+    }
+
+    #[test]
+    fn parkinson_volatility_device_path_matches_cpu_when_gpu_available() {
+        let params = [ParamKV {
+            key: "period",
+            value: ParamValue::Int(21),
+        }];
+        assert_high_low_device_path_matches_cpu_with_output(
+            "parkinson_volatility",
+            Some("volatility"),
+            &params,
+        );
+    }
+
+    #[test]
+    fn parkinson_volatility_device_path_matches_host_cuda_when_gpu_available() {
+        let params = [ParamKV {
+            key: "period",
+            value: ParamValue::Int(21),
+        }];
+        assert_high_low_device_path_matches_host_cuda_with_output(
+            "parkinson_volatility",
+            Some("variance"),
+            &params,
+        );
     }
 
     #[test]

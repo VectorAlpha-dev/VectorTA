@@ -4,6 +4,10 @@ use super::{
 };
 use crate::indicators::acosc::{acosc_with_kernel, AcoscInput, AcoscParams};
 use crate::indicators::ad::{ad_with_kernel, AdInput, AdParams};
+use crate::indicators::adaptive_schaff_trend_cycle::{
+    adaptive_schaff_trend_cycle_with_kernel, AdaptiveSchaffTrendCycleInput,
+    AdaptiveSchaffTrendCycleParams,
+};
 use crate::indicators::adosc::{adosc_with_kernel, AdoscInput, AdoscParams};
 use crate::indicators::adx::{adx_with_kernel, AdxInput, AdxParams};
 use crate::indicators::adxr::{adxr_with_kernel, AdxrInput, AdxrParams};
@@ -52,6 +56,9 @@ use crate::indicators::dti::{dti_into_slice, DtiInput, DtiParams};
 use crate::indicators::dvdiqqe::{dvdiqqe_with_kernel, DvdiqqeInput, DvdiqqeParams};
 use crate::indicators::dx::{dx_batch_with_kernel, dx_into_slice, DxBatchRange, DxInput, DxParams};
 use crate::indicators::efi::{efi_with_kernel, EfiInput, EfiParams};
+use crate::indicators::ehlers_detrending_filter::{
+    ehlers_detrending_filter_with_kernel, EhlersDetrendingFilterInput, EhlersDetrendingFilterParams,
+};
 use crate::indicators::emd::{emd_with_kernel, EmdInput, EmdParams};
 use crate::indicators::emv::{emv_with_kernel, EmvInput};
 use crate::indicators::er::{er_with_kernel, ErInput, ErParams};
@@ -63,15 +70,41 @@ use crate::indicators::fvg_trailing_stop::{
 };
 use crate::indicators::gatorosc::{gatorosc_with_kernel, GatorOscInput, GatorOscParams};
 use crate::indicators::halftrend::{halftrend_with_kernel, HalfTrendInput, HalfTrendParams};
+use crate::indicators::historical_volatility_percentile::{
+    historical_volatility_percentile_with_kernel, HistoricalVolatilityPercentileInput,
+    HistoricalVolatilityPercentileParams,
+};
+use crate::indicators::hypertrend::{hypertrend_with_kernel, HyperTrendInput, HyperTrendParams};
+use crate::indicators::ict_propulsion_block::{
+    ict_propulsion_block_with_kernel, IctPropulsionBlockInput, IctPropulsionBlockParams,
+};
 use crate::indicators::ift_rsi::{ift_rsi_with_kernel, IftRsiInput, IftRsiParams};
+use crate::indicators::impulse_macd::{
+    impulse_macd_with_kernel, ImpulseMacdInput, ImpulseMacdParams,
+};
+use crate::indicators::insync_index::{
+    insync_index_with_kernel, InsyncIndexInput, InsyncIndexParams,
+};
 use crate::indicators::kaufmanstop::{
     kaufmanstop_with_kernel, KaufmanstopInput, KaufmanstopParams,
 };
 use crate::indicators::kdj::{kdj_with_kernel, KdjInput, KdjParams};
 use crate::indicators::keltner::{keltner_with_kernel, KeltnerInput, KeltnerParams};
+use crate::indicators::keltner_channel_width_oscillator::{
+    keltner_channel_width_oscillator_with_kernel, KeltnerChannelWidthOscillatorInput,
+    KeltnerChannelWidthOscillatorParams,
+};
 use crate::indicators::kst::{kst_with_kernel, KstInput, KstParams};
 use crate::indicators::kurtosis::{kurtosis_with_kernel, KurtosisInput, KurtosisParams};
 use crate::indicators::kvo::{kvo_with_kernel, KvoInput, KvoParams};
+use crate::indicators::leavitt_convolution_acceleration::{
+    leavitt_convolution_acceleration_with_kernel, LeavittConvolutionAccelerationInput,
+    LeavittConvolutionAccelerationParams,
+};
+use crate::indicators::linear_regression_intensity::{
+    linear_regression_intensity_with_kernel, LinearRegressionIntensityInput,
+    LinearRegressionIntensityParams,
+};
 use crate::indicators::linearreg_angle::{
     linearreg_angle_with_kernel, Linearreg_angleInput, Linearreg_angleParams,
 };
@@ -86,6 +119,9 @@ use crate::indicators::lrsi::{lrsi_with_kernel, LrsiInput, LrsiParams};
 use crate::indicators::mab::{mab_with_kernel, MabInput, MabParams};
 use crate::indicators::macd::{macd_with_kernel, MacdInput, MacdParams};
 use crate::indicators::macz::{macz_with_kernel, MaczInput, MaczParams};
+use crate::indicators::market_meanness_index::{
+    market_meanness_index_with_kernel, MarketMeannessIndexInput, MarketMeannessIndexParams,
+};
 use crate::indicators::mass::{mass_with_kernel, MassInput, MassParams};
 use crate::indicators::mean_ad::{mean_ad_with_kernel, MeanAdInput, MeanAdParams};
 use crate::indicators::medium_ad::{medium_ad_with_kernel, MediumAdInput, MediumAdParams};
@@ -100,6 +136,14 @@ use crate::indicators::mod_god_mode::{
     mod_god_mode, ModGodModeData, ModGodModeInput, ModGodModeMode, ModGodModeParams,
 };
 use crate::indicators::mom::{mom_with_kernel, MomInput, MomParams};
+use crate::indicators::momentum_ratio_oscillator::{
+    momentum_ratio_oscillator_with_kernel, MomentumRatioOscillatorInput,
+    MomentumRatioOscillatorParams,
+};
+use crate::indicators::moving_averages::logarithmic_moving_average::{
+    logarithmic_moving_average_with_kernel, LogarithmicMovingAverageInput,
+    LogarithmicMovingAverageParams,
+};
 use crate::indicators::moving_averages::ma::MaData;
 use crate::indicators::moving_averages::ma_batch::{
     ma_batch_with_kernel_and_typed_params, MaBatchParamKV, MaBatchParamValue,
@@ -113,7 +157,14 @@ use crate::indicators::natr::{natr_with_kernel, NatrInput, NatrParams};
 use crate::indicators::net_myrsi::{net_myrsi_with_kernel, NetMyrsiInput, NetMyrsiParams};
 use crate::indicators::nvi::{nvi_with_kernel, NviInput, NviParams};
 use crate::indicators::obv::{obv_with_kernel, ObvInput, ObvParams};
+use crate::indicators::on_balance_volume_oscillator::{
+    on_balance_volume_oscillator_with_kernel, OnBalanceVolumeOscillatorInput,
+    OnBalanceVolumeOscillatorParams,
+};
 use crate::indicators::otto::{otto_with_kernel, OttoInput, OttoParams};
+use crate::indicators::parkinson_volatility::{
+    parkinson_volatility_with_kernel, ParkinsonVolatilityInput, ParkinsonVolatilityParams,
+};
 use crate::indicators::percentile_nearest_rank::{
     percentile_nearest_rank_with_kernel, PercentileNearestRankInput, PercentileNearestRankParams,
 };
@@ -122,11 +173,24 @@ use crate::indicators::pivot::{pivot_with_kernel, PivotInput, PivotParams};
 use crate::indicators::pma::{pma_with_kernel, PmaInput, PmaParams};
 use crate::indicators::ppo::{ppo_with_kernel, PpoInput, PpoParams};
 use crate::indicators::prb::{prb_with_kernel, PrbInput, PrbParams};
+use crate::indicators::pretty_good_oscillator::{
+    pretty_good_oscillator_with_kernel, PrettyGoodOscillatorInput, PrettyGoodOscillatorParams,
+};
+use crate::indicators::price_density_market_noise::{
+    price_density_market_noise_with_kernel, PriceDensityMarketNoiseInput,
+    PriceDensityMarketNoiseParams,
+};
+use crate::indicators::psychological_line::{
+    psychological_line_with_kernel, PsychologicalLineInput, PsychologicalLineParams,
+};
 use crate::indicators::pvi::{pvi_with_kernel, PviInput, PviParams};
 use crate::indicators::qqe::{qqe_with_kernel, QqeInput, QqeParams};
 use crate::indicators::qstick::{qstick_with_kernel, QstickInput, QstickParams};
 use crate::indicators::range_filter::{
     range_filter_with_kernel, RangeFilterInput, RangeFilterParams,
+};
+use crate::indicators::rank_correlation_index::{
+    rank_correlation_index_with_kernel, RankCorrelationIndexInput, RankCorrelationIndexParams,
 };
 use crate::indicators::registry::{
     get_indicator, IndicatorInfo, IndicatorInputKind, ParamValueStatic,
@@ -141,6 +205,10 @@ use crate::indicators::rvi::{rvi_with_kernel, RviInput, RviParams};
 use crate::indicators::safezonestop::{
     safezonestop_with_kernel, SafeZoneStopInput, SafeZoneStopParams,
 };
+use crate::indicators::smoothed_gaussian_trend_filter::{
+    smoothed_gaussian_trend_filter_with_kernel, SmoothedGaussianTrendFilterInput,
+    SmoothedGaussianTrendFilterParams,
+};
 use crate::indicators::squeeze_momentum::{
     squeeze_momentum_with_kernel, SqueezeMomentumInput, SqueezeMomentumParams,
 };
@@ -148,8 +216,28 @@ use crate::indicators::srsi::{srsi_with_kernel, SrsiInput, SrsiParams};
 use crate::indicators::stc::{stc_with_kernel, StcInput, StcParams};
 use crate::indicators::stddev::{stddev_with_kernel, StdDevInput, StdDevParams};
 use crate::indicators::stoch::{stoch_with_kernel, StochInput, StochParams};
+use crate::indicators::stochastic_adaptive_d::{
+    stochastic_adaptive_d_with_kernel, StochasticAdaptiveDInput, StochasticAdaptiveDParams,
+};
+use crate::indicators::stochastic_connors_rsi::{
+    stochastic_connors_rsi_with_kernel, StochasticConnorsRsiInput, StochasticConnorsRsiParams,
+};
 use crate::indicators::stochf::{stochf_with_kernel, StochfInput, StochfParams};
 use crate::indicators::supertrend::{supertrend_with_kernel, SuperTrendInput, SuperTrendParams};
+use crate::indicators::supertrend_oscillator::{
+    supertrend_oscillator_with_kernel, SuperTrendOscillatorInput, SuperTrendOscillatorParams,
+};
+use crate::indicators::trend_continuation_factor::{
+    trend_continuation_factor_with_kernel, TrendContinuationFactorInput,
+    TrendContinuationFactorParams,
+};
+use crate::indicators::trend_direction_force_index::{
+    trend_direction_force_index_with_kernel, TrendDirectionForceIndexInput,
+    TrendDirectionForceIndexParams,
+};
+use crate::indicators::trend_follower::{
+    trend_follower_with_kernel, TrendFollowerInput, TrendFollowerParams,
+};
 use crate::indicators::trix::{
     trix_batch_with_kernel, trix_into_slice, trix_with_kernel, TrixBatchRange, TrixInput,
     TrixParams,
@@ -158,12 +246,23 @@ use crate::indicators::tsf::{tsf_with_kernel, TsfInput, TsfParams};
 use crate::indicators::tsi::{tsi_with_kernel, TsiInput, TsiParams};
 use crate::indicators::ttm_squeeze::{ttm_squeeze_with_kernel, TtmSqueezeInput, TtmSqueezeParams};
 use crate::indicators::ttm_trend::{ttm_trend_with_kernel, TtmTrendInput, TtmTrendParams};
+use crate::indicators::twiggs_money_flow::{
+    twiggs_money_flow_with_kernel, TwiggsMoneyFlowInput, TwiggsMoneyFlowParams,
+};
 use crate::indicators::ui::{ui_with_kernel, UiInput, UiParams};
 use crate::indicators::ultosc::{ultosc_with_kernel, UltOscInput, UltOscParams};
 use crate::indicators::var::{var_with_kernel, VarInput, VarParams};
 use crate::indicators::vi::{vi_with_kernel, ViInput, ViParams};
 use crate::indicators::vidya::{vidya_with_kernel, VidyaInput, VidyaParams};
 use crate::indicators::vlma::{vlma_with_kernel, VlmaInput, VlmaParams};
+use crate::indicators::volatility_ratio_adaptive_rsx::{
+    volatility_ratio_adaptive_rsx_with_kernel, VolatilityRatioAdaptiveRsxInput,
+    VolatilityRatioAdaptiveRsxParams,
+};
+use crate::indicators::volume_weighted_stochastic_rsi::{
+    volume_weighted_stochastic_rsi_with_kernel, VolumeWeightedStochasticRsiInput,
+    VolumeWeightedStochasticRsiParams,
+};
 use crate::indicators::vosc::{vosc_with_kernel, VoscInput, VoscParams};
 use crate::indicators::voss::{voss_with_kernel, VossInput, VossParams};
 use crate::indicators::vpci::{vpci_with_kernel, VpciInput, VpciParams};
@@ -266,6 +365,195 @@ fn try_fast_dispatch_non_strict(
                     None
                 }
             }
+            "historical_volatility_percentile" => {
+                if let Some(out) = output_id {
+                    Some(compute_historical_volatility_percentile_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "volatility_ratio_adaptive_rsx" => {
+                if let Some(out) = output_id {
+                    Some(compute_volatility_ratio_adaptive_rsx_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "on_balance_volume_oscillator" => {
+                if let Some(out) = output_id {
+                    Some(compute_on_balance_volume_oscillator_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "parkinson_volatility" => {
+                if let Some(out) = output_id {
+                    Some(compute_parkinson_volatility_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "psychological_line" => {
+                if let Some(out) = output_id {
+                    Some(compute_psychological_line_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "rank_correlation_index" => {
+                if let Some(out) = output_id {
+                    Some(compute_rank_correlation_index_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "trend_direction_force_index" => {
+                if let Some(out) = output_id {
+                    Some(compute_trend_direction_force_index_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "linear_regression_intensity" => {
+                if let Some(out) = output_id {
+                    Some(compute_linear_regression_intensity_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "trend_follower" => {
+                if let Some(out) = output_id {
+                    Some(compute_trend_follower_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "keltner_channel_width_oscillator" => {
+                if let Some(out) = output_id {
+                    Some(compute_keltner_channel_width_oscillator_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "market_meanness_index" => {
+                if let Some(out) = output_id {
+                    Some(compute_market_meanness_index_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "ehlers_detrending_filter" => {
+                if let Some(out) = output_id {
+                    Some(compute_ehlers_detrending_filter_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "momentum_ratio_oscillator" => {
+                if let Some(out) = output_id {
+                    Some(compute_momentum_ratio_oscillator_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "hypertrend" => {
+                if let Some(out) = output_id {
+                    Some(compute_hypertrend_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "adaptive_schaff_trend_cycle" => {
+                if let Some(out) = output_id {
+                    Some(compute_adaptive_schaff_trend_cycle_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "smoothed_gaussian_trend_filter" => {
+                if let Some(out) = output_id {
+                    Some(compute_smoothed_gaussian_trend_filter_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "ict_propulsion_block" => {
+                if let Some(out) = output_id {
+                    Some(compute_ict_propulsion_block_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "leavitt_convolution_acceleration" => {
+                if let Some(out) = output_id {
+                    Some(compute_leavitt_convolution_acceleration_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "price_density_market_noise" => {
+                if let Some(out) = output_id {
+                    Some(compute_price_density_market_noise_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "impulse_macd" => {
+                if let Some(out) = output_id {
+                    Some(compute_impulse_macd_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "insync_index" => {
+                if let Some(out) = output_id {
+                    Some(compute_insync_index_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "trend_continuation_factor" => {
+                if let Some(out) = output_id {
+                    Some(compute_trend_continuation_factor_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "pretty_good_oscillator" => {
+                if let Some(out) = output_id {
+                    Some(compute_pretty_good_oscillator_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "twiggs_money_flow" => {
+                if let Some(out) = output_id {
+                    Some(compute_twiggs_money_flow_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "volume_weighted_stochastic_rsi" => {
+                if let Some(out) = output_id {
+                    Some(compute_volume_weighted_stochastic_rsi_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "stochastic_connors_rsi" => {
+                if let Some(out) = output_id {
+                    Some(compute_stochastic_connors_rsi_batch(req, out))
+                } else {
+                    None
+                }
+            }
+            "stochastic_adaptive_d" => {
+                if let Some(out) = output_id {
+                    Some(compute_stochastic_adaptive_d_batch(req, out))
+                } else {
+                    None
+                }
+            }
             "voss" => {
                 if let Some(out) = output_id {
                     Some(compute_voss_batch(req, out))
@@ -326,6 +614,168 @@ fn try_fast_dispatch_non_strict(
     if id.eq_ignore_ascii_case("yang_zhang_volatility") {
         if let Some(out) = output_id {
             return Some(compute_yang_zhang_volatility_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("historical_volatility_percentile") {
+        if let Some(out) = output_id {
+            return Some(compute_historical_volatility_percentile_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("volatility_ratio_adaptive_rsx") {
+        if let Some(out) = output_id {
+            return Some(compute_volatility_ratio_adaptive_rsx_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("on_balance_volume_oscillator") {
+        if let Some(out) = output_id {
+            return Some(compute_on_balance_volume_oscillator_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("parkinson_volatility") {
+        if let Some(out) = output_id {
+            return Some(compute_parkinson_volatility_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("psychological_line") {
+        if let Some(out) = output_id {
+            return Some(compute_psychological_line_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("rank_correlation_index") {
+        if let Some(out) = output_id {
+            return Some(compute_rank_correlation_index_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("trend_direction_force_index") {
+        if let Some(out) = output_id {
+            return Some(compute_trend_direction_force_index_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("linear_regression_intensity") {
+        if let Some(out) = output_id {
+            return Some(compute_linear_regression_intensity_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("trend_follower") {
+        if let Some(out) = output_id {
+            return Some(compute_trend_follower_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("keltner_channel_width_oscillator") {
+        if let Some(out) = output_id {
+            return Some(compute_keltner_channel_width_oscillator_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("market_meanness_index") {
+        if let Some(out) = output_id {
+            return Some(compute_market_meanness_index_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("ehlers_detrending_filter") {
+        if let Some(out) = output_id {
+            return Some(compute_ehlers_detrending_filter_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("momentum_ratio_oscillator") {
+        if let Some(out) = output_id {
+            return Some(compute_momentum_ratio_oscillator_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("hypertrend") {
+        if let Some(out) = output_id {
+            return Some(compute_hypertrend_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("adaptive_schaff_trend_cycle") {
+        if let Some(out) = output_id {
+            return Some(compute_adaptive_schaff_trend_cycle_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("smoothed_gaussian_trend_filter") {
+        if let Some(out) = output_id {
+            return Some(compute_smoothed_gaussian_trend_filter_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("ict_propulsion_block") {
+        if let Some(out) = output_id {
+            return Some(compute_ict_propulsion_block_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("leavitt_convolution_acceleration") {
+        if let Some(out) = output_id {
+            return Some(compute_leavitt_convolution_acceleration_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("price_density_market_noise") {
+        if let Some(out) = output_id {
+            return Some(compute_price_density_market_noise_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("impulse_macd") {
+        if let Some(out) = output_id {
+            return Some(compute_impulse_macd_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("insync_index") {
+        if let Some(out) = output_id {
+            return Some(compute_insync_index_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("trend_continuation_factor") {
+        if let Some(out) = output_id {
+            return Some(compute_trend_continuation_factor_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("pretty_good_oscillator") {
+        if let Some(out) = output_id {
+            return Some(compute_pretty_good_oscillator_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("twiggs_money_flow") {
+        if let Some(out) = output_id {
+            return Some(compute_twiggs_money_flow_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("volume_weighted_stochastic_rsi") {
+        if let Some(out) = output_id {
+            return Some(compute_volume_weighted_stochastic_rsi_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("stochastic_connors_rsi") {
+        if let Some(out) = output_id {
+            return Some(compute_stochastic_connors_rsi_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("stochastic_adaptive_d") {
+        if let Some(out) = output_id {
+            return Some(compute_stochastic_adaptive_d_batch(req, out));
         }
         return None;
     }
@@ -437,10 +887,53 @@ fn dispatch_cpu_batch_by_indicator(
         "squeeze_momentum" => compute_squeeze_momentum_batch(req, output_id),
         "srsi" => compute_srsi_batch(req, output_id),
         "supertrend" => compute_supertrend_batch(req, output_id),
+        "hypertrend" => compute_hypertrend_batch(req, output_id),
+        "adaptive_schaff_trend_cycle" => compute_adaptive_schaff_trend_cycle_batch(req, output_id),
+        "smoothed_gaussian_trend_filter" => {
+            compute_smoothed_gaussian_trend_filter_batch(req, output_id)
+        }
+        "logarithmic_moving_average" => compute_logarithmic_moving_average_batch(req, output_id),
+        "ict_propulsion_block" => compute_ict_propulsion_block_batch(req, output_id),
+        "supertrend_oscillator" => compute_supertrend_oscillator_batch(req, output_id),
         "vi" => compute_vi_batch(req, output_id),
         "wavetrend" => compute_wavetrend_batch(req, output_id),
         "wto" => compute_wto_batch(req, output_id),
         "yang_zhang_volatility" => compute_yang_zhang_volatility_batch(req, output_id),
+        "historical_volatility_percentile" => {
+            compute_historical_volatility_percentile_batch(req, output_id)
+        }
+        "impulse_macd" => compute_impulse_macd_batch(req, output_id),
+        "insync_index" => compute_insync_index_batch(req, output_id),
+        "volatility_ratio_adaptive_rsx" => {
+            compute_volatility_ratio_adaptive_rsx_batch(req, output_id)
+        }
+        "on_balance_volume_oscillator" => {
+            compute_on_balance_volume_oscillator_batch(req, output_id)
+        }
+        "parkinson_volatility" => compute_parkinson_volatility_batch(req, output_id),
+        "psychological_line" => compute_psychological_line_batch(req, output_id),
+        "rank_correlation_index" => compute_rank_correlation_index_batch(req, output_id),
+        "trend_direction_force_index" => compute_trend_direction_force_index_batch(req, output_id),
+        "linear_regression_intensity" => compute_linear_regression_intensity_batch(req, output_id),
+        "trend_follower" => compute_trend_follower_batch(req, output_id),
+        "keltner_channel_width_oscillator" => {
+            compute_keltner_channel_width_oscillator_batch(req, output_id)
+        }
+        "market_meanness_index" => compute_market_meanness_index_batch(req, output_id),
+        "ehlers_detrending_filter" => compute_ehlers_detrending_filter_batch(req, output_id),
+        "momentum_ratio_oscillator" => compute_momentum_ratio_oscillator_batch(req, output_id),
+        "leavitt_convolution_acceleration" => {
+            compute_leavitt_convolution_acceleration_batch(req, output_id)
+        }
+        "price_density_market_noise" => compute_price_density_market_noise_batch(req, output_id),
+        "trend_continuation_factor" => compute_trend_continuation_factor_batch(req, output_id),
+        "pretty_good_oscillator" => compute_pretty_good_oscillator_batch(req, output_id),
+        "twiggs_money_flow" => compute_twiggs_money_flow_batch(req, output_id),
+        "volume_weighted_stochastic_rsi" => {
+            compute_volume_weighted_stochastic_rsi_batch(req, output_id)
+        }
+        "stochastic_connors_rsi" => compute_stochastic_connors_rsi_batch(req, output_id),
+        "stochastic_adaptive_d" => compute_stochastic_adaptive_d_batch(req, output_id),
         "acosc" => compute_acosc_batch(req, output_id),
         "alligator" => compute_alligator_batch(req, output_id),
         "alphatrend" => compute_alphatrend_batch(req, output_id),
@@ -3652,6 +4145,1974 @@ fn compute_yang_zhang_volatility_batch(
     )
 }
 
+fn compute_historical_volatility_percentile_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let data = extract_slice_input("historical_volatility_percentile", req.data, "close")?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "historical_volatility_percentile",
+        output_id,
+        req.combos,
+        data.len(),
+        |params| {
+            let length = get_usize_param("historical_volatility_percentile", params, "length", 21)?;
+            let annual_length = get_usize_param(
+                "historical_volatility_percentile",
+                params,
+                "annual_length",
+                252,
+            )?;
+            let input = HistoricalVolatilityPercentileInput::from_slice(
+                data,
+                HistoricalVolatilityPercentileParams {
+                    length: Some(length),
+                    annual_length: Some(annual_length),
+                },
+            );
+            let out =
+                historical_volatility_percentile_with_kernel(&input, kernel).map_err(|e| {
+                    IndicatorDispatchError::ComputeFailed {
+                        indicator: "historical_volatility_percentile".to_string(),
+                        details: e.to_string(),
+                    }
+                })?;
+            if output_id.eq_ignore_ascii_case("hvp") || output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.hvp);
+            }
+            if output_id.eq_ignore_ascii_case("hvp_sma") {
+                return Ok(out.hvp_sma);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "historical_volatility_percentile".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_volatility_ratio_adaptive_rsx_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let data = extract_slice_input("volatility_ratio_adaptive_rsx", req.data, "close")?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "volatility_ratio_adaptive_rsx",
+        output_id,
+        req.combos,
+        data.len(),
+        |params| {
+            let period = get_usize_param("volatility_ratio_adaptive_rsx", params, "period", 14)?;
+            let speed = get_f64_param_with_aliases(
+                "volatility_ratio_adaptive_rsx",
+                params,
+                &["speed", "spd"],
+                0.5,
+            )?;
+            let input = VolatilityRatioAdaptiveRsxInput::from_slice(
+                data,
+                VolatilityRatioAdaptiveRsxParams {
+                    period: Some(period),
+                    speed: Some(speed),
+                },
+            );
+            let out = volatility_ratio_adaptive_rsx_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "volatility_ratio_adaptive_rsx".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("line") || output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.line);
+            }
+            if output_id.eq_ignore_ascii_case("signal") {
+                return Ok(out.signal);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "volatility_ratio_adaptive_rsx".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_on_balance_volume_oscillator_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let (source, volume) =
+        extract_close_volume_input("on_balance_volume_oscillator", req.data, "close")?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "on_balance_volume_oscillator",
+        output_id,
+        req.combos,
+        source.len(),
+        |params| {
+            let obv_length =
+                get_usize_param("on_balance_volume_oscillator", params, "obv_length", 20)?;
+            let ema_length =
+                get_usize_param("on_balance_volume_oscillator", params, "ema_length", 9)?;
+            let input = OnBalanceVolumeOscillatorInput::from_slices(
+                source,
+                volume,
+                OnBalanceVolumeOscillatorParams {
+                    obv_length: Some(obv_length),
+                    ema_length: Some(ema_length),
+                },
+            );
+            let out = on_balance_volume_oscillator_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "on_balance_volume_oscillator".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("line") || output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.line);
+            }
+            if output_id.eq_ignore_ascii_case("signal") {
+                return Ok(out.signal);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "on_balance_volume_oscillator".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_parkinson_volatility_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let (high, low) = extract_high_low_input("parkinson_volatility", req.data)?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "parkinson_volatility",
+        output_id,
+        req.combos,
+        high.len(),
+        |params| {
+            let period = get_usize_param("parkinson_volatility", params, "period", 8)?;
+            let input = ParkinsonVolatilityInput::from_slices(
+                high,
+                low,
+                ParkinsonVolatilityParams {
+                    period: Some(period),
+                },
+            );
+            let out = parkinson_volatility_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "parkinson_volatility".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("volatility")
+                || output_id.eq_ignore_ascii_case("value")
+            {
+                return Ok(out.volatility);
+            }
+            if output_id.eq_ignore_ascii_case("variance") {
+                return Ok(out.variance);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "parkinson_volatility".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_pretty_good_oscillator_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let (high, low, close, source) = match req.data {
+        IndicatorDataRef::Candles { candles, source } => (
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
+            source_type(candles, source.unwrap_or("close")),
+        ),
+        IndicatorDataRef::Ohlc {
+            open,
+            high,
+            low,
+            close,
+        } => {
+            ensure_same_len_4(
+                "pretty_good_oscillator",
+                open.len(),
+                high.len(),
+                low.len(),
+                close.len(),
+            )?;
+            (high, low, close, close)
+        }
+        IndicatorDataRef::Ohlcv {
+            open,
+            high,
+            low,
+            close,
+            volume,
+        } => {
+            ensure_same_len_5(
+                "pretty_good_oscillator",
+                open.len(),
+                high.len(),
+                low.len(),
+                close.len(),
+                volume.len(),
+            )?;
+            (high, low, close, close)
+        }
+        _ => {
+            return Err(IndicatorDispatchError::MissingRequiredInput {
+                indicator: "pretty_good_oscillator".to_string(),
+                input: IndicatorInputKind::Candles,
+            });
+        }
+    };
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "pretty_good_oscillator",
+        output_id,
+        req.combos,
+        source.len(),
+        |params| {
+            let length = get_usize_param("pretty_good_oscillator", params, "length", 14)?;
+            let input = PrettyGoodOscillatorInput::from_slices(
+                high,
+                low,
+                close,
+                source,
+                PrettyGoodOscillatorParams {
+                    length: Some(length),
+                },
+            );
+            let out = pretty_good_oscillator_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "pretty_good_oscillator".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.values);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "pretty_good_oscillator".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_psychological_line_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let data = extract_slice_input("psychological_line", req.data, "close")?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "psychological_line",
+        output_id,
+        req.combos,
+        data.len(),
+        |params| {
+            let length = get_usize_param("psychological_line", params, "length", 20)?;
+            let input = PsychologicalLineInput::from_slice(
+                data,
+                PsychologicalLineParams {
+                    length: Some(length),
+                },
+            );
+            let out = psychological_line_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "psychological_line".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.values);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "psychological_line".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_rank_correlation_index_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let data = extract_slice_input("rank_correlation_index", req.data, "close")?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "rank_correlation_index",
+        output_id,
+        req.combos,
+        data.len(),
+        |params| {
+            let length = get_usize_param("rank_correlation_index", params, "length", 12)?;
+            let input = RankCorrelationIndexInput::from_slice(
+                data,
+                RankCorrelationIndexParams {
+                    length: Some(length),
+                },
+            );
+            let out = rank_correlation_index_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "rank_correlation_index".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.values);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "rank_correlation_index".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_trend_direction_force_index_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let data = extract_slice_input("trend_direction_force_index", req.data, "close")?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "trend_direction_force_index",
+        output_id,
+        req.combos,
+        data.len(),
+        |params| {
+            let length = get_usize_param("trend_direction_force_index", params, "length", 10)?;
+            let input = TrendDirectionForceIndexInput::from_slice(
+                data,
+                TrendDirectionForceIndexParams {
+                    length: Some(length),
+                },
+            );
+            let out = trend_direction_force_index_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "trend_direction_force_index".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("value") || output_id.eq_ignore_ascii_case("tdfi") {
+                return Ok(out.values);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "trend_direction_force_index".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_linear_regression_intensity_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let data = extract_slice_input("linear_regression_intensity", req.data, "close")?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "linear_regression_intensity",
+        output_id,
+        req.combos,
+        data.len(),
+        |params| {
+            let lookback_period =
+                get_usize_param("linear_regression_intensity", params, "lookback_period", 12)?;
+            let range_tolerance = get_f64_param(
+                "linear_regression_intensity",
+                params,
+                "range_tolerance",
+                90.0,
+            )?;
+            let linreg_length =
+                get_usize_param("linear_regression_intensity", params, "linreg_length", 90)?;
+            let input = LinearRegressionIntensityInput::from_slice(
+                data,
+                LinearRegressionIntensityParams {
+                    lookback_period: Some(lookback_period),
+                    range_tolerance: Some(range_tolerance),
+                    linreg_length: Some(linreg_length),
+                },
+            );
+            let out = linear_regression_intensity_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "linear_regression_intensity".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("value")
+                || output_id.eq_ignore_ascii_case("intensity")
+                || output_id.eq_ignore_ascii_case("linear_regression_intensity")
+            {
+                return Ok(out.values);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "linear_regression_intensity".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_trend_follower_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let (_open, high, low, close, volume) = extract_ohlcv_full_input("trend_follower", req.data)?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "trend_follower",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let matype = get_enum_param("trend_follower", params, "matype", "ema")?;
+            let trend_period = get_usize_param("trend_follower", params, "trend_period", 20)?;
+            let ma_period = get_usize_param("trend_follower", params, "ma_period", 20)?;
+            let channel_rate_percent =
+                get_f64_param("trend_follower", params, "channel_rate_percent", 1.0)?;
+            let use_linear_regression =
+                get_bool_param("trend_follower", params, "use_linear_regression", true)?;
+            let linear_regression_period =
+                get_usize_param("trend_follower", params, "linear_regression_period", 5)?;
+            let input = TrendFollowerInput::from_slices(
+                high,
+                low,
+                close,
+                volume,
+                TrendFollowerParams {
+                    matype: Some(matype),
+                    trend_period: Some(trend_period),
+                    ma_period: Some(ma_period),
+                    channel_rate_percent: Some(channel_rate_percent),
+                    use_linear_regression: Some(use_linear_regression),
+                    linear_regression_period: Some(linear_regression_period),
+                },
+            );
+            let out = trend_follower_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "trend_follower".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("value")
+                || output_id.eq_ignore_ascii_case("trend")
+                || output_id.eq_ignore_ascii_case("trend_follower")
+            {
+                return Ok(out.values);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "trend_follower".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_keltner_channel_width_oscillator_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let (high, low, close, source) = match req.data {
+        IndicatorDataRef::Candles { candles, source } => (
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
+            source_type(candles, source.unwrap_or("close")),
+        ),
+        IndicatorDataRef::Ohlc {
+            open,
+            high,
+            low,
+            close,
+        } => {
+            ensure_same_len_4(
+                "keltner_channel_width_oscillator",
+                open.len(),
+                high.len(),
+                low.len(),
+                close.len(),
+            )?;
+            (high, low, close, close)
+        }
+        IndicatorDataRef::Ohlcv {
+            open,
+            high,
+            low,
+            close,
+            volume,
+        } => {
+            ensure_same_len_5(
+                "keltner_channel_width_oscillator",
+                open.len(),
+                high.len(),
+                low.len(),
+                close.len(),
+                volume.len(),
+            )?;
+            (high, low, close, close)
+        }
+        _ => {
+            return Err(IndicatorDispatchError::MissingRequiredInput {
+                indicator: "keltner_channel_width_oscillator".to_string(),
+                input: IndicatorInputKind::Candles,
+            });
+        }
+    };
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "keltner_channel_width_oscillator",
+        output_id,
+        req.combos,
+        source.len(),
+        |params| {
+            let length = get_usize_param("keltner_channel_width_oscillator", params, "length", 20)?;
+            let multiplier = get_f64_param(
+                "keltner_channel_width_oscillator",
+                params,
+                "multiplier",
+                2.0,
+            )?;
+            let use_exponential = get_bool_param(
+                "keltner_channel_width_oscillator",
+                params,
+                "use_exponential",
+                true,
+            )?;
+            let bands_style = get_enum_param(
+                "keltner_channel_width_oscillator",
+                params,
+                "bands_style",
+                "Average True Range",
+            )?;
+            let atr_length =
+                get_usize_param("keltner_channel_width_oscillator", params, "atr_length", 10)?;
+            let input = KeltnerChannelWidthOscillatorInput::from_slices(
+                high,
+                low,
+                close,
+                source,
+                KeltnerChannelWidthOscillatorParams {
+                    length: Some(length),
+                    multiplier: Some(multiplier),
+                    use_exponential: Some(use_exponential),
+                    bands_style: Some(bands_style),
+                    atr_length: Some(atr_length),
+                },
+            );
+            let out =
+                keltner_channel_width_oscillator_with_kernel(&input, kernel).map_err(|e| {
+                    IndicatorDispatchError::ComputeFailed {
+                        indicator: "keltner_channel_width_oscillator".to_string(),
+                        details: e.to_string(),
+                    }
+                })?;
+            if output_id.eq_ignore_ascii_case("kbw") {
+                return Ok(out.kbw);
+            }
+            if output_id.eq_ignore_ascii_case("kbw_sma")
+                || output_id.eq_ignore_ascii_case("signal")
+                || output_id.eq_ignore_ascii_case("width_sma")
+            {
+                return Ok(out.kbw_sma);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "keltner_channel_width_oscillator".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_market_meanness_index_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let (open, _high, _low, close) = extract_ohlc_full_input("market_meanness_index", req.data)?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "market_meanness_index",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let length = get_usize_param("market_meanness_index", params, "length", 300)?;
+            let source_mode =
+                get_enum_param("market_meanness_index", params, "source_mode", "Price")?;
+            let input = MarketMeannessIndexInput::from_slices(
+                open,
+                close,
+                MarketMeannessIndexParams {
+                    length: Some(length),
+                    source_mode: Some(source_mode),
+                },
+            );
+            let out = market_meanness_index_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "market_meanness_index".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("mmi") || output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.mmi);
+            }
+            if output_id.eq_ignore_ascii_case("mmi_smoothed")
+                || output_id.eq_ignore_ascii_case("smoothed")
+                || output_id.eq_ignore_ascii_case("signal")
+            {
+                return Ok(out.mmi_smoothed);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "market_meanness_index".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_ehlers_detrending_filter_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let data = extract_slice_input("ehlers_detrending_filter", req.data, "hlcc4")?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "ehlers_detrending_filter",
+        output_id,
+        req.combos,
+        data.len(),
+        |params| {
+            let length = get_usize_param("ehlers_detrending_filter", params, "length", 10)?;
+            let input = EhlersDetrendingFilterInput::from_slice(
+                data,
+                EhlersDetrendingFilterParams {
+                    length: Some(length),
+                },
+            );
+            let out = ehlers_detrending_filter_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "ehlers_detrending_filter".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("edf")
+                || output_id.eq_ignore_ascii_case("value")
+                || output_id.eq_ignore_ascii_case("filter")
+            {
+                return Ok(out.edf);
+            }
+            if output_id.eq_ignore_ascii_case("signal") || output_id.eq_ignore_ascii_case("sig") {
+                return Ok(out.signal);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "ehlers_detrending_filter".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_momentum_ratio_oscillator_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let data = extract_slice_input("momentum_ratio_oscillator", req.data, "close")?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "momentum_ratio_oscillator",
+        output_id,
+        req.combos,
+        data.len(),
+        |params| {
+            let period = get_usize_param("momentum_ratio_oscillator", params, "period", 50)?;
+            let input = MomentumRatioOscillatorInput::from_slice(
+                data,
+                MomentumRatioOscillatorParams {
+                    period: Some(period),
+                },
+            );
+            let out = momentum_ratio_oscillator_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "momentum_ratio_oscillator".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("line")
+                || output_id.eq_ignore_ascii_case("value")
+                || output_id.eq_ignore_ascii_case("oscillator")
+            {
+                return Ok(out.line);
+            }
+            if output_id.eq_ignore_ascii_case("signal") {
+                return Ok(out.signal);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "momentum_ratio_oscillator".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_hypertrend_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let (high, low, source) = match req.data {
+        IndicatorDataRef::Candles { candles, source } => (
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            source_type(candles, source.unwrap_or("close")),
+        ),
+        IndicatorDataRef::Ohlc {
+            open,
+            high,
+            low,
+            close,
+        } => {
+            ensure_same_len_4("hypertrend", open.len(), high.len(), low.len(), close.len())?;
+            (high, low, close)
+        }
+        IndicatorDataRef::Ohlcv {
+            open,
+            high,
+            low,
+            close,
+            volume,
+        } => {
+            ensure_same_len_5(
+                "hypertrend",
+                open.len(),
+                high.len(),
+                low.len(),
+                close.len(),
+                volume.len(),
+            )?;
+            (high, low, close)
+        }
+        _ => {
+            return Err(IndicatorDispatchError::MissingRequiredInput {
+                indicator: "hypertrend".to_string(),
+                input: IndicatorInputKind::Ohlc,
+            });
+        }
+    };
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "hypertrend",
+        output_id,
+        req.combos,
+        source.len(),
+        |params| {
+            let factor = get_f64_param_with_aliases(
+                "hypertrend",
+                params,
+                &["factor", "mult", "multiplicative_factor"],
+                5.0,
+            )?;
+            let slope = get_f64_param("hypertrend", params, "slope", 14.0)?;
+            let width_percent = get_f64_param_with_aliases(
+                "hypertrend",
+                params,
+                &["width_percent", "width"],
+                80.0,
+            )?;
+            let input = HyperTrendInput::from_slices(
+                high,
+                low,
+                source,
+                HyperTrendParams {
+                    factor: Some(factor),
+                    slope: Some(slope),
+                    width_percent: Some(width_percent),
+                },
+            );
+            let out = hypertrend_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "hypertrend".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("average")
+                || output_id.eq_ignore_ascii_case("avg")
+                || output_id.eq_ignore_ascii_case("value")
+            {
+                return Ok(out.average);
+            }
+            if output_id.eq_ignore_ascii_case("upper") {
+                return Ok(out.upper);
+            }
+            if output_id.eq_ignore_ascii_case("lower") {
+                return Ok(out.lower);
+            }
+            if output_id.eq_ignore_ascii_case("trend") {
+                return Ok(out.trend);
+            }
+            if output_id.eq_ignore_ascii_case("changed") || output_id.eq_ignore_ascii_case("change")
+            {
+                return Ok(out.changed);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "hypertrend".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_logarithmic_moving_average_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let (data, volume) = match req.data {
+        IndicatorDataRef::Slice { values } => (values, None),
+        IndicatorDataRef::Candles { candles, source } => (
+            source_type(candles, source.unwrap_or("close")),
+            Some(candles.volume.as_slice()),
+        ),
+        IndicatorDataRef::CloseVolume { close, volume } => {
+            ensure_same_len_2("logarithmic_moving_average", close.len(), volume.len())?;
+            (close, Some(volume))
+        }
+        IndicatorDataRef::Ohlc {
+            open,
+            high,
+            low,
+            close,
+        } => {
+            ensure_same_len_4(
+                "logarithmic_moving_average",
+                open.len(),
+                high.len(),
+                low.len(),
+                close.len(),
+            )?;
+            (close, None)
+        }
+        IndicatorDataRef::Ohlcv {
+            open,
+            high,
+            low,
+            close,
+            volume,
+        } => {
+            ensure_same_len_5(
+                "logarithmic_moving_average",
+                open.len(),
+                high.len(),
+                low.len(),
+                close.len(),
+                volume.len(),
+            )?;
+            (close, Some(volume))
+        }
+        _ => {
+            return Err(IndicatorDispatchError::MissingRequiredInput {
+                indicator: "logarithmic_moving_average".to_string(),
+                input: IndicatorInputKind::CloseVolume,
+            });
+        }
+    };
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "logarithmic_moving_average",
+        output_id,
+        req.combos,
+        data.len(),
+        |params| {
+            let period = get_usize_param("logarithmic_moving_average", params, "period", 100)?;
+            let steepness = get_f64_param("logarithmic_moving_average", params, "steepness", 2.5)?;
+            let ma_type = get_enum_param("logarithmic_moving_average", params, "ma_type", "ema")?;
+            let smooth = get_usize_param("logarithmic_moving_average", params, "smooth", 10)?;
+            let momentum_weight =
+                get_f64_param("logarithmic_moving_average", params, "momentum_weight", 1.2)?;
+            let long_threshold =
+                get_f64_param("logarithmic_moving_average", params, "long_threshold", 0.5)?;
+            let short_threshold = get_f64_param(
+                "logarithmic_moving_average",
+                params,
+                "short_threshold",
+                -0.5,
+            )?;
+            let input = match volume {
+                Some(v) => LogarithmicMovingAverageInput::from_slice_with_volume(
+                    data,
+                    v,
+                    LogarithmicMovingAverageParams {
+                        period: Some(period),
+                        steepness: Some(steepness),
+                        ma_type: Some(ma_type),
+                        smooth: Some(smooth),
+                        momentum_weight: Some(momentum_weight),
+                        long_threshold: Some(long_threshold),
+                        short_threshold: Some(short_threshold),
+                    },
+                ),
+                None => LogarithmicMovingAverageInput::from_slice(
+                    data,
+                    LogarithmicMovingAverageParams {
+                        period: Some(period),
+                        steepness: Some(steepness),
+                        ma_type: Some(ma_type),
+                        smooth: Some(smooth),
+                        momentum_weight: Some(momentum_weight),
+                        long_threshold: Some(long_threshold),
+                        short_threshold: Some(short_threshold),
+                    },
+                ),
+            };
+            let out = logarithmic_moving_average_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "logarithmic_moving_average".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("lma") || output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.lma);
+            }
+            if output_id.eq_ignore_ascii_case("signal") {
+                return Ok(out.signal);
+            }
+            if output_id.eq_ignore_ascii_case("position") || output_id.eq_ignore_ascii_case("trend")
+            {
+                return Ok(out.position);
+            }
+            if output_id.eq_ignore_ascii_case("momentum_confirmed")
+                || output_id.eq_ignore_ascii_case("confirmed")
+            {
+                return Ok(out.momentum_confirmed);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "logarithmic_moving_average".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_adaptive_schaff_trend_cycle_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let (high, low, close) = match req.data {
+        IndicatorDataRef::Candles { candles, .. } => (
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
+        ),
+        IndicatorDataRef::Ohlc {
+            open,
+            high,
+            low,
+            close,
+        } => {
+            ensure_same_len_4(
+                "adaptive_schaff_trend_cycle",
+                open.len(),
+                high.len(),
+                low.len(),
+                close.len(),
+            )?;
+            (high, low, close)
+        }
+        IndicatorDataRef::Ohlcv {
+            open,
+            high,
+            low,
+            close,
+            volume,
+        } => {
+            ensure_same_len_5(
+                "adaptive_schaff_trend_cycle",
+                open.len(),
+                high.len(),
+                low.len(),
+                close.len(),
+                volume.len(),
+            )?;
+            (high, low, close)
+        }
+        _ => {
+            return Err(IndicatorDispatchError::MissingRequiredInput {
+                indicator: "adaptive_schaff_trend_cycle".to_string(),
+                input: IndicatorInputKind::Ohlc,
+            });
+        }
+    };
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "adaptive_schaff_trend_cycle",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let adaptive_length = get_usize_param_with_aliases(
+                "adaptive_schaff_trend_cycle",
+                params,
+                &["adaptive_length", "length", "adaptive_logic_length"],
+                55,
+            )?;
+            let stc_length = get_usize_param_with_aliases(
+                "adaptive_schaff_trend_cycle",
+                params,
+                &["stc_length", "length_input"],
+                12,
+            )?;
+            let smoothing_factor = get_f64_param_with_aliases(
+                "adaptive_schaff_trend_cycle",
+                params,
+                &["smoothing_factor", "smoothing", "sensitivity"],
+                0.45,
+            )?;
+            let fast_length = get_usize_param_with_aliases(
+                "adaptive_schaff_trend_cycle",
+                params,
+                &["fast_length", "fast"],
+                26,
+            )?;
+            let slow_length = get_usize_param_with_aliases(
+                "adaptive_schaff_trend_cycle",
+                params,
+                &["slow_length", "slow"],
+                50,
+            )?;
+            let input = AdaptiveSchaffTrendCycleInput::from_slices(
+                high,
+                low,
+                close,
+                AdaptiveSchaffTrendCycleParams {
+                    adaptive_length: Some(adaptive_length),
+                    stc_length: Some(stc_length),
+                    smoothing_factor: Some(smoothing_factor),
+                    fast_length: Some(fast_length),
+                    slow_length: Some(slow_length),
+                },
+            );
+            let out = adaptive_schaff_trend_cycle_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "adaptive_schaff_trend_cycle".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("stc") || output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.stc);
+            }
+            if output_id.eq_ignore_ascii_case("histogram")
+                || output_id.eq_ignore_ascii_case("hist")
+                || output_id.eq_ignore_ascii_case("macd")
+            {
+                return Ok(out.histogram);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "adaptive_schaff_trend_cycle".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_smoothed_gaussian_trend_filter_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let (high, low, close) = match req.data {
+        IndicatorDataRef::Candles { candles, .. } => (
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
+        ),
+        IndicatorDataRef::Ohlc {
+            open,
+            high,
+            low,
+            close,
+        } => {
+            ensure_same_len_4(
+                "smoothed_gaussian_trend_filter",
+                open.len(),
+                high.len(),
+                low.len(),
+                close.len(),
+            )?;
+            (high, low, close)
+        }
+        IndicatorDataRef::Ohlcv {
+            open,
+            high,
+            low,
+            close,
+            volume,
+        } => {
+            ensure_same_len_5(
+                "smoothed_gaussian_trend_filter",
+                open.len(),
+                high.len(),
+                low.len(),
+                close.len(),
+                volume.len(),
+            )?;
+            (high, low, close)
+        }
+        _ => {
+            return Err(IndicatorDispatchError::MissingRequiredInput {
+                indicator: "smoothed_gaussian_trend_filter".to_string(),
+                input: IndicatorInputKind::Ohlc,
+            });
+        }
+    };
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "smoothed_gaussian_trend_filter",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let gaussian_length = get_usize_param_with_aliases(
+                "smoothed_gaussian_trend_filter",
+                params,
+                &["gaussian_length", "period", "length"],
+                15,
+            )?;
+            let poles = get_usize_param("smoothed_gaussian_trend_filter", params, "poles", 3)?;
+            let smoothing_length = get_usize_param_with_aliases(
+                "smoothed_gaussian_trend_filter",
+                params,
+                &[
+                    "smoothing_length",
+                    "linreg_length",
+                    "smoothing",
+                    "linreglen",
+                ],
+                22,
+            )?;
+            let linreg_offset = get_usize_param_with_aliases(
+                "smoothed_gaussian_trend_filter",
+                params,
+                &[
+                    "linreg_offset",
+                    "flatten_multiplier",
+                    "offset",
+                    "linregoffset",
+                ],
+                7,
+            )?;
+            let input = SmoothedGaussianTrendFilterInput::from_slices(
+                high,
+                low,
+                close,
+                SmoothedGaussianTrendFilterParams {
+                    gaussian_length: Some(gaussian_length),
+                    poles: Some(poles),
+                    smoothing_length: Some(smoothing_length),
+                    linreg_offset: Some(linreg_offset),
+                },
+            );
+            let out = smoothed_gaussian_trend_filter_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "smoothed_gaussian_trend_filter".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("filter") || output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.filter);
+            }
+            if output_id.eq_ignore_ascii_case("supertrend") || output_id.eq_ignore_ascii_case("st")
+            {
+                return Ok(out.supertrend);
+            }
+            if output_id.eq_ignore_ascii_case("trend") {
+                return Ok(out.trend);
+            }
+            if output_id.eq_ignore_ascii_case("ranging")
+                || output_id.eq_ignore_ascii_case("range")
+                || output_id.eq_ignore_ascii_case("state")
+            {
+                return Ok(out.ranging);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "smoothed_gaussian_trend_filter".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_ict_propulsion_block_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let (open, high, low, close) = match req.data {
+        IndicatorDataRef::Candles { candles, .. } => (
+            candles.open.as_slice(),
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
+        ),
+        IndicatorDataRef::Ohlc {
+            open,
+            high,
+            low,
+            close,
+        } => {
+            ensure_same_len_4(
+                "ict_propulsion_block",
+                open.len(),
+                high.len(),
+                low.len(),
+                close.len(),
+            )?;
+            (open, high, low, close)
+        }
+        IndicatorDataRef::Ohlcv {
+            open,
+            high,
+            low,
+            close,
+            volume,
+        } => {
+            ensure_same_len_5(
+                "ict_propulsion_block",
+                open.len(),
+                high.len(),
+                low.len(),
+                close.len(),
+                volume.len(),
+            )?;
+            (open, high, low, close)
+        }
+        _ => {
+            return Err(IndicatorDispatchError::MissingRequiredInput {
+                indicator: "ict_propulsion_block".to_string(),
+                input: IndicatorInputKind::Ohlc,
+            });
+        }
+    };
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "ict_propulsion_block",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let swing_length = get_usize_param_with_aliases(
+                "ict_propulsion_block",
+                params,
+                &["swing_length", "ob_length", "swing_detection_length"],
+                3,
+            )?;
+            let mitigation_price =
+                get_enum_param("ict_propulsion_block", params, "mitigation_price", "close")?;
+            let input = IctPropulsionBlockInput::from_slices(
+            open,
+            high,
+            low,
+            close,
+            IctPropulsionBlockParams {
+                swing_length: Some(swing_length),
+                mitigation_price: Some(crate::indicators::ict_propulsion_block::IctPropulsionBlockMitigationPrice::Close),
+            },
+        );
+            let mut input = input;
+            input.params.mitigation_price = Some(
+                crate::indicators::ict_propulsion_block::IctPropulsionBlockMitigationPrice::Close,
+            );
+            if mitigation_price.eq_ignore_ascii_case("wick") {
+                input.params.mitigation_price = Some(
+                crate::indicators::ict_propulsion_block::IctPropulsionBlockMitigationPrice::Wick,
+            );
+            }
+            let out = ict_propulsion_block_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "ict_propulsion_block".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("bullish_high") {
+                return Ok(out.bullish_high);
+            }
+            if output_id.eq_ignore_ascii_case("bullish_low") {
+                return Ok(out.bullish_low);
+            }
+            if output_id.eq_ignore_ascii_case("bullish_kind") {
+                return Ok(out.bullish_kind);
+            }
+            if output_id.eq_ignore_ascii_case("bullish_active") {
+                return Ok(out.bullish_active);
+            }
+            if output_id.eq_ignore_ascii_case("bullish_mitigated") {
+                return Ok(out.bullish_mitigated);
+            }
+            if output_id.eq_ignore_ascii_case("bullish_new") {
+                return Ok(out.bullish_new);
+            }
+            if output_id.eq_ignore_ascii_case("bearish_high") {
+                return Ok(out.bearish_high);
+            }
+            if output_id.eq_ignore_ascii_case("bearish_low") {
+                return Ok(out.bearish_low);
+            }
+            if output_id.eq_ignore_ascii_case("bearish_kind") {
+                return Ok(out.bearish_kind);
+            }
+            if output_id.eq_ignore_ascii_case("bearish_active") {
+                return Ok(out.bearish_active);
+            }
+            if output_id.eq_ignore_ascii_case("bearish_mitigated") {
+                return Ok(out.bearish_mitigated);
+            }
+            if output_id.eq_ignore_ascii_case("bearish_new") {
+                return Ok(out.bearish_new);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "ict_propulsion_block".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_supertrend_oscillator_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let (high, low, source) = match req.data {
+        IndicatorDataRef::Candles { candles, source } => (
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            source_type(candles, source.unwrap_or("close")),
+        ),
+        IndicatorDataRef::Ohlc {
+            open,
+            high,
+            low,
+            close,
+        } => {
+            ensure_same_len_4(
+                "supertrend_oscillator",
+                open.len(),
+                high.len(),
+                low.len(),
+                close.len(),
+            )?;
+            (high, low, close)
+        }
+        IndicatorDataRef::Ohlcv {
+            open,
+            high,
+            low,
+            close,
+            volume,
+        } => {
+            ensure_same_len_5(
+                "supertrend_oscillator",
+                open.len(),
+                high.len(),
+                low.len(),
+                close.len(),
+                volume.len(),
+            )?;
+            (high, low, close)
+        }
+        _ => {
+            return Err(IndicatorDispatchError::MissingRequiredInput {
+                indicator: "supertrend_oscillator".to_string(),
+                input: IndicatorInputKind::Ohlc,
+            });
+        }
+    };
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "supertrend_oscillator",
+        output_id,
+        req.combos,
+        source.len(),
+        |params| {
+            let length = get_usize_param("supertrend_oscillator", params, "length", 10)?;
+            let mult = get_f64_param("supertrend_oscillator", params, "mult", 2.0)?;
+            let smooth = get_usize_param("supertrend_oscillator", params, "smooth", 72)?;
+            let input = SuperTrendOscillatorInput::from_slices(
+                high,
+                low,
+                source,
+                SuperTrendOscillatorParams {
+                    length: Some(length),
+                    mult: Some(mult),
+                    smooth: Some(smooth),
+                },
+            );
+            let out = supertrend_oscillator_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "supertrend_oscillator".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("oscillator")
+                || output_id.eq_ignore_ascii_case("osc")
+                || output_id.eq_ignore_ascii_case("value")
+            {
+                return Ok(out.oscillator);
+            }
+            if output_id.eq_ignore_ascii_case("signal") {
+                return Ok(out.signal);
+            }
+            if output_id.eq_ignore_ascii_case("histogram") || output_id.eq_ignore_ascii_case("hist")
+            {
+                return Ok(out.histogram);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "supertrend_oscillator".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_leavitt_convolution_acceleration_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let data = extract_slice_input("leavitt_convolution_acceleration", req.data, "hlcc4")?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "leavitt_convolution_acceleration",
+        output_id,
+        req.combos,
+        data.len(),
+        |params| {
+            let length = get_usize_param("leavitt_convolution_acceleration", params, "length", 70)?;
+            let norm_length = get_usize_param(
+                "leavitt_convolution_acceleration",
+                params,
+                "norm_length",
+                150,
+            )?;
+            let use_norm_hyperbolic = get_bool_param(
+                "leavitt_convolution_acceleration",
+                params,
+                "use_norm_hyperbolic",
+                true,
+            )?;
+            let input = LeavittConvolutionAccelerationInput::from_slice(
+                data,
+                LeavittConvolutionAccelerationParams {
+                    length: Some(length),
+                    norm_length: Some(norm_length),
+                    use_norm_hyperbolic: Some(use_norm_hyperbolic),
+                },
+            );
+            let out =
+                leavitt_convolution_acceleration_with_kernel(&input, kernel).map_err(|e| {
+                    IndicatorDispatchError::ComputeFailed {
+                        indicator: "leavitt_convolution_acceleration".to_string(),
+                        details: e.to_string(),
+                    }
+                })?;
+            if output_id.eq_ignore_ascii_case("conv_acceleration")
+                || output_id.eq_ignore_ascii_case("value")
+                || output_id.eq_ignore_ascii_case("conv_accel")
+                || output_id.eq_ignore_ascii_case("histogram")
+            {
+                return Ok(out.conv_acceleration);
+            }
+            if output_id.eq_ignore_ascii_case("signal") || output_id.eq_ignore_ascii_case("sig") {
+                return Ok(out.signal);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "leavitt_convolution_acceleration".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_price_density_market_noise_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let (_open, high, low, close) =
+        extract_ohlc_full_input("price_density_market_noise", req.data)?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "price_density_market_noise",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let length = get_usize_param("price_density_market_noise", params, "length", 14)?;
+            let eval_period =
+                get_usize_param("price_density_market_noise", params, "eval_period", 200)?;
+            let input = PriceDensityMarketNoiseInput::from_slices(
+                high,
+                low,
+                close,
+                PriceDensityMarketNoiseParams {
+                    length: Some(length),
+                    eval_period: Some(eval_period),
+                },
+            );
+            let out = price_density_market_noise_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "price_density_market_noise".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("price_density")
+                || output_id.eq_ignore_ascii_case("value")
+                || output_id.eq_ignore_ascii_case("pd")
+            {
+                return Ok(out.price_density);
+            }
+            if output_id.eq_ignore_ascii_case("price_density_percent")
+                || output_id.eq_ignore_ascii_case("percent")
+                || output_id.eq_ignore_ascii_case("relative")
+                || output_id.eq_ignore_ascii_case("signal")
+            {
+                return Ok(out.price_density_percent);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "price_density_market_noise".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_impulse_macd_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let (_open, high, low, close) = extract_ohlc_full_input("impulse_macd", req.data)?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "impulse_macd",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let length_ma = get_usize_param("impulse_macd", params, "length_ma", 34)?;
+            let length_signal = get_usize_param("impulse_macd", params, "length_signal", 9)?;
+            let input = ImpulseMacdInput::from_slices(
+                high,
+                low,
+                close,
+                ImpulseMacdParams {
+                    length_ma: Some(length_ma),
+                    length_signal: Some(length_signal),
+                },
+            );
+            let out = impulse_macd_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "impulse_macd".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("impulse_macd")
+                || output_id.eq_ignore_ascii_case("value")
+                || output_id.eq_ignore_ascii_case("md")
+            {
+                return Ok(out.impulse_macd);
+            }
+            if output_id.eq_ignore_ascii_case("impulse_histo")
+                || output_id.eq_ignore_ascii_case("histogram")
+                || output_id.eq_ignore_ascii_case("hist")
+                || output_id.eq_ignore_ascii_case("sh")
+            {
+                return Ok(out.impulse_histo);
+            }
+            if output_id.eq_ignore_ascii_case("signal") || output_id.eq_ignore_ascii_case("sb") {
+                return Ok(out.signal);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "impulse_macd".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_insync_index_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let (_open, high, low, close, volume) = extract_ohlcv_full_input("insync_index", req.data)?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "insync_index",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let emo_divisor = get_usize_param("insync_index", params, "emo_divisor", 10000)?;
+            let emo_length = get_usize_param("insync_index", params, "emo_length", 14)?;
+            let fast_length = get_usize_param("insync_index", params, "fast_length", 12)?;
+            let slow_length = get_usize_param("insync_index", params, "slow_length", 26)?;
+            let mfi_length = get_usize_param("insync_index", params, "mfi_length", 20)?;
+            let bb_length = get_usize_param("insync_index", params, "bb_length", 20)?;
+            let bb_multiplier = get_f64_param("insync_index", params, "bb_multiplier", 2.0)?;
+            let cci_length = get_usize_param("insync_index", params, "cci_length", 14)?;
+            let dpo_length = get_usize_param("insync_index", params, "dpo_length", 18)?;
+            let roc_length = get_usize_param("insync_index", params, "roc_length", 10)?;
+            let rsi_length = get_usize_param("insync_index", params, "rsi_length", 14)?;
+            let stoch_length = get_usize_param("insync_index", params, "stoch_length", 14)?;
+            let stoch_d_length = get_usize_param("insync_index", params, "stoch_d_length", 3)?;
+            let stoch_k_length = get_usize_param("insync_index", params, "stoch_k_length", 1)?;
+            let sma_length = get_usize_param("insync_index", params, "sma_length", 10)?;
+            let input = InsyncIndexInput::from_slices(
+                high,
+                low,
+                close,
+                volume,
+                InsyncIndexParams {
+                    emo_divisor: Some(emo_divisor),
+                    emo_length: Some(emo_length),
+                    fast_length: Some(fast_length),
+                    slow_length: Some(slow_length),
+                    mfi_length: Some(mfi_length),
+                    bb_length: Some(bb_length),
+                    bb_multiplier: Some(bb_multiplier),
+                    cci_length: Some(cci_length),
+                    dpo_length: Some(dpo_length),
+                    roc_length: Some(roc_length),
+                    rsi_length: Some(rsi_length),
+                    stoch_length: Some(stoch_length),
+                    stoch_d_length: Some(stoch_d_length),
+                    stoch_k_length: Some(stoch_k_length),
+                    sma_length: Some(sma_length),
+                },
+            );
+            let out = insync_index_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "insync_index".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("value")
+                || output_id.eq_ignore_ascii_case("insync_index")
+                || output_id.eq_ignore_ascii_case("index")
+            {
+                return Ok(out.values);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "insync_index".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_trend_continuation_factor_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let data = extract_slice_input("trend_continuation_factor", req.data, "close")?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "trend_continuation_factor",
+        output_id,
+        req.combos,
+        data.len(),
+        |params| {
+            let length = get_usize_param("trend_continuation_factor", params, "length", 35)?;
+            let input = TrendContinuationFactorInput::from_slice(
+                data,
+                TrendContinuationFactorParams {
+                    length: Some(length),
+                },
+            );
+            let out = trend_continuation_factor_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "trend_continuation_factor".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("plus_tcf") || output_id.eq_ignore_ascii_case("plus")
+            {
+                return Ok(out.plus_tcf);
+            }
+            if output_id.eq_ignore_ascii_case("minus_tcf")
+                || output_id.eq_ignore_ascii_case("minus")
+            {
+                return Ok(out.minus_tcf);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "trend_continuation_factor".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_twiggs_money_flow_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let (high, low, close, volume) = extract_hlcv_input("twiggs_money_flow", req.data)?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "twiggs_money_flow",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let length = get_usize_param("twiggs_money_flow", params, "length", 21)?;
+            let smoothing_length =
+                get_usize_param("twiggs_money_flow", params, "smoothing_length", 14)?;
+            let ma_type = get_enum_param("twiggs_money_flow", params, "ma_type", "WMA")?;
+            let input = TwiggsMoneyFlowInput::from_slices(
+                high,
+                low,
+                close,
+                volume,
+                TwiggsMoneyFlowParams {
+                    length: Some(length),
+                    smoothing_length: Some(smoothing_length),
+                    ma_type: Some(ma_type.to_string()),
+                },
+            );
+            let out = twiggs_money_flow_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "twiggs_money_flow".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("tmf") || output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.tmf);
+            }
+            if output_id.eq_ignore_ascii_case("smoothed") {
+                return Ok(out.smoothed);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "twiggs_money_flow".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_volume_weighted_stochastic_rsi_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let (source, volume) =
+        extract_close_volume_input("volume_weighted_stochastic_rsi", req.data, "close")?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "volume_weighted_stochastic_rsi",
+        output_id,
+        req.combos,
+        source.len(),
+        |params| {
+            let rsi_length =
+                get_usize_param("volume_weighted_stochastic_rsi", params, "rsi_length", 14)?;
+            let stoch_length =
+                get_usize_param("volume_weighted_stochastic_rsi", params, "stoch_length", 14)?;
+            let k_length =
+                get_usize_param("volume_weighted_stochastic_rsi", params, "k_length", 3)?;
+            let d_length =
+                get_usize_param("volume_weighted_stochastic_rsi", params, "d_length", 3)?;
+            let ma_type =
+                get_enum_param("volume_weighted_stochastic_rsi", params, "ma_type", "WSMA")?;
+            let input = VolumeWeightedStochasticRsiInput::from_slices(
+                source,
+                volume,
+                VolumeWeightedStochasticRsiParams {
+                    rsi_length: Some(rsi_length),
+                    stoch_length: Some(stoch_length),
+                    k_length: Some(k_length),
+                    d_length: Some(d_length),
+                    ma_type: Some(ma_type.to_string()),
+                },
+            );
+            let out = volume_weighted_stochastic_rsi_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "volume_weighted_stochastic_rsi".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("k") || output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.k);
+            }
+            if output_id.eq_ignore_ascii_case("d") {
+                return Ok(out.d);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "volume_weighted_stochastic_rsi".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_stochastic_connors_rsi_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let source = extract_slice_input("stochastic_connors_rsi", req.data, "close")?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "stochastic_connors_rsi",
+        output_id,
+        req.combos,
+        source.len(),
+        |params| {
+            let stoch_length =
+                get_usize_param("stochastic_connors_rsi", params, "stoch_length", 3)?;
+            let smooth_k = get_usize_param("stochastic_connors_rsi", params, "smooth_k", 3)?;
+            let smooth_d = get_usize_param("stochastic_connors_rsi", params, "smooth_d", 3)?;
+            let rsi_length = get_usize_param("stochastic_connors_rsi", params, "rsi_length", 3)?;
+            let updown_length =
+                get_usize_param("stochastic_connors_rsi", params, "updown_length", 2)?;
+            let roc_length = get_usize_param("stochastic_connors_rsi", params, "roc_length", 100)?;
+            let input = StochasticConnorsRsiInput::from_slice(
+                source,
+                StochasticConnorsRsiParams {
+                    stoch_length: Some(stoch_length),
+                    smooth_k: Some(smooth_k),
+                    smooth_d: Some(smooth_d),
+                    rsi_length: Some(rsi_length),
+                    updown_length: Some(updown_length),
+                    roc_length: Some(roc_length),
+                },
+            );
+            let out = stochastic_connors_rsi_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "stochastic_connors_rsi".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("k") || output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.k);
+            }
+            if output_id.eq_ignore_ascii_case("d") {
+                return Ok(out.d);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "stochastic_connors_rsi".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
+fn compute_stochastic_adaptive_d_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let (high, low, close) = match req.data {
+        IndicatorDataRef::Candles { candles, source } => (
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            source_type(candles, source.unwrap_or("close")),
+        ),
+        IndicatorDataRef::Ohlc {
+            open,
+            high,
+            low,
+            close,
+        } => {
+            ensure_same_len_4(
+                "stochastic_adaptive_d",
+                open.len(),
+                high.len(),
+                low.len(),
+                close.len(),
+            )?;
+            (high, low, close)
+        }
+        IndicatorDataRef::Ohlcv {
+            open,
+            high,
+            low,
+            close,
+            volume,
+        } => {
+            ensure_same_len_5(
+                "stochastic_adaptive_d",
+                open.len(),
+                high.len(),
+                low.len(),
+                close.len(),
+                volume.len(),
+            )?;
+            (high, low, close)
+        }
+        _ => {
+            return Err(IndicatorDispatchError::MissingRequiredInput {
+                indicator: "stochastic_adaptive_d".to_string(),
+                input: IndicatorInputKind::Ohlc,
+            });
+        }
+    };
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "stochastic_adaptive_d",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let k_length = get_usize_param("stochastic_adaptive_d", params, "k_length", 20)?;
+            let d_smoothing = get_usize_param("stochastic_adaptive_d", params, "d_smoothing", 9)?;
+            let pre_smooth = get_usize_param("stochastic_adaptive_d", params, "pre_smooth", 20)?;
+            let attenuation = get_f64_param("stochastic_adaptive_d", params, "attenuation", 2.0)?;
+            let input = StochasticAdaptiveDInput::from_slices(
+                high,
+                low,
+                close,
+                StochasticAdaptiveDParams {
+                    k_length: Some(k_length),
+                    d_smoothing: Some(d_smoothing),
+                    pre_smooth: Some(pre_smooth),
+                    attenuation: Some(attenuation),
+                },
+            );
+            let out = stochastic_adaptive_d_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "stochastic_adaptive_d".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("standard_d")
+                || output_id.eq_ignore_ascii_case("stoch_d")
+                || output_id.eq_ignore_ascii_case("d")
+            {
+                return Ok(out.standard_d);
+            }
+            if output_id.eq_ignore_ascii_case("adaptive_d")
+                || output_id.eq_ignore_ascii_case("adaptive")
+                || output_id.eq_ignore_ascii_case("ama")
+                || output_id.eq_ignore_ascii_case("signal")
+            {
+                return Ok(out.adaptive_d);
+            }
+            if output_id.eq_ignore_ascii_case("difference")
+                || output_id.eq_ignore_ascii_case("diff")
+                || output_id.eq_ignore_ascii_case("difference_oscillator")
+                || output_id.eq_ignore_ascii_case("histogram")
+                || output_id.eq_ignore_ascii_case("hist")
+            {
+                return Ok(out.difference);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "stochastic_adaptive_d".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
 fn compute_acosc_batch(
     req: IndicatorBatchRequest<'_>,
     output_id: &str,
@@ -6556,6 +9017,10 @@ mod tests {
     };
     use crate::indicators::efi::{efi_with_kernel, EfiInput, EfiParams};
     use crate::indicators::fosc::{fosc_with_kernel, FoscInput, FoscParams};
+    use crate::indicators::historical_volatility_percentile::{
+        historical_volatility_percentile_with_kernel, HistoricalVolatilityPercentileInput,
+        HistoricalVolatilityPercentileParams,
+    };
     use crate::indicators::ift_rsi::{ift_rsi_with_kernel, IftRsiInput, IftRsiParams};
     use crate::indicators::kvo::{kvo_with_kernel, KvoInput, KvoParams};
     use crate::indicators::linearreg_angle::{
@@ -6589,6 +9054,13 @@ mod tests {
         trix_batch_with_kernel, trix_with_kernel, TrixBatchRange, TrixInput, TrixParams,
     };
     use crate::indicators::ttm_trend::{ttm_trend_with_kernel, TtmTrendInput, TtmTrendParams};
+    use crate::indicators::twiggs_money_flow::{
+        twiggs_money_flow_with_kernel, TwiggsMoneyFlowInput, TwiggsMoneyFlowParams,
+    };
+    use crate::indicators::volatility_ratio_adaptive_rsx::{
+        volatility_ratio_adaptive_rsx_with_kernel, VolatilityRatioAdaptiveRsxInput,
+        VolatilityRatioAdaptiveRsxParams,
+    };
     use crate::indicators::vpci::{vpci_with_kernel, VpciInput, VpciParams};
     use crate::indicators::yang_zhang_volatility::{
         yang_zhang_volatility_with_kernel, YangZhangVolatilityInput, YangZhangVolatilityParams,
@@ -8202,6 +10674,207 @@ mod tests {
         let direct = yang_zhang_volatility_with_kernel(&input, Kernel::Auto.to_non_batch())
             .unwrap()
             .rs;
+        let got = out.values_f64.unwrap();
+        assert_series_eq(&got, &direct, 1e-12);
+    }
+
+    #[test]
+    fn historical_volatility_percentile_signal_output_matches_direct() {
+        let data = sample_series();
+        let combo = [
+            ParamKV {
+                key: "length",
+                value: ParamValue::Int(5),
+            },
+            ParamKV {
+                key: "annual_length",
+                value: ParamValue::Int(10),
+            },
+        ];
+        let combos = [IndicatorParamSet { params: &combo }];
+        let req = IndicatorBatchRequest {
+            indicator_id: "historical_volatility_percentile",
+            output_id: Some("hvp_sma"),
+            data: IndicatorDataRef::Slice { values: &data },
+            combos: &combos,
+            kernel: Kernel::Auto,
+        };
+        let out = compute_cpu_batch(req).unwrap();
+        let input = HistoricalVolatilityPercentileInput::from_slice(
+            &data,
+            HistoricalVolatilityPercentileParams {
+                length: Some(5),
+                annual_length: Some(10),
+            },
+        );
+        let direct =
+            historical_volatility_percentile_with_kernel(&input, Kernel::Auto.to_non_batch())
+                .unwrap()
+                .hvp_sma;
+        let got = out.values_f64.unwrap();
+        assert_series_eq(&got, &direct, 1e-12);
+    }
+
+    #[test]
+    fn volatility_ratio_adaptive_rsx_signal_output_matches_direct() {
+        let data = sample_series();
+        let combo = [
+            ParamKV {
+                key: "period",
+                value: ParamValue::Int(6),
+            },
+            ParamKV {
+                key: "speed",
+                value: ParamValue::Float(0.5),
+            },
+        ];
+        let combos = [IndicatorParamSet { params: &combo }];
+        let req = IndicatorBatchRequest {
+            indicator_id: "volatility_ratio_adaptive_rsx",
+            output_id: Some("signal"),
+            data: IndicatorDataRef::Slice { values: &data },
+            combos: &combos,
+            kernel: Kernel::Auto,
+        };
+        let out = compute_cpu_batch(req).unwrap();
+        let input = VolatilityRatioAdaptiveRsxInput::from_slice(
+            &data,
+            VolatilityRatioAdaptiveRsxParams {
+                period: Some(6),
+                speed: Some(0.5),
+            },
+        );
+        let direct = volatility_ratio_adaptive_rsx_with_kernel(&input, Kernel::Auto.to_non_batch())
+            .unwrap()
+            .signal;
+        let got = out.values_f64.unwrap();
+        assert_series_eq(&got, &direct, 1e-12);
+    }
+
+    #[test]
+    fn on_balance_volume_oscillator_signal_output_matches_direct() {
+        let close = sample_series();
+        let volume: Vec<f64> = (0..close.len()).map(|i| 1000.0 + i as f64 * 3.0).collect();
+        let combo = [
+            ParamKV {
+                key: "obv_length",
+                value: ParamValue::Int(20),
+            },
+            ParamKV {
+                key: "ema_length",
+                value: ParamValue::Int(9),
+            },
+        ];
+        let combos = [IndicatorParamSet { params: &combo }];
+        let req = IndicatorBatchRequest {
+            indicator_id: "on_balance_volume_oscillator",
+            output_id: Some("signal"),
+            data: IndicatorDataRef::CloseVolume {
+                close: &close,
+                volume: &volume,
+            },
+            combos: &combos,
+            kernel: Kernel::Auto,
+        };
+        let out = compute_cpu_batch(req).unwrap();
+        let input = OnBalanceVolumeOscillatorInput::from_slices(
+            &close,
+            &volume,
+            OnBalanceVolumeOscillatorParams {
+                obv_length: Some(20),
+                ema_length: Some(9),
+            },
+        );
+        let direct = on_balance_volume_oscillator_with_kernel(&input, Kernel::Auto.to_non_batch())
+            .unwrap()
+            .signal;
+        let got = out.values_f64.unwrap();
+        assert_series_eq(&got, &direct, 1e-12);
+    }
+
+    #[test]
+    fn twiggs_money_flow_smoothed_output_matches_direct() {
+        let open = vec![10.0, 10.2, 10.4, 10.7, 10.9, 11.1, 11.3, 11.5, 11.7, 11.9];
+        let high = vec![10.4, 10.7, 10.9, 11.1, 11.4, 11.6, 11.8, 12.0, 12.2, 12.4];
+        let low = vec![9.8, 10.0, 10.2, 10.5, 10.7, 10.9, 11.1, 11.3, 11.5, 11.7];
+        let close = vec![10.1, 10.5, 10.7, 10.9, 11.2, 11.4, 11.6, 11.8, 12.0, 12.2];
+        let volume = vec![
+            1000.0, 1015.0, 1030.0, 1045.0, 1060.0, 1075.0, 1090.0, 1105.0, 1120.0, 1135.0,
+        ];
+        let combo = [
+            ParamKV {
+                key: "length",
+                value: ParamValue::Int(5),
+            },
+            ParamKV {
+                key: "smoothing_length",
+                value: ParamValue::Int(4),
+            },
+            ParamKV {
+                key: "ma_type",
+                value: ParamValue::EnumString("WMA"),
+            },
+        ];
+        let combos = [IndicatorParamSet { params: &combo }];
+        let req = IndicatorBatchRequest {
+            indicator_id: "twiggs_money_flow",
+            output_id: Some("smoothed"),
+            data: IndicatorDataRef::Ohlcv {
+                open: &open,
+                high: &high,
+                low: &low,
+                close: &close,
+                volume: &volume,
+            },
+            combos: &combos,
+            kernel: Kernel::Auto,
+        };
+        let out = compute_cpu_batch(req).unwrap();
+        let input = TwiggsMoneyFlowInput::from_slices(
+            &high,
+            &low,
+            &close,
+            &volume,
+            TwiggsMoneyFlowParams {
+                length: Some(5),
+                smoothing_length: Some(4),
+                ma_type: Some("WMA".to_string()),
+            },
+        );
+        let direct = twiggs_money_flow_with_kernel(&input, Kernel::Auto.to_non_batch())
+            .unwrap()
+            .smoothed;
+        let got = out.values_f64.unwrap();
+        assert_series_eq(&got, &direct, 1e-12);
+    }
+
+    #[test]
+    fn parkinson_variance_output_matches_direct() {
+        let (_open, high, low, _close) = sample_ohlc();
+        let combo = [ParamKV {
+            key: "period",
+            value: ParamValue::Int(9),
+        }];
+        let combos = [IndicatorParamSet { params: &combo }];
+        let req = IndicatorBatchRequest {
+            indicator_id: "parkinson_volatility",
+            output_id: Some("variance"),
+            data: IndicatorDataRef::HighLow {
+                high: &high,
+                low: &low,
+            },
+            combos: &combos,
+            kernel: Kernel::Auto,
+        };
+        let out = compute_cpu_batch(req).unwrap();
+        let input = ParkinsonVolatilityInput::from_slices(
+            &high,
+            &low,
+            ParkinsonVolatilityParams { period: Some(9) },
+        );
+        let direct = parkinson_volatility_with_kernel(&input, Kernel::Auto.to_non_batch())
+            .unwrap()
+            .variance;
         let got = out.values_f64.unwrap();
         assert_series_eq(&got, &direct, 1e-12);
     }

@@ -1,15 +1,14 @@
-
-
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
 #[cfg(feature = "python")]
 #[pymodule]
 fn ta_indicators(m: &Bound<'_, PyModule>) -> PyResult<()> {
-
     crate::indicators::zscore::register_zscore_module(m)?;
     crate::indicators::moving_averages::alma::register_alma_module(m)?;
     crate::indicators::moving_averages::cwma::register_cwma_module(m)?;
+    crate::indicators::moving_averages::corrected_moving_average::register_corrected_moving_average_module(m)?;
+    crate::indicators::moving_averages::logarithmic_moving_average::register_logarithmic_moving_average_module(m)?;
     crate::indicators::moving_averages::edcf::register_edcf_module(m)?;
     crate::indicators::moving_averages::ehlers_kama::register_ehlers_kama_module(m)?;
     crate::indicators::moving_averages::hma::register_hma_module(m)?;
@@ -37,6 +36,31 @@ fn ta_indicators(m: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::indicators::lpc::register_lpc_module(m)?;
     crate::indicators::linearreg_angle::register_linearreg_angle_module(m)?;
     crate::indicators::kst::register_kst_module(m)?;
+    crate::indicators::historical_volatility_percentile::register_historical_volatility_percentile_module(m)?;
+    crate::indicators::ehlers_detrending_filter::register_ehlers_detrending_filter_module(m)?;
+    crate::indicators::keltner_channel_width_oscillator::register_keltner_channel_width_oscillator_module(m)?;
+    crate::indicators::market_meanness_index::register_market_meanness_index_module(m)?;
+    crate::indicators::insync_index::register_insync_index_module(m)?;
+    crate::indicators::momentum_ratio_oscillator::register_momentum_ratio_oscillator_module(m)?;
+    crate::indicators::hypertrend::register_hypertrend_module(m)?;
+    crate::indicators::ict_propulsion_block::register_ict_propulsion_block_module(m)?;
+    crate::indicators::supertrend_oscillator::register_supertrend_oscillator_module(m)?;
+    crate::indicators::leavitt_convolution_acceleration::register_leavitt_convolution_acceleration_module(m)?;
+    crate::indicators::price_density_market_noise::register_price_density_market_noise_module(m)?;
+    crate::indicators::impulse_macd::register_impulse_macd_module(m)?;
+    crate::indicators::volatility_ratio_adaptive_rsx::register_volatility_ratio_adaptive_rsx_module(m)?;
+    crate::indicators::parkinson_volatility::register_parkinson_volatility_module(m)?;
+    crate::indicators::psychological_line::register_psychological_line_module(m)?;
+    crate::indicators::rank_correlation_index::register_rank_correlation_index_module(m)?;
+    crate::indicators::trend_direction_force_index::register_trend_direction_force_index_module(m)?;
+    crate::indicators::trend_continuation_factor::register_trend_continuation_factor_module(m)?;
+    crate::indicators::pretty_good_oscillator::register_pretty_good_oscillator_module(m)?;
+    crate::indicators::twiggs_money_flow::register_twiggs_money_flow_module(m)?;
+    crate::indicators::volume_weighted_stochastic_rsi::register_volume_weighted_stochastic_rsi_module(m)?;
+    crate::indicators::adaptive_schaff_trend_cycle::register_adaptive_schaff_trend_cycle_module(m)?;
+    crate::indicators::smoothed_gaussian_trend_filter::register_smoothed_gaussian_trend_filter_module(m)?;
+    crate::indicators::stochastic_adaptive_d::register_stochastic_adaptive_d_module(m)?;
+    crate::indicators::stochastic_connors_rsi::register_stochastic_connors_rsi_module(m)?;
     crate::indicators::yang_zhang_volatility::register_yang_zhang_volatility_module(m)?;
     Ok(())
 }

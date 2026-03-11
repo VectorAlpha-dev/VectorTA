@@ -737,6 +737,11 @@ fn compile_cuda_kernels() {
         "kernels/cuda/yang_zhang_volatility_kernel.cu",
         "yang_zhang_volatility_kernel.ptx",
     );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/parkinson_volatility_kernel.cu",
+        "parkinson_volatility_kernel.ptx",
+    );
     compile_kernel(&cuda_path, "kernels/cuda/voss_kernel.cu", "voss_kernel.ptx");
     compile_kernel(&cuda_path, "kernels/cuda/cksp_kernel.cu", "cksp_kernel.ptx");
     compile_kernel(&cuda_path, "kernels/cuda/emd_kernel.cu", "emd_kernel.ptx");

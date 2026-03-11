@@ -1,5 +1,9 @@
 use crate::indicators::alma::{alma, AlmaData, AlmaInput, AlmaParams};
 use crate::indicators::cora_wave::{cora_wave, CoraWaveData, CoraWaveInput, CoraWaveParams};
+use crate::indicators::corrected_moving_average::{
+    corrected_moving_average, CorrectedMovingAverageData, CorrectedMovingAverageInput,
+    CorrectedMovingAverageParams,
+};
 use crate::indicators::cwma::{cwma, CwmaData, CwmaInput, CwmaParams};
 use crate::indicators::dema::{dema, DemaData, DemaInput, DemaParams};
 use crate::indicators::edcf::{edcf, EdcfData, EdcfInput, EdcfParams};
@@ -30,11 +34,18 @@ use crate::indicators::moving_averages::ehlers_kama::{
     ehlers_kama, EhlersKamaData, EhlersKamaInput, EhlersKamaParams,
 };
 use crate::indicators::moving_averages::ehma::{ehma, EhmaData, EhmaInput, EhmaParams};
+use crate::indicators::moving_averages::ema_deviation_corrected_t3::{
+    ema_deviation_corrected_t3, EmaDeviationCorrectedT3Data, EmaDeviationCorrectedT3Input,
+    EmaDeviationCorrectedT3Params,
+};
 use crate::indicators::moving_averages::frama::{frama, FramaInput, FramaParams};
 use crate::indicators::moving_averages::nama::{nama, NamaData, NamaInput, NamaParams};
 use crate::indicators::moving_averages::sama::{sama, SamaData, SamaInput, SamaParams};
 use crate::indicators::moving_averages::volatility_adjusted_ma::{
     vama, VamaData, VamaInput, VamaParams,
+};
+use crate::indicators::moving_averages::wave_smoother::{
+    wave_smoother, WaveSmootherData, WaveSmootherInput, WaveSmootherParams,
 };
 use crate::indicators::mwdx::{mwdx, MwdxData, MwdxInput, MwdxParams};
 use crate::indicators::nma::{nma, NmaData, NmaInput, NmaParams};
@@ -69,6 +80,7 @@ use thiserror::Error;
 
 use crate::indicators::alma::alma_with_kernel;
 use crate::indicators::cora_wave::cora_wave_with_kernel;
+use crate::indicators::corrected_moving_average::corrected_moving_average_with_kernel;
 use crate::indicators::cwma::cwma_with_kernel;
 use crate::indicators::dema::dema_with_kernel;
 use crate::indicators::edcf::edcf_with_kernel;
@@ -91,10 +103,12 @@ use crate::indicators::moving_averages::dma::dma_with_kernel;
 use crate::indicators::moving_averages::ehlers_ecema::ehlers_ecema_with_kernel;
 use crate::indicators::moving_averages::ehlers_kama::ehlers_kama_with_kernel;
 use crate::indicators::moving_averages::ehma::ehma_with_kernel;
+use crate::indicators::moving_averages::ema_deviation_corrected_t3::ema_deviation_corrected_t3_with_kernel;
 use crate::indicators::moving_averages::frama::frama_with_kernel;
 use crate::indicators::moving_averages::nama::nama_with_kernel;
 use crate::indicators::moving_averages::sama::sama_with_kernel;
 use crate::indicators::moving_averages::volatility_adjusted_ma::vama_with_kernel;
+use crate::indicators::moving_averages::wave_smoother::wave_smoother_with_kernel;
 use crate::indicators::mwdx::mwdx_with_kernel;
 use crate::indicators::nma::nma_with_kernel;
 use crate::indicators::pwma::pwma_with_kernel;
@@ -259,6 +273,25 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
             Ok(output.values)
         }
 
+        "corrected_moving_average" => {
+            let input = match data {
+                MaData::Candles { candles, source } => CorrectedMovingAverageInput {
+                    data: CorrectedMovingAverageData::Candles { candles, source },
+                    params: CorrectedMovingAverageParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => CorrectedMovingAverageInput {
+                    data: CorrectedMovingAverageData::Slice(slice),
+                    params: CorrectedMovingAverageParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = corrected_moving_average(&input)?;
+            Ok(output.values)
+        }
+
         "dema" => {
             let input = match data {
                 MaData::Candles { candles, source } => DemaInput {
@@ -294,6 +327,48 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
                 },
             };
             let output = edcf(&input)?;
+            Ok(output.values)
+        }
+
+        "ema_deviation_corrected_t3" => {
+            let input = match data {
+                MaData::Candles { candles, source } => EmaDeviationCorrectedT3Input {
+                    data: EmaDeviationCorrectedT3Data::Candles { candles, source },
+                    params: EmaDeviationCorrectedT3Params {
+                        period: Some(period),
+                        ..Default::default()
+                    },
+                },
+                MaData::Slice(slice) => EmaDeviationCorrectedT3Input {
+                    data: EmaDeviationCorrectedT3Data::Slice(slice),
+                    params: EmaDeviationCorrectedT3Params {
+                        period: Some(period),
+                        ..Default::default()
+                    },
+                },
+            };
+            let output = ema_deviation_corrected_t3(&input)?;
+            Ok(output.corrected)
+        }
+
+        "wave_smoother" => {
+            let input = match data {
+                MaData::Candles { candles, source } => WaveSmootherInput {
+                    data: WaveSmootherData::Candles { candles, source },
+                    params: WaveSmootherParams {
+                        period: Some(period),
+                        phase: None,
+                    },
+                },
+                MaData::Slice(slice) => WaveSmootherInput {
+                    data: WaveSmootherData::Slice(slice),
+                    params: WaveSmootherParams {
+                        period: Some(period),
+                        phase: None,
+                    },
+                },
+            };
+            let output = wave_smoother(&input)?;
             Ok(output.values)
         }
 
@@ -1376,6 +1451,48 @@ pub fn ma_with_kernel<'a>(
             Ok(output.values)
         }
 
+        "ema_deviation_corrected_t3" => {
+            let input = match data {
+                MaData::Candles { candles, source } => EmaDeviationCorrectedT3Input {
+                    data: EmaDeviationCorrectedT3Data::Candles { candles, source },
+                    params: EmaDeviationCorrectedT3Params {
+                        period: Some(period),
+                        ..Default::default()
+                    },
+                },
+                MaData::Slice(slice) => EmaDeviationCorrectedT3Input {
+                    data: EmaDeviationCorrectedT3Data::Slice(slice),
+                    params: EmaDeviationCorrectedT3Params {
+                        period: Some(period),
+                        ..Default::default()
+                    },
+                },
+            };
+            let output = ema_deviation_corrected_t3_with_kernel(&input, kernel)?;
+            Ok(output.corrected)
+        }
+
+        "wave_smoother" => {
+            let input = match data {
+                MaData::Candles { candles, source } => WaveSmootherInput {
+                    data: WaveSmootherData::Candles { candles, source },
+                    params: WaveSmootherParams {
+                        period: Some(period),
+                        phase: None,
+                    },
+                },
+                MaData::Slice(slice) => WaveSmootherInput {
+                    data: WaveSmootherData::Slice(slice),
+                    params: WaveSmootherParams {
+                        period: Some(period),
+                        phase: None,
+                    },
+                },
+            };
+            let output = wave_smoother_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
         "ema" => {
             let input = match data {
                 MaData::Candles { candles, source } => EmaInput {
@@ -1935,6 +2052,46 @@ pub fn ma_with_kernel<'a>(
             Ok(output.values)
         }
 
+        "corrected_moving_average" => {
+            let input = match data {
+                MaData::Candles { candles, source } => CorrectedMovingAverageInput {
+                    data: CorrectedMovingAverageData::Candles { candles, source },
+                    params: CorrectedMovingAverageParams {
+                        period: Some(period),
+                    },
+                },
+                MaData::Slice(slice) => CorrectedMovingAverageInput {
+                    data: CorrectedMovingAverageData::Slice(slice),
+                    params: CorrectedMovingAverageParams {
+                        period: Some(period),
+                    },
+                },
+            };
+            let output = corrected_moving_average_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "wave_smoother" => {
+            let input = match data {
+                MaData::Candles { candles, source } => WaveSmootherInput {
+                    data: WaveSmootherData::Candles { candles, source },
+                    params: WaveSmootherParams {
+                        period: Some(period),
+                        phase: None,
+                    },
+                },
+                MaData::Slice(slice) => WaveSmootherInput {
+                    data: WaveSmootherData::Slice(slice),
+                    params: WaveSmootherParams {
+                        period: Some(period),
+                        phase: None,
+                    },
+                },
+            };
+            let output = wave_smoother_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
         "trima" => {
             let input = match data {
                 MaData::Candles { candles, source } => TrimaInput {
@@ -2371,6 +2528,9 @@ mod tests {
             "swma",
             "tilson",
             "trendflex",
+            "corrected_moving_average",
+            "ema_deviation_corrected_t3",
+            "wave_smoother",
             "trima",
             "wilders",
             "wma",

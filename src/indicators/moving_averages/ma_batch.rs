@@ -416,6 +416,65 @@ pub fn ma_batch_with_kernel_and_typed_params<'a>(
         });
     }
 
+    if ma_type.eq_ignore_ascii_case("ema_deviation_corrected_t3") {
+        let kernel = to_batch_kernel(kernel)?;
+        let (prices, _) = match data {
+            MaData::Slice(s) => (s, None),
+            MaData::Candles { candles, source } => (source_type(candles, source), Some(candles)),
+        };
+        let sweep = super::ema_deviation_corrected_t3::EmaDeviationCorrectedT3BatchRange {
+            period: period_range,
+            hot: {
+                let v = numeric.get("hot").copied().unwrap_or(0.7);
+                (v, v, 0.0)
+            },
+            t3_mode: {
+                let v = numeric.get("t3_mode").copied().unwrap_or(0.0);
+                if v < 0.0 || (v - v.round()).abs() > 1e-9 {
+                    return Err(MaBatchDispatchError::InvalidParam {
+                        indicator: "ema_deviation_corrected_t3",
+                        key: "t3_mode",
+                        value: v,
+                        reason: "expected integer >= 0",
+                    }
+                    .into());
+                }
+                let v = v.round() as usize;
+                (v, v, 0)
+            },
+        };
+        let out = super::ema_deviation_corrected_t3::ema_deviation_corrected_t3_batch_with_kernel(
+            prices, &sweep, kernel,
+        )?;
+        let output = text
+            .get("output")
+            .map(String::as_str)
+            .unwrap_or("corrected")
+            .to_ascii_lowercase();
+        let periods = map_periods(&out.combos, |p| p.period.unwrap_or(10));
+        let rows = out.rows;
+        let cols = out.cols;
+        let series = match output.as_str() {
+            "corrected" | "value" => out.corrected,
+            "t3" => out.t3,
+            _ => {
+                return Err(MaBatchDispatchError::InvalidParam {
+                    indicator: "ema_deviation_corrected_t3",
+                    key: "output",
+                    value: f64::NAN,
+                    reason: "expected 'corrected' or 't3'",
+                }
+                .into())
+            }
+        };
+        return Ok(MaBatchOutput {
+            periods,
+            values: series,
+            rows,
+            cols,
+        });
+    }
+
     if ma_type.eq_ignore_ascii_case("buff_averages") {
         let kernel = to_batch_kernel(kernel)?;
         let (prices, candles) = match data {
@@ -1109,6 +1168,64 @@ pub fn ma_batch_with_kernel_and_params<'a>(
                 cols: out.cols,
             })
         }
+        "corrected_moving_average" => {
+            let sweep = super::corrected_moving_average::CorrectedMovingAverageBatchRange {
+                period: period_range,
+            };
+            let out = super::corrected_moving_average::corrected_moving_average_batch_with_kernel(
+                prices, &sweep, kernel,
+            )?;
+            Ok(MaBatchOutput {
+                periods: map_periods(&out.combos, |p| p.period.unwrap_or(35)),
+                values: out.values,
+                rows: out.rows,
+                cols: out.cols,
+            })
+        }
+        "ema_deviation_corrected_t3" => {
+            let sweep = super::ema_deviation_corrected_t3::EmaDeviationCorrectedT3BatchRange {
+                period: period_range,
+                hot: {
+                    let v = get_f64(params, "ema_deviation_corrected_t3", "hot")?.unwrap_or(0.7);
+                    (v, v, 0.0)
+                },
+                t3_mode: {
+                    let v =
+                        get_usize(params, "ema_deviation_corrected_t3", "t3_mode")?.unwrap_or(0);
+                    (v, v, 0)
+                },
+            };
+            let out =
+                super::ema_deviation_corrected_t3::ema_deviation_corrected_t3_batch_with_kernel(
+                    prices, &sweep, kernel,
+                )?;
+            let periods = map_periods(&out.combos, |p| p.period.unwrap_or(10));
+            let rows = out.rows;
+            let cols = out.cols;
+            Ok(MaBatchOutput {
+                periods,
+                values: out.corrected,
+                rows,
+                cols,
+            })
+        }
+        "wave_smoother" => {
+            let sweep = super::wave_smoother::WaveSmootherBatchRange {
+                period: period_range,
+                phase: {
+                    let v = get_f64(params, "wave_smoother", "phase")?.unwrap_or(70.0);
+                    (v, v, 0.0)
+                },
+            };
+            let out =
+                super::wave_smoother::wave_smoother_batch_with_kernel(prices, &sweep, kernel)?;
+            Ok(MaBatchOutput {
+                periods: map_periods(&out.combos, |p| p.period.unwrap_or(20)),
+                values: out.values,
+                rows: out.rows,
+                cols: out.cols,
+            })
+        }
         "trima" => {
             let sweep = super::trima::TrimaBatchRange {
                 period: period_range,
@@ -1666,6 +1783,9 @@ mod tests {
             "supersmoother_3_pole",
             "tilson",
             "trendflex",
+            "corrected_moving_average",
+            "ema_deviation_corrected_t3",
+            "wave_smoother",
             "trima",
             "wilders",
             "epma",

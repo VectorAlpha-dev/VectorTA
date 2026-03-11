@@ -1,5 +1,6 @@
 pub mod alma;
 pub mod buff_averages;
+pub mod corrected_moving_average;
 pub mod cwma;
 pub mod dema;
 pub mod dma;
@@ -10,6 +11,7 @@ pub mod ehlers_kama;
 pub mod ehlers_pma;
 pub mod ehma;
 pub mod ema;
+pub mod ema_deviation_corrected_t3;
 pub mod epma;
 pub mod frama;
 pub mod fwma;
@@ -22,6 +24,7 @@ pub mod jma;
 pub mod jsa;
 pub mod kama;
 pub mod linreg;
+pub mod logarithmic_moving_average;
 pub mod ma;
 pub mod ma_batch;
 pub mod ma_stream;
@@ -54,6 +57,7 @@ pub mod volume_adjusted_ma;
 pub mod vpwma;
 pub mod vwap;
 pub mod vwma;
+pub mod wave_smoother;
 pub mod wilders;
 pub mod wma;
 pub mod zlema;
@@ -69,6 +73,18 @@ pub use ehlers_kama::{ehlers_kama, EhlersKamaInput, EhlersKamaOutput, EhlersKama
 pub use ehlers_pma::{
     ehlers_pma, expand_grid as expand_grid_ehlers_pma, EhlersPmaBatchRange, EhlersPmaInput,
     EhlersPmaOutput, EhlersPmaParams,
+};
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use logarithmic_moving_average::logarithmic_moving_average_into;
+pub use logarithmic_moving_average::{
+    expand_grid_logarithmic_moving_average, logarithmic_moving_average,
+    logarithmic_moving_average_batch_par_slice, logarithmic_moving_average_batch_slice,
+    logarithmic_moving_average_batch_with_kernel, logarithmic_moving_average_into_slice,
+    logarithmic_moving_average_with_kernel, LogarithmicMovingAverageBatchBuilder,
+    LogarithmicMovingAverageBatchOutput, LogarithmicMovingAverageBatchRange,
+    LogarithmicMovingAverageBuilder, LogarithmicMovingAverageData, LogarithmicMovingAverageError,
+    LogarithmicMovingAverageInput, LogarithmicMovingAverageOutput, LogarithmicMovingAverageParams,
+    LogarithmicMovingAverageStream,
 };
 pub use uma::{uma, UmaInput, UmaOutput, UmaParams};
 pub use volatility_adjusted_ma::{
@@ -106,6 +122,12 @@ pub use dma::{dma_batch_py, dma_py, DmaStreamPy};
 pub use ehma::{ehma_batch_py, ehma_py, EhmaStreamPy};
 
 #[cfg(feature = "python")]
+pub use logarithmic_moving_average::{
+    logarithmic_moving_average_batch_py, logarithmic_moving_average_py,
+    LogarithmicMovingAverageStreamPy,
+};
+
+#[cfg(feature = "python")]
 pub use nama::{nama_batch_py, nama_py, NamaStreamPy};
 
 #[cfg(feature = "python")]
@@ -113,3 +135,11 @@ pub use sama::{sama_batch_py, sama_py, SamaStreamPy};
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 pub use nama::{nama_alloc, nama_batch_unified_js, nama_free, nama_into, nama_js};
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use logarithmic_moving_average::{
+    logarithmic_moving_average_alloc, logarithmic_moving_average_batch_into,
+    logarithmic_moving_average_batch_js, logarithmic_moving_average_free,
+    logarithmic_moving_average_into, logarithmic_moving_average_into_host,
+    logarithmic_moving_average_js,
+};
