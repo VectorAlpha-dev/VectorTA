@@ -1,12 +1,9 @@
-
-
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
 #[cfg(feature = "python")]
 #[pymodule]
 fn ta_indicators(m: &Bound<'_, PyModule>) -> PyResult<()> {
-
     crate::indicators::zscore::register_zscore_module(m)?;
     crate::indicators::moving_averages::alma::register_alma_module(m)?;
     crate::indicators::moving_averages::cwma::register_cwma_module(m)?;
@@ -14,6 +11,7 @@ fn ta_indicators(m: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::indicators::moving_averages::ehlers_kama::register_ehlers_kama_module(m)?;
     crate::indicators::moving_averages::hma::register_hma_module(m)?;
     crate::indicators::moving_averages::jsa::register_jsa_module(m)?;
+    crate::indicators::moving_averages::n_order_ema::register_n_order_ema_module(m)?;
     crate::indicators::moving_averages::volume_adjusted_ma::register_VolumeAdjustedMa_module(m)?;
     crate::indicators::nadaraya_watson_envelope::register_nadaraya_watson_envelope_module(m)?;
     crate::indicators::wto::register_wto_module(m)?;
@@ -37,6 +35,35 @@ fn ta_indicators(m: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::indicators::lpc::register_lpc_module(m)?;
     crate::indicators::linearreg_angle::register_linearreg_angle_module(m)?;
     crate::indicators::kst::register_kst_module(m)?;
+    crate::indicators::rogers_satchell_volatility::register_rogers_satchell_volatility_module(m)?;
+    crate::indicators::dual_ulcer_index::register_dual_ulcer_index_module(m)?;
+    crate::indicators::fractal_dimension_index::register_fractal_dimension_index_module(m)?;
+    crate::indicators::disparity_index::register_disparity_index_module(m)?;
+    crate::indicators::donchian_channel_width::register_donchian_channel_width_module(m)?;
+    crate::indicators::kairi_relative_index::register_kairi_relative_index_module(m)?;
+    crate::indicators::volume_weighted_rsi::register_volume_weighted_rsi_module(m)?;
+    crate::indicators::dynamic_momentum_index::register_dynamic_momentum_index_module(m)?;
+    crate::indicators::projection_oscillator::register_projection_oscillator_module(m)?;
+    crate::indicators::cyberpunk_value_trend_analyzer::register_cyberpunk_value_trend_analyzer_module(m)?;
+    crate::indicators::fvg_positioning_average::register_fvg_positioning_average_module(m)?;
+    crate::indicators::emd_trend::register_emd_trend_module(m)?;
+    crate::indicators::evasive_supertrend::register_evasive_supertrend_module(m)?;
+    crate::indicators::reversal_signals::register_reversal_signals_module(m)?;
+    crate::indicators::market_structure_trailing_stop::register_market_structure_trailing_stop_module(m)?;
+    crate::indicators::zig_zag_channels::register_zig_zag_channels_module(m)?;
+    crate::indicators::directional_imbalance_index::register_directional_imbalance_index_module(m)?;
+    crate::indicators::candle_strength_oscillator::register_candle_strength_oscillator_module(m)?;
+    crate::indicators::gmma_oscillator::register_gmma_oscillator_module(m)?;
+    crate::indicators::nonlinear_regression_zero_lag_moving_average::register_nonlinear_regression_zero_lag_moving_average_module(m)?;
+    crate::indicators::possible_rsi::register_possible_rsi_module(m)?;
+    crate::indicators::rolling_skewness_kurtosis::register_rolling_skewness_kurtosis_module(m)?;
+    crate::indicators::rolling_z_score_trend::register_rolling_z_score_trend_module(m)?;
+    crate::indicators::stochastic_money_flow_index::register_stochastic_money_flow_index_module(m)?;
+    crate::indicators::ehlers_data_sampling_relative_strength_indicator::register_ehlers_data_sampling_relative_strength_indicator_module(m)?;
+    crate::indicators::velocity_acceleration_convergence_divergence_indicator::register_velocity_acceleration_convergence_divergence_indicator_module(m)?;
+    crate::indicators::trend_direction_force_index::register_trend_direction_force_index_module(m)?;
+    crate::indicators::autocorrelation_indicator::register_autocorrelation_indicator_module(m)?;
+    crate::indicators::goertzel_cycle_composite_wave::register_goertzel_cycle_composite_wave_module(m)?;
     crate::indicators::yang_zhang_volatility::register_yang_zhang_volatility_module(m)?;
     Ok(())
 }

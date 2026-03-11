@@ -79,6 +79,12 @@ pub fn deallocate_f64_matrix(ptr: *mut f64) {}
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
+pub fn wasm_memory() -> JsValue {
+    wasm_bindgen::memory()
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
 pub fn read_f64_matrix(ptr: *const f64, rows: usize, cols: usize) -> js_sys::Array {
     unsafe {
         let flat = std::slice::from_raw_parts(ptr, rows * cols);

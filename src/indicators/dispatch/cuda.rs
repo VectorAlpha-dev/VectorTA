@@ -730,6 +730,9 @@ fn dispatch_cuda_device_supported(
     if normalized_id.eq_ignore_ascii_case("yang_zhang_volatility") {
         return compute_yang_zhang_cuda_device(req, info);
     }
+    if normalized_id.eq_ignore_ascii_case("rogers_satchell_volatility") {
+        return compute_rogers_satchell_cuda_device(req, info);
+    }
     if normalized_id.eq_ignore_ascii_case("wavetrend") {
         return compute_wavetrend_cuda_device(req, info);
     }
@@ -1038,6 +1041,7 @@ fn supports_cuda_device_dispatch(indicator_id: &str) -> bool {
             | "kst"
             | "cvi"
             | "yang_zhang_volatility"
+            | "rogers_satchell_volatility"
             | "wavetrend"
             | "wto"
             | "alma"
@@ -1173,7 +1177,9 @@ fn upload_host_cuda_data_for_device_core(
             let uploaded = runtime
                 .upload_ohlc(open, high, low, close, source)
                 .map_err(map_cuda_runtime_error)?;
-            let first_valid = if indicator.eq_ignore_ascii_case("yang_zhang_volatility") {
+            let first_valid = if indicator.eq_ignore_ascii_case("yang_zhang_volatility")
+                || indicator.eq_ignore_ascii_case("rogers_satchell_volatility")
+            {
                 first_valid_in_ohlc_positive(open, high, low, close)
             } else {
                 host_first_valid_for_indicator(
@@ -1202,7 +1208,9 @@ fn upload_host_cuda_data_for_device_core(
             let uploaded = runtime
                 .upload_ohlcv(timestamp, open, high, low, close, volume, source)
                 .map_err(map_cuda_runtime_error)?;
-            let first_valid = if indicator.eq_ignore_ascii_case("yang_zhang_volatility") {
+            let first_valid = if indicator.eq_ignore_ascii_case("yang_zhang_volatility")
+                || indicator.eq_ignore_ascii_case("rogers_satchell_volatility")
+            {
                 first_valid_in_ohlc_positive(open, high, low, close)
             } else {
                 host_first_valid_for_indicator(
@@ -4849,6 +4857,64 @@ fn compute_yang_zhang_cuda_device(
     let owner = match output_index {
         0 => result.outputs.yz,
         1 => result.outputs.rs,
+        _ => {
+            return Err(IndicatorDispatchError::UnknownOutput {
+                indicator: info.id.to_string(),
+                output: output_id.to_string(),
+            });
+        }
+    };
+    finalize_cuda_device_output(output_id, owner, None, req.target, device_id)
+}
+
+fn compute_rogers_satchell_cuda_device(
+    req: IndicatorCudaDeviceRequest<'_>,
+    info: &IndicatorInfo,
+) -> Result<IndicatorCudaOutput, IndicatorDispatchError> {
+    if !info.capabilities.supports_cuda_batch {
+        return Err(IndicatorDispatchError::UnsupportedCapability {
+            indicator: info.id.to_string(),
+            capability: "cuda_device_batch",
+        });
+    }
+
+    let output_id = resolve_output_id(info, req.output_id)?;
+    let output_index = resolve_output_index(info, output_id).unwrap_or(0);
+    let (open, high, low, close, device_id) = cuda_device_ohlc_from_req(info.id, req.data)?;
+    let device_id = resolve_device_runtime_id(info.id, req.params, device_id)?;
+    let first_valid = resolve_device_first_valid(info.id, req.params)?;
+    let lookback = resolve_usize_range_param_device(req.params, "lookback", (8, 252, 1), info.id)?;
+    let signal_length =
+        resolve_usize_range_param_device(req.params, "signal_length", (8, 8, 0), info.id)?;
+    let sweep = crate::indicators::rogers_satchell_volatility::RogersSatchellVolatilityBatchRange {
+        lookback,
+        signal_length,
+    };
+    let open_buf = unsafe { BorrowedCudaDeviceSeries::from_view(open) };
+    let high_buf = unsafe { BorrowedCudaDeviceSeries::from_view(high) };
+    let low_buf = unsafe { BorrowedCudaDeviceSeries::from_view(low) };
+    let close_buf = unsafe { BorrowedCudaDeviceSeries::from_view(close) };
+    let cuda = crate::cuda::CudaRogersSatchellVolatility::new(device_id as usize).map_err(|e| {
+        IndicatorDispatchError::KernelUnavailable {
+            details: e.to_string(),
+        }
+    })?;
+    let result = cuda
+        .rogers_satchell_volatility_batch_from_device(
+            open_buf.as_buffer(),
+            high_buf.as_buffer(),
+            low_buf.as_buffer(),
+            close_buf.as_buffer(),
+            first_valid,
+            &sweep,
+        )
+        .map_err(|e| IndicatorDispatchError::ComputeFailed {
+            indicator: info.id.to_string(),
+            details: e.to_string(),
+        })?;
+    let owner = match output_index {
+        0 => result.outputs.rs,
+        1 => result.outputs.signal,
         _ => {
             return Err(IndicatorDispatchError::UnknownOutput {
                 indicator: info.id.to_string(),

@@ -1,5 +1,6 @@
 pub mod alma;
 pub mod buff_averages;
+pub mod corrected_moving_average;
 pub mod cwma;
 pub mod dema;
 pub mod dma;
@@ -28,6 +29,7 @@ pub mod ma_stream;
 pub mod maaq;
 pub mod mama;
 pub mod mwdx;
+pub mod n_order_ema;
 pub mod nama;
 pub mod nma;
 pub mod param_schema;
@@ -58,6 +60,18 @@ pub mod wilders;
 pub mod wma;
 pub mod zlema;
 
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use corrected_moving_average::corrected_moving_average_into;
+pub use corrected_moving_average::{
+    corrected_moving_average, corrected_moving_average_batch_par_slice,
+    corrected_moving_average_batch_slice, corrected_moving_average_batch_with_kernel,
+    corrected_moving_average_into_slice, corrected_moving_average_with_kernel,
+    expand_grid_corrected_moving_average, CorrectedMovingAverageBatchBuilder,
+    CorrectedMovingAverageBatchOutput, CorrectedMovingAverageBatchRange,
+    CorrectedMovingAverageBuilder, CorrectedMovingAverageData, CorrectedMovingAverageError,
+    CorrectedMovingAverageInput, CorrectedMovingAverageOutput, CorrectedMovingAverageParams,
+    CorrectedMovingAverageStream,
+};
 pub use cwma::{cwma, CwmaInput, CwmaOutput, CwmaParams};
 pub use dma::{
     dma, dma_batch_with_kernel, dma_into_slice, dma_with_kernel, DmaBatchBuilder, DmaBatchOutput,
@@ -93,6 +107,17 @@ pub use nama::{
     NamaParams, NamaStream,
 };
 
+pub use n_order_ema::{
+    expand_grid_n_order_ema, n_order_ema, n_order_ema_batch_from_input_with_kernel,
+    n_order_ema_batch_with_kernel, n_order_ema_into_slice, n_order_ema_with_kernel,
+    NOrderEmaBatchBuilder, NOrderEmaBatchOutput, NOrderEmaBatchRange, NOrderEmaBuilder,
+    NOrderEmaData, NOrderEmaError, NOrderEmaIirStyle, NOrderEmaInput, NOrderEmaOutput,
+    NOrderEmaParams, NOrderEmaStream, NOrderEmaStyle,
+};
+
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use n_order_ema::n_order_ema_into;
+
 pub use sama::{
     sama, sama_batch_par_slice, sama_batch_slice, sama_batch_with_kernel, sama_into_slice,
     sama_with_kernel, SamaBatchBuilder, SamaBatchOutput, SamaBatchRange, SamaBuilder, SamaData,
@@ -106,10 +131,33 @@ pub use dma::{dma_batch_py, dma_py, DmaStreamPy};
 pub use ehma::{ehma_batch_py, ehma_py, EhmaStreamPy};
 
 #[cfg(feature = "python")]
+pub use corrected_moving_average::{
+    corrected_moving_average_batch_py, corrected_moving_average_py, CorrectedMovingAverageStreamPy,
+};
+
+#[cfg(feature = "python")]
 pub use nama::{nama_batch_py, nama_py, NamaStreamPy};
+
+#[cfg(feature = "python")]
+pub use n_order_ema::{
+    n_order_ema_batch_py, n_order_ema_py, register_n_order_ema_module, NOrderEmaStreamPy,
+};
 
 #[cfg(feature = "python")]
 pub use sama::{sama_batch_py, sama_py, SamaStreamPy};
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use corrected_moving_average::{
+    corrected_moving_average_alloc, corrected_moving_average_batch_into,
+    corrected_moving_average_batch_js, corrected_moving_average_free,
+    corrected_moving_average_into, corrected_moving_average_js,
+};
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 pub use nama::{nama_alloc, nama_batch_unified_js, nama_free, nama_into, nama_js};
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use n_order_ema::{
+    n_order_ema_alloc, n_order_ema_batch_into, n_order_ema_batch_js, n_order_ema_free,
+    n_order_ema_into, n_order_ema_js,
+};

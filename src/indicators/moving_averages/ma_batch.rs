@@ -530,6 +530,74 @@ pub fn ma_batch_with_kernel_and_typed_params<'a>(
         });
     }
 
+    if ma_type.eq_ignore_ascii_case("n_order_ema") {
+        let kernel = to_batch_kernel(kernel)?;
+        let (prices, _) = match data {
+            MaData::Slice(s) => (s, None),
+            MaData::Candles { candles, source } => (source_type(candles, source), Some(candles)),
+        };
+
+        let order = match numeric.get("order").copied() {
+            Some(v) => {
+                if v <= 0.0 {
+                    return Err(MaBatchDispatchError::InvalidParam {
+                        indicator: "n_order_ema",
+                        key: "order",
+                        value: v,
+                        reason: "expected integer > 0",
+                    }
+                    .into());
+                }
+                let r = v.round();
+                if (v - r).abs() > 1.0e-9 {
+                    return Err(MaBatchDispatchError::InvalidParam {
+                        indicator: "n_order_ema",
+                        key: "order",
+                        value: v,
+                        reason: "expected integer",
+                    }
+                    .into());
+                }
+                r as usize
+            }
+            None => 1usize,
+        };
+
+        let ema_style = text
+            .get("ema_style")
+            .cloned()
+            .unwrap_or_else(|| "ema".to_string());
+        let iir_style = text
+            .get("iir_style")
+            .cloned()
+            .unwrap_or_else(|| "impulse_matched".to_string());
+
+        let out = super::n_order_ema::n_order_ema_batch_with_kernel(
+            prices,
+            &super::n_order_ema::NOrderEmaBatchRange {
+                period: (
+                    period_range.0 as f64,
+                    period_range.1 as f64,
+                    period_range.2 as f64,
+                ),
+                order: (order, order, 0),
+            },
+            &super::n_order_ema::NOrderEmaParams {
+                period: None,
+                order: None,
+                ema_style: Some(ema_style),
+                iir_style: Some(iir_style),
+            },
+            kernel,
+        )?;
+        return Ok(MaBatchOutput {
+            periods: map_periods(&out.combos, |p| p.period.unwrap_or(9.0).round() as usize),
+            values: out.values,
+            rows: out.rows,
+            cols: out.cols,
+        });
+    }
+
     ma_batch_with_kernel_and_params(ma_type, data, period_range, kernel, Some(&numeric))
 }
 
@@ -730,6 +798,20 @@ pub fn ma_batch_with_kernel_and_params<'a>(
             let out = super::cwma::cwma_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
+                values: out.values,
+                rows: out.rows,
+                cols: out.cols,
+            })
+        }
+        "corrected_moving_average" | "cma" => {
+            let sweep = super::corrected_moving_average::CorrectedMovingAverageBatchRange {
+                period: period_range,
+            };
+            let out = super::corrected_moving_average::corrected_moving_average_batch_with_kernel(
+                prices, &sweep, kernel,
+            )?;
+            Ok(MaBatchOutput {
+                periods: map_periods(&out.combos, |p| p.period.unwrap_or(35)),
                 values: out.values,
                 rows: out.rows,
                 cols: out.cols,
@@ -967,6 +1049,32 @@ pub fn ma_batch_with_kernel_and_params<'a>(
             let out = super::nama::nama_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
+                values: out.values,
+                rows: out.rows,
+                cols: out.cols,
+            })
+        }
+        "n_order_ema" => {
+            let out = super::n_order_ema::n_order_ema_batch_with_kernel(
+                prices,
+                &super::n_order_ema::NOrderEmaBatchRange {
+                    period: (
+                        period_range.0 as f64,
+                        period_range.1 as f64,
+                        period_range.2 as f64,
+                    ),
+                    order: (1, 1, 0),
+                },
+                &super::n_order_ema::NOrderEmaParams {
+                    period: None,
+                    order: None,
+                    ema_style: Some("ema".to_string()),
+                    iir_style: Some("impulse_matched".to_string()),
+                },
+                kernel,
+            )?;
+            Ok(MaBatchOutput {
+                periods: map_periods(&out.combos, |p| p.period.unwrap_or(9.0).round() as usize),
                 values: out.values,
                 rows: out.rows,
                 cols: out.cols,
@@ -1640,6 +1748,7 @@ mod tests {
             "wma",
             "alma",
             "cwma",
+            "corrected_moving_average",
             "cora_wave",
             "edcf",
             "fwma",

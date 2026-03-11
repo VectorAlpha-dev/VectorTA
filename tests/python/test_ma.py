@@ -108,6 +108,16 @@ class TestMaDispatcher:
         direct_result = ta_indicators.hma(close, 20)
         assert_close(result, direct_result, rtol=1e-10, msg="MA dispatcher HMA mismatch")
 
+    def test_ma_n_order_ema(self, test_data):
+        """Test MA dispatcher with N Order EMA defaults"""
+        close = test_data['close']
+
+        result = ta_indicators.ma(close, "n_order_ema", 9)
+        assert len(result) == len(close)
+
+        direct_result = ta_indicators.n_order_ema(close, 9.0, 1, "ema", "impulse_matched")
+        assert_close(result, direct_result, rtol=1e-10, msg="MA dispatcher N Order EMA mismatch")
+
     def test_ma_kama(self, test_data):
         """Test MA dispatcher with KAMA"""
         close = test_data['close']
@@ -206,7 +216,7 @@ class TestMaDispatcher:
         ma_types = [
             "sma", "ema", "dema", "tema", "smma", "zlema", "alma", "cwma",
             "edcf", "fwma", "gaussian", "highpass", "highpass2", "hma",
-            "jma", "jsa", "kama", "linreg", "nma", "pwma", "reflex",
+            "jma", "jsa", "kama", "linreg", "n_order_ema", "nma", "pwma", "reflex",
             "sinwma", "sqwma", "srwma", "supersmoother", "supersmoother_3_pole",
             "swma", "tilson", "trendflex", "trima", "wilders", "wma"
         ]
