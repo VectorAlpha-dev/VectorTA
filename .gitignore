@@ -59,6 +59,7 @@ website
 # Local Python virtualenvs (Linux/WSL)
 .venv-linux/
 venv/
+.pydeps/
 dist/
 __pycache__/
 *.pyc
@@ -71,6 +72,8 @@ pkg/
 pkg_bak/
 tests/wasm/node_modules/
 tests/wasm/*.cjs
+tests/wasm/debug_tema.js
+tests/wasm/debug_tema2.js
 
 # proptest regression artifacts
 proptest-regressions/
@@ -90,6 +93,7 @@ history-backups/
 *.out
 *.pid
 *.tmp
+rustc-ice-*.txt
 .env
 
 # Local build byproducts sometimes written outside `target/`

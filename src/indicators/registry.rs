@@ -193,6 +193,30 @@ const ENUM_VALUES_N_ORDER_EMA_IIR_STYLE: &[&str] =
     &["all_pole", "impulse_matched", "matched_z", "bilinear"];
 const ENUM_VALUES_FVG_POSITIONING_AVERAGE_LOOKBACK_TYPE: &[&str] = &["Bar Count", "FVG Count"];
 const ENUM_VALUES_MS_TS_RESET_ON: &[&str] = &["CHoCH", "All"];
+const ENUM_VALUES_PRICE_SOURCE: &[&str] =
+    &["open", "high", "low", "close", "hl2", "hlc3", "ohlc4", "hlcc4"];
+const ENUM_VALUES_VDO_SESSION_MODE: &[&str] =
+    &["4_hours", "daily", "weekly", "rolling_bars", "rolling_days"];
+const ENUM_VALUES_VDO_DEVIATION_MODE: &[&str] = &["percent", "absolute", "zscore"];
+const ENUM_VALUES_ICHI_NORMALIZE_MODE: &[&str] = &["all", "window", "disabled"];
+const ENUM_VALUES_STATISTICAL_TRAILING_STOP_BASE_LEVEL: &[&str] =
+    &["level0", "level1", "level2", "level3"];
+const ENUM_VALUES_EDCT3_OUTPUT: &[&str] = &["corrected", "t3"];
+const ENUM_VALUES_NORMALIZED_VOLUME_TRUE_RANGE_OUTPUT: &[&str] = &[
+    "normalized_volume",
+    "normalized_true_range",
+    "baseline",
+    "atr",
+    "average_volume",
+];
+const ENUM_VALUES_MOVING_AVERAGE_CROSS_PROBABILITY_MA_TYPE: &[&str] = &["ema", "sma"];
+const ENUM_VALUES_BULLS_V_BEARS_MA_TYPE: &[&str] = &["ema", "sma", "wma"];
+const ENUM_VALUES_BULLS_V_BEARS_CALCULATION_METHOD: &[&str] = &["normalized", "raw"];
+const ENUM_VALUES_SMOOTH_THEIL_SEN_STAT_STYLE: &[&str] =
+    &["mean", "smooth_median", "median"];
+const ENUM_VALUES_SMOOTH_THEIL_SEN_DEVIATION_STYLE: &[&str] = &["mad", "rmsd"];
+const ENUM_VALUES_PMARP_MA_TYPE: &[&str] = &["sma", "ema", "hma", "rma", "vwma"];
+const ENUM_VALUES_PMARP_LINE_MODE: &[&str] = &["pmar", "pmarp"];
 const ENUM_VALUES_EMD_TREND_SOURCE: &[&str] = &[
     "open", "high", "low", "close", "oc2", "hl2", "occ3", "hlc3", "ohlc4", "hlcc4",
 ];
@@ -487,6 +511,11 @@ const OUTPUT_MAMA: IndicatorOutputInfo = IndicatorOutputInfo {
     label: "MAMA",
     value_type: IndicatorValueType::F64,
 };
+const OUTPUT_MA: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "ma",
+    label: "MA",
+    value_type: IndicatorValueType::F64,
+};
 const OUTPUT_FAMA: IndicatorOutputInfo = IndicatorOutputInfo {
     id: "fama",
     label: "FAMA",
@@ -680,6 +709,341 @@ const OUTPUT_ESTIMATE: IndicatorOutputInfo = IndicatorOutputInfo {
 const OUTPUT_EXPECTED_VALUE: IndicatorOutputInfo = IndicatorOutputInfo {
     id: "expected_value",
     label: "Expected Value",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_ZERO_CROSS_UP: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "zero_cross_up",
+    label: "Zero Cross Up",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_ZERO_CROSS_DOWN: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "zero_cross_down",
+    label: "Zero Cross Down",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_EXTREMITY: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "extremity",
+    label: "Extremity",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_SMOOTHED_OPEN: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "smoothed_open",
+    label: "Smoothed Open",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_SMOOTHED_HIGH: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "smoothed_high",
+    label: "Smoothed High",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_SMOOTHED_LOW: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "smoothed_low",
+    label: "Smoothed Low",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_SMOOTHED_CLOSE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "smoothed_close",
+    label: "Smoothed Close",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_RSI_LINE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "rsi",
+    label: "RSI",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_LOWER_MID: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "lower_mid",
+    label: "Lower Mid",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_UPPER_MID: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "upper_mid",
+    label: "Upper Mid",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_REGIME: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "regime",
+    label: "Regime",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_REGIME_FLIP: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "regime_flip",
+    label: "Regime Flip",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_LOWER_SIGNAL: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "lower_signal",
+    label: "Lower Signal",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_UPPER_SIGNAL: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "upper_signal",
+    label: "Upper Signal",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_FORWARD_BACKWARD: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "forward_backward",
+    label: "Forward Backward",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_BACKWARD_LINE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "backward",
+    label: "Backward",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_SLOPE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "slope",
+    label: "Slope",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_INTERCEPT: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "intercept",
+    label: "Intercept",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_DEVIATION: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "deviation",
+    label: "Deviation",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_BULLISH_REVERSAL: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "bullish_reversal",
+    label: "Bullish Reversal",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_BEARISH_REVERSAL: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "bearish_reversal",
+    label: "Bearish Reversal",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_NORMALIZED_VOLUME: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "normalized_volume",
+    label: "Normalized Volume",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_NORMALIZED_TRUE_RANGE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "normalized_true_range",
+    label: "Normalized True Range",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_BASELINE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "baseline",
+    label: "Baseline",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_ATR_LINE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "atr",
+    label: "ATR",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_AVERAGE_VOLUME: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "average_volume",
+    label: "Average Volume",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_CG: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "cg",
+    label: "CG",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_AMO: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "amo",
+    label: "AMO",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_AMA: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "ama",
+    label: "AMA",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_RANGE_TOP: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "range_top",
+    label: "Range Top",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_RANGE_BOTTOM: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "range_bottom",
+    label: "Range Bottom",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_BULLISH: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "bullish",
+    label: "Bullish",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_EXTRA_BULLISH: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "extra_bullish",
+    label: "Extra Bullish",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_BEARISH: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "bearish",
+    label: "Bearish",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_EXTRA_BEARISH: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "extra_bearish",
+    label: "Extra Bearish",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_UPTREND_BASE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "uptrend_base",
+    label: "Uptrend Base",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_DOWNTREND_BASE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "downtrend_base",
+    label: "Downtrend Base",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_UPTREND_EXTENSION: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "uptrend_extension",
+    label: "Uptrend Extension",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_DOWNTREND_EXTENSION: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "downtrend_extension",
+    label: "Downtrend Extension",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_BULLISH_CHANGE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "bullish_change",
+    label: "Bullish Change",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_BEARISH_CHANGE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "bearish_change",
+    label: "Bearish Change",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_VOLATILITY: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "volatility",
+    label: "Volatility",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_VARIANCE: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "variance",
+    label: "Variance",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_TMF: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "tmf",
+    label: "TMF",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_SMOOTHED: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "smoothed",
+    label: "Smoothed",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_HVP: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "hvp",
+    label: "HVP",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_HVP_SMA: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "hvp_sma",
+    label: "HVP SMA",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_EDF: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "edf",
+    label: "EDF",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_KBW: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "kbw",
+    label: "KBW",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_KBW_SMA: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "kbw_sma",
+    label: "KBW SMA",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_MMI: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "mmi",
+    label: "MMI",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_MMI_SMOOTHED: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "mmi_smoothed",
+    label: "MMI Smoothed",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_PRICE_DENSITY: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "price_density",
+    label: "Price Density",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_PRICE_DENSITY_PERCENT: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "price_density_percent",
+    label: "Price Density Percent",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_IMPULSE_MACD: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "impulse_macd",
+    label: "Impulse MACD",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_MOMENTUM_RATIO_OSCILLATOR: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "line",
+    label: "Line",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_SUPERTREND_OSCILLATOR: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "oscillator",
+    label: "Oscillator",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_CONV_ACCELERATION: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "conv_acceleration",
+    label: "Convolution Acceleration",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_PLUS_TCF: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "plus_tcf",
+    label: "Plus TCF",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_MINUS_TCF: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "minus_tcf",
+    label: "Minus TCF",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_VQI_SUM: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "vqi_sum",
+    label: "VQI Sum",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_FAST_SMA: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "fast_sma",
+    label: "Fast SMA",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_SLOW_SMA: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "slow_sma",
+    label: "Slow SMA",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_EMA: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "ema",
+    label: "EMA",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_FORECAST: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "forecast",
+    label: "Forecast",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_BULLISH_SIGNAL: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "bullish_signal",
+    label: "Bullish Signal",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_BEARISH_SIGNAL: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "bearish_signal",
+    label: "Bearish Signal",
     value_type: IndicatorValueType::F64,
 };
 
@@ -12508,6 +12872,7 @@ fn ma_outputs_for(ma_id: &str) -> Vec<IndicatorOutputInfo> {
         "ehlers_undersampled_double_moving_average" => OUTPUTS_BUFF_AVERAGES.to_vec(),
         "buff_averages" => OUTPUTS_BUFF_AVERAGES.to_vec(),
         "ema_deviation_corrected_t3" => OUTPUTS_EDCT3.to_vec(),
+        "logarithmic_moving_average" => OUTPUTS_LOGARITHMIC_MOVING_AVERAGE.to_vec(),
         _ => OUTPUTS_VALUE_F64.to_vec(),
     }
 }

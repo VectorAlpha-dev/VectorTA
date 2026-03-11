@@ -1,7 +1,4 @@
 use crate::indicators::alma::{AlmaParams, AlmaStream};
-use crate::indicators::corrected_moving_average::{
-    CorrectedMovingAverageParams, CorrectedMovingAverageStream,
-};
 use crate::indicators::cwma::{CwmaParams, CwmaStream};
 use crate::indicators::dema::{DemaParams, DemaStream};
 use crate::indicators::edcf::{EdcfParams, EdcfStream};
@@ -28,16 +25,22 @@ use crate::indicators::moving_averages::dma::{DmaParams, DmaStream};
 use crate::indicators::moving_averages::ehlers_ecema::{EhlersEcemaParams, EhlersEcemaStream};
 use crate::indicators::moving_averages::ehlers_kama::{EhlersKamaParams, EhlersKamaStream};
 use crate::indicators::moving_averages::ehma::{EhmaParams, EhmaStream};
+use crate::indicators::moving_averages::elastic_volume_weighted_moving_average::{
+    ElasticVolumeWeightedMovingAverageParams, ElasticVolumeWeightedMovingAverageStream,
+};
+use crate::indicators::moving_averages::ema_deviation_corrected_t3::{
+    EmaDeviationCorrectedT3Params, EmaDeviationCorrectedT3Stream,
+};
 use crate::indicators::moving_averages::n_order_ema::{NOrderEmaParams, NOrderEmaStream};
 use crate::indicators::moving_averages::nama::{NamaParams, NamaStream};
 use crate::indicators::moving_averages::sama::{SamaParams, SamaStream};
+use crate::indicators::moving_averages::sgf::{SgfParams, SgfStream};
 use crate::indicators::moving_averages::volatility_adjusted_ma::{VamaParams, VamaStream};
 use crate::indicators::moving_averages::wave_smoother::{WaveSmootherParams, WaveSmootherStream};
 use crate::indicators::mwdx::{MwdxParams, MwdxStream};
 use crate::indicators::nma::{NmaParams, NmaStream};
 use crate::indicators::pwma::{PwmaParams, PwmaStream};
 use crate::indicators::reflex::{ReflexParams, ReflexStream};
-use crate::indicators::sgf::{SgfParams, SgfStream};
 use crate::indicators::sinwma::{SinWmaParams, SinWmaStream};
 use crate::indicators::sma::{SmaParams, SmaStream};
 use crate::indicators::smma::{SmmaParams, SmmaStream};
@@ -72,7 +75,6 @@ pub enum MaStream {
     EmaDeviationCorrectedT3(EmaDeviationCorrectedT3Stream),
     WaveSmoother(WaveSmootherStream),
     Cwma(CwmaStream),
-    CorrectedMovingAverage(CorrectedMovingAverageStream),
     Edcf(EdcfStream),
     Fwma(FwmaStream),
     Gaussian(GaussianStream),
@@ -134,7 +136,6 @@ impl MaStream {
             MaStream::EmaDeviationCorrectedT3(s) => s.update(value).map(|(_, corrected)| corrected),
             MaStream::WaveSmoother(s) => s.update(value),
             MaStream::Cwma(s) => s.update(value),
-            MaStream::CorrectedMovingAverage(s) => s.update(value),
             MaStream::Edcf(s) => s.update(value),
             MaStream::Fwma(s) => s.update(value),
             MaStream::Gaussian(s) => Some(s.update(value)),

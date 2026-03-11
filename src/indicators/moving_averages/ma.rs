@@ -1,9 +1,5 @@
 use crate::indicators::alma::{alma, AlmaData, AlmaInput, AlmaParams};
 use crate::indicators::cora_wave::{cora_wave, CoraWaveData, CoraWaveInput, CoraWaveParams};
-use crate::indicators::corrected_moving_average::{
-    corrected_moving_average, CorrectedMovingAverageData, CorrectedMovingAverageInput,
-    CorrectedMovingAverageParams,
-};
 use crate::indicators::cwma::{cwma, CwmaData, CwmaInput, CwmaParams};
 use crate::indicators::dema::{dema, DemaData, DemaInput, DemaParams};
 use crate::indicators::edcf::{edcf, EdcfData, EdcfInput, EdcfParams};
@@ -64,7 +60,7 @@ use crate::indicators::mwdx::{mwdx, MwdxData, MwdxInput, MwdxParams};
 use crate::indicators::nma::{nma, NmaData, NmaInput, NmaParams};
 use crate::indicators::pwma::{pwma, PwmaData, PwmaInput, PwmaParams};
 use crate::indicators::reflex::{reflex, ReflexData, ReflexInput, ReflexParams};
-use crate::indicators::sgf::{sgf, SgfData, SgfInput, SgfParams};
+use crate::indicators::moving_averages::sgf::{sgf, SgfData, SgfInput, SgfParams};
 use crate::indicators::sinwma::{sinwma, SinWmaData, SinWmaInput, SinWmaParams};
 use crate::indicators::sma::{sma, SmaData, SmaInput, SmaParams};
 use crate::indicators::smma::{smma, SmmaData, SmmaInput, SmmaParams};
@@ -94,7 +90,6 @@ use thiserror::Error;
 
 use crate::indicators::alma::alma_with_kernel;
 use crate::indicators::cora_wave::cora_wave_with_kernel;
-use crate::indicators::corrected_moving_average::corrected_moving_average_with_kernel;
 use crate::indicators::cwma::cwma_with_kernel;
 use crate::indicators::dema::dema_with_kernel;
 use crate::indicators::edcf::edcf_with_kernel;
@@ -127,7 +122,7 @@ use crate::indicators::mwdx::mwdx_with_kernel;
 use crate::indicators::nma::nma_with_kernel;
 use crate::indicators::pwma::pwma_with_kernel;
 use crate::indicators::reflex::reflex_with_kernel;
-use crate::indicators::sgf::sgf_with_kernel;
+use crate::indicators::moving_averages::sgf::sgf_with_kernel;
 use crate::indicators::sinwma::sinwma_with_kernel;
 use crate::indicators::sma::sma_with_kernel;
 use crate::indicators::smma::smma_with_kernel;

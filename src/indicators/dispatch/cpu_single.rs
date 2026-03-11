@@ -12,39 +12,32 @@ use crate::indicators::registry::{get_indicator, IndicatorInfo, IndicatorInputKi
 pub fn compute_cpu(
     req: IndicatorComputeRequest<'_>,
 ) -> Result<IndicatorComputeOutput, IndicatorDispatchError> {
-    let info = get_indicator(req.indicator_id).ok_or_else(|| {
-        IndicatorDispatchError::UnknownIndicator {
-            id: req.indicator_id.to_string(),
+    let info = get_indicator(req.indicator_id);
+
+    if let Some(info) = info {
+        if info.id.eq_ignore_ascii_case("pattern_recognition") {
+            return compute_pattern_recognition(req, info);
         }
-    })?;
-
-    if info.id.eq_ignore_ascii_case("pattern_recognition") {
-        return compute_pattern_recognition(req, info);
     }
 
-    if !info.capabilities.supports_cpu_single {
-        return Err(IndicatorDispatchError::UnsupportedCapability {
-            indicator: info.id.to_string(),
-            capability: "cpu_single",
-        });
-    }
-
-    if !info.capabilities.supports_cpu_batch {
-        return Err(IndicatorDispatchError::UnsupportedCapability {
-            indicator: info.id.to_string(),
-            capability: "cpu_single",
-        });
-    }
+    let indicator_id = info.map_or(req.indicator_id, |info| info.id);
 
     let combos = [IndicatorParamSet { params: req.params }];
-    let out = compute_cpu_batch(IndicatorBatchRequest {
-        indicator_id: info.id,
+    let out = match compute_cpu_batch(IndicatorBatchRequest {
+        indicator_id,
         output_id: req.output_id,
         data: req.data,
         combos: &combos,
         kernel: req.kernel,
-    })?;
-    map_batch_output_to_compute(info.id, out)
+    }) {
+        Err(IndicatorDispatchError::UnsupportedCapability { .. }) if info.is_none() => {
+            return Err(IndicatorDispatchError::UnknownIndicator {
+                id: req.indicator_id.to_string(),
+            });
+        }
+        other => other?,
+    };
+    map_batch_output_to_compute(indicator_id, out)
 }
 
 fn compute_pattern_recognition(
