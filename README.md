@@ -2,17 +2,19 @@
 
 VectorTA is a Rust crate of over 350 implemented technical analysis indicators focused on speed, predictable allocations, and practical execution flexibility, with optional SIMD/CUDA acceleration and optional Python/WASM bindings. In addition to standard single-call APIs, much of the library also supports streaming/stateful updates, batch parameter sweeps, and registry-driven dispatch across multiple input and output shapes.
 
-Full documentation (indicator list, API reference, and guides): https://vectoralpha.dev/projects/ta
+It is intended for workloads where throughput and execution behavior actually matter, including research pipelines, backtesting systems, and high-throughput production use cases. The library is not limited to close-only, single-output indicators either; it spans a wide range of input structures, multi-output studies, and execution paths across Rust, Python, WASM, and CUDA.
 
 The CUDA bindings are predominantly only worth using if used in a VRAM-resident workflow. For example, it is possible to achieve a benchmark timing of 3.69 ms for 250 million calculated ALMA indicator data points on an RTX 4090, whereas the CPU (AMD 9950X) AVX-512, AVX2, and scalar timings are approximately 140.61 ms, 188.64 ms, and 386.20 ms, respectively. The Python bindings also expose GPU-oriented workflows for a subset of indicators, including device-resident outputs intended for high-throughput research pipelines.
 
-The Tauri backtest optimization demo application using this library can achieve 58,300 backtests for a double ALMA crossover strategy over 200k data points in only 85.863 milliseconds on the same hardware (RTX 4090 + AMD 9950X). 
+The Tauri backtest optimization demo application using this library can achieve 58,300 backtests for a double ALMA crossover strategy over 200k data points in only 85.863 milliseconds on the same hardware (RTX 4090 + AMD 9950X).
+
+For the full indicator list, API reference, and usage guides, see: https://vectoralpha.dev/projects/ta
 
 
 
 ## Rust usage
 
-Example: ADX over HLC slices
+Example: computing ADX from HLC slices
 
 ```rust
 use vector_ta::indicators::adx::{adx, AdxInput, AdxParams};
@@ -29,15 +31,15 @@ fn compute_adx(
 
 ## Features
 
-- `cuda`: GPU acceleration using prebuilt PTX (compute_89) shipped in the crate.
-- `cuda-build-ptx`: You can compile PTX from `kernels/cuda/**` using `nvcc`.
-- `nightly-avx`: Runtime-selected AVX2/AVX512 kernels on `x86_64` (nightly required).
-- `python`: PyO3 bindings (build from source via `maturin`).
-- `wasm`: wasm-bindgen bindings (build from source via `wasm-pack`).
+- `cuda`: GPU acceleration using prebuilt PTX for `compute_89` shipped in the crate.
+- `cuda-build-ptx`: compile PTX from `kernels/cuda/**` using `nvcc`.
+- `nightly-avx`: runtime selected AVX2 and AVX512 kernels on `x86_64`.
+- `python`: PyO3 bindings built from source with `maturin`.
+- `wasm`: wasm-bindgen bindings built from source with `wasm-pack`.
 
 ## Python (optional)
 
-Build + install into a virtualenv:
+Build and install into a virtualenv:
 
 ```bash
 python3 -m venv .venv
@@ -48,7 +50,7 @@ maturin develop --release --features python
 
 ## WASM (optional)
 
-Build with `wasm-pack`:
+Build the Node-targeted package with `wasm-pack`:
 
 ```bash
 rustup target add wasm32-unknown-unknown
@@ -57,7 +59,7 @@ wasm-pack build --target nodejs --release --features wasm
 
 ## CUDA (optional)
 
-Enable:
+Enable the CUDA feature:
 
 ```toml
 [dependencies]
