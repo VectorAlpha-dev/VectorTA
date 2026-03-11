@@ -1,12 +1,9 @@
-
-
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
 #[cfg(feature = "python")]
 #[pymodule]
 fn ta_indicators(m: &Bound<'_, PyModule>) -> PyResult<()> {
-
     crate::indicators::zscore::register_zscore_module(m)?;
     crate::indicators::moving_averages::alma::register_alma_module(m)?;
     crate::indicators::moving_averages::cwma::register_cwma_module(m)?;
@@ -34,9 +31,42 @@ fn ta_indicators(m: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::indicators::medprice::register_medprice_module(m)?;
     crate::indicators::mass::register_mass_module(m)?;
     crate::indicators::macd::register_macd_module(m)?;
+    crate::indicators::macd_wave_signal_pro::register_macd_wave_signal_pro_module(m)?;
     crate::indicators::lpc::register_lpc_module(m)?;
     crate::indicators::linearreg_angle::register_linearreg_angle_module(m)?;
     crate::indicators::kst::register_kst_module(m)?;
+    crate::indicators::garman_klass_volatility::register_garman_klass_volatility_module(m)?;
     crate::indicators::yang_zhang_volatility::register_yang_zhang_volatility_module(m)?;
+    crate::indicators::atr_percentile::register_atr_percentile_module(m)?;
+    crate::indicators::absolute_strength_index_oscillator::register_absolute_strength_index_oscillator_module(m)?;
+    crate::indicators::adaptive_bandpass_trigger_oscillator::register_adaptive_bandpass_trigger_oscillator_module(m)?;
+    crate::indicators::premier_rsi_oscillator::register_premier_rsi_oscillator_module(m)?;
+    crate::indicators::grover_llorens_cycle_oscillator::register_grover_llorens_cycle_oscillator_module(m)?;
+    crate::indicators::advance_decline_line::register_advance_decline_line_module(m)?;
+    crate::indicators::decisionpoint_breadth_swenlin_trading_oscillator::register_decisionpoint_breadth_swenlin_trading_oscillator_module(m)?;
+    crate::indicators::half_causal_estimator::register_half_causal_estimator_module(m)?;
+    crate::indicators::hema_trend_levels::register_hema_trend_levels_module(m)?;
+    crate::indicators::velocity_acceleration_indicator::register_velocity_acceleration_indicator_module(m)?;
+    crate::indicators::normalized_resonator::register_normalized_resonator_module(m)?;
+    crate::indicators::multi_length_stochastic_average::register_multi_length_stochastic_average_module(m)?;
+    crate::indicators::volume_energy_reservoirs::register_volume_energy_reservoirs_module(m)?;
+    crate::indicators::hull_butterfly_oscillator::register_hull_butterfly_oscillator_module(m)?;
+    crate::indicators::fibonacci_trailing_stop::register_fibonacci_trailing_stop_module(m)?;
+    crate::indicators::fibonacci_entry_bands::register_fibonacci_entry_bands_module(m)?;
+    crate::indicators::neighboring_trailing_stop::register_neighboring_trailing_stop_module(m)?;
+    crate::indicators::monotonicity_index::register_monotonicity_index_module(m)?;
+    crate::indicators::bull_power_vs_bear_power::register_bull_power_vs_bear_power_module(m)?;
+    crate::indicators::demand_index::register_demand_index_module(m)?;
+    crate::indicators::didi_index::register_didi_index_module(m)?;
+    crate::indicators::ehlers_autocorrelation_periodogram::register_ehlers_autocorrelation_periodogram_module(m)?;
+    crate::indicators::ehlers_linear_extrapolation_predictor::register_ehlers_linear_extrapolation_predictor_module(m)?;
+    crate::indicators::kase_peak_oscillator_with_divergences::register_kase_peak_oscillator_with_divergences_module(m)?;
+    crate::indicators::gopalakrishnan_range_index::register_gopalakrishnan_range_index_module(m)?;
+    crate::indicators::historical_volatility::register_historical_volatility_module(m)?;
+    crate::indicators::squeeze_index::register_squeeze_index_module(m)?;
+    crate::indicators::stochastic_distance::register_stochastic_distance_module(m)?;
+    crate::indicators::vertical_horizontal_filter::register_vertical_horizontal_filter_module(m)?;
+    crate::indicators::intraday_momentum_index::register_intraday_momentum_index_module(m)?;
+    crate::indicators::vwap_zscore_with_signals::register_vwap_zscore_with_signals_module(m)?;
     Ok(())
 }

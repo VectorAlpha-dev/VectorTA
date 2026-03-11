@@ -221,6 +221,8 @@ pub mod emd_wrapper;
 #[cfg(feature = "cuda")]
 pub mod fvg_trailing_stop_wrapper;
 #[cfg(feature = "cuda")]
+pub mod garman_klass_volatility_wrapper;
+#[cfg(feature = "cuda")]
 pub mod halftrend_wrapper;
 #[cfg(feature = "cuda")]
 pub mod kaufmanstop_wrapper;
@@ -302,6 +304,10 @@ pub use devstop_wrapper::{CudaDevStop, CudaDevStopError};
 pub use emd_wrapper::{CudaEmd, CudaEmdBatchResult, CudaEmdError, DeviceArrayF32Triple};
 #[cfg(feature = "cuda")]
 pub use fvg_trailing_stop_wrapper::{CudaFvgTs, CudaFvgTsError};
+#[cfg(feature = "cuda")]
+pub use garman_klass_volatility_wrapper::{
+    CudaGarmanKlassBatchResult, CudaGarmanKlassVolatility, CudaGarmanKlassVolatilityError,
+};
 #[cfg(feature = "cuda")]
 pub use kaufmanstop_wrapper::{CudaKaufmanstop, CudaKaufmanstopError};
 #[cfg(feature = "cuda")]

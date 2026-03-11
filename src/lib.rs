@@ -56,6 +56,15 @@ pub fn allocate_f64_array(len: usize) -> *mut f64 {
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
+pub fn copy_f64_array(values: &[f64]) -> *mut f64 {
+    let mut v = values.to_vec();
+    let ptr = v.as_mut_ptr();
+    std::mem::forget(v);
+    ptr
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
 pub fn deallocate_f64_array(ptr: *mut f64) {}
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
