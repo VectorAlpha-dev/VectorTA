@@ -904,6 +904,69 @@ use crate::indicators::yang_zhang_volatility::{
 };
 #[cfg(feature = "python")]
 use crate::indicators::zig_zag_channels::{zig_zag_channels_batch_py, zig_zag_channels_py};
+#[cfg(feature = "python")]
+use crate::indicators::adaptive_macd::{
+    adaptive_macd_batch_py, adaptive_macd_py, AdaptiveMacdStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::adaptive_momentum_oscillator::{
+    adaptive_momentum_oscillator_batch_py, adaptive_momentum_oscillator_py,
+    AdaptiveMomentumOscillatorStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::adjustable_ma_alternating_extremities::{
+    adjustable_ma_alternating_extremities_batch_py,
+    adjustable_ma_alternating_extremities_py,
+    AdjustableMaAlternatingExtremitiesStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::ehlers_adaptive_cg::{
+    ehlers_adaptive_cg_batch_py, ehlers_adaptive_cg_py, EhlersAdaptiveCgStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::exponential_trend::{
+    exponential_trend_batch_py, exponential_trend_py, ExponentialTrendStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::geometric_bias_oscillator::{
+    geometric_bias_oscillator_batch_py, geometric_bias_oscillator_py,
+    GeometricBiasOscillatorStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::normalized_volume_true_range::{
+    normalized_volume_true_range_batch_py, normalized_volume_true_range_py,
+    NormalizedVolumeTrueRangeStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::range_breakout_signals::{
+    range_breakout_signals_batch_py, range_breakout_signals_py, RangeBreakoutSignalsStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::standardized_psar_oscillator::{
+    standardized_psar_oscillator_batch_py, standardized_psar_oscillator_py,
+    StandardizedPsarOscillatorStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::statistical_trailing_stop::{
+    statistical_trailing_stop_batch_py, statistical_trailing_stop_py,
+    StatisticalTrailingStopStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::trend_flow_trail::{
+    trend_flow_trail_batch_py, trend_flow_trail_py, TrendFlowTrailStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::vdubus_divergence_wave_pattern_generator::{
+    vdubus_divergence_wave_pattern_generator_batch_py,
+    vdubus_divergence_wave_pattern_generator_py,
+    VdubusDivergenceWavePatternGeneratorStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::velocity::{velocity_batch_py, velocity_py, VelocityStreamPy};
+#[cfg(feature = "python")]
+use crate::indicators::moving_averages::wave_smoother::{
+    wave_smoother_batch_py, wave_smoother_py, WaveSmootherStreamPy,
+};
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "vama")]
