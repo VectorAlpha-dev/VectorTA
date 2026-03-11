@@ -8,7 +8,9 @@ pub mod ehlers_ecema;
 pub mod ehlers_itrend;
 pub mod ehlers_kama;
 pub mod ehlers_pma;
+pub mod ehlers_undersampled_double_moving_average;
 pub mod ehma;
+pub mod elastic_volume_weighted_moving_average;
 pub mod ema;
 pub mod epma;
 pub mod frama;
@@ -69,6 +71,17 @@ pub use ehlers_kama::{ehlers_kama, EhlersKamaInput, EhlersKamaOutput, EhlersKama
 pub use ehlers_pma::{
     ehlers_pma, expand_grid as expand_grid_ehlers_pma, EhlersPmaBatchRange, EhlersPmaInput,
     EhlersPmaOutput, EhlersPmaParams,
+};
+pub use ehlers_undersampled_double_moving_average::{
+    ehlers_undersampled_double_moving_average,
+    expand_grid_ehlers_undersampled_double_moving_average,
+    EhlersUndersampledDoubleMovingAverageBatchRange, EhlersUndersampledDoubleMovingAverageInput,
+    EhlersUndersampledDoubleMovingAverageOutput, EhlersUndersampledDoubleMovingAverageParams,
+};
+pub use elastic_volume_weighted_moving_average::{
+    elastic_volume_weighted_moving_average, expand_grid_elastic_volume_weighted_moving_average,
+    ElasticVolumeWeightedMovingAverageBatchRange, ElasticVolumeWeightedMovingAverageInput,
+    ElasticVolumeWeightedMovingAverageOutput, ElasticVolumeWeightedMovingAverageParams,
 };
 pub use uma::{uma, UmaInput, UmaOutput, UmaParams};
 pub use volatility_adjusted_ma::{

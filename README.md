@@ -6,7 +6,7 @@ Full documentation (indicator list, API reference, and guides): https://vectoral
 
 The CUDA bindings are predominantly only worth using if used in a VRAM-resident workflow. For example, It is possible to achieve a benchmark timing of 3.69 ms for 250 million calculated ALMA indicator data points on an RTX 4090, whereas the CPU (AMD 9950X) AVX-512, AVX2, and scalar timings are approximately 140.61 ms, 188.64 ms, and 386.20 ms, respectively.
 
-The Tauri backtest optimization demo application using this library can achieve 58300 backtests for a double ALMA crossover strategy over 200k data points in only 87.96 milliseconds on the same hardware (RTX 4090 + AMD 9950X). 
+The Tauri backtest optimization demo application using this library can achieve 58300 backtests for a double ALMA crossover strategy over 200k data points in only 85.863 milliseconds on the same hardware (RTX 4090 + AMD 9950X). 
 
 
 

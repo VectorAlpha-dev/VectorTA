@@ -30,6 +30,11 @@ use crate::indicators::moving_averages::ehlers_kama::{
     ehlers_kama, EhlersKamaData, EhlersKamaInput, EhlersKamaParams,
 };
 use crate::indicators::moving_averages::ehma::{ehma, EhmaData, EhmaInput, EhmaParams};
+use crate::indicators::moving_averages::elastic_volume_weighted_moving_average::{
+    elastic_volume_weighted_moving_average, elastic_volume_weighted_moving_average_with_kernel,
+    ElasticVolumeWeightedMovingAverageData, ElasticVolumeWeightedMovingAverageInput,
+    ElasticVolumeWeightedMovingAverageParams,
+};
 use crate::indicators::moving_averages::frama::{frama, FramaInput, FramaParams};
 use crate::indicators::moving_averages::nama::{nama, NamaData, NamaInput, NamaParams};
 use crate::indicators::moving_averages::sama::{sama, SamaData, SamaInput, SamaParams};
@@ -958,6 +963,41 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
             } else {
                 eprintln!("Unknown data type for 'vwma'. Defaulting to 'sma'.");
 
+                let input = match data {
+                    MaData::Candles { candles, source } => SmaInput::from_candles(
+                        candles,
+                        source,
+                        SmaParams {
+                            period: Some(period),
+                        },
+                    ),
+                    MaData::Slice(slice) => SmaInput::from_slice(
+                        slice,
+                        SmaParams {
+                            period: Some(period),
+                        },
+                    ),
+                };
+                let output = sma(&input)?;
+                Ok(output.values)
+            }
+        }
+        "elastic_volume_weighted_moving_average" => {
+            if let MaData::Candles { candles, source } = data {
+                let input = ElasticVolumeWeightedMovingAverageInput {
+                    data: ElasticVolumeWeightedMovingAverageData::Candles { candles, source },
+                    params: ElasticVolumeWeightedMovingAverageParams {
+                        length: Some(period),
+                        absolute_volume_millions: None,
+                        use_volume_sum: Some(true),
+                    },
+                };
+                let output = elastic_volume_weighted_moving_average(&input)?;
+                Ok(output.values)
+            } else {
+                eprintln!(
+                    "Unknown data type for 'elastic_volume_weighted_moving_average'. Defaulting to 'sma'."
+                );
                 let input = match data {
                     MaData::Candles { candles, source } => SmaInput::from_candles(
                         candles,
@@ -2041,6 +2081,26 @@ pub fn ma_with_kernel<'a>(
             let output = vwma_with_kernel(&input, kernel)?;
             Ok(output.values)
         }
+        "elastic_volume_weighted_moving_average" => {
+            let input = match data {
+                MaData::Candles { candles, source } => ElasticVolumeWeightedMovingAverageInput {
+                    data: ElasticVolumeWeightedMovingAverageData::Candles { candles, source },
+                    params: ElasticVolumeWeightedMovingAverageParams {
+                        length: Some(period),
+                        absolute_volume_millions: None,
+                        use_volume_sum: Some(true),
+                    },
+                },
+                MaData::Slice(_) => {
+                    return Err(MaError::RequiresVolume {
+                        indicator: "elastic_volume_weighted_moving_average",
+                    }
+                    .into());
+                }
+            };
+            let output = elastic_volume_weighted_moving_average_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
 
         "zlema" => {
             let input = match data {
@@ -2377,6 +2437,7 @@ mod tests {
             "vpwma",
             "vwap",
             "vwma",
+            "elastic_volume_weighted_moving_average",
             "mama",
         ];
 
@@ -2412,7 +2473,7 @@ mod tests {
                 );
             }
 
-            if ma_type != "mama" {
+            if ma_type != "mama" && ma_type != "elastic_volume_weighted_moving_average" {
                 let slice_result = ma(ma_type, MaData::Slice(&candles_result), 60)
                     .unwrap_or_else(|err| panic!("`ma({})` failed with error: {}", ma_type, err));
 

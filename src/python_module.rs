@@ -1,12 +1,9 @@
-
-
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
 #[cfg(feature = "python")]
 #[pymodule]
 fn ta_indicators(m: &Bound<'_, PyModule>) -> PyResult<()> {
-
     crate::indicators::zscore::register_zscore_module(m)?;
     crate::indicators::moving_averages::alma::register_alma_module(m)?;
     crate::indicators::moving_averages::cwma::register_cwma_module(m)?;
@@ -24,6 +21,8 @@ fn ta_indicators(m: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::indicators::stc::register_stc_module(m)?;
     crate::indicators::rvi::register_rvi_module(m)?;
     crate::indicators::rocp::register_rocp_module(m)?;
+    crate::indicators::ehlers_adaptive_cg::register_ehlers_adaptive_cg_module(m)?;
+    crate::indicators::ehlers_fm_demodulator::register_ehlers_fm_demodulator_module(m)?;
     crate::indicators::qstick::register_qstick_module(m)?;
     crate::indicators::ppo::register_ppo_module(m)?;
     crate::indicators::percentile_nearest_rank::register_percentile_nearest_rank_module(m)?;

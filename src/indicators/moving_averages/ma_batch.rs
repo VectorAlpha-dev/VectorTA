@@ -416,6 +416,86 @@ pub fn ma_batch_with_kernel_and_typed_params<'a>(
         });
     }
 
+    if ma_type.eq_ignore_ascii_case("ehlers_undersampled_double_moving_average") {
+        let kernel = to_batch_kernel(kernel)?;
+        let (prices, _) = match data {
+            MaData::Slice(s) => (s, None),
+            MaData::Candles { candles, source } => (source_type(candles, source), Some(candles)),
+        };
+
+        let get_u = |key: &'static str, default_v: usize| -> Result<usize, MaBatchDispatchError> {
+            let Some(v) = numeric.get(key).copied() else {
+                return Ok(default_v);
+            };
+            if v < 0.0 {
+                return Err(MaBatchDispatchError::InvalidParam {
+                    indicator: "ehlers_undersampled_double_moving_average",
+                    key,
+                    value: v,
+                    reason: "expected >= 0",
+                });
+            }
+            let r = v.round();
+            if (v - r).abs() > 1e-9 {
+                return Err(MaBatchDispatchError::InvalidParam {
+                    indicator: "ehlers_undersampled_double_moving_average",
+                    key,
+                    value: v,
+                    reason: "expected integer",
+                });
+            }
+            Ok(r as usize)
+        };
+
+        let mut sweep =
+            super::ehlers_undersampled_double_moving_average::EhlersUndersampledDoubleMovingAverageBatchRange::default();
+        sweep.fast_length = (
+            get_u("fast_length_start", get_u("fast_length", 6)?)?,
+            get_u("fast_length_end", get_u("fast_length", 6)?)?,
+            get_u("fast_length_step", 0)?,
+        );
+        sweep.slow_length = (
+            get_u("slow_length_start", get_u("slow_length", 12)?)?,
+            get_u("slow_length_end", get_u("slow_length", 12)?)?,
+            get_u("slow_length_step", 0)?,
+        );
+        sweep.sample_length = (
+            get_u("sample_length_start", get_u("sample_length", 5)?)?,
+            get_u("sample_length_end", get_u("sample_length", 5)?)?,
+            get_u("sample_length_step", 0)?,
+        );
+
+        let out =
+            super::ehlers_undersampled_double_moving_average::ehlers_undersampled_double_moving_average_batch_with_kernel(
+                prices, &sweep, kernel,
+            )?;
+        let output = text
+            .get("output")
+            .map(String::as_str)
+            .unwrap_or("fast")
+            .to_ascii_lowercase();
+        let values = match output.as_str() {
+            "fast" => out.fast_values,
+            "slow" => out.slow_values,
+            _ => {
+                return Err(MaBatchDispatchError::InvalidParam {
+                    indicator: "ehlers_undersampled_double_moving_average",
+                    key: "output",
+                    value: f64::NAN,
+                    reason: "expected 'fast' or 'slow'",
+                }
+                .into())
+            }
+        };
+
+        return Ok(MaBatchOutput {
+            periods: (1..=out.rows).collect(),
+            values,
+            rows: out.rows,
+            cols: out.cols,
+        });
+    }
+
     if ma_type.eq_ignore_ascii_case("buff_averages") {
         let kernel = to_batch_kernel(kernel)?;
         let (prices, candles) = match data {
@@ -1163,6 +1243,58 @@ pub fn ma_batch_with_kernel_and_params<'a>(
                 cols: out.cols,
             })
         }
+        "elastic_volume_weighted_moving_average" => {
+            let candles = candles.ok_or(MaBatchDispatchError::RequiresCandles {
+                indicator: "elastic_volume_weighted_moving_average",
+            })?;
+            let mut sweep =
+                super::elastic_volume_weighted_moving_average::ElasticVolumeWeightedMovingAverageBatchRange::default();
+            sweep.length = period_range;
+            if let Some(v) = get_f64(
+                params,
+                "elastic_volume_weighted_moving_average",
+                "absolute_volume_millions",
+            )? {
+                sweep.absolute_volume_millions = Some(v);
+            }
+            if let Some(v) = get_usize(params, "elastic_volume_weighted_moving_average", "length")?
+            {
+                sweep.length = (v, v, 0);
+            }
+            if let Some(v) = get_usize(
+                params,
+                "elastic_volume_weighted_moving_average",
+                "use_volume_sum",
+            )? {
+                sweep.use_volume_sum = Some(match v {
+                    0 => false,
+                    1 => true,
+                    other => {
+                        return Err(MaBatchDispatchError::InvalidParam {
+                            indicator: "elastic_volume_weighted_moving_average",
+                            key: "use_volume_sum",
+                            value: other as f64,
+                            reason: "expected 0 or 1",
+                        }
+                        .into());
+                    }
+                });
+            } else {
+                sweep.use_volume_sum = Some(true);
+            }
+            let out = super::elastic_volume_weighted_moving_average::elastic_volume_weighted_moving_average_batch_with_kernel(
+                prices,
+                &candles.volume,
+                &sweep,
+                kernel,
+            )?;
+            Ok(MaBatchOutput {
+                periods: map_periods(&out.combos, |p| p.length.unwrap_or(30)),
+                values: out.values,
+                rows: out.rows,
+                cols: out.cols,
+            })
+        }
         "tradjema" => {
             let candles = candles.ok_or(MaBatchDispatchError::RequiresCandles {
                 indicator: "tradjema",
@@ -1323,6 +1455,107 @@ pub fn ma_batch_with_kernel_and_params<'a>(
                 values,
                 rows,
                 cols,
+            })
+        }
+        "ehlers_undersampled_double_moving_average" => {
+            let mut sweep =
+                super::ehlers_undersampled_double_moving_average::EhlersUndersampledDoubleMovingAverageBatchRange::default();
+            if let Some(v) = get_usize(
+                params,
+                "ehlers_undersampled_double_moving_average",
+                "fast_length",
+            )? {
+                sweep.fast_length = (v, v, 0);
+            } else {
+                if let Some(v) = get_usize(
+                    params,
+                    "ehlers_undersampled_double_moving_average",
+                    "fast_length_start",
+                )? {
+                    sweep.fast_length.0 = v;
+                }
+                if let Some(v) = get_usize(
+                    params,
+                    "ehlers_undersampled_double_moving_average",
+                    "fast_length_end",
+                )? {
+                    sweep.fast_length.1 = v;
+                }
+                if let Some(v) = get_usize(
+                    params,
+                    "ehlers_undersampled_double_moving_average",
+                    "fast_length_step",
+                )? {
+                    sweep.fast_length.2 = v;
+                }
+            }
+            if let Some(v) = get_usize(
+                params,
+                "ehlers_undersampled_double_moving_average",
+                "slow_length",
+            )? {
+                sweep.slow_length = (v, v, 0);
+            } else {
+                if let Some(v) = get_usize(
+                    params,
+                    "ehlers_undersampled_double_moving_average",
+                    "slow_length_start",
+                )? {
+                    sweep.slow_length.0 = v;
+                }
+                if let Some(v) = get_usize(
+                    params,
+                    "ehlers_undersampled_double_moving_average",
+                    "slow_length_end",
+                )? {
+                    sweep.slow_length.1 = v;
+                }
+                if let Some(v) = get_usize(
+                    params,
+                    "ehlers_undersampled_double_moving_average",
+                    "slow_length_step",
+                )? {
+                    sweep.slow_length.2 = v;
+                }
+            }
+            if let Some(v) = get_usize(
+                params,
+                "ehlers_undersampled_double_moving_average",
+                "sample_length",
+            )? {
+                sweep.sample_length = (v, v, 0);
+            } else {
+                if let Some(v) = get_usize(
+                    params,
+                    "ehlers_undersampled_double_moving_average",
+                    "sample_length_start",
+                )? {
+                    sweep.sample_length.0 = v;
+                }
+                if let Some(v) = get_usize(
+                    params,
+                    "ehlers_undersampled_double_moving_average",
+                    "sample_length_end",
+                )? {
+                    sweep.sample_length.1 = v;
+                }
+                if let Some(v) = get_usize(
+                    params,
+                    "ehlers_undersampled_double_moving_average",
+                    "sample_length_step",
+                )? {
+                    sweep.sample_length.2 = v;
+                }
+            }
+            let out =
+                super::ehlers_undersampled_double_moving_average::ehlers_undersampled_double_moving_average_batch_with_kernel(
+                    prices, &sweep, kernel,
+                )?;
+            Ok(MaBatchOutput {
+                periods: (1..=out.rows).collect(),
+                values: out.fast_values,
+                rows: out.rows,
+                cols: out.cols,
             })
         }
         "mwdx" => {

@@ -22,6 +22,9 @@ use crate::indicators::moving_averages::dma::{DmaParams, DmaStream};
 use crate::indicators::moving_averages::ehlers_ecema::{EhlersEcemaParams, EhlersEcemaStream};
 use crate::indicators::moving_averages::ehlers_kama::{EhlersKamaParams, EhlersKamaStream};
 use crate::indicators::moving_averages::ehma::{EhmaParams, EhmaStream};
+use crate::indicators::moving_averages::elastic_volume_weighted_moving_average::{
+    ElasticVolumeWeightedMovingAverageParams, ElasticVolumeWeightedMovingAverageStream,
+};
 use crate::indicators::moving_averages::nama::{NamaParams, NamaStream};
 use crate::indicators::moving_averages::sama::{SamaParams, SamaStream};
 use crate::indicators::moving_averages::volatility_adjusted_ma::{VamaParams, VamaStream};
@@ -91,6 +94,7 @@ pub enum MaStream {
     VpWma(VpwmaStream),
     Vwap(VwapStream),
     Vwma(VwmaStream),
+    ElasticVolumeWeightedMovingAverage(ElasticVolumeWeightedMovingAverageStream),
     EhlersITrend(EhlersITrendStream),
     Frama(FramaStream),
     Epma(EpmaStream),
@@ -146,6 +150,7 @@ impl MaStream {
             MaStream::VpWma(s) => s.update(value),
             MaStream::Vwap(s) => None,
             MaStream::Vwma(s) => None,
+            MaStream::ElasticVolumeWeightedMovingAverage(_s) => None,
             MaStream::EhlersITrend(s) => s.update(value),
             MaStream::Frama(s) => None,
             MaStream::Epma(s) => s.update(value),
@@ -165,6 +170,7 @@ impl MaStream {
             MaStream::VpWma(s) => s.update(value * volume),
             MaStream::Vwap(_s) => None,
             MaStream::Vwma(s) => s.update(value, volume),
+            MaStream::ElasticVolumeWeightedMovingAverage(s) => s.update(value, volume),
             _ => self.update(value),
         }
     }
@@ -455,6 +461,16 @@ pub fn ma_stream(ma_type: &str, period: usize) -> Result<MaStream, Box<dyn Error
             })?;
             Ok(MaStream::Vwma(stream))
         }
+        "elastic_volume_weighted_moving_average" => {
+            let stream = ElasticVolumeWeightedMovingAverageStream::try_new(
+                ElasticVolumeWeightedMovingAverageParams {
+                    length: Some(period),
+                    absolute_volume_millions: None,
+                    use_volume_sum: Some(true),
+                },
+            )?;
+            Ok(MaStream::ElasticVolumeWeightedMovingAverage(stream))
+        }
 
         "ehlers_itrend" => {
             let stream = EhlersITrendStream::try_new(EhlersITrendParams {
@@ -590,6 +606,7 @@ mod tests {
             "vpwma",
             "vwap",
             "vwma",
+            "elastic_volume_weighted_moving_average",
             "mama",
             "ehlers_itrend",
             "frama",
@@ -632,6 +649,8 @@ mod tests {
         let mut vwma = ma_stream("vwma", 3).expect("Failed to create VWMA stream");
         let mut vpwma = ma_stream("vpwma", 3).expect("Failed to create VPWMA stream");
         let mut vwap = ma_stream("vwap", 3).expect("Failed to create VWAP stream");
+        let mut evwma = ma_stream("elastic_volume_weighted_moving_average", 3)
+            .expect("Failed to create EVWMA stream");
 
         let prices = vec![100.0, 102.0, 101.0, 103.0, 105.0];
         let volumes = vec![1000.0, 1500.0, 1200.0, 2000.0, 1800.0];
@@ -640,6 +659,7 @@ mod tests {
             vwma.update_with_volume(price, volume);
             vpwma.update_with_volume(price, volume);
             vwap.update_with_volume(price, volume);
+            evwma.update_with_volume(price, volume);
         }
     }
 

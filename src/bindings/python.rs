@@ -9,6 +9,15 @@ use crate::indicators::acosc::{acosc_cuda_batch_dev_py, acosc_cuda_many_series_o
 #[cfg(feature = "python")]
 use crate::indicators::ad::{ad_batch_py, ad_py, AdStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::adaptive_macd::{
+    adaptive_macd_batch_py, adaptive_macd_py, AdaptiveMacdStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::adaptive_momentum_oscillator::{
+    adaptive_momentum_oscillator_batch_py, adaptive_momentum_oscillator_py,
+    AdaptiveMomentumOscillatorStreamPy,
+};
+#[cfg(feature = "python")]
 use crate::indicators::adosc::{adosc_batch_py, adosc_py, AdoscStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::adx::{adx_batch_py, adx_py, AdxStreamPy};
@@ -207,6 +216,10 @@ use crate::indicators::efi::{
     efi_cuda_batch_dev_py, efi_cuda_many_series_one_param_dev_py, EfiDeviceArrayF32Py,
 };
 #[cfg(feature = "python")]
+use crate::indicators::ehlers_adaptive_cg::{
+    ehlers_adaptive_cg_batch_py, ehlers_adaptive_cg_py, EhlersAdaptiveCgStreamPy,
+};
+#[cfg(feature = "python")]
 use crate::indicators::emd::{emd_batch_py, emd_py, EmdStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::emd::{emd_cuda_batch_dev_py, emd_cuda_many_series_one_param_dev_py};
@@ -220,6 +233,10 @@ use crate::indicators::er::{er_batch_py, er_py, ErStreamPy};
 use crate::indicators::eri::{eri_batch_py, eri_py, EriStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::eri::{eri_cuda_batch_dev_py, eri_cuda_many_series_one_param_dev_py};
+#[cfg(feature = "python")]
+use crate::indicators::exponential_trend::{
+    exponential_trend_batch_py, exponential_trend_py, ExponentialTrendStreamPy,
+};
 #[cfg(feature = "python")]
 use crate::indicators::fisher::{fisher_batch_py, fisher_py, FisherStreamPy};
 #[cfg(feature = "python")]
@@ -239,6 +256,11 @@ use crate::indicators::gatorosc::{gatorosc_batch_py, gatorosc_py, GatorOscStream
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::gatorosc::{
     gatorosc_cuda_batch_dev_py, gatorosc_cuda_many_series_one_param_dev_py,
+};
+#[cfg(feature = "python")]
+use crate::indicators::geometric_bias_oscillator::{
+    geometric_bias_oscillator_batch_py, geometric_bias_oscillator_py,
+    GeometricBiasOscillatorStreamPy,
 };
 #[cfg(feature = "python")]
 use crate::indicators::halftrend::{
@@ -420,6 +442,11 @@ use crate::indicators::moving_averages::ehlers_pma::{
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::ehlers_pma::{
     ehlers_pma_cuda_batch_dev_py, ehlers_pma_cuda_many_series_one_param_dev_py,
+};
+#[cfg(feature = "python")]
+use crate::indicators::moving_averages::ehlers_undersampled_double_moving_average::{
+    ehlers_undersampled_double_moving_average_batch_py,
+    ehlers_undersampled_double_moving_average_py, EhlersUndersampledDoubleMovingAverageStreamPy,
 };
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::ehma::{ehma_batch_py, ehma_py, EhmaStreamPy};
@@ -657,6 +684,36 @@ use crate::indicators::moving_averages::volatility_adjusted_ma::{
 };
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::volume_adjusted_ma as vama_volu;
+#[cfg(feature = "python")]
+use crate::indicators::normalized_volume_true_range::{
+    normalized_volume_true_range_batch_py, normalized_volume_true_range_py,
+    NormalizedVolumeTrueRangeStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::range_breakout_signals::{
+    range_breakout_signals_batch_py, range_breakout_signals_py, RangeBreakoutSignalsStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::standardized_psar_oscillator::{
+    standardized_psar_oscillator_batch_py, standardized_psar_oscillator_py,
+    StandardizedPsarOscillatorStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::statistical_trailing_stop::{
+    statistical_trailing_stop_batch_py, statistical_trailing_stop_py,
+    StatisticalTrailingStopStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::trend_flow_trail::{
+    trend_flow_trail_batch_py, trend_flow_trail_py, TrendFlowTrailStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::vdubus_divergence_wave_pattern_generator::{
+    vdubus_divergence_wave_pattern_generator_batch_py, vdubus_divergence_wave_pattern_generator_py,
+    VdubusDivergenceWavePatternGeneratorStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::velocity::{velocity_batch_py, velocity_py, VelocityStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::yang_zhang_volatility::{
     yang_zhang_volatility_batch_py, yang_zhang_volatility_py, YangZhangVolatilityStreamPy,
@@ -991,6 +1048,20 @@ impl VamaStreamUnifiedPy {
         }
     }
 }
+#[cfg(feature = "python")]
+use crate::indicators::ehlers_fm_demodulator::{
+    ehlers_fm_demodulator_batch_py, ehlers_fm_demodulator_py, EhlersFmDemodulatorStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::linear_correlation_oscillator::{
+    linear_correlation_oscillator_batch_py, linear_correlation_oscillator_py,
+    LinearCorrelationOscillatorStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::moving_averages::elastic_volume_weighted_moving_average::{
+    elastic_volume_weighted_moving_average_batch_py, elastic_volume_weighted_moving_average_py,
+    ElasticVolumeWeightedMovingAverageStreamPy,
+};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::volume_adjusted_ma::{
     volume_adjusted_ma_cuda_batch_dev_py, volume_adjusted_ma_cuda_many_series_one_param_dev_py,
@@ -1083,6 +1154,11 @@ use crate::indicators::pivot::{pivot_batch_py, pivot_py, PivotStreamPy};
 use crate::indicators::pma::{pma_batch_py, pma_py, PmaStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::pma::{pma_cuda_batch_dev_py, pma_cuda_many_series_one_param_dev_py};
+#[cfg(feature = "python")]
+use crate::indicators::polynomial_regression_extrapolation::{
+    polynomial_regression_extrapolation_batch_py, polynomial_regression_extrapolation_py,
+    PolynomialRegressionExtrapolationStreamPy,
+};
 #[cfg(feature = "python")]
 use crate::indicators::ppo::{ppo_batch_py, ppo_py, PpoStreamPy};
 #[cfg(feature = "python")]
@@ -1190,6 +1266,10 @@ use crate::indicators::supertrend::{supertrend_batch_py, supertrend_py, SuperTre
 use crate::indicators::supertrend::{
     supertrend_cuda_batch_dev_py, supertrend_cuda_many_series_one_param_dev_py,
     SupertrendDeviceArrayF32Py,
+};
+#[cfg(feature = "python")]
+use crate::indicators::supertrend_recovery::{
+    supertrend_recovery_batch_py, supertrend_recovery_py, SuperTrendRecoveryStreamPy,
 };
 #[cfg(feature = "python")]
 use crate::indicators::trix::{trix_batch_py, trix_py, TrixStreamPy};
@@ -1404,6 +1484,22 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(adxr_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(adxr_cuda_many_series_one_param_dev_py, m)?)?;
     }
+
+    m.add_function(wrap_pyfunction!(adaptive_momentum_oscillator_py, m)?)?;
+    m.add_function(wrap_pyfunction!(adaptive_momentum_oscillator_batch_py, m)?)?;
+    m.add_class::<AdaptiveMomentumOscillatorStreamPy>()?;
+
+    m.add_function(wrap_pyfunction!(adaptive_macd_py, m)?)?;
+    m.add_function(wrap_pyfunction!(adaptive_macd_batch_py, m)?)?;
+    m.add_class::<AdaptiveMacdStreamPy>()?;
+
+    m.add_function(wrap_pyfunction!(statistical_trailing_stop_py, m)?)?;
+    m.add_function(wrap_pyfunction!(statistical_trailing_stop_batch_py, m)?)?;
+    m.add_class::<StatisticalTrailingStopStreamPy>()?;
+
+    m.add_function(wrap_pyfunction!(standardized_psar_oscillator_py, m)?)?;
+    m.add_function(wrap_pyfunction!(standardized_psar_oscillator_batch_py, m)?)?;
+    m.add_class::<StandardizedPsarOscillatorStreamPy>()?;
 
     m.add_function(wrap_pyfunction!(acosc_py, m)?)?;
     m.add_function(wrap_pyfunction!(acosc_batch_py, m)?)?;
@@ -1904,6 +2000,17 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(pma_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
+    m.add_function(wrap_pyfunction!(linear_correlation_oscillator_py, m)?)?;
+    m.add_function(wrap_pyfunction!(linear_correlation_oscillator_batch_py, m)?)?;
+    m.add_class::<LinearCorrelationOscillatorStreamPy>()?;
+
+    m.add_function(wrap_pyfunction!(polynomial_regression_extrapolation_py, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        polynomial_regression_extrapolation_batch_py,
+        m
+    )?)?;
+    m.add_class::<PolynomialRegressionExtrapolationStreamPy>()?;
+
     m.add_function(wrap_pyfunction!(roc_py, m)?)?;
     m.add_function(wrap_pyfunction!(roc_batch_py, m)?)?;
     m.add_class::<RocStreamPy>()?;
@@ -2104,6 +2211,15 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(vwma_py, m)?)?;
     m.add_function(wrap_pyfunction!(vwma_batch_py, m)?)?;
     m.add_class::<VwmaStreamPy>()?;
+    m.add_function(wrap_pyfunction!(
+        elastic_volume_weighted_moving_average_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        elastic_volume_weighted_moving_average_batch_py,
+        m
+    )?)?;
+    m.add_class::<ElasticVolumeWeightedMovingAverageStreamPy>()?;
     #[cfg(feature = "cuda")]
     {
         m.add_function(wrap_pyfunction!(vwma_cuda_batch_dev_py, m)?)?;
@@ -2177,6 +2293,16 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
             m
         )?)?;
     }
+
+    m.add_function(wrap_pyfunction!(
+        ehlers_undersampled_double_moving_average_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        ehlers_undersampled_double_moving_average_batch_py,
+        m
+    )?)?;
+    m.add_class::<EhlersUndersampledDoubleMovingAverageStreamPy>()?;
 
     m.add_function(wrap_pyfunction!(chandelier_exit_py, m)?)?;
     m.add_function(wrap_pyfunction!(chandelier_exit_batch_py, m)?)?;
@@ -2348,6 +2474,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(cg_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(cg_cuda_many_series_one_param_dev_py, m)?)?;
     }
+
+    m.add_function(wrap_pyfunction!(ehlers_adaptive_cg_py, m)?)?;
+    m.add_function(wrap_pyfunction!(ehlers_adaptive_cg_batch_py, m)?)?;
+    m.add_class::<EhlersAdaptiveCgStreamPy>()?;
 
     m.add_function(wrap_pyfunction!(coppock_py, m)?)?;
     m.add_function(wrap_pyfunction!(coppock_batch_py, m)?)?;
@@ -3150,6 +3280,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(obv_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
+    m.add_function(wrap_pyfunction!(ehlers_fm_demodulator_py, m)?)?;
+    m.add_function(wrap_pyfunction!(ehlers_fm_demodulator_batch_py, m)?)?;
+    m.add_class::<EhlersFmDemodulatorStreamPy>()?;
+
     m.add_function(wrap_pyfunction!(qstick_py, m)?)?;
     m.add_function(wrap_pyfunction!(qstick_batch_py, m)?)?;
     m.add_class::<QstickStreamPy>()?;
@@ -3227,6 +3361,19 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(alphatrend_py, m)?)?;
     m.add_class::<AlphaTrendStreamPy>()?;
+
+    m.add_function(wrap_pyfunction!(geometric_bias_oscillator_py, m)?)?;
+    m.add_function(wrap_pyfunction!(geometric_bias_oscillator_batch_py, m)?)?;
+    m.add_class::<GeometricBiasOscillatorStreamPy>()?;
+    m.add_function(wrap_pyfunction!(
+        vdubus_divergence_wave_pattern_generator_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        vdubus_divergence_wave_pattern_generator_batch_py,
+        m
+    )?)?;
+    m.add_class::<VdubusDivergenceWavePatternGeneratorStreamPy>()?;
 
     m.add_function(wrap_pyfunction!(gatorosc_py, m)?)?;
     m.add_function(wrap_pyfunction!(gatorosc_batch_py, m)?)?;
@@ -3325,6 +3472,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<SupertrendDeviceArrayF32Py>()?;
     }
 
+    m.add_function(wrap_pyfunction!(supertrend_recovery_py, m)?)?;
+    m.add_function(wrap_pyfunction!(supertrend_recovery_batch_py, m)?)?;
+    m.add_class::<SuperTrendRecoveryStreamPy>()?;
+
     m.add_function(wrap_pyfunction!(ultosc_py, m)?)?;
     m.add_function(wrap_pyfunction!(ultosc_batch_py, m)?)?;
     m.add_class::<UltOscStreamPy>()?;
@@ -3398,6 +3549,25 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(mom_py, m)?)?;
     m.add_function(wrap_pyfunction!(mom_batch_py, m)?)?;
     m.add_class::<MomStreamPy>()?;
+
+    m.add_function(wrap_pyfunction!(normalized_volume_true_range_py, m)?)?;
+    m.add_function(wrap_pyfunction!(normalized_volume_true_range_batch_py, m)?)?;
+    m.add_class::<NormalizedVolumeTrueRangeStreamPy>()?;
+
+    m.add_function(wrap_pyfunction!(exponential_trend_py, m)?)?;
+    m.add_function(wrap_pyfunction!(exponential_trend_batch_py, m)?)?;
+    m.add_class::<ExponentialTrendStreamPy>()?;
+    m.add_function(wrap_pyfunction!(trend_flow_trail_py, m)?)?;
+    m.add_function(wrap_pyfunction!(trend_flow_trail_batch_py, m)?)?;
+    m.add_class::<TrendFlowTrailStreamPy>()?;
+
+    m.add_function(wrap_pyfunction!(range_breakout_signals_py, m)?)?;
+    m.add_function(wrap_pyfunction!(range_breakout_signals_batch_py, m)?)?;
+    m.add_class::<RangeBreakoutSignalsStreamPy>()?;
+
+    m.add_function(wrap_pyfunction!(velocity_py, m)?)?;
+    m.add_function(wrap_pyfunction!(velocity_batch_py, m)?)?;
+    m.add_class::<VelocityStreamPy>()?;
     #[cfg(feature = "cuda")]
     {
         m.add_function(wrap_pyfunction!(mom_cuda_batch_dev_py, m)?)?;
