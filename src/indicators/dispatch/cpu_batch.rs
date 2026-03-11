@@ -7,9 +7,6 @@ use crate::indicators::accumulation_swing_index::{
 };
 use crate::indicators::acosc::{acosc_with_kernel, AcoscInput, AcoscParams};
 use crate::indicators::ad::{ad_with_kernel, AdInput, AdParams};
-use crate::indicators::adaptive_bounds_rsi::{
-    adaptive_bounds_rsi_with_kernel, AdaptiveBoundsRsiInput, AdaptiveBoundsRsiParams,
-};
 use crate::indicators::adjustable_ma_alternating_extremities::{
     adjustable_ma_alternating_extremities_with_kernel, AdjustableMaAlternatingExtremitiesInput,
     AdjustableMaAlternatingExtremitiesParams,
@@ -1094,7 +1091,6 @@ fn dispatch_cpu_batch_by_indicator(
         "pma" => compute_pma_batch(req, output_id),
         "prb" => compute_prb_batch(req, output_id),
         "qqe" => compute_qqe_batch(req, output_id),
-        "adaptive_bounds_rsi" => compute_adaptive_bounds_rsi_batch(req, output_id),
         "forward_backward_exponential_oscillator" => {
             compute_forward_backward_exponential_oscillator_batch(req, output_id)
         }
@@ -9086,75 +9082,6 @@ fn compute_forward_backward_exponential_oscillator_batch(
             }
             Err(IndicatorDispatchError::UnknownOutput {
                 indicator: "forward_backward_exponential_oscillator".to_string(),
-                output: output_id.to_string(),
-            })
-        },
-    )
-}
-
-fn compute_adaptive_bounds_rsi_batch(
-    req: IndicatorBatchRequest<'_>,
-    output_id: &str,
-) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
-    let data = extract_slice_input("adaptive_bounds_rsi", req.data, "close")?;
-    let kernel = req.kernel.to_non_batch();
-    collect_f64(
-        "adaptive_bounds_rsi",
-        output_id,
-        req.combos,
-        data.len(),
-        |params| {
-            let rsi_length = get_usize_param("adaptive_bounds_rsi", params, "rsi_length", 14)?;
-            let alpha = get_f64_param("adaptive_bounds_rsi", params, "alpha", 0.1)?;
-            let input = AdaptiveBoundsRsiInput::from_slice(
-                data,
-                AdaptiveBoundsRsiParams {
-                    rsi_length: Some(rsi_length),
-                    alpha: Some(alpha),
-                },
-            );
-            let out = adaptive_bounds_rsi_with_kernel(&input, kernel).map_err(|e| {
-                IndicatorDispatchError::ComputeFailed {
-                    indicator: "adaptive_bounds_rsi".to_string(),
-                    details: e.to_string(),
-                }
-            })?;
-            if output_id.eq_ignore_ascii_case("rsi") || output_id.eq_ignore_ascii_case("value") {
-                return Ok(out.rsi);
-            }
-            if output_id.eq_ignore_ascii_case("lower_bound") || output_id.eq_ignore_ascii_case("c1")
-            {
-                return Ok(out.lower_bound);
-            }
-            if output_id.eq_ignore_ascii_case("lower_mid") || output_id.eq_ignore_ascii_case("c2") {
-                return Ok(out.lower_mid);
-            }
-            if output_id.eq_ignore_ascii_case("mid") || output_id.eq_ignore_ascii_case("c3") {
-                return Ok(out.mid);
-            }
-            if output_id.eq_ignore_ascii_case("upper_mid") || output_id.eq_ignore_ascii_case("c4") {
-                return Ok(out.upper_mid);
-            }
-            if output_id.eq_ignore_ascii_case("upper_bound") || output_id.eq_ignore_ascii_case("c5")
-            {
-                return Ok(out.upper_bound);
-            }
-            if output_id.eq_ignore_ascii_case("regime") {
-                return Ok(out.regime);
-            }
-            if output_id.eq_ignore_ascii_case("regime_flip")
-                || output_id.eq_ignore_ascii_case("flip")
-            {
-                return Ok(out.regime_flip);
-            }
-            if output_id.eq_ignore_ascii_case("lower_signal") {
-                return Ok(out.lower_signal);
-            }
-            if output_id.eq_ignore_ascii_case("upper_signal") {
-                return Ok(out.upper_signal);
-            }
-            Err(IndicatorDispatchError::UnknownOutput {
-                indicator: "adaptive_bounds_rsi".to_string(),
                 output: output_id.to_string(),
             })
         },

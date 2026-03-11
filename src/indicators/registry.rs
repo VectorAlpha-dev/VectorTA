@@ -9759,7 +9759,6 @@ fn supplemental_supports_cpu_batch(id: &str) -> bool {
             | "bulls_v_bears"
             | "regression_slope_oscillator"
             | "smooth_theil_sen"
-            | "adaptive_bounds_rsi"
             | "market_structure_confluence"
             | "forward_backward_exponential_oscillator"
             | "qqe_weighted_oscillator"
