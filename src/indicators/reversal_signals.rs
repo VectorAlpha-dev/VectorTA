@@ -345,7 +345,11 @@ fn input_slices<'a>(
 
 #[inline(always)]
 fn is_valid_ohlcv(open: f64, high: f64, low: f64, close: f64, volume: f64) -> bool {
-    open.is_finite() && high.is_finite() && low.is_finite() && close.is_finite() && volume.is_finite()
+    open.is_finite()
+        && high.is_finite()
+        && low.is_finite()
+        && close.is_finite()
+        && volume.is_finite()
 }
 
 #[inline(always)]
@@ -1140,11 +1144,7 @@ impl Default for ReversalSignalsBatchRange {
     fn default() -> Self {
         Self {
             lookback_period: (DEFAULT_LOOKBACK_PERIOD, DEFAULT_LOOKBACK_PERIOD, 0),
-            confirmation_period: (
-                DEFAULT_CONFIRMATION_PERIOD,
-                DEFAULT_CONFIRMATION_PERIOD,
-                0,
-            ),
+            confirmation_period: (DEFAULT_CONFIRMATION_PERIOD, DEFAULT_CONFIRMATION_PERIOD, 0),
             trend_ma_period: (DEFAULT_TREND_MA_PERIOD, DEFAULT_TREND_MA_PERIOD, 0),
             ma_step_period: (DEFAULT_MA_STEP_PERIOD, DEFAULT_MA_STEP_PERIOD, 0),
             use_volume_confirmation: DEFAULT_USE_VOLUME_CONFIRMATION,
@@ -1370,11 +1370,11 @@ pub fn reversal_signals_batch_with_kernel(
     let combos = expand_grid_checked(sweep)?;
     let rows = combos.len();
     let cols = close.len();
-    let total =
-        rows.checked_mul(cols)
-            .ok_or_else(|| ReversalSignalsError::InvalidInput {
-                msg: "reversal_signals: rows*cols overflow in batch".to_string(),
-            })?;
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| ReversalSignalsError::InvalidInput {
+            msg: "reversal_signals: rows*cols overflow in batch".to_string(),
+        })?;
 
     let buy_mu = make_uninit_matrix(rows, cols);
     let sell_mu = make_uninit_matrix(rows, cols);
@@ -1491,11 +1491,11 @@ fn reversal_signals_batch_inner_into(
     let combos = expand_grid_checked(sweep)?;
     let rows = combos.len();
     let cols = close.len();
-    let total =
-        rows.checked_mul(cols)
-            .ok_or_else(|| ReversalSignalsError::InvalidInput {
-                msg: "reversal_signals: rows*cols overflow in batch_into".to_string(),
-            })?;
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| ReversalSignalsError::InvalidInput {
+            msg: "reversal_signals: rows*cols overflow in batch_into".to_string(),
+        })?;
 
     for out in [
         &mut *out_buy_signal,
@@ -1655,8 +1655,7 @@ impl ReversalSignalsStream {
             .as_deref()
             .unwrap_or(DEFAULT_TREND_MA_TYPE);
         let ma_step_period = params.ma_step_period.unwrap_or(DEFAULT_MA_STEP_PERIOD);
-        let trend_ma_kind =
-            validate_params_only(lookback_period, trend_ma_period, trend_ma_type)?;
+        let trend_ma_kind = validate_params_only(lookback_period, trend_ma_period, trend_ma_type)?;
 
         Ok(Self {
             lookback_period,
@@ -1722,12 +1721,20 @@ impl ReversalSignalsStream {
         let bull_candidate_trigger = if prev_span == 0 {
             true
         } else {
-            has_prev_window && self.prev_lows.current().is_some_and(|min_prev| close < min_prev)
+            has_prev_window
+                && self
+                    .prev_lows
+                    .current()
+                    .is_some_and(|min_prev| close < min_prev)
         };
         let bear_candidate_trigger = if prev_span == 0 {
             true
         } else {
-            has_prev_window && self.prev_highs.current().is_some_and(|max_prev| close > max_prev)
+            has_prev_window
+                && self
+                    .prev_highs
+                    .current()
+                    .is_some_and(|max_prev| close > max_prev)
         };
 
         if bear_candidate_trigger {
@@ -1994,17 +2001,26 @@ pub fn reversal_signals_batch_py<'py>(
     let dict = PyDict::new(py);
     dict.set_item(
         "buy_signal",
-        out.buy_signal.into_pyarray(py).reshape((out.rows, out.cols))?,
+        out.buy_signal
+            .into_pyarray(py)
+            .reshape((out.rows, out.cols))?,
     )?;
     dict.set_item(
         "sell_signal",
-        out.sell_signal.into_pyarray(py).reshape((out.rows, out.cols))?,
+        out.sell_signal
+            .into_pyarray(py)
+            .reshape((out.rows, out.cols))?,
     )?;
     dict.set_item(
         "stepped_ma",
-        out.stepped_ma.into_pyarray(py).reshape((out.rows, out.cols))?,
+        out.stepped_ma
+            .into_pyarray(py)
+            .reshape((out.rows, out.cols))?,
     )?;
-    dict.set_item("state", out.state.into_pyarray(py).reshape((out.rows, out.cols))?)?;
+    dict.set_item(
+        "state",
+        out.state.into_pyarray(py).reshape((out.rows, out.cols))?,
+    )?;
     dict.set_item(
         "lookback_periods",
         out.combos
@@ -2305,7 +2321,9 @@ pub fn reversal_signals_into(
         || volume_ptr.is_null()
         || out_ptr.is_null()
     {
-        return Err(JsValue::from_str("null pointer passed to reversal_signals_into"));
+        return Err(JsValue::from_str(
+            "null pointer passed to reversal_signals_into",
+        ));
     }
 
     unsafe {
@@ -2383,11 +2401,7 @@ pub fn reversal_signals_batch_into(
 
     let sweep = ReversalSignalsBatchRange {
         lookback_period: (lookback_start, lookback_end, lookback_step),
-        confirmation_period: (
-            confirmation_start,
-            confirmation_end,
-            confirmation_step,
-        ),
+        confirmation_period: (confirmation_start, confirmation_end, confirmation_step),
         trend_ma_period: (
             trend_ma_period_start,
             trend_ma_period_end,
@@ -2543,7 +2557,10 @@ mod tests {
             Kernel::Scalar,
         )
         .unwrap_err();
-        assert!(matches!(err, ReversalSignalsError::InvalidTrendMaPeriod { .. }));
+        assert!(matches!(
+            err,
+            ReversalSignalsError::InvalidTrendMaPeriod { .. }
+        ));
 
         let err = reversal_signals_with_kernel(
             &ReversalSignalsInput::from_slices(
@@ -2560,7 +2577,10 @@ mod tests {
             Kernel::Scalar,
         )
         .unwrap_err();
-        assert!(matches!(err, ReversalSignalsError::InvalidTrendMaType { .. }));
+        assert!(matches!(
+            err,
+            ReversalSignalsError::InvalidTrendMaType { .. }
+        ));
     }
 
     #[test]
@@ -2597,16 +2617,14 @@ mod tests {
     #[test]
     fn reversal_signals_batch_single_matches_single() -> Result<(), Box<dyn Error>> {
         let (open, high, low, close, volume) = sample_ohlcv(200);
-        let single = reversal_signals(
-            &ReversalSignalsInput::from_slices(
-                &open,
-                &high,
-                &low,
-                &close,
-                &volume,
-                ReversalSignalsParams::default(),
-            ),
-        )?;
+        let single = reversal_signals(&ReversalSignalsInput::from_slices(
+            &open,
+            &high,
+            &low,
+            &close,
+            &volume,
+            ReversalSignalsParams::default(),
+        ))?;
         let batch = reversal_signals_batch_with_kernel(
             &open,
             &high,
@@ -2628,19 +2646,17 @@ mod tests {
     #[test]
     fn reversal_signals_stream_matches_single() -> Result<(), Box<dyn Error>> {
         let (open, high, low, close, volume) = sample_ohlcv(220);
-        let safe = reversal_signals(
-            &ReversalSignalsInput::from_slices(
-                &open,
-                &high,
-                &low,
-                &close,
-                &volume,
-                ReversalSignalsParams {
-                    trend_ma_type: Some("VWMA".to_string()),
-                    ..ReversalSignalsParams::default()
-                },
-            ),
-        )?;
+        let safe = reversal_signals(&ReversalSignalsInput::from_slices(
+            &open,
+            &high,
+            &low,
+            &close,
+            &volume,
+            ReversalSignalsParams {
+                trend_ma_type: Some("VWMA".to_string()),
+                ..ReversalSignalsParams::default()
+            },
+        ))?;
         let mut stream = ReversalSignalsStream::try_new(ReversalSignalsParams {
             trend_ma_type: Some("VWMA".to_string()),
             ..ReversalSignalsParams::default()

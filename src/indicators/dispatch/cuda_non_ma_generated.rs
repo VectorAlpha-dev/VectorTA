@@ -1323,6 +1323,15 @@ pub(super) fn try_dispatch_non_ma_cuda(
             let (output_id, output_index) =
                 resolve_output_with_fallback(indicator, info, req.output_id, fallback_outputs)?;
             let primary_f32 = primary_f32_from_data(req.data, indicator)?;
+            let first_valid = primary_f32
+                .as_slice()
+                .iter()
+                .position(|value| value.is_finite())
+                .ok_or_else(|| IndicatorDispatchError::InvalidParam {
+                    indicator: indicator.to_string(),
+                    key: "data".to_string(),
+                    reason: "all values are NaN".to_string(),
+                })?;
             let mut sweep: crate::indicators::decycler::DecyclerBatchRange = Default::default();
             sweep.hp_period =
                 resolve_usize_range_param(req.params, "hp_period", sweep.hp_period, indicator)?;
@@ -1349,7 +1358,13 @@ pub(super) fn try_dispatch_non_ma_cuda(
                     });
                 }
             };
-            finalize_cuda_matrix_output(output_id, owner, req.target, device_id as u32, None)
+            finalize_cuda_matrix_output(
+                output_id,
+                owner,
+                req.target,
+                device_id as u32,
+                Some(first_valid + 2),
+            )
         })()),
         "deviation" => Some((|| {
             let indicator = "deviation";
@@ -3760,7 +3775,7 @@ pub(super) fn try_dispatch_non_ma_cuda(
         })()),
         "qqe" => Some((|| {
             let indicator = "qqe";
-            let fallback_outputs: &[&str] = &["value"];
+            let fallback_outputs: &[&str] = &["fast", "slow"];
             let (output_id, output_index) =
                 resolve_output_with_fallback(indicator, info, req.output_id, fallback_outputs)?;
             let primary_f32 = primary_f32_from_data(req.data, indicator)?;
@@ -3780,23 +3795,30 @@ pub(super) fn try_dispatch_non_ma_cuda(
                     details: e.to_string(),
                 }
             })?;
-            let result = cuda
-                .qqe_batch_dev(primary_f32.as_slice(), &sweep)
+            let first_valid = primary_f32
+                .as_slice()
+                .iter()
+                .position(|value| value.is_finite())
+                .ok_or_else(|| IndicatorDispatchError::InvalidParam {
+                    indicator: indicator.to_string(),
+                    key: "data".to_string(),
+                    reason: "all values are NaN".to_string(),
+                })?;
+            let (result, _) = cuda
+                .qqe_batch_output_dev(primary_f32.as_slice(), &sweep, output_index)
                 .map_err(|e| map_non_ma_compute_error(indicator, e.to_string()))?;
-            let owner = match output_index {
-                0 => crate::cuda::moving_averages::DeviceArrayF32 {
-                    buf: result.0.buf,
-                    rows: result.0.rows,
-                    cols: result.0.cols,
-                },
-                _ => {
-                    return Err(IndicatorDispatchError::UnknownOutput {
-                        indicator: indicator.to_string(),
-                        output: output_id.clone(),
-                    });
-                }
+            let owner = crate::cuda::moving_averages::DeviceArrayF32 {
+                buf: result.buf,
+                rows: result.rows,
+                cols: result.cols,
             };
-            finalize_cuda_matrix_output(output_id, owner, req.target, device_id as u32, None)
+            let warmup = Some(
+                first_valid
+                    + sweep.rsi_period.0.min(sweep.rsi_period.1)
+                    + sweep.smoothing_factor.0.min(sweep.smoothing_factor.1)
+                    - 2,
+            );
+            finalize_cuda_matrix_output(output_id, owner, req.target, device_id as u32, warmup)
         })()),
         "qstick" => Some((|| {
             let indicator = "qstick";

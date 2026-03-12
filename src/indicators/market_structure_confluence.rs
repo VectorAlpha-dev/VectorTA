@@ -224,8 +224,14 @@ impl MarketStructureConfluenceBuilder {
 pub enum MarketStructureConfluenceError {
     #[error("market_structure_confluence: input data slice is empty")]
     EmptyInputData,
-    #[error("market_structure_confluence: data length mismatch: high={high}, low={low}, close={close}")]
-    DataLengthMismatch { high: usize, low: usize, close: usize },
+    #[error(
+        "market_structure_confluence: data length mismatch: high={high}, low={low}, close={close}"
+    )]
+    DataLengthMismatch {
+        high: usize,
+        low: usize,
+        close: usize,
+    },
     #[error("market_structure_confluence: all values are NaN")]
     AllValuesNaN,
     #[error("market_structure_confluence: invalid swing_size: swing_size = {swing_size}, data length = {data_len}")]
@@ -233,14 +239,19 @@ pub enum MarketStructureConfluenceError {
     #[error("market_structure_confluence: invalid bos_confirmation: {bos_confirmation}")]
     InvalidBosConfirmation { bos_confirmation: String },
     #[error("market_structure_confluence: invalid basis_length: basis_length = {basis_length}, data length = {data_len}")]
-    InvalidBasisLength { basis_length: usize, data_len: usize },
+    InvalidBasisLength {
+        basis_length: usize,
+        data_len: usize,
+    },
     #[error("market_structure_confluence: invalid atr_length: atr_length = {atr_length}, data length = {data_len}")]
     InvalidAtrLength { atr_length: usize, data_len: usize },
     #[error("market_structure_confluence: invalid atr_smooth: atr_smooth = {atr_smooth}, data length = {data_len}")]
     InvalidAtrSmooth { atr_smooth: usize, data_len: usize },
     #[error("market_structure_confluence: invalid vol_mult: {vol_mult}")]
     InvalidVolMult { vol_mult: f64 },
-    #[error("market_structure_confluence: not enough valid data: needed = {needed}, valid = {valid}")]
+    #[error(
+        "market_structure_confluence: not enough valid data: needed = {needed}, valid = {valid}"
+    )]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("market_structure_confluence: output length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
@@ -606,7 +617,10 @@ impl MarketStructureConfluenceCore {
         let mut ll = 0.0;
 
         if let Some((pivot_high, pivot_idx)) = self.piv_high.update(high, self.index) {
-            let is_hh = self.prev_high.map(|value| pivot_high >= value).unwrap_or(true);
+            let is_hh = self
+                .prev_high
+                .map(|value| pivot_high >= value)
+                .unwrap_or(true);
             if is_hh {
                 hh = 1.0;
             } else {
@@ -618,7 +632,10 @@ impl MarketStructureConfluenceCore {
         }
 
         if let Some((pivot_low, pivot_idx)) = self.piv_low.update(low, self.index) {
-            let is_hl = self.prev_low.map(|value| pivot_low >= value).unwrap_or(true);
+            let is_hl = self
+                .prev_low
+                .map(|value| pivot_low >= value)
+                .unwrap_or(true);
             if is_hl {
                 hl = 1.0;
             } else {
@@ -1014,8 +1031,8 @@ fn resolve_params(
         .unwrap_or_else(|| DEFAULT_BOS_CONFIRMATION.to_string());
     let bos_confirmation = MarketStructureConfluenceBosConfirmation::parse(&bos_confirmation_raw)
         .ok_or(MarketStructureConfluenceError::InvalidBosConfirmation {
-            bos_confirmation: bos_confirmation_raw.clone(),
-        })?;
+        bos_confirmation: bos_confirmation_raw.clone(),
+    })?;
     let basis_length = params.basis_length.unwrap_or(DEFAULT_BASIS_LENGTH);
     let atr_length = params.atr_length.unwrap_or(DEFAULT_ATR_LENGTH);
     let atr_smooth = params.atr_smooth.unwrap_or(DEFAULT_ATR_SMOOTH);
@@ -1416,7 +1433,11 @@ pub fn market_structure_confluence_batch_with_kernel(
     let batch_kernel = match kernel {
         Kernel::Auto => detect_best_batch_kernel(),
         value if value.is_batch() => value,
-        _ => return Err(MarketStructureConfluenceError::InvalidKernelForBatch(kernel)),
+        _ => {
+            return Err(MarketStructureConfluenceError::InvalidKernelForBatch(
+                kernel,
+            ))
+        }
     };
     let single_kernel = batch_kernel.to_non_batch();
     let combos = expand_grid(range)?;
@@ -1587,7 +1608,10 @@ pub fn market_structure_confluence_batch_with_kernel(
                                                                 (
                                                                     (
                                                                         (
-                                                                            (basis_row, upper_band_row),
+                                                                            (
+                                                                                basis_row,
+                                                                                upper_band_row,
+                                                                            ),
                                                                             lower_band_row,
                                                                         ),
                                                                         structure_direction_row,
@@ -1758,7 +1782,10 @@ pub fn market_structure_confluence_py<'py>(
     dict.set_item("basis", output.basis.into_pyarray(py))?;
     dict.set_item("upper_band", output.upper_band.into_pyarray(py))?;
     dict.set_item("lower_band", output.lower_band.into_pyarray(py))?;
-    dict.set_item("structure_direction", output.structure_direction.into_pyarray(py))?;
+    dict.set_item(
+        "structure_direction",
+        output.structure_direction.into_pyarray(py),
+    )?;
     dict.set_item("bullish_arrow", output.bullish_arrow.into_pyarray(py))?;
     dict.set_item("bearish_arrow", output.bearish_arrow.into_pyarray(py))?;
     dict.set_item("bullish_change", output.bullish_change.into_pyarray(py))?;
@@ -1857,18 +1884,42 @@ pub fn market_structure_confluence_batch_py<'py>(
         "structure_direction",
         arrays[3].reshape((output.rows, output.cols))?,
     )?;
-    dict.set_item("bullish_arrow", arrays[4].reshape((output.rows, output.cols))?)?;
-    dict.set_item("bearish_arrow", arrays[5].reshape((output.rows, output.cols))?)?;
-    dict.set_item("bullish_change", arrays[6].reshape((output.rows, output.cols))?)?;
-    dict.set_item("bearish_change", arrays[7].reshape((output.rows, output.cols))?)?;
+    dict.set_item(
+        "bullish_arrow",
+        arrays[4].reshape((output.rows, output.cols))?,
+    )?;
+    dict.set_item(
+        "bearish_arrow",
+        arrays[5].reshape((output.rows, output.cols))?,
+    )?;
+    dict.set_item(
+        "bullish_change",
+        arrays[6].reshape((output.rows, output.cols))?,
+    )?;
+    dict.set_item(
+        "bearish_change",
+        arrays[7].reshape((output.rows, output.cols))?,
+    )?;
     dict.set_item("hh", arrays[8].reshape((output.rows, output.cols))?)?;
     dict.set_item("lh", arrays[9].reshape((output.rows, output.cols))?)?;
     dict.set_item("hl", arrays[10].reshape((output.rows, output.cols))?)?;
     dict.set_item("ll", arrays[11].reshape((output.rows, output.cols))?)?;
-    dict.set_item("bullish_bos", arrays[12].reshape((output.rows, output.cols))?)?;
-    dict.set_item("bullish_choch", arrays[13].reshape((output.rows, output.cols))?)?;
-    dict.set_item("bearish_bos", arrays[14].reshape((output.rows, output.cols))?)?;
-    dict.set_item("bearish_choch", arrays[15].reshape((output.rows, output.cols))?)?;
+    dict.set_item(
+        "bullish_bos",
+        arrays[12].reshape((output.rows, output.cols))?,
+    )?;
+    dict.set_item(
+        "bullish_choch",
+        arrays[13].reshape((output.rows, output.cols))?,
+    )?;
+    dict.set_item(
+        "bearish_bos",
+        arrays[14].reshape((output.rows, output.cols))?,
+    )?;
+    dict.set_item(
+        "bearish_choch",
+        arrays[15].reshape((output.rows, output.cols))?,
+    )?;
     dict.set_item(
         "swing_sizes",
         output
@@ -1883,7 +1934,12 @@ pub fn market_structure_confluence_batch_py<'py>(
         output
             .combos
             .iter()
-            .map(|combo| combo.bos_confirmation.clone().unwrap_or_else(|| DEFAULT_BOS_CONFIRMATION.to_string()))
+            .map(|combo| {
+                combo
+                    .bos_confirmation
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_BOS_CONFIRMATION.to_string())
+            })
             .collect::<Vec<_>>(),
     )?;
     dict.set_item(
@@ -1983,9 +2039,7 @@ impl MarketStructureConfluenceStreamPy {
 }
 
 #[cfg(feature = "python")]
-pub fn register_market_structure_confluence_module(
-    m: &Bound<'_, PyModule>,
-) -> PyResult<()> {
+pub fn register_market_structure_confluence_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(market_structure_confluence_py, m)?)?;
     m.add_function(wrap_pyfunction!(market_structure_confluence_batch_py, m)?)?;
     m.add_class::<MarketStructureConfluenceStreamPy>()?;
@@ -2153,7 +2207,12 @@ pub fn market_structure_confluence_batch_js(
         bos_confirmations: output
             .combos
             .iter()
-            .map(|combo| combo.bos_confirmation.clone().unwrap_or_else(|| DEFAULT_BOS_CONFIRMATION.to_string()))
+            .map(|combo| {
+                combo
+                    .bos_confirmation
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_BOS_CONFIRMATION.to_string())
+            })
             .collect(),
         basis_lengths: output
             .combos
@@ -2360,7 +2419,10 @@ mod tests {
                 (single.basis[i], batch.basis[idx]),
                 (single.upper_band[i], batch.upper_band[idx]),
                 (single.lower_band[i], batch.lower_band[idx]),
-                (single.structure_direction[i], batch.structure_direction[idx]),
+                (
+                    single.structure_direction[i],
+                    batch.structure_direction[idx],
+                ),
                 (single.bullish_arrow[i], batch.bullish_arrow[idx]),
                 (single.bearish_arrow[i], batch.bearish_arrow[idx]),
                 (single.bullish_change[i], batch.bullish_change[idx]),

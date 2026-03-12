@@ -57,6 +57,9 @@ use my_project::indicators::linearreg_intercept::{
     linearreg_intercept, LinearRegInterceptInput, LinearRegInterceptParams,
 };
 use my_project::indicators::macz::{macz, MaczInput, MaczParams};
+use my_project::indicators::market_structure_confluence::{
+    market_structure_confluence, MarketStructureConfluenceInput, MarketStructureConfluenceParams,
+};
 use my_project::indicators::marketefi::{
     marketefi, MarketefiData, MarketefiInput, MarketefiParams,
 };
@@ -134,9 +137,6 @@ use my_project::indicators::qqe_weighted_oscillator::{
 };
 use my_project::indicators::range_filtered_trend_signals::{
     range_filtered_trend_signals, RangeFilteredTrendSignalsInput, RangeFilteredTrendSignalsParams,
-};
-use my_project::indicators::market_structure_confluence::{
-    market_structure_confluence, MarketStructureConfluenceInput, MarketStructureConfluenceParams,
 };
 use my_project::indicators::range_oscillator::{
     range_oscillator, RangeOscillatorInput, RangeOscillatorParams,

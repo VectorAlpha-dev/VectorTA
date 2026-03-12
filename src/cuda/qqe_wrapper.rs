@@ -356,6 +356,29 @@ impl CudaQqe {
         Ok((dev, combos))
     }
 
+    pub fn qqe_batch_output_dev(
+        &self,
+        prices_f32: &[f32],
+        sweep: &QqeBatchRange,
+        output_index: usize,
+    ) -> Result<(DeviceArrayF32, Vec<QqeParams>), CudaQqeError> {
+        if prices_f32.is_empty() {
+            return Err(CudaQqeError::InvalidInput("empty price input".into()));
+        }
+        let first_valid = Self::first_valid_f32(prices_f32)?;
+        let d_prices: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(prices_f32, &self.stream) }?;
+        let out = self.qqe_batch_output_dev_from_device_prices(
+            &d_prices,
+            prices_f32.len(),
+            first_valid,
+            sweep,
+            output_index,
+        )?;
+        self.stream.synchronize()?;
+        Ok(out)
+    }
+
     pub fn qqe_batch_dev_from_device_prices(
         &self,
         d_prices: &DeviceBuffer<f32>,

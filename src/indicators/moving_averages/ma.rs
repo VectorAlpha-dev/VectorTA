@@ -34,14 +34,14 @@ use crate::indicators::moving_averages::ehlers_kama::{
     ehlers_kama, EhlersKamaData, EhlersKamaInput, EhlersKamaParams,
 };
 use crate::indicators::moving_averages::ehma::{ehma, EhmaData, EhmaInput, EhmaParams};
-use crate::indicators::moving_averages::ema_deviation_corrected_t3::{
-    ema_deviation_corrected_t3, EmaDeviationCorrectedT3Data, EmaDeviationCorrectedT3Input,
-    EmaDeviationCorrectedT3Params,
-};
 use crate::indicators::moving_averages::elastic_volume_weighted_moving_average::{
     elastic_volume_weighted_moving_average, elastic_volume_weighted_moving_average_with_kernel,
     ElasticVolumeWeightedMovingAverageData, ElasticVolumeWeightedMovingAverageInput,
     ElasticVolumeWeightedMovingAverageParams,
+};
+use crate::indicators::moving_averages::ema_deviation_corrected_t3::{
+    ema_deviation_corrected_t3, EmaDeviationCorrectedT3Data, EmaDeviationCorrectedT3Input,
+    EmaDeviationCorrectedT3Params,
 };
 use crate::indicators::moving_averages::frama::{frama, FramaInput, FramaParams};
 use crate::indicators::moving_averages::n_order_ema::{
@@ -50,6 +50,7 @@ use crate::indicators::moving_averages::n_order_ema::{
 };
 use crate::indicators::moving_averages::nama::{nama, NamaData, NamaInput, NamaParams};
 use crate::indicators::moving_averages::sama::{sama, SamaData, SamaInput, SamaParams};
+use crate::indicators::moving_averages::sgf::{sgf, SgfData, SgfInput, SgfParams};
 use crate::indicators::moving_averages::volatility_adjusted_ma::{
     vama, VamaData, VamaInput, VamaParams,
 };
@@ -60,7 +61,6 @@ use crate::indicators::mwdx::{mwdx, MwdxData, MwdxInput, MwdxParams};
 use crate::indicators::nma::{nma, NmaData, NmaInput, NmaParams};
 use crate::indicators::pwma::{pwma, PwmaData, PwmaInput, PwmaParams};
 use crate::indicators::reflex::{reflex, ReflexData, ReflexInput, ReflexParams};
-use crate::indicators::moving_averages::sgf::{sgf, SgfData, SgfInput, SgfParams};
 use crate::indicators::sinwma::{sinwma, SinWmaData, SinWmaInput, SinWmaParams};
 use crate::indicators::sma::{sma, SmaData, SmaInput, SmaParams};
 use crate::indicators::smma::{smma, SmmaData, SmmaInput, SmmaParams};
@@ -116,13 +116,13 @@ use crate::indicators::moving_averages::ema_deviation_corrected_t3::ema_deviatio
 use crate::indicators::moving_averages::frama::frama_with_kernel;
 use crate::indicators::moving_averages::nama::nama_with_kernel;
 use crate::indicators::moving_averages::sama::sama_with_kernel;
+use crate::indicators::moving_averages::sgf::sgf_with_kernel;
 use crate::indicators::moving_averages::volatility_adjusted_ma::vama_with_kernel;
 use crate::indicators::moving_averages::wave_smoother::wave_smoother_with_kernel;
 use crate::indicators::mwdx::mwdx_with_kernel;
 use crate::indicators::nma::nma_with_kernel;
 use crate::indicators::pwma::pwma_with_kernel;
 use crate::indicators::reflex::reflex_with_kernel;
-use crate::indicators::moving_averages::sgf::sgf_with_kernel;
 use crate::indicators::sinwma::sinwma_with_kernel;
 use crate::indicators::sma::sma_with_kernel;
 use crate::indicators::smma::smma_with_kernel;

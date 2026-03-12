@@ -1,18 +1,18 @@
 pub mod absolute_strength_index_oscillator;
+pub mod accumulation_swing_index;
 pub mod acosc;
 pub mod ad;
 pub mod adaptive_bandpass_trigger_oscillator;
+pub mod adaptive_bounds_rsi;
+pub mod adaptive_macd;
+pub mod adaptive_momentum_oscillator;
+pub mod adjustable_ma_alternating_extremities;
 pub mod adosc;
 pub mod advance_decline_line;
 pub mod adx;
 pub mod adxr;
 pub mod alligator;
 pub mod alphatrend;
-pub mod accumulation_swing_index;
-pub mod adaptive_bounds_rsi;
-pub mod adaptive_macd;
-pub mod adaptive_momentum_oscillator;
-pub mod adjustable_ma_alternating_extremities;
 pub mod dispatch;
 pub mod ehlers_fm_demodulator;
 pub mod evasive_supertrend;
@@ -129,10 +129,10 @@ pub use dvdiqqe::{
 };
 pub mod dx;
 pub mod efi;
+pub mod ehlers_adaptive_cg;
 pub mod ehlers_adaptive_cyber_cycle;
 pub mod ehlers_simple_cycle_indicator;
 pub mod ehlers_smoothed_adaptive_momentum;
-pub mod ehlers_adaptive_cg;
 pub mod emd;
 pub mod emd_trend;
 pub mod emv;
@@ -372,24 +372,24 @@ pub mod qstick;
 pub mod random_walk_index;
 pub mod range_breakout_signals;
 pub mod range_filter;
-pub mod reversal_signals;
 pub mod registry;
+pub mod reversal_signals;
 pub mod volume_weighted_relative_strength_index;
-pub use range_filter::{
-    range_filter, range_filter_batch_par_slice, range_filter_batch_slice, range_filter_into_slice,
-    range_filter_with_kernel, RangeFilterBatchBuilder, RangeFilterBatchOutput,
-    RangeFilterBatchRange, RangeFilterBuilder, RangeFilterData, RangeFilterError, RangeFilterInput,
-    RangeFilterOutput, RangeFilterParams, RangeFilterStream,
-};
 pub use market_structure_confluence::{
     market_structure_confluence, market_structure_confluence_batch_with_kernel,
     market_structure_confluence_into, market_structure_confluence_into_slices,
     market_structure_confluence_with_kernel, MarketStructureConfluenceBatchBuilder,
     MarketStructureConfluenceBatchOutput, MarketStructureConfluenceBatchRange,
     MarketStructureConfluenceBosConfirmation, MarketStructureConfluenceBuilder,
-    MarketStructureConfluenceData, MarketStructureConfluenceError,
-    MarketStructureConfluenceInput, MarketStructureConfluenceOutput,
-    MarketStructureConfluenceParams, MarketStructureConfluenceStream,
+    MarketStructureConfluenceData, MarketStructureConfluenceError, MarketStructureConfluenceInput,
+    MarketStructureConfluenceOutput, MarketStructureConfluenceParams,
+    MarketStructureConfluenceStream,
+};
+pub use range_filter::{
+    range_filter, range_filter_batch_par_slice, range_filter_batch_slice, range_filter_into_slice,
+    range_filter_with_kernel, RangeFilterBatchBuilder, RangeFilterBatchOutput,
+    RangeFilterBatchRange, RangeFilterBuilder, RangeFilterData, RangeFilterError, RangeFilterInput,
+    RangeFilterOutput, RangeFilterParams, RangeFilterStream,
 };
 pub use range_filtered_trend_signals::{
     range_filtered_trend_signals, range_filtered_trend_signals_batch_with_kernel,
@@ -493,8 +493,8 @@ pub mod velocity;
 pub mod vi;
 pub mod vidya;
 pub mod vlma;
-pub mod volume_weighted_stochastic_rsi;
 pub mod volatility_quality_index;
+pub mod volume_weighted_stochastic_rsi;
 pub mod volume_zone_oscillator;
 pub mod vosc;
 pub mod voss;
@@ -1366,6 +1366,27 @@ pub use possible_rsi::{
     possible_rsi_batch_py, possible_rsi_py, register_possible_rsi_module, PossibleRsiStreamPy,
 };
 #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use premier_rsi_oscillator::premier_rsi_oscillator_into;
+pub use premier_rsi_oscillator::{
+    premier_rsi_oscillator, premier_rsi_oscillator_batch_inner_into,
+    premier_rsi_oscillator_batch_par_slice, premier_rsi_oscillator_batch_slice,
+    premier_rsi_oscillator_batch_with_kernel, premier_rsi_oscillator_into_slice,
+    premier_rsi_oscillator_with_kernel, PremierRsiOscillatorBatchBuilder,
+    PremierRsiOscillatorBatchOutput, PremierRsiOscillatorBatchRange, PremierRsiOscillatorBuilder,
+    PremierRsiOscillatorData, PremierRsiOscillatorError, PremierRsiOscillatorInput,
+    PremierRsiOscillatorOutput, PremierRsiOscillatorParams, PremierRsiOscillatorStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use premier_rsi_oscillator::{
+    premier_rsi_oscillator_alloc, premier_rsi_oscillator_batch_into,
+    premier_rsi_oscillator_batch_js, premier_rsi_oscillator_free, premier_rsi_oscillator_into,
+    premier_rsi_oscillator_js, PremierRsiOscillatorBatchJsOutput,
+};
+#[cfg(feature = "python")]
+pub use premier_rsi_oscillator::{
+    premier_rsi_oscillator_batch_py, premier_rsi_oscillator_py, PremierRsiOscillatorStreamPy,
+};
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub use projection_oscillator::projection_oscillator_into;
 pub use projection_oscillator::{
     expand_grid_projection_oscillator, projection_oscillator,
@@ -1449,27 +1470,6 @@ pub use rolling_z_score_trend::{
 #[cfg(feature = "python")]
 pub use rolling_z_score_trend::{
     rolling_z_score_trend_batch_py, rolling_z_score_trend_py, RollingZScoreTrendStreamPy,
-};
-#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
-pub use premier_rsi_oscillator::premier_rsi_oscillator_into;
-pub use premier_rsi_oscillator::{
-    premier_rsi_oscillator, premier_rsi_oscillator_batch_inner_into,
-    premier_rsi_oscillator_batch_par_slice, premier_rsi_oscillator_batch_slice,
-    premier_rsi_oscillator_batch_with_kernel, premier_rsi_oscillator_into_slice,
-    premier_rsi_oscillator_with_kernel, PremierRsiOscillatorBatchBuilder,
-    PremierRsiOscillatorBatchOutput, PremierRsiOscillatorBatchRange, PremierRsiOscillatorBuilder,
-    PremierRsiOscillatorData, PremierRsiOscillatorError, PremierRsiOscillatorInput,
-    PremierRsiOscillatorOutput, PremierRsiOscillatorParams, PremierRsiOscillatorStream,
-};
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
-pub use premier_rsi_oscillator::{
-    premier_rsi_oscillator_alloc, premier_rsi_oscillator_batch_into,
-    premier_rsi_oscillator_batch_js, premier_rsi_oscillator_free, premier_rsi_oscillator_into,
-    premier_rsi_oscillator_js, PremierRsiOscillatorBatchJsOutput,
-};
-#[cfg(feature = "python")]
-pub use premier_rsi_oscillator::{
-    premier_rsi_oscillator_batch_py, premier_rsi_oscillator_py, PremierRsiOscillatorStreamPy,
 };
 pub use rsi::{rsi, RsiBatchOutput, RsiInput, RsiOutput, RsiParams, RsiStream};
 #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]

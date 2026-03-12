@@ -90,6 +90,17 @@ pub use ehlers_pma::{
     ehlers_pma, expand_grid as expand_grid_ehlers_pma, EhlersPmaBatchRange, EhlersPmaInput,
     EhlersPmaOutput, EhlersPmaParams,
 };
+pub use ehlers_undersampled_double_moving_average::{
+    ehlers_undersampled_double_moving_average,
+    expand_grid_ehlers_undersampled_double_moving_average,
+    EhlersUndersampledDoubleMovingAverageBatchRange, EhlersUndersampledDoubleMovingAverageInput,
+    EhlersUndersampledDoubleMovingAverageOutput, EhlersUndersampledDoubleMovingAverageParams,
+};
+pub use elastic_volume_weighted_moving_average::{
+    elastic_volume_weighted_moving_average, expand_grid_elastic_volume_weighted_moving_average,
+    ElasticVolumeWeightedMovingAverageBatchRange, ElasticVolumeWeightedMovingAverageInput,
+    ElasticVolumeWeightedMovingAverageOutput, ElasticVolumeWeightedMovingAverageParams,
+};
 #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub use logarithmic_moving_average::logarithmic_moving_average_into;
 pub use logarithmic_moving_average::{
@@ -101,17 +112,6 @@ pub use logarithmic_moving_average::{
     LogarithmicMovingAverageBuilder, LogarithmicMovingAverageData, LogarithmicMovingAverageError,
     LogarithmicMovingAverageInput, LogarithmicMovingAverageOutput, LogarithmicMovingAverageParams,
     LogarithmicMovingAverageStream,
-};
-pub use ehlers_undersampled_double_moving_average::{
-    ehlers_undersampled_double_moving_average,
-    expand_grid_ehlers_undersampled_double_moving_average,
-    EhlersUndersampledDoubleMovingAverageBatchRange, EhlersUndersampledDoubleMovingAverageInput,
-    EhlersUndersampledDoubleMovingAverageOutput, EhlersUndersampledDoubleMovingAverageParams,
-};
-pub use elastic_volume_weighted_moving_average::{
-    elastic_volume_weighted_moving_average, expand_grid_elastic_volume_weighted_moving_average,
-    ElasticVolumeWeightedMovingAverageBatchRange, ElasticVolumeWeightedMovingAverageInput,
-    ElasticVolumeWeightedMovingAverageOutput, ElasticVolumeWeightedMovingAverageParams,
 };
 pub use uma::{uma, UmaInput, UmaOutput, UmaParams};
 pub use volatility_adjusted_ma::{

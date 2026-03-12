@@ -19,6 +19,20 @@ use crate::indicators::adaptive_bandpass_trigger_oscillator::{
     AdaptiveBandpassTriggerOscillatorStreamPy,
 };
 #[cfg(feature = "python")]
+use crate::indicators::adaptive_macd::{
+    adaptive_macd_batch_py, adaptive_macd_py, AdaptiveMacdStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::adaptive_momentum_oscillator::{
+    adaptive_momentum_oscillator_batch_py, adaptive_momentum_oscillator_py,
+    AdaptiveMomentumOscillatorStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::adjustable_ma_alternating_extremities::{
+    adjustable_ma_alternating_extremities_batch_py, adjustable_ma_alternating_extremities_py,
+    AdjustableMaAlternatingExtremitiesStreamPy,
+};
+#[cfg(feature = "python")]
 use crate::indicators::adosc::{adosc_batch_py, adosc_py, AdoscStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::advance_decline_line::{
@@ -262,6 +276,10 @@ use crate::indicators::efi::{
     efi_cuda_batch_dev_py, efi_cuda_many_series_one_param_dev_py, EfiDeviceArrayF32Py,
 };
 #[cfg(feature = "python")]
+use crate::indicators::ehlers_adaptive_cg::{
+    ehlers_adaptive_cg_batch_py, ehlers_adaptive_cg_py, EhlersAdaptiveCgStreamPy,
+};
+#[cfg(feature = "python")]
 use crate::indicators::ehlers_autocorrelation_periodogram::{
     ehlers_autocorrelation_periodogram_batch_py, ehlers_autocorrelation_periodogram_py,
     EhlersAutocorrelationPeriodogramStreamPy,
@@ -287,6 +305,10 @@ use crate::indicators::er::{er_batch_py, er_py, ErStreamPy};
 use crate::indicators::eri::{eri_batch_py, eri_py, EriStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::eri::{eri_cuda_batch_dev_py, eri_cuda_many_series_one_param_dev_py};
+#[cfg(feature = "python")]
+use crate::indicators::exponential_trend::{
+    exponential_trend_batch_py, exponential_trend_py, ExponentialTrendStreamPy,
+};
 #[cfg(feature = "python")]
 use crate::indicators::fibonacci_entry_bands::{
     fibonacci_entry_bands_batch_py, fibonacci_entry_bands_py, FibonacciEntryBandsStreamPy,
@@ -331,6 +353,11 @@ use crate::indicators::gatorosc::{gatorosc_batch_py, gatorosc_py, GatorOscStream
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::gatorosc::{
     gatorosc_cuda_batch_dev_py, gatorosc_cuda_many_series_one_param_dev_py,
+};
+#[cfg(feature = "python")]
+use crate::indicators::geometric_bias_oscillator::{
+    geometric_bias_oscillator_batch_py, geometric_bias_oscillator_py,
+    GeometricBiasOscillatorStreamPy,
 };
 #[cfg(feature = "python")]
 use crate::indicators::gopalakrishnan_range_index::{
@@ -406,6 +433,14 @@ use crate::indicators::kurtosis::{
 #[cfg(feature = "python")]
 use crate::indicators::kvo::{kvo_batch_py, kvo_py, KvoStreamPy};
 #[cfg(feature = "python")]
+use crate::indicators::l1_ehlers_phasor::{
+    l1_ehlers_phasor_batch_py, l1_ehlers_phasor_py, L1EhlersPhasorStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::l2_ehlers_signal_to_noise::{
+    l2_ehlers_signal_to_noise_batch_py, l2_ehlers_signal_to_noise_py, L2EhlersSignalToNoiseStreamPy,
+};
+#[cfg(feature = "python")]
 use crate::indicators::leavitt_convolution_acceleration::{
     leavitt_convolution_acceleration_batch_py, leavitt_convolution_acceleration_py,
     LeavittConvolutionAccelerationStreamPy,
@@ -414,14 +449,6 @@ use crate::indicators::leavitt_convolution_acceleration::{
 use crate::indicators::linear_regression_intensity::{
     linear_regression_intensity_batch_py, linear_regression_intensity_py,
     LinearRegressionIntensityStreamPy,
-};
-#[cfg(feature = "python")]
-use crate::indicators::l1_ehlers_phasor::{
-    l1_ehlers_phasor_batch_py, l1_ehlers_phasor_py, L1EhlersPhasorStreamPy,
-};
-#[cfg(feature = "python")]
-use crate::indicators::l2_ehlers_signal_to_noise::{
-    l2_ehlers_signal_to_noise_batch_py, l2_ehlers_signal_to_noise_py, L2EhlersSignalToNoiseStreamPy,
 };
 #[cfg(feature = "python")]
 use crate::indicators::linearreg_angle::{
@@ -855,6 +882,10 @@ use crate::indicators::moving_averages::volatility_adjusted_ma::{
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::volume_adjusted_ma as vama_volu;
 #[cfg(feature = "python")]
+use crate::indicators::moving_averages::wave_smoother::{
+    wave_smoother_batch_py, wave_smoother_py, WaveSmootherStreamPy,
+};
+#[cfg(feature = "python")]
 use crate::indicators::multi_length_stochastic_average::{
     multi_length_stochastic_average_batch_py, multi_length_stochastic_average_py,
     MultiLengthStochasticAverageStreamPy,
@@ -869,17 +900,47 @@ use crate::indicators::normalized_resonator::{
     normalized_resonator_batch_py, normalized_resonator_py, NormalizedResonatorStreamPy,
 };
 #[cfg(feature = "python")]
+use crate::indicators::normalized_volume_true_range::{
+    normalized_volume_true_range_batch_py, normalized_volume_true_range_py,
+    NormalizedVolumeTrueRangeStreamPy,
+};
+#[cfg(feature = "python")]
 use crate::indicators::premier_rsi_oscillator::{
     premier_rsi_oscillator_batch_py, premier_rsi_oscillator_py, PremierRsiOscillatorStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::range_breakout_signals::{
+    range_breakout_signals_batch_py, range_breakout_signals_py, RangeBreakoutSignalsStreamPy,
 };
 #[cfg(feature = "python")]
 use crate::indicators::squeeze_index::{
     squeeze_index_batch_py, squeeze_index_py, SqueezeIndexStreamPy,
 };
 #[cfg(feature = "python")]
+use crate::indicators::standardized_psar_oscillator::{
+    standardized_psar_oscillator_batch_py, standardized_psar_oscillator_py,
+    StandardizedPsarOscillatorStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::statistical_trailing_stop::{
+    statistical_trailing_stop_batch_py, statistical_trailing_stop_py,
+    StatisticalTrailingStopStreamPy,
+};
+#[cfg(feature = "python")]
 use crate::indicators::stochastic_distance::{
     stochastic_distance_batch_py, stochastic_distance_py, StochasticDistanceStreamPy,
 };
+#[cfg(feature = "python")]
+use crate::indicators::trend_flow_trail::{
+    trend_flow_trail_batch_py, trend_flow_trail_py, TrendFlowTrailStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::vdubus_divergence_wave_pattern_generator::{
+    vdubus_divergence_wave_pattern_generator_batch_py, vdubus_divergence_wave_pattern_generator_py,
+    VdubusDivergenceWavePatternGeneratorStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::velocity::{velocity_batch_py, velocity_py, VelocityStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::velocity_acceleration_indicator::{
     velocity_acceleration_indicator_batch_py, velocity_acceleration_indicator_py,
@@ -904,69 +965,6 @@ use crate::indicators::yang_zhang_volatility::{
 };
 #[cfg(feature = "python")]
 use crate::indicators::zig_zag_channels::{zig_zag_channels_batch_py, zig_zag_channels_py};
-#[cfg(feature = "python")]
-use crate::indicators::adaptive_macd::{
-    adaptive_macd_batch_py, adaptive_macd_py, AdaptiveMacdStreamPy,
-};
-#[cfg(feature = "python")]
-use crate::indicators::adaptive_momentum_oscillator::{
-    adaptive_momentum_oscillator_batch_py, adaptive_momentum_oscillator_py,
-    AdaptiveMomentumOscillatorStreamPy,
-};
-#[cfg(feature = "python")]
-use crate::indicators::adjustable_ma_alternating_extremities::{
-    adjustable_ma_alternating_extremities_batch_py,
-    adjustable_ma_alternating_extremities_py,
-    AdjustableMaAlternatingExtremitiesStreamPy,
-};
-#[cfg(feature = "python")]
-use crate::indicators::ehlers_adaptive_cg::{
-    ehlers_adaptive_cg_batch_py, ehlers_adaptive_cg_py, EhlersAdaptiveCgStreamPy,
-};
-#[cfg(feature = "python")]
-use crate::indicators::exponential_trend::{
-    exponential_trend_batch_py, exponential_trend_py, ExponentialTrendStreamPy,
-};
-#[cfg(feature = "python")]
-use crate::indicators::geometric_bias_oscillator::{
-    geometric_bias_oscillator_batch_py, geometric_bias_oscillator_py,
-    GeometricBiasOscillatorStreamPy,
-};
-#[cfg(feature = "python")]
-use crate::indicators::normalized_volume_true_range::{
-    normalized_volume_true_range_batch_py, normalized_volume_true_range_py,
-    NormalizedVolumeTrueRangeStreamPy,
-};
-#[cfg(feature = "python")]
-use crate::indicators::range_breakout_signals::{
-    range_breakout_signals_batch_py, range_breakout_signals_py, RangeBreakoutSignalsStreamPy,
-};
-#[cfg(feature = "python")]
-use crate::indicators::standardized_psar_oscillator::{
-    standardized_psar_oscillator_batch_py, standardized_psar_oscillator_py,
-    StandardizedPsarOscillatorStreamPy,
-};
-#[cfg(feature = "python")]
-use crate::indicators::statistical_trailing_stop::{
-    statistical_trailing_stop_batch_py, statistical_trailing_stop_py,
-    StatisticalTrailingStopStreamPy,
-};
-#[cfg(feature = "python")]
-use crate::indicators::trend_flow_trail::{
-    trend_flow_trail_batch_py, trend_flow_trail_py, TrendFlowTrailStreamPy,
-};
-#[cfg(feature = "python")]
-use crate::indicators::vdubus_divergence_wave_pattern_generator::{
-    vdubus_divergence_wave_pattern_generator_batch_py,
-    vdubus_divergence_wave_pattern_generator_py,
-    VdubusDivergenceWavePatternGeneratorStreamPy,
-};
-#[cfg(feature = "python")]
-use crate::indicators::velocity::{velocity_batch_py, velocity_py, VelocityStreamPy};
-#[cfg(feature = "python")]
-use crate::indicators::moving_averages::wave_smoother::{
-    wave_smoother_batch_py, wave_smoother_py, WaveSmootherStreamPy,
-};
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "vama")]
@@ -1302,18 +1300,23 @@ use crate::indicators::adaptive_bounds_rsi::{
     adaptive_bounds_rsi_batch_py, adaptive_bounds_rsi_py, AdaptiveBoundsRsiStreamPy,
 };
 #[cfg(feature = "python")]
+use crate::indicators::ehlers_fm_demodulator::{
+    ehlers_fm_demodulator_batch_py, ehlers_fm_demodulator_py, EhlersFmDemodulatorStreamPy,
+};
+#[cfg(feature = "python")]
 use crate::indicators::forward_backward_exponential_oscillator::{
     forward_backward_exponential_oscillator_batch_py, forward_backward_exponential_oscillator_py,
     ForwardBackwardExponentialOscillatorStreamPy,
 };
 #[cfg(feature = "python")]
-use crate::indicators::ehlers_fm_demodulator::{
-    ehlers_fm_demodulator_batch_py, ehlers_fm_demodulator_py, EhlersFmDemodulatorStreamPy,
-};
-#[cfg(feature = "python")]
 use crate::indicators::linear_correlation_oscillator::{
     linear_correlation_oscillator_batch_py, linear_correlation_oscillator_py,
     LinearCorrelationOscillatorStreamPy,
+};
+#[cfg(feature = "python")]
+use crate::indicators::market_structure_confluence::{
+    market_structure_confluence_batch_py, market_structure_confluence_py,
+    MarketStructureConfluenceStreamPy,
 };
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::elastic_volume_weighted_moving_average::{
@@ -1461,11 +1464,6 @@ use crate::indicators::range_filter::{
 use crate::indicators::range_filtered_trend_signals::{
     range_filtered_trend_signals_batch_py, range_filtered_trend_signals_py,
     RangeFilteredTrendSignalsStreamPy,
-};
-#[cfg(feature = "python")]
-use crate::indicators::market_structure_confluence::{
-    market_structure_confluence_batch_py, market_structure_confluence_py,
-    MarketStructureConfluenceStreamPy,
 };
 #[cfg(feature = "python")]
 use crate::indicators::range_oscillator::{

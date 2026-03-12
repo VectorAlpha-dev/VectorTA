@@ -7,29 +7,28 @@ use crate::indicators::absolute_strength_index_oscillator::{
     AbsoluteStrengthIndexOscillatorParams,
 };
 use crate::indicators::accumulation_swing_index::{
-    accumulation_swing_index_with_kernel, AccumulationSwingIndexInput,
-    AccumulationSwingIndexParams,
+    accumulation_swing_index_with_kernel, AccumulationSwingIndexInput, AccumulationSwingIndexParams,
 };
 use crate::indicators::acosc::{acosc_with_kernel, AcoscInput, AcoscParams};
 use crate::indicators::ad::{ad_with_kernel, AdInput, AdParams};
+use crate::indicators::adaptive_bandpass_trigger_oscillator::{
+    adaptive_bandpass_trigger_oscillator_with_kernel, AdaptiveBandpassTriggerOscillatorInput,
+    AdaptiveBandpassTriggerOscillatorParams,
+};
 use crate::indicators::adaptive_macd::{
     adaptive_macd_with_kernel, AdaptiveMacdInput, AdaptiveMacdParams,
-};
-use crate::indicators::adaptive_schaff_trend_cycle::{
-    adaptive_schaff_trend_cycle_with_kernel, AdaptiveSchaffTrendCycleInput,
-    AdaptiveSchaffTrendCycleParams,
 };
 use crate::indicators::adaptive_momentum_oscillator::{
     adaptive_momentum_oscillator_with_kernel, AdaptiveMomentumOscillatorInput,
     AdaptiveMomentumOscillatorParams,
 };
+use crate::indicators::adaptive_schaff_trend_cycle::{
+    adaptive_schaff_trend_cycle_with_kernel, AdaptiveSchaffTrendCycleInput,
+    AdaptiveSchaffTrendCycleParams,
+};
 use crate::indicators::adjustable_ma_alternating_extremities::{
     adjustable_ma_alternating_extremities_with_kernel, AdjustableMaAlternatingExtremitiesInput,
     AdjustableMaAlternatingExtremitiesParams,
-};
-use crate::indicators::adaptive_bandpass_trigger_oscillator::{
-    adaptive_bandpass_trigger_oscillator_with_kernel, AdaptiveBandpassTriggerOscillatorInput,
-    AdaptiveBandpassTriggerOscillatorParams,
 };
 use crate::indicators::adosc::{adosc_with_kernel, AdoscInput, AdoscParams};
 use crate::indicators::advance_decline_line::{
@@ -64,12 +63,12 @@ use crate::indicators::bollinger_bands_width::{
     bollinger_bands_width_with_kernel, BollingerBandsWidthInput, BollingerBandsWidthParams,
 };
 use crate::indicators::bop::{bop_with_kernel, BopInput, BopParams};
+use crate::indicators::bull_power_vs_bear_power::{
+    bull_power_vs_bear_power_with_kernel, BullPowerVsBearPowerInput, BullPowerVsBearPowerParams,
+};
 use crate::indicators::bulls_v_bears::{
     bulls_v_bears_with_kernel, BullsVBearsCalculationMethod, BullsVBearsInput, BullsVBearsMaType,
     BullsVBearsParams,
-};
-use crate::indicators::bull_power_vs_bear_power::{
-    bull_power_vs_bear_power_with_kernel, BullPowerVsBearPowerInput, BullPowerVsBearPowerParams,
 };
 use crate::indicators::candle_strength_oscillator::{
     candle_strength_oscillator_with_kernel, CandleStrengthOscillatorInput,
@@ -90,13 +89,12 @@ use crate::indicators::correl_hl::{correl_hl_with_kernel, CorrelHlInput, CorrelH
 use crate::indicators::correlation_cycle::{
     correlation_cycle_with_kernel, CorrelationCycleInput, CorrelationCycleParams,
 };
-use crate::indicators::cycle_channel_oscillator::{
-    cycle_channel_oscillator_with_kernel, CycleChannelOscillatorInput,
-    CycleChannelOscillatorParams,
-};
 use crate::indicators::cyberpunk_value_trend_analyzer::{
     cyberpunk_value_trend_analyzer_with_kernel, CyberpunkValueTrendAnalyzerInput,
     CyberpunkValueTrendAnalyzerParams,
+};
+use crate::indicators::cycle_channel_oscillator::{
+    cycle_channel_oscillator_with_kernel, CycleChannelOscillatorInput, CycleChannelOscillatorParams,
 };
 use crate::indicators::daily_factor::{
     daily_factor_with_kernel, DailyFactorInput, DailyFactorParams,
@@ -115,6 +113,7 @@ use crate::indicators::demand_index::{
 use crate::indicators::deviation::{deviation_with_kernel, DeviationInput, DeviationParams};
 use crate::indicators::devstop::{devstop_with_kernel, DevStopInput, DevStopParams};
 use crate::indicators::di::{di_with_kernel, DiInput, DiParams};
+use crate::indicators::didi_index::{didi_index_with_kernel, DidiIndexInput, DidiIndexParams};
 use crate::indicators::directional_imbalance_index::{
     directional_imbalance_index_with_kernel, DirectionalImbalanceIndexInput,
     DirectionalImbalanceIndexParams,
@@ -122,7 +121,6 @@ use crate::indicators::directional_imbalance_index::{
 use crate::indicators::disparity_index::{
     disparity_index_into_slice, DisparityIndexInput, DisparityIndexParams,
 };
-use crate::indicators::didi_index::{didi_index_with_kernel, DidiIndexInput, DidiIndexParams};
 use crate::indicators::dm::{dm_with_kernel, DmInput, DmParams};
 use crate::indicators::donchian::{donchian_with_kernel, DonchianInput, DonchianParams};
 use crate::indicators::donchian_channel_width::{
@@ -140,10 +138,6 @@ use crate::indicators::dynamic_momentum_index::{
     DynamicMomentumIndexInput, DynamicMomentumIndexParams,
 };
 use crate::indicators::efi::{efi_with_kernel, EfiInput, EfiParams};
-use crate::indicators::ehlers_autocorrelation_periodogram::{
-    ehlers_autocorrelation_periodogram_with_kernel, EhlersAutocorrelationPeriodogramInput,
-    EhlersAutocorrelationPeriodogramParams,
-};
 use crate::indicators::ehlers_adaptive_cg::{
     ehlers_adaptive_cg_with_kernel, EhlersAdaptiveCgInput, EhlersAdaptiveCgParams,
 };
@@ -151,17 +145,20 @@ use crate::indicators::ehlers_adaptive_cyber_cycle::{
     ehlers_adaptive_cyber_cycle_with_kernel, EhlersAdaptiveCyberCycleInput,
     EhlersAdaptiveCyberCycleParams,
 };
+use crate::indicators::ehlers_autocorrelation_periodogram::{
+    ehlers_autocorrelation_periodogram_with_kernel, EhlersAutocorrelationPeriodogramInput,
+    EhlersAutocorrelationPeriodogramParams,
+};
 use crate::indicators::ehlers_data_sampling_relative_strength_indicator::{
     ehlers_data_sampling_relative_strength_indicator_with_kernel,
     EhlersDataSamplingRelativeStrengthIndicatorInput,
     EhlersDataSamplingRelativeStrengthIndicatorParams,
 };
+use crate::indicators::ehlers_detrending_filter::{
+    ehlers_detrending_filter_with_kernel, EhlersDetrendingFilterInput, EhlersDetrendingFilterParams,
+};
 use crate::indicators::ehlers_fm_demodulator::{
     ehlers_fm_demodulator_with_kernel, EhlersFmDemodulatorInput, EhlersFmDemodulatorParams,
-};
-use crate::indicators::ehlers_detrending_filter::{
-    ehlers_detrending_filter_with_kernel, EhlersDetrendingFilterInput,
-    EhlersDetrendingFilterParams,
 };
 use crate::indicators::ehlers_linear_extrapolation_predictor::{
     ehlers_linear_extrapolation_predictor_with_kernel, EhlersLinearExtrapolationPredictorInput,
@@ -180,11 +177,11 @@ use crate::indicators::emd_trend::{emd_trend_with_kernel, EmdTrendInput, EmdTren
 use crate::indicators::emv::{emv_with_kernel, EmvInput};
 use crate::indicators::er::{er_with_kernel, ErInput, ErParams};
 use crate::indicators::eri::{eri_with_kernel, EriInput, EriParams};
-use crate::indicators::ewma_volatility::{
-    ewma_volatility_with_kernel, EwmaVolatilityInput, EwmaVolatilityParams,
-};
 use crate::indicators::evasive_supertrend::{
     evasive_supertrend_with_kernel, EvasiveSuperTrendInput, EvasiveSuperTrendParams,
+};
+use crate::indicators::ewma_volatility::{
+    ewma_volatility_with_kernel, EwmaVolatilityInput, EwmaVolatilityParams,
 };
 use crate::indicators::exponential_trend::{
     exponential_trend_with_kernel, ExponentialTrendInput, ExponentialTrendParams,
@@ -257,27 +254,27 @@ use crate::indicators::hull_butterfly_oscillator::{
     HullButterflyOscillatorParams,
 };
 use crate::indicators::hypertrend::{hypertrend_with_kernel, HyperTrendInput, HyperTrendParams};
-use crate::indicators::ift_rsi::{ift_rsi_with_kernel, IftRsiInput, IftRsiParams};
 use crate::indicators::ichimoku_oscillator::{
     ichimoku_oscillator_with_kernel, IchimokuOscillatorInput, IchimokuOscillatorNormalizeMode,
     IchimokuOscillatorParams,
 };
 use crate::indicators::ict_propulsion_block::{
-    ict_propulsion_block_with_kernel, IctPropulsionBlockInput,
-    IctPropulsionBlockMitigationPrice, IctPropulsionBlockParams,
+    ict_propulsion_block_with_kernel, IctPropulsionBlockInput, IctPropulsionBlockMitigationPrice,
+    IctPropulsionBlockParams,
 };
+use crate::indicators::ift_rsi::{ift_rsi_with_kernel, IftRsiInput, IftRsiParams};
 use crate::indicators::impulse_macd::{
     impulse_macd_with_kernel, ImpulseMacdInput, ImpulseMacdParams,
 };
 use crate::indicators::intraday_momentum_index::{
     intraday_momentum_index_with_kernel, IntradayMomentumIndexInput, IntradayMomentumIndexParams,
 };
+use crate::indicators::kairi_relative_index::{
+    kairi_relative_index_into_slice, KairiRelativeIndexInput, KairiRelativeIndexParams,
+};
 use crate::indicators::kase_peak_oscillator_with_divergences::{
     kase_peak_oscillator_with_divergences_with_kernel, KasePeakOscillatorWithDivergencesInput,
     KasePeakOscillatorWithDivergencesParams,
-};
-use crate::indicators::kairi_relative_index::{
-    kairi_relative_index_into_slice, KairiRelativeIndexInput, KairiRelativeIndexParams,
 };
 use crate::indicators::kaufmanstop::{
     kaufmanstop_with_kernel, KaufmanstopInput, KaufmanstopParams,
@@ -291,23 +288,23 @@ use crate::indicators::keltner_channel_width_oscillator::{
 use crate::indicators::kst::{kst_with_kernel, KstInput, KstParams};
 use crate::indicators::kurtosis::{kurtosis_with_kernel, KurtosisInput, KurtosisParams};
 use crate::indicators::kvo::{kvo_with_kernel, KvoInput, KvoParams};
-use crate::indicators::leavitt_convolution_acceleration::{
-    leavitt_convolution_acceleration_with_kernel, LeavittConvolutionAccelerationInput,
-    LeavittConvolutionAccelerationParams,
-};
-use crate::indicators::linear_regression_intensity::{
-    linear_regression_intensity_with_kernel, LinearRegressionIntensityInput,
-    LinearRegressionIntensityParams,
-};
 use crate::indicators::l1_ehlers_phasor::{
     l1_ehlers_phasor_with_kernel, L1EhlersPhasorInput, L1EhlersPhasorParams,
 };
 use crate::indicators::l2_ehlers_signal_to_noise::{
     l2_ehlers_signal_to_noise_with_kernel, L2EhlersSignalToNoiseInput, L2EhlersSignalToNoiseParams,
 };
+use crate::indicators::leavitt_convolution_acceleration::{
+    leavitt_convolution_acceleration_with_kernel, LeavittConvolutionAccelerationInput,
+    LeavittConvolutionAccelerationParams,
+};
 use crate::indicators::linear_correlation_oscillator::{
     linear_correlation_oscillator_with_kernel, LinearCorrelationOscillatorInput,
     LinearCorrelationOscillatorParams,
+};
+use crate::indicators::linear_regression_intensity::{
+    linear_regression_intensity_with_kernel, LinearRegressionIntensityInput,
+    LinearRegressionIntensityParams,
 };
 use crate::indicators::linearreg_angle::{
     linearreg_angle_with_kernel, Linearreg_angleInput, Linearreg_angleParams,
@@ -328,6 +325,10 @@ use crate::indicators::macd_wave_signal_pro::{
 use crate::indicators::macz::{macz_with_kernel, MaczInput, MaczParams};
 use crate::indicators::market_meanness_index::{
     market_meanness_index_with_kernel, MarketMeannessIndexInput, MarketMeannessIndexParams,
+};
+use crate::indicators::market_structure_confluence::{
+    market_structure_confluence_with_kernel, MarketStructureConfluenceInput,
+    MarketStructureConfluenceParams,
 };
 use crate::indicators::market_structure_trailing_stop::{
     market_structure_trailing_stop_with_kernel, MarketStructureTrailingStopInput,
@@ -351,25 +352,25 @@ use crate::indicators::mod_god_mode::{
     mod_god_mode, ModGodModeData, ModGodModeInput, ModGodModeMode, ModGodModeParams,
 };
 use crate::indicators::mom::{mom_with_kernel, MomInput, MomParams};
-use crate::indicators::monotonicity_index::{
-    monotonicity_index_with_kernel, MonotonicityIndexInput, MonotonicityIndexMode,
-    MonotonicityIndexParams,
-};
 use crate::indicators::momentum_ratio_oscillator::{
     momentum_ratio_oscillator_with_kernel, MomentumRatioOscillatorInput,
     MomentumRatioOscillatorParams,
+};
+use crate::indicators::monotonicity_index::{
+    monotonicity_index_with_kernel, MonotonicityIndexInput, MonotonicityIndexMode,
+    MonotonicityIndexParams,
 };
 use crate::indicators::moving_average_cross_probability::{
     moving_average_cross_probability_with_kernel, MovingAverageCrossProbabilityInput,
     MovingAverageCrossProbabilityMaType, MovingAverageCrossProbabilityParams,
 };
-use crate::indicators::moving_averages::ma::MaData;
-use crate::indicators::moving_averages::ma_batch::{
-    ma_batch_with_kernel_and_typed_params, MaBatchParamKV, MaBatchParamValue,
-};
 use crate::indicators::moving_averages::logarithmic_moving_average::{
     logarithmic_moving_average_with_kernel, LogarithmicMovingAverageInput,
     LogarithmicMovingAverageParams,
+};
+use crate::indicators::moving_averages::ma::MaData;
+use crate::indicators::moving_averages::ma_batch::{
+    ma_batch_with_kernel_and_typed_params, MaBatchParamKV, MaBatchParamValue,
 };
 use crate::indicators::moving_averages::registry::list_moving_averages;
 use crate::indicators::msw::{msw_with_kernel, MswInput, MswParams};
@@ -388,15 +389,14 @@ use crate::indicators::neighboring_trailing_stop::{
 use crate::indicators::net_myrsi::{net_myrsi_with_kernel, NetMyrsiInput, NetMyrsiParams};
 use crate::indicators::nonlinear_regression_zero_lag_moving_average::{
     nonlinear_regression_zero_lag_moving_average_with_kernel,
-    NonlinearRegressionZeroLagMovingAverageInput,
-    NonlinearRegressionZeroLagMovingAverageParams,
+    NonlinearRegressionZeroLagMovingAverageInput, NonlinearRegressionZeroLagMovingAverageParams,
+};
+use crate::indicators::normalized_resonator::{
+    normalized_resonator_with_kernel, NormalizedResonatorInput, NormalizedResonatorParams,
 };
 use crate::indicators::normalized_volume_true_range::{
     normalized_volume_true_range_with_kernel, NormalizedVolumeTrueRangeInput,
     NormalizedVolumeTrueRangeParams, NormalizedVolumeTrueRangeStyle,
-};
-use crate::indicators::normalized_resonator::{
-    normalized_resonator_with_kernel, NormalizedResonatorInput, NormalizedResonatorParams,
 };
 use crate::indicators::nvi::{nvi_with_kernel, NviInput, NviParams};
 use crate::indicators::obv::{obv_with_kernel, ObvInput, ObvParams};
@@ -408,30 +408,24 @@ use crate::indicators::otto::{otto_with_kernel, OttoInput, OttoParams};
 use crate::indicators::parkinson_volatility::{
     parkinson_volatility_with_kernel, ParkinsonVolatilityInput, ParkinsonVolatilityParams,
 };
-use crate::indicators::price_moving_average_ratio_percentile::{
-    price_moving_average_ratio_percentile_with_kernel, PriceMovingAverageRatioPercentileInput,
-    PriceMovingAverageRatioPercentileLineMode, PriceMovingAverageRatioPercentileMaType,
-    PriceMovingAverageRatioPercentileParams,
-};
 use crate::indicators::percentile_nearest_rank::{
     percentile_nearest_rank_with_kernel, PercentileNearestRankInput, PercentileNearestRankParams,
 };
 use crate::indicators::pfe::{pfe_with_kernel, PfeInput, PfeParams};
 use crate::indicators::pivot::{pivot_with_kernel, PivotInput, PivotParams};
 use crate::indicators::pma::{pma_with_kernel, PmaInput, PmaParams};
-use crate::indicators::possible_rsi::{
-    possible_rsi_with_kernel, PossibleRsiInput, PossibleRsiParams,
-};
 use crate::indicators::polynomial_regression_extrapolation::{
     polynomial_regression_extrapolation_with_kernel, PolynomialRegressionExtrapolationInput,
     PolynomialRegressionExtrapolationParams,
+};
+use crate::indicators::possible_rsi::{
+    possible_rsi_with_kernel, PossibleRsiInput, PossibleRsiParams,
 };
 use crate::indicators::ppo::{ppo_with_kernel, PpoInput, PpoParams};
 use crate::indicators::prb::{prb_with_kernel, PrbInput, PrbParams};
 use crate::indicators::premier_rsi_oscillator::{
     premier_rsi_oscillator_with_kernel, PremierRsiOscillatorInput, PremierRsiOscillatorParams,
 };
-use crate::indicators::pvi::{pvi_with_kernel, PviInput, PviParams};
 use crate::indicators::pretty_good_oscillator::{
     pretty_good_oscillator_with_kernel, PrettyGoodOscillatorInput, PrettyGoodOscillatorParams,
 };
@@ -439,12 +433,18 @@ use crate::indicators::price_density_market_noise::{
     price_density_market_noise_with_kernel, PriceDensityMarketNoiseInput,
     PriceDensityMarketNoiseParams,
 };
+use crate::indicators::price_moving_average_ratio_percentile::{
+    price_moving_average_ratio_percentile_with_kernel, PriceMovingAverageRatioPercentileInput,
+    PriceMovingAverageRatioPercentileLineMode, PriceMovingAverageRatioPercentileMaType,
+    PriceMovingAverageRatioPercentileParams,
+};
 use crate::indicators::projection_oscillator::{
     projection_oscillator_with_kernel, ProjectionOscillatorInput, ProjectionOscillatorParams,
 };
 use crate::indicators::psychological_line::{
     psychological_line_with_kernel, PsychologicalLineInput, PsychologicalLineParams,
 };
+use crate::indicators::pvi::{pvi_with_kernel, PviInput, PviParams};
 use crate::indicators::qqe::{qqe_with_kernel, QqeInput, QqeParams};
 use crate::indicators::qqe_weighted_oscillator::{
     qqe_weighted_oscillator_with_kernel, QqeWeightedOscillatorInput, QqeWeightedOscillatorParams,
@@ -459,19 +459,15 @@ use crate::indicators::range_breakout_signals::{
 use crate::indicators::range_filter::{
     range_filter_with_kernel, RangeFilterInput, RangeFilterParams,
 };
-use crate::indicators::rank_correlation_index::{
-    rank_correlation_index_with_kernel, RankCorrelationIndexInput, RankCorrelationIndexParams,
-};
-use crate::indicators::market_structure_confluence::{
-    market_structure_confluence_with_kernel, MarketStructureConfluenceInput,
-    MarketStructureConfluenceParams,
-};
 use crate::indicators::range_filtered_trend_signals::{
     range_filtered_trend_signals_with_kernel, RangeFilteredTrendSignalsInput,
     RangeFilteredTrendSignalsParams,
 };
 use crate::indicators::range_oscillator::{
     range_oscillator_with_kernel, RangeOscillatorInput, RangeOscillatorParams,
+};
+use crate::indicators::rank_correlation_index::{
+    rank_correlation_index_with_kernel, RankCorrelationIndexInput, RankCorrelationIndexParams,
 };
 use crate::indicators::registry::{
     get_indicator, IndicatorInfo, IndicatorInputKind, ParamValueStatic,
@@ -512,6 +508,10 @@ use crate::indicators::smooth_theil_sen::{
     smooth_theil_sen_with_kernel, SmoothTheilSenDeviationType, SmoothTheilSenInput,
     SmoothTheilSenParams, SmoothTheilSenStatStyle,
 };
+use crate::indicators::smoothed_gaussian_trend_filter::{
+    smoothed_gaussian_trend_filter_with_kernel, SmoothedGaussianTrendFilterInput,
+    SmoothedGaussianTrendFilterParams,
+};
 use crate::indicators::spearman_correlation::{
     spearman_correlation_with_kernel, SpearmanCorrelationInput, SpearmanCorrelationParams,
 };
@@ -520,10 +520,6 @@ use crate::indicators::squeeze_index::{
 };
 use crate::indicators::squeeze_momentum::{
     squeeze_momentum_with_kernel, SqueezeMomentumInput, SqueezeMomentumParams,
-};
-use crate::indicators::smoothed_gaussian_trend_filter::{
-    smoothed_gaussian_trend_filter_with_kernel, SmoothedGaussianTrendFilterInput,
-    SmoothedGaussianTrendFilterParams,
 };
 use crate::indicators::srsi::{srsi_with_kernel, SrsiInput, SrsiParams};
 use crate::indicators::standardized_psar_oscillator::{
@@ -537,18 +533,18 @@ use crate::indicators::statistical_trailing_stop::{
 use crate::indicators::stc::{stc_with_kernel, StcInput, StcParams};
 use crate::indicators::stddev::{stddev_with_kernel, StdDevInput, StdDevParams};
 use crate::indicators::stoch::{stoch_with_kernel, StochInput, StochParams};
+use crate::indicators::stochastic_adaptive_d::{
+    stochastic_adaptive_d_with_kernel, StochasticAdaptiveDInput, StochasticAdaptiveDParams,
+};
+use crate::indicators::stochastic_connors_rsi::{
+    stochastic_connors_rsi_with_kernel, StochasticConnorsRsiInput, StochasticConnorsRsiParams,
+};
 use crate::indicators::stochastic_distance::{
     stochastic_distance_with_kernel, StochasticDistanceInput, StochasticDistanceParams,
 };
 use crate::indicators::stochastic_money_flow_index::{
     stochastic_money_flow_index_with_kernel, StochasticMoneyFlowIndexInput,
     StochasticMoneyFlowIndexParams,
-};
-use crate::indicators::stochastic_adaptive_d::{
-    stochastic_adaptive_d_with_kernel, StochasticAdaptiveDInput, StochasticAdaptiveDParams,
-};
-use crate::indicators::stochastic_connors_rsi::{
-    stochastic_connors_rsi_with_kernel, StochasticConnorsRsiInput, StochasticConnorsRsiParams,
 };
 use crate::indicators::stochf::{stochf_with_kernel, StochfInput, StochfParams};
 use crate::indicators::supertrend::{supertrend_with_kernel, SuperTrendInput, SuperTrendParams};
@@ -558,15 +554,19 @@ use crate::indicators::supertrend_oscillator::{
 use crate::indicators::supertrend_recovery::{
     supertrend_recovery_with_kernel, SuperTrendRecoveryInput, SuperTrendRecoveryParams,
 };
-use crate::indicators::trend_trigger_factor::{
-    trend_trigger_factor_with_kernel, TrendTriggerFactorInput, TrendTriggerFactorParams,
-};
-use crate::indicators::trend_flow_trail::{
-    trend_flow_trail_with_kernel, TrendFlowTrailInput, TrendFlowTrailParams,
+use crate::indicators::trend_continuation_factor::{
+    trend_continuation_factor_with_kernel, TrendContinuationFactorInput,
+    TrendContinuationFactorParams,
 };
 use crate::indicators::trend_direction_force_index::{
     trend_direction_force_index_into_slice, TrendDirectionForceIndexInput,
     TrendDirectionForceIndexParams,
+};
+use crate::indicators::trend_flow_trail::{
+    trend_flow_trail_with_kernel, TrendFlowTrailInput, TrendFlowTrailParams,
+};
+use crate::indicators::trend_trigger_factor::{
+    trend_trigger_factor_with_kernel, TrendTriggerFactorInput, TrendTriggerFactorParams,
 };
 use crate::indicators::trix::{
     trix_batch_with_kernel, trix_into_slice, trix_with_kernel, TrixBatchRange, TrixInput,
@@ -576,10 +576,6 @@ use crate::indicators::tsf::{tsf_with_kernel, TsfInput, TsfParams};
 use crate::indicators::tsi::{tsi_with_kernel, TsiInput, TsiParams};
 use crate::indicators::ttm_squeeze::{ttm_squeeze_with_kernel, TtmSqueezeInput, TtmSqueezeParams};
 use crate::indicators::ttm_trend::{ttm_trend_with_kernel, TtmTrendInput, TtmTrendParams};
-use crate::indicators::trend_continuation_factor::{
-    trend_continuation_factor_with_kernel, TrendContinuationFactorInput,
-    TrendContinuationFactorParams,
-};
 use crate::indicators::twiggs_money_flow::{
     twiggs_money_flow_with_kernel, TwiggsMoneyFlowInput, TwiggsMoneyFlowParams,
 };
@@ -588,8 +584,7 @@ use crate::indicators::ultosc::{ultosc_with_kernel, UltOscInput, UltOscParams};
 use crate::indicators::var::{var_with_kernel, VarInput, VarParams};
 use crate::indicators::vdubus_divergence_wave_pattern_generator::{
     vdubus_divergence_wave_pattern_generator_with_kernel,
-    VdubusDivergenceWavePatternGeneratorInput,
-    VdubusDivergenceWavePatternGeneratorParams,
+    VdubusDivergenceWavePatternGeneratorInput, VdubusDivergenceWavePatternGeneratorParams,
 };
 use crate::indicators::velocity::{velocity_with_kernel, VelocityInput, VelocityParams};
 use crate::indicators::velocity_acceleration_convergence_divergence_indicator::{
@@ -618,13 +613,13 @@ use crate::indicators::volatility_ratio_adaptive_rsx::{
 use crate::indicators::volume_energy_reservoirs::{
     volume_energy_reservoirs_with_kernel, VolumeEnergyReservoirsInput, VolumeEnergyReservoirsParams,
 };
-use crate::indicators::volume_weighted_rsi::{
-    volume_weighted_rsi_batch_with_kernel, volume_weighted_rsi_into_slice,
-    VolumeWeightedRsiBatchRange, VolumeWeightedRsiInput, VolumeWeightedRsiParams,
-};
 use crate::indicators::volume_weighted_relative_strength_index::{
     volume_weighted_relative_strength_index_with_kernel, VolumeWeightedRelativeStrengthIndexInput,
     VolumeWeightedRelativeStrengthIndexParams,
+};
+use crate::indicators::volume_weighted_rsi::{
+    volume_weighted_rsi_batch_with_kernel, volume_weighted_rsi_into_slice,
+    VolumeWeightedRsiBatchRange, VolumeWeightedRsiInput, VolumeWeightedRsiParams,
 };
 use crate::indicators::volume_weighted_stochastic_rsi::{
     volume_weighted_stochastic_rsi_with_kernel, VolumeWeightedStochasticRsiInput,
@@ -1729,7 +1724,9 @@ fn dispatch_cpu_batch_by_indicator(
         "pfe" => compute_pfe_batch(req, output_id),
         "ehlers_detrending_filter" => compute_ehlers_detrending_filter_batch(req, output_id),
         "ehlers_fm_demodulator" => compute_ehlers_fm_demodulator_batch(req, output_id),
-        "ehlers_simple_cycle_indicator" => compute_ehlers_simple_cycle_indicator_batch(req, output_id),
+        "ehlers_simple_cycle_indicator" => {
+            compute_ehlers_simple_cycle_indicator_batch(req, output_id)
+        }
         "ehlers_smoothed_adaptive_momentum" => {
             compute_ehlers_smoothed_adaptive_momentum_batch(req, output_id)
         }
@@ -1738,7 +1735,9 @@ fn dispatch_cpu_batch_by_indicator(
         "reverse_rsi" => compute_reverse_rsi_batch(req, output_id),
         "percentile_nearest_rank" => compute_percentile_nearest_rank_batch(req, output_id),
         "obv" => compute_obv_batch(req, output_id),
-        "on_balance_volume_oscillator" => compute_on_balance_volume_oscillator_batch(req, output_id),
+        "on_balance_volume_oscillator" => {
+            compute_on_balance_volume_oscillator_batch(req, output_id)
+        }
         "vpt" => compute_vpt_batch(req, output_id),
         "nvi" => compute_nvi_batch(req, output_id),
         "pvi" => compute_pvi_batch(req, output_id),
@@ -1895,7 +1894,9 @@ fn dispatch_cpu_batch_by_indicator(
         }
         "linear_regression_intensity" => compute_linear_regression_intensity_batch(req, output_id),
         "market_meanness_index" => compute_market_meanness_index_batch(req, output_id),
-        "mesa_stochastic_multi_length" => compute_mesa_stochastic_multi_length_batch(req, output_id),
+        "mesa_stochastic_multi_length" => {
+            compute_mesa_stochastic_multi_length_batch(req, output_id)
+        }
         "moving_average_cross_probability" => {
             compute_moving_average_cross_probability_batch(req, output_id)
         }
@@ -2065,6 +2066,25 @@ fn strict_expected_input_kind(indicator: &str, fallback: IndicatorInputKind) -> 
     fallback
 }
 
+fn normalize_output_token(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch.to_ascii_lowercase());
+        }
+    }
+    if normalized == "values" {
+        "value".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn output_id_matches(candidate: &str, requested: &str) -> bool {
+    candidate.eq_ignore_ascii_case(requested)
+        || normalize_output_token(candidate) == normalize_output_token(requested)
+}
+
 fn resolve_output_id<'a>(
     info: &'a IndicatorInfo,
     requested: Option<&str>,
@@ -2082,7 +2102,7 @@ fn resolve_output_id<'a>(
             if req == only {
                 return Ok(only);
             }
-            if !req.eq_ignore_ascii_case(only) {
+            if !output_id_matches(only, req) {
                 return Err(IndicatorDispatchError::UnknownOutput {
                     indicator: info.id.to_string(),
                     output: req.to_string(),
@@ -2103,7 +2123,7 @@ fn resolve_output_id<'a>(
     }
     info.outputs
         .iter()
-        .find(|o| o.id.eq_ignore_ascii_case(req))
+        .find(|o| output_id_matches(o.id, req))
         .map(|o| o.id)
         .ok_or_else(|| IndicatorDispatchError::UnknownOutput {
             indicator: info.id.to_string(),
@@ -6878,65 +6898,65 @@ fn compute_reversal_signals_batch(
     req: IndicatorBatchRequest<'_>,
     output_id: &str,
 ) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
-    let (open, high, low, close, volume) =
-        extract_ohlcv_full_input("reversal_signals", req.data)?;
+    let (open, high, low, close, volume) = extract_ohlcv_full_input("reversal_signals", req.data)?;
     let kernel = req.kernel.to_non_batch();
-    collect_f64("reversal_signals", output_id, req.combos, close.len(), |params| {
-        let lookback_period =
-            get_usize_param("reversal_signals", params, "lookback_period", 12)?;
-        let confirmation_period =
-            get_usize_param("reversal_signals", params, "confirmation_period", 3)?;
-        let use_volume_confirmation = get_bool_param(
-            "reversal_signals",
-            params,
-            "use_volume_confirmation",
-            true,
-        )?;
-        let trend_ma_period =
-            get_usize_param("reversal_signals", params, "trend_ma_period", 50)?;
-        let trend_ma_type =
-            get_enum_param("reversal_signals", params, "trend_ma_type", "EMA")?;
-        let ma_step_period =
-            get_usize_param("reversal_signals", params, "ma_step_period", 33)?;
-        let input = ReversalSignalsInput::from_slices(
-            open,
-            high,
-            low,
-            close,
-            volume,
-            ReversalSignalsParams {
-                lookback_period: Some(lookback_period),
-                confirmation_period: Some(confirmation_period),
-                use_volume_confirmation: Some(use_volume_confirmation),
-                trend_ma_period: Some(trend_ma_period),
-                trend_ma_type: Some(trend_ma_type.to_string()),
-                ma_step_period: Some(ma_step_period),
-            },
-        );
-        let out = reversal_signals_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
-                indicator: "reversal_signals".to_string(),
-                details: e.to_string(),
+    collect_f64(
+        "reversal_signals",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let lookback_period =
+                get_usize_param("reversal_signals", params, "lookback_period", 12)?;
+            let confirmation_period =
+                get_usize_param("reversal_signals", params, "confirmation_period", 3)?;
+            let use_volume_confirmation =
+                get_bool_param("reversal_signals", params, "use_volume_confirmation", true)?;
+            let trend_ma_period =
+                get_usize_param("reversal_signals", params, "trend_ma_period", 50)?;
+            let trend_ma_type = get_enum_param("reversal_signals", params, "trend_ma_type", "EMA")?;
+            let ma_step_period = get_usize_param("reversal_signals", params, "ma_step_period", 33)?;
+            let input = ReversalSignalsInput::from_slices(
+                open,
+                high,
+                low,
+                close,
+                volume,
+                ReversalSignalsParams {
+                    lookback_period: Some(lookback_period),
+                    confirmation_period: Some(confirmation_period),
+                    use_volume_confirmation: Some(use_volume_confirmation),
+                    trend_ma_period: Some(trend_ma_period),
+                    trend_ma_type: Some(trend_ma_type.to_string()),
+                    ma_step_period: Some(ma_step_period),
+                },
+            );
+            let out = reversal_signals_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "reversal_signals".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("buy_signal") {
+                return Ok(out.buy_signal);
             }
-        })?;
-        if output_id.eq_ignore_ascii_case("buy_signal") {
-            return Ok(out.buy_signal);
-        }
-        if output_id.eq_ignore_ascii_case("sell_signal") {
-            return Ok(out.sell_signal);
-        }
-        if output_id.eq_ignore_ascii_case("stepped_ma") || output_id.eq_ignore_ascii_case("value")
-        {
-            return Ok(out.stepped_ma);
-        }
-        if output_id.eq_ignore_ascii_case("state") {
-            return Ok(out.state);
-        }
-        Err(IndicatorDispatchError::UnknownOutput {
-            indicator: "reversal_signals".to_string(),
-            output: output_id.to_string(),
-        })
-    })
+            if output_id.eq_ignore_ascii_case("sell_signal") {
+                return Ok(out.sell_signal);
+            }
+            if output_id.eq_ignore_ascii_case("stepped_ma")
+                || output_id.eq_ignore_ascii_case("value")
+            {
+                return Ok(out.stepped_ma);
+            }
+            if output_id.eq_ignore_ascii_case("state") {
+                return Ok(out.state);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "reversal_signals".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
 }
 
 fn compute_zig_zag_channels_batch(
@@ -9246,8 +9266,7 @@ fn compute_historical_volatility_percentile_batch(
         req.combos,
         data.len(),
         |params| {
-            let length =
-                get_usize_param("historical_volatility_percentile", params, "length", 20)?;
+            let length = get_usize_param("historical_volatility_percentile", params, "length", 20)?;
             let annual_length = get_usize_param(
                 "historical_volatility_percentile",
                 params,
@@ -9261,12 +9280,13 @@ fn compute_historical_volatility_percentile_batch(
                     annual_length: Some(annual_length),
                 },
             );
-            let out = historical_volatility_percentile_with_kernel(&input, kernel).map_err(|e| {
-                IndicatorDispatchError::ComputeFailed {
-                    indicator: "historical_volatility_percentile".to_string(),
-                    details: e.to_string(),
-                }
-            })?;
+            let out =
+                historical_volatility_percentile_with_kernel(&input, kernel).map_err(|e| {
+                    IndicatorDispatchError::ComputeFailed {
+                        indicator: "historical_volatility_percentile".to_string(),
+                        details: e.to_string(),
+                    }
+                })?;
             if output_id.eq_ignore_ascii_case("hvp") {
                 return Ok(out.hvp);
             }
@@ -9293,8 +9313,7 @@ fn compute_volatility_ratio_adaptive_rsx_batch(
         req.combos,
         data.len(),
         |params| {
-            let period =
-                get_usize_param("volatility_ratio_adaptive_rsx", params, "period", 14)?;
+            let period = get_usize_param("volatility_ratio_adaptive_rsx", params, "period", 14)?;
             let speed = get_f64_param("volatility_ratio_adaptive_rsx", params, "speed", 0.5)?;
             let input = VolatilityRatioAdaptiveRsxInput::from_slice(
                 data,
@@ -9374,39 +9393,45 @@ fn compute_twiggs_money_flow_batch(
 ) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
     let (high, low, close, volume) = extract_hlcv_input("twiggs_money_flow", req.data)?;
     let kernel = req.kernel.to_non_batch();
-    collect_f64("twiggs_money_flow", output_id, req.combos, close.len(), |params| {
-        let length = get_usize_param("twiggs_money_flow", params, "length", 21)?;
-        let smoothing_length =
-            get_usize_param("twiggs_money_flow", params, "smoothing_length", 4)?;
-        let ma_type = get_enum_param("twiggs_money_flow", params, "ma_type", "ema")?;
-        let input = TwiggsMoneyFlowInput::from_slices(
-            high,
-            low,
-            close,
-            volume,
-            TwiggsMoneyFlowParams {
-                length: Some(length),
-                smoothing_length: Some(smoothing_length),
-                ma_type: Some(ma_type),
-            },
-        );
-        let out = twiggs_money_flow_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
-                indicator: "twiggs_money_flow".to_string(),
-                details: e.to_string(),
+    collect_f64(
+        "twiggs_money_flow",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let length = get_usize_param("twiggs_money_flow", params, "length", 21)?;
+            let smoothing_length =
+                get_usize_param("twiggs_money_flow", params, "smoothing_length", 4)?;
+            let ma_type = get_enum_param("twiggs_money_flow", params, "ma_type", "ema")?;
+            let input = TwiggsMoneyFlowInput::from_slices(
+                high,
+                low,
+                close,
+                volume,
+                TwiggsMoneyFlowParams {
+                    length: Some(length),
+                    smoothing_length: Some(smoothing_length),
+                    ma_type: Some(ma_type),
+                },
+            );
+            let out = twiggs_money_flow_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "twiggs_money_flow".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("tmf") || output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.tmf);
             }
-        })?;
-        if output_id.eq_ignore_ascii_case("tmf") || output_id.eq_ignore_ascii_case("value") {
-            return Ok(out.tmf);
-        }
-        if output_id.eq_ignore_ascii_case("smoothed") {
-            return Ok(out.smoothed);
-        }
-        Err(IndicatorDispatchError::UnknownOutput {
-            indicator: "twiggs_money_flow".to_string(),
-            output: output_id.to_string(),
-        })
-    })
+            if output_id.eq_ignore_ascii_case("smoothed") {
+                return Ok(out.smoothed);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "twiggs_money_flow".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
 }
 
 fn compute_parkinson_volatility_batch(
@@ -9435,7 +9460,8 @@ fn compute_parkinson_volatility_batch(
                     details: e.to_string(),
                 }
             })?;
-            if output_id.eq_ignore_ascii_case("volatility") || output_id.eq_ignore_ascii_case("value")
+            if output_id.eq_ignore_ascii_case("volatility")
+                || output_id.eq_ignore_ascii_case("value")
             {
                 return Ok(out.volatility);
             }
@@ -9539,8 +9565,12 @@ fn compute_cycle_channel_oscillator_batch(
             let source = get_enum_param("cycle_channel_oscillator", params, "source", "close")?;
             let short_cycle_length =
                 get_usize_param("cycle_channel_oscillator", params, "short_cycle_length", 10)?;
-            let medium_cycle_length =
-                get_usize_param("cycle_channel_oscillator", params, "medium_cycle_length", 30)?;
+            let medium_cycle_length = get_usize_param(
+                "cycle_channel_oscillator",
+                params,
+                "medium_cycle_length",
+                30,
+            )?;
             let short_multiplier =
                 get_f64_param("cycle_channel_oscillator", params, "short_multiplier", 1.0)?;
             let medium_multiplier =
@@ -9592,38 +9622,43 @@ fn compute_andean_oscillator_batch(
 ) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
     let (open, _high, _low, close) = extract_ohlc_full_input("andean_oscillator", req.data)?;
     let kernel = req.kernel.to_non_batch();
-    collect_f64("andean_oscillator", output_id, req.combos, close.len(), |params| {
-        let length = get_usize_param("andean_oscillator", params, "length", 50)?;
-        let signal_length =
-            get_usize_param("andean_oscillator", params, "signal_length", 9)?;
-        let input = AndeanOscillatorInput::from_slices(
-            open,
-            close,
-            AndeanOscillatorParams {
-                length: Some(length),
-                signal_length: Some(signal_length),
-            },
-        );
-        let out = andean_oscillator_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
-                indicator: "andean_oscillator".to_string(),
-                details: e.to_string(),
+    collect_f64(
+        "andean_oscillator",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let length = get_usize_param("andean_oscillator", params, "length", 50)?;
+            let signal_length = get_usize_param("andean_oscillator", params, "signal_length", 9)?;
+            let input = AndeanOscillatorInput::from_slices(
+                open,
+                close,
+                AndeanOscillatorParams {
+                    length: Some(length),
+                    signal_length: Some(signal_length),
+                },
+            );
+            let out = andean_oscillator_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "andean_oscillator".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("bull") {
+                return Ok(out.bull);
             }
-        })?;
-        if output_id.eq_ignore_ascii_case("bull") {
-            return Ok(out.bull);
-        }
-        if output_id.eq_ignore_ascii_case("bear") {
-            return Ok(out.bear);
-        }
-        if output_id.eq_ignore_ascii_case("signal") {
-            return Ok(out.signal);
-        }
-        Err(IndicatorDispatchError::UnknownOutput {
-            indicator: "andean_oscillator".to_string(),
-            output: output_id.to_string(),
-        })
-    })
+            if output_id.eq_ignore_ascii_case("bear") {
+                return Ok(out.bear);
+            }
+            if output_id.eq_ignore_ascii_case("signal") {
+                return Ok(out.signal);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "andean_oscillator".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
 }
 
 fn compute_daily_factor_batch(
@@ -9632,38 +9667,43 @@ fn compute_daily_factor_batch(
 ) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
     let (open, high, low, close) = extract_ohlc_full_input("daily_factor", req.data)?;
     let kernel = req.kernel.to_non_batch();
-    collect_f64("daily_factor", output_id, req.combos, close.len(), |params| {
-        let threshold_level =
-            get_f64_param("daily_factor", params, "threshold_level", 0.35)?;
-        let input = DailyFactorInput::from_slices(
-            open,
-            high,
-            low,
-            close,
-            DailyFactorParams {
-                threshold_level: Some(threshold_level),
-            },
-        );
-        let out = daily_factor_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
-                indicator: "daily_factor".to_string(),
-                details: e.to_string(),
+    collect_f64(
+        "daily_factor",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let threshold_level = get_f64_param("daily_factor", params, "threshold_level", 0.35)?;
+            let input = DailyFactorInput::from_slices(
+                open,
+                high,
+                low,
+                close,
+                DailyFactorParams {
+                    threshold_level: Some(threshold_level),
+                },
+            );
+            let out = daily_factor_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "daily_factor".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.value);
             }
-        })?;
-        if output_id.eq_ignore_ascii_case("value") {
-            return Ok(out.value);
-        }
-        if output_id.eq_ignore_ascii_case("ema") {
-            return Ok(out.ema);
-        }
-        if output_id.eq_ignore_ascii_case("signal") {
-            return Ok(out.signal);
-        }
-        Err(IndicatorDispatchError::UnknownOutput {
-            indicator: "daily_factor".to_string(),
-            output: output_id.to_string(),
-        })
-    })
+            if output_id.eq_ignore_ascii_case("ema") {
+                return Ok(out.ema);
+            }
+            if output_id.eq_ignore_ascii_case("signal") {
+                return Ok(out.signal);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "daily_factor".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
 }
 
 fn compute_ehlers_adaptive_cyber_cycle_batch(
@@ -9781,23 +9821,29 @@ fn compute_l1_ehlers_phasor_batch(
     expect_value_output("l1_ehlers_phasor", output_id)?;
     let data = extract_slice_input("l1_ehlers_phasor", req.data, "close")?;
     let kernel = req.kernel.to_non_batch();
-    collect_f64("l1_ehlers_phasor", output_id, req.combos, data.len(), |params| {
-        let domestic_cycle_length =
-            get_usize_param("l1_ehlers_phasor", params, "domestic_cycle_length", 15)?;
-        let input = L1EhlersPhasorInput::from_slice(
-            data,
-            L1EhlersPhasorParams {
-                domestic_cycle_length: Some(domestic_cycle_length),
-            },
-        );
-        let out = l1_ehlers_phasor_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
-                indicator: "l1_ehlers_phasor".to_string(),
-                details: e.to_string(),
-            }
-        })?;
-        Ok(out.values)
-    })
+    collect_f64(
+        "l1_ehlers_phasor",
+        output_id,
+        req.combos,
+        data.len(),
+        |params| {
+            let domestic_cycle_length =
+                get_usize_param("l1_ehlers_phasor", params, "domestic_cycle_length", 15)?;
+            let input = L1EhlersPhasorInput::from_slice(
+                data,
+                L1EhlersPhasorParams {
+                    domestic_cycle_length: Some(domestic_cycle_length),
+                },
+            );
+            let out = l1_ehlers_phasor_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "l1_ehlers_phasor".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            Ok(out.values)
+        },
+    )
 }
 
 fn compute_ehlers_smoothed_adaptive_momentum_batch(
@@ -9826,10 +9872,8 @@ fn compute_ehlers_smoothed_adaptive_momentum_batch(
         |params| {
             let source =
                 get_enum_param("ehlers_smoothed_adaptive_momentum", params, "source", "hl2")?;
-            let alpha =
-                get_f64_param("ehlers_smoothed_adaptive_momentum", params, "alpha", 0.07)?;
-            let cutoff =
-                get_f64_param("ehlers_smoothed_adaptive_momentum", params, "cutoff", 8.0)?;
+            let alpha = get_f64_param("ehlers_smoothed_adaptive_momentum", params, "alpha", 0.07)?;
+            let cutoff = get_f64_param("ehlers_smoothed_adaptive_momentum", params, "cutoff", 8.0)?;
             let data = match req.data {
                 IndicatorDataRef::Slice { values } => values,
                 IndicatorDataRef::Candles { candles, .. } => source_type(candles, &source),
@@ -9861,22 +9905,28 @@ fn compute_ewma_volatility_batch(
     expect_value_output("ewma_volatility", output_id)?;
     let data = extract_slice_input("ewma_volatility", req.data, "close")?;
     let kernel = req.kernel.to_non_batch();
-    collect_f64("ewma_volatility", output_id, req.combos, data.len(), |params| {
-        let lambda = get_f64_param("ewma_volatility", params, "lambda", 0.94)?;
-        let input = EwmaVolatilityInput::from_slice(
-            data,
-            EwmaVolatilityParams {
-                lambda: Some(lambda),
-            },
-        );
-        let out = ewma_volatility_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
-                indicator: "ewma_volatility".to_string(),
-                details: e.to_string(),
-            }
-        })?;
-        Ok(out.values)
-    })
+    collect_f64(
+        "ewma_volatility",
+        output_id,
+        req.combos,
+        data.len(),
+        |params| {
+            let lambda = get_f64_param("ewma_volatility", params, "lambda", 0.94)?;
+            let input = EwmaVolatilityInput::from_slice(
+                data,
+                EwmaVolatilityParams {
+                    lambda: Some(lambda),
+                },
+            );
+            let out = ewma_volatility_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "ewma_volatility".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            Ok(out.values)
+        },
+    )
 }
 
 fn compute_random_walk_index_batch(
@@ -9885,33 +9935,39 @@ fn compute_random_walk_index_batch(
 ) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
     let (high, low, close) = extract_ohlc_input("random_walk_index", req.data)?;
     let kernel = req.kernel.to_non_batch();
-    collect_f64("random_walk_index", output_id, req.combos, close.len(), |params| {
-        let length = get_usize_param("random_walk_index", params, "length", 14)?;
-        let input = RandomWalkIndexInput::from_slices(
-            high,
-            low,
-            close,
-            RandomWalkIndexParams {
-                length: Some(length),
-            },
-        );
-        let out = random_walk_index_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
-                indicator: "random_walk_index".to_string(),
-                details: e.to_string(),
+    collect_f64(
+        "random_walk_index",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let length = get_usize_param("random_walk_index", params, "length", 14)?;
+            let input = RandomWalkIndexInput::from_slices(
+                high,
+                low,
+                close,
+                RandomWalkIndexParams {
+                    length: Some(length),
+                },
+            );
+            let out = random_walk_index_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "random_walk_index".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("high") {
+                return Ok(out.high);
             }
-        })?;
-        if output_id.eq_ignore_ascii_case("high") {
-            return Ok(out.high);
-        }
-        if output_id.eq_ignore_ascii_case("low") {
-            return Ok(out.low);
-        }
-        Err(IndicatorDispatchError::UnknownOutput {
-            indicator: "random_walk_index".to_string(),
-            output: output_id.to_string(),
-        })
-    })
+            if output_id.eq_ignore_ascii_case("low") {
+                return Ok(out.low);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "random_walk_index".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
 }
 
 fn compute_price_moving_average_ratio_percentile_batch(
@@ -9938,10 +9994,18 @@ fn compute_price_moving_average_ratio_percentile_batch(
         req.combos,
         data_len,
         |params| {
-            let source =
-                get_enum_param("price_moving_average_ratio_percentile", params, "source", "close")?;
-            let ma_length =
-                get_usize_param("price_moving_average_ratio_percentile", params, "ma_length", 20)?;
+            let source = get_enum_param(
+                "price_moving_average_ratio_percentile",
+                params,
+                "source",
+                "close",
+            )?;
+            let ma_length = get_usize_param(
+                "price_moving_average_ratio_percentile",
+                params,
+                "ma_length",
+                20,
+            )?;
             let ma_type = get_enum_param(
                 "price_moving_average_ratio_percentile",
                 params,
@@ -10024,12 +10088,13 @@ fn compute_price_moving_average_ratio_percentile_batch(
                     line_mode: Some(line_mode),
                 },
             );
-            let out = price_moving_average_ratio_percentile_with_kernel(&input, kernel).map_err(
-                |e| IndicatorDispatchError::ComputeFailed {
-                    indicator: "price_moving_average_ratio_percentile".to_string(),
-                    details: e.to_string(),
-                },
-            )?;
+            let out =
+                price_moving_average_ratio_percentile_with_kernel(&input, kernel).map_err(|e| {
+                    IndicatorDispatchError::ComputeFailed {
+                        indicator: "price_moving_average_ratio_percentile".to_string(),
+                        details: e.to_string(),
+                    }
+                })?;
             if output_id.eq_ignore_ascii_case("pmar") {
                 return Ok(out.pmar);
             }
@@ -10067,23 +10132,29 @@ fn compute_trend_trigger_factor_batch(
     expect_value_output("trend_trigger_factor", output_id)?;
     let (high, low) = extract_high_low_input("trend_trigger_factor", req.data)?;
     let kernel = req.kernel.to_non_batch();
-    collect_f64("trend_trigger_factor", output_id, req.combos, high.len(), |params| {
-        let length = get_usize_param("trend_trigger_factor", params, "length", 15)?;
-        let input = TrendTriggerFactorInput::from_slices(
-            high,
-            low,
-            TrendTriggerFactorParams {
-                length: Some(length),
-            },
-        );
-        let out = trend_trigger_factor_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
-                indicator: "trend_trigger_factor".to_string(),
-                details: e.to_string(),
-            }
-        })?;
-        Ok(out.values)
-    })
+    collect_f64(
+        "trend_trigger_factor",
+        output_id,
+        req.combos,
+        high.len(),
+        |params| {
+            let length = get_usize_param("trend_trigger_factor", params, "length", 15)?;
+            let input = TrendTriggerFactorInput::from_slices(
+                high,
+                low,
+                TrendTriggerFactorParams {
+                    length: Some(length),
+                },
+            );
+            let out = trend_trigger_factor_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "trend_trigger_factor".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            Ok(out.values)
+        },
+    )
 }
 
 fn compute_mesa_stochastic_multi_length_batch(
@@ -10109,16 +10180,11 @@ fn compute_mesa_stochastic_multi_length_batch(
         req.combos,
         data_len,
         |params| {
-            let source =
-                get_enum_param("mesa_stochastic_multi_length", params, "source", "close")?;
-            let length_1 =
-                get_usize_param("mesa_stochastic_multi_length", params, "length_1", 48)?;
-            let length_2 =
-                get_usize_param("mesa_stochastic_multi_length", params, "length_2", 21)?;
-            let length_3 =
-                get_usize_param("mesa_stochastic_multi_length", params, "length_3", 9)?;
-            let length_4 =
-                get_usize_param("mesa_stochastic_multi_length", params, "length_4", 6)?;
+            let source = get_enum_param("mesa_stochastic_multi_length", params, "source", "close")?;
+            let length_1 = get_usize_param("mesa_stochastic_multi_length", params, "length_1", 48)?;
+            let length_2 = get_usize_param("mesa_stochastic_multi_length", params, "length_2", 21)?;
+            let length_3 = get_usize_param("mesa_stochastic_multi_length", params, "length_3", 9)?;
+            let length_4 = get_usize_param("mesa_stochastic_multi_length", params, "length_4", 6)?;
             let trigger_length =
                 get_usize_param("mesa_stochastic_multi_length", params, "trigger_length", 2)?;
             let data = match req.data {
@@ -10190,45 +10256,51 @@ fn compute_spearman_correlation_batch(
         }
     };
     let kernel = req.kernel.to_non_batch();
-    collect_f64("spearman_correlation", output_id, req.combos, data_len, |params| {
-        let source = get_enum_param("spearman_correlation", params, "source", "close")?;
-        let comparison_source =
-            get_enum_param("spearman_correlation", params, "comparison_source", "open")?;
-        let lookback = get_usize_param("spearman_correlation", params, "lookback", 30)?;
-        let smoothing_length =
-            get_usize_param("spearman_correlation", params, "smoothing_length", 3)?;
-        let (main, compare) = match req.data {
-            IndicatorDataRef::Candles { candles, .. } => (
-                source_type(candles, &source),
-                source_type(candles, &comparison_source),
-            ),
-            _ => unreachable!(),
-        };
-        let input = SpearmanCorrelationInput::from_slices(
-            main,
-            compare,
-            SpearmanCorrelationParams {
-                lookback: Some(lookback),
-                smoothing_length: Some(smoothing_length),
-            },
-        );
-        let out = spearman_correlation_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
-                indicator: "spearman_correlation".to_string(),
-                details: e.to_string(),
+    collect_f64(
+        "spearman_correlation",
+        output_id,
+        req.combos,
+        data_len,
+        |params| {
+            let source = get_enum_param("spearman_correlation", params, "source", "close")?;
+            let comparison_source =
+                get_enum_param("spearman_correlation", params, "comparison_source", "open")?;
+            let lookback = get_usize_param("spearman_correlation", params, "lookback", 30)?;
+            let smoothing_length =
+                get_usize_param("spearman_correlation", params, "smoothing_length", 3)?;
+            let (main, compare) = match req.data {
+                IndicatorDataRef::Candles { candles, .. } => (
+                    source_type(candles, &source),
+                    source_type(candles, &comparison_source),
+                ),
+                _ => unreachable!(),
+            };
+            let input = SpearmanCorrelationInput::from_slices(
+                main,
+                compare,
+                SpearmanCorrelationParams {
+                    lookback: Some(lookback),
+                    smoothing_length: Some(smoothing_length),
+                },
+            );
+            let out = spearman_correlation_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "spearman_correlation".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("raw") || output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.raw);
             }
-        })?;
-        if output_id.eq_ignore_ascii_case("raw") || output_id.eq_ignore_ascii_case("value") {
-            return Ok(out.raw);
-        }
-        if output_id.eq_ignore_ascii_case("smoothed") {
-            return Ok(out.smoothed);
-        }
-        Err(IndicatorDispatchError::UnknownOutput {
-            indicator: "spearman_correlation".to_string(),
-            output: output_id.to_string(),
-        })
-    })
+            if output_id.eq_ignore_ascii_case("smoothed") {
+                return Ok(out.smoothed);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "spearman_correlation".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
 }
 
 fn compute_relative_strength_index_wave_indicator_batch(
@@ -10309,13 +10381,12 @@ fn compute_relative_strength_index_wave_indicator_batch(
                     length4: Some(length4),
                 },
             );
-            let out =
-                relative_strength_index_wave_indicator_with_kernel(&input, kernel).map_err(|e| {
-                    IndicatorDispatchError::ComputeFailed {
-                        indicator: "relative_strength_index_wave_indicator".to_string(),
-                        details: e.to_string(),
-                    }
-                })?;
+            let out = relative_strength_index_wave_indicator_with_kernel(&input, kernel).map_err(
+                |e| IndicatorDispatchError::ComputeFailed {
+                    indicator: "relative_strength_index_wave_indicator".to_string(),
+                    details: e.to_string(),
+                },
+            )?;
             if output_id.eq_ignore_ascii_case("rsi_ma1") || output_id.eq_ignore_ascii_case("value")
             {
                 return Ok(out.rsi_ma1);
@@ -10381,104 +10452,110 @@ fn compute_ichimoku_oscillator_batch(
 ) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
     let (high, low, close) = extract_ohlc_input("ichimoku_oscillator", req.data)?;
     let kernel = req.kernel.to_non_batch();
-    collect_f64("ichimoku_oscillator", output_id, req.combos, close.len(), |params| {
-        let source_name = get_enum_param("ichimoku_oscillator", params, "source", "close")?;
-        let conversion_periods =
-            get_usize_param("ichimoku_oscillator", params, "conversion_periods", 9)?;
-        let base_periods = get_usize_param("ichimoku_oscillator", params, "base_periods", 26)?;
-        let lagging_span_periods =
-            get_usize_param("ichimoku_oscillator", params, "lagging_span_periods", 52)?;
-        let displacement = get_usize_param("ichimoku_oscillator", params, "displacement", 26)?;
-        let ma_length = get_usize_param("ichimoku_oscillator", params, "ma_length", 12)?;
-        let smoothing_length =
-            get_usize_param("ichimoku_oscillator", params, "smoothing_length", 3)?;
-        let extra_smoothing =
-            get_bool_param("ichimoku_oscillator", params, "extra_smoothing", true)?;
-        let normalize = get_enum_param("ichimoku_oscillator", params, "normalize", "window")?
-            .parse::<IchimokuOscillatorNormalizeMode>()
-            .map_err(|e| IndicatorDispatchError::InvalidParam {
-                indicator: "ichimoku_oscillator".to_string(),
-                key: "normalize".to_string(),
-                reason: e,
+    collect_f64(
+        "ichimoku_oscillator",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let source_name = get_enum_param("ichimoku_oscillator", params, "source", "close")?;
+            let conversion_periods =
+                get_usize_param("ichimoku_oscillator", params, "conversion_periods", 9)?;
+            let base_periods = get_usize_param("ichimoku_oscillator", params, "base_periods", 26)?;
+            let lagging_span_periods =
+                get_usize_param("ichimoku_oscillator", params, "lagging_span_periods", 52)?;
+            let displacement = get_usize_param("ichimoku_oscillator", params, "displacement", 26)?;
+            let ma_length = get_usize_param("ichimoku_oscillator", params, "ma_length", 12)?;
+            let smoothing_length =
+                get_usize_param("ichimoku_oscillator", params, "smoothing_length", 3)?;
+            let extra_smoothing =
+                get_bool_param("ichimoku_oscillator", params, "extra_smoothing", true)?;
+            let normalize = get_enum_param("ichimoku_oscillator", params, "normalize", "window")?
+                .parse::<IchimokuOscillatorNormalizeMode>()
+                .map_err(|e| IndicatorDispatchError::InvalidParam {
+                    indicator: "ichimoku_oscillator".to_string(),
+                    key: "normalize".to_string(),
+                    reason: e,
+                })?;
+            let window_size = get_usize_param("ichimoku_oscillator", params, "window_size", 20)?;
+            let clamp = get_bool_param("ichimoku_oscillator", params, "clamp", true)?;
+            let top_band = get_f64_param("ichimoku_oscillator", params, "top_band", 2.0)?;
+            let mid_band = get_f64_param("ichimoku_oscillator", params, "mid_band", 1.5)?;
+            let source = match req.data {
+                IndicatorDataRef::Candles { candles, .. } => source_type(candles, &source_name),
+                _ => close,
+            };
+            let input = IchimokuOscillatorInput::from_slices(
+                high,
+                low,
+                close,
+                source,
+                IchimokuOscillatorParams {
+                    conversion_periods: Some(conversion_periods),
+                    base_periods: Some(base_periods),
+                    lagging_span_periods: Some(lagging_span_periods),
+                    displacement: Some(displacement),
+                    ma_length: Some(ma_length),
+                    smoothing_length: Some(smoothing_length),
+                    extra_smoothing: Some(extra_smoothing),
+                    normalize: Some(normalize),
+                    window_size: Some(window_size),
+                    clamp: Some(clamp),
+                    top_band: Some(top_band),
+                    mid_band: Some(mid_band),
+                },
+            );
+            let out = ichimoku_oscillator_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "ichimoku_oscillator".to_string(),
+                    details: e.to_string(),
+                }
             })?;
-        let window_size = get_usize_param("ichimoku_oscillator", params, "window_size", 20)?;
-        let clamp = get_bool_param("ichimoku_oscillator", params, "clamp", true)?;
-        let top_band = get_f64_param("ichimoku_oscillator", params, "top_band", 2.0)?;
-        let mid_band = get_f64_param("ichimoku_oscillator", params, "mid_band", 1.5)?;
-        let source = match req.data {
-            IndicatorDataRef::Candles { candles, .. } => source_type(candles, &source_name),
-            _ => close,
-        };
-        let input = IchimokuOscillatorInput::from_slices(
-            high,
-            low,
-            close,
-            source,
-            IchimokuOscillatorParams {
-                conversion_periods: Some(conversion_periods),
-                base_periods: Some(base_periods),
-                lagging_span_periods: Some(lagging_span_periods),
-                displacement: Some(displacement),
-                ma_length: Some(ma_length),
-                smoothing_length: Some(smoothing_length),
-                extra_smoothing: Some(extra_smoothing),
-                normalize: Some(normalize),
-                window_size: Some(window_size),
-                clamp: Some(clamp),
-                top_band: Some(top_band),
-                mid_band: Some(mid_band),
-            },
-        );
-        let out = ichimoku_oscillator_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
-                indicator: "ichimoku_oscillator".to_string(),
-                details: e.to_string(),
+            if output_id.eq_ignore_ascii_case("signal") || output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.signal);
             }
-        })?;
-        if output_id.eq_ignore_ascii_case("signal") || output_id.eq_ignore_ascii_case("value") {
-            return Ok(out.signal);
-        }
-        if output_id.eq_ignore_ascii_case("ma") {
-            return Ok(out.ma);
-        }
-        if output_id.eq_ignore_ascii_case("conversion") {
-            return Ok(out.conversion);
-        }
-        if output_id.eq_ignore_ascii_case("base") {
-            return Ok(out.base);
-        }
-        if output_id.eq_ignore_ascii_case("chikou") {
-            return Ok(out.chikou);
-        }
-        if output_id.eq_ignore_ascii_case("current_kumo_a") {
-            return Ok(out.current_kumo_a);
-        }
-        if output_id.eq_ignore_ascii_case("current_kumo_b") {
-            return Ok(out.current_kumo_b);
-        }
-        if output_id.eq_ignore_ascii_case("future_kumo_a") {
-            return Ok(out.future_kumo_a);
-        }
-        if output_id.eq_ignore_ascii_case("future_kumo_b") {
-            return Ok(out.future_kumo_b);
-        }
-        if output_id.eq_ignore_ascii_case("max_level") {
-            return Ok(out.max_level);
-        }
-        if output_id.eq_ignore_ascii_case("high_level") {
-            return Ok(out.high_level);
-        }
-        if output_id.eq_ignore_ascii_case("low_level") {
-            return Ok(out.low_level);
-        }
-        if output_id.eq_ignore_ascii_case("min_level") {
-            return Ok(out.min_level);
-        }
-        Err(IndicatorDispatchError::UnknownOutput {
-            indicator: "ichimoku_oscillator".to_string(),
-            output: output_id.to_string(),
-        })
-    })
+            if output_id.eq_ignore_ascii_case("ma") {
+                return Ok(out.ma);
+            }
+            if output_id.eq_ignore_ascii_case("conversion") {
+                return Ok(out.conversion);
+            }
+            if output_id.eq_ignore_ascii_case("base") {
+                return Ok(out.base);
+            }
+            if output_id.eq_ignore_ascii_case("chikou") {
+                return Ok(out.chikou);
+            }
+            if output_id.eq_ignore_ascii_case("current_kumo_a") {
+                return Ok(out.current_kumo_a);
+            }
+            if output_id.eq_ignore_ascii_case("current_kumo_b") {
+                return Ok(out.current_kumo_b);
+            }
+            if output_id.eq_ignore_ascii_case("future_kumo_a") {
+                return Ok(out.future_kumo_a);
+            }
+            if output_id.eq_ignore_ascii_case("future_kumo_b") {
+                return Ok(out.future_kumo_b);
+            }
+            if output_id.eq_ignore_ascii_case("max_level") {
+                return Ok(out.max_level);
+            }
+            if output_id.eq_ignore_ascii_case("high_level") {
+                return Ok(out.high_level);
+            }
+            if output_id.eq_ignore_ascii_case("low_level") {
+                return Ok(out.low_level);
+            }
+            if output_id.eq_ignore_ascii_case("min_level") {
+                return Ok(out.min_level);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "ichimoku_oscillator".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
 }
 
 fn compute_volatility_quality_index_batch(
@@ -10487,40 +10564,48 @@ fn compute_volatility_quality_index_batch(
 ) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
     let (open, high, low, close) = extract_ohlc_full_input("volatility_quality_index", req.data)?;
     let kernel = req.kernel.to_non_batch();
-    collect_f64("volatility_quality_index", output_id, req.combos, close.len(), |params| {
-        let fast_length = get_usize_param("volatility_quality_index", params, "fast_length", 9)?;
-        let slow_length =
-            get_usize_param("volatility_quality_index", params, "slow_length", 200)?;
-        let input = VolatilityQualityIndexInput::from_slices(
-            open,
-            high,
-            low,
-            close,
-            VolatilityQualityIndexParams {
-                fast_length: Some(fast_length),
-                slow_length: Some(slow_length),
-            },
-        );
-        let out = volatility_quality_index_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
-                indicator: "volatility_quality_index".to_string(),
-                details: e.to_string(),
+    collect_f64(
+        "volatility_quality_index",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let fast_length =
+                get_usize_param("volatility_quality_index", params, "fast_length", 9)?;
+            let slow_length =
+                get_usize_param("volatility_quality_index", params, "slow_length", 200)?;
+            let input = VolatilityQualityIndexInput::from_slices(
+                open,
+                high,
+                low,
+                close,
+                VolatilityQualityIndexParams {
+                    fast_length: Some(fast_length),
+                    slow_length: Some(slow_length),
+                },
+            );
+            let out = volatility_quality_index_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "volatility_quality_index".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("vqi_sum") || output_id.eq_ignore_ascii_case("value")
+            {
+                return Ok(out.vqi_sum);
             }
-        })?;
-        if output_id.eq_ignore_ascii_case("vqi_sum") || output_id.eq_ignore_ascii_case("value") {
-            return Ok(out.vqi_sum);
-        }
-        if output_id.eq_ignore_ascii_case("fast_sma") {
-            return Ok(out.fast_sma);
-        }
-        if output_id.eq_ignore_ascii_case("slow_sma") {
-            return Ok(out.slow_sma);
-        }
-        Err(IndicatorDispatchError::UnknownOutput {
-            indicator: "volatility_quality_index".to_string(),
-            output: output_id.to_string(),
-        })
-    })
+            if output_id.eq_ignore_ascii_case("fast_sma") {
+                return Ok(out.fast_sma);
+            }
+            if output_id.eq_ignore_ascii_case("slow_sma") {
+                return Ok(out.slow_sma);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "volatility_quality_index".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
 }
 
 fn compute_vwap_deviation_oscillator_batch(
@@ -10550,28 +10635,36 @@ fn compute_vwap_deviation_oscillator_batch(
         req.combos,
         close.len(),
         |params| {
-            let session_mode =
-                get_enum_param("vwap_deviation_oscillator", params, "session_mode", "rolling_bars")?
-                    .parse::<VwapDeviationSessionMode>()
-                    .map_err(|e| IndicatorDispatchError::InvalidParam {
-                        indicator: "vwap_deviation_oscillator".to_string(),
-                        key: "session_mode".to_string(),
-                        reason: e,
-                    })?;
+            let session_mode = get_enum_param(
+                "vwap_deviation_oscillator",
+                params,
+                "session_mode",
+                "rolling_bars",
+            )?
+            .parse::<VwapDeviationSessionMode>()
+            .map_err(|e| IndicatorDispatchError::InvalidParam {
+                indicator: "vwap_deviation_oscillator".to_string(),
+                key: "session_mode".to_string(),
+                reason: e,
+            })?;
             let rolling_period =
                 get_usize_param("vwap_deviation_oscillator", params, "rolling_period", 20)?;
             let rolling_days =
                 get_usize_param("vwap_deviation_oscillator", params, "rolling_days", 30)?;
             let use_close =
                 get_bool_param("vwap_deviation_oscillator", params, "use_close", false)?;
-            let deviation_mode =
-                get_enum_param("vwap_deviation_oscillator", params, "deviation_mode", "absolute")?
-                    .parse::<VwapDeviationMode>()
-                    .map_err(|e| IndicatorDispatchError::InvalidParam {
-                        indicator: "vwap_deviation_oscillator".to_string(),
-                        key: "deviation_mode".to_string(),
-                        reason: e,
-                    })?;
+            let deviation_mode = get_enum_param(
+                "vwap_deviation_oscillator",
+                params,
+                "deviation_mode",
+                "absolute",
+            )?
+            .parse::<VwapDeviationMode>()
+            .map_err(|e| IndicatorDispatchError::InvalidParam {
+                indicator: "vwap_deviation_oscillator".to_string(),
+                key: "deviation_mode".to_string(),
+                reason: e,
+            })?;
             let z_window = get_usize_param("vwap_deviation_oscillator", params, "z_window", 50)?;
             let pct_vol_lookback =
                 get_usize_param("vwap_deviation_oscillator", params, "pct_vol_lookback", 100)?;
@@ -10629,86 +10722,91 @@ fn compute_bulls_v_bears_batch(
 ) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
     let (high, low, close) = extract_ohlc_input("bulls_v_bears", req.data)?;
     let kernel = req.kernel.to_non_batch();
-    collect_f64("bulls_v_bears", output_id, req.combos, close.len(), |params| {
-        let period = get_usize_param("bulls_v_bears", params, "period", 14)?;
-        let ma_type = get_enum_param("bulls_v_bears", params, "ma_type", "ema")?
-            .parse::<BullsVBearsMaType>()
-            .map_err(|e| IndicatorDispatchError::InvalidParam {
-                indicator: "bulls_v_bears".to_string(),
-                key: "ma_type".to_string(),
-                reason: e,
-            })?;
-        let calculation_method =
-            get_enum_param("bulls_v_bears", params, "calculation_method", "normalized")?
-                .parse::<BullsVBearsCalculationMethod>()
+    collect_f64(
+        "bulls_v_bears",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let period = get_usize_param("bulls_v_bears", params, "period", 14)?;
+            let ma_type = get_enum_param("bulls_v_bears", params, "ma_type", "ema")?
+                .parse::<BullsVBearsMaType>()
                 .map_err(|e| IndicatorDispatchError::InvalidParam {
                     indicator: "bulls_v_bears".to_string(),
-                    key: "calculation_method".to_string(),
+                    key: "ma_type".to_string(),
                     reason: e,
                 })?;
-        let normalized_bars_back =
-            get_usize_param("bulls_v_bears", params, "normalized_bars_back", 120)?;
-        let raw_rolling_period =
-            get_usize_param("bulls_v_bears", params, "raw_rolling_period", 50)?;
-        let raw_threshold_percentile =
-            get_f64_param("bulls_v_bears", params, "raw_threshold_percentile", 95.0)?;
-        let threshold_level =
-            get_f64_param("bulls_v_bears", params, "threshold_level", 80.0)?;
-        let input = BullsVBearsInput::from_slices(
-            high,
-            low,
-            close,
-            BullsVBearsParams {
-                period: Some(period),
-                ma_type: Some(ma_type),
-                calculation_method: Some(calculation_method),
-                normalized_bars_back: Some(normalized_bars_back),
-                raw_rolling_period: Some(raw_rolling_period),
-                raw_threshold_percentile: Some(raw_threshold_percentile),
-                threshold_level: Some(threshold_level),
-            },
-        );
-        let out = bulls_v_bears_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
-                indicator: "bulls_v_bears".to_string(),
-                details: e.to_string(),
+            let calculation_method =
+                get_enum_param("bulls_v_bears", params, "calculation_method", "normalized")?
+                    .parse::<BullsVBearsCalculationMethod>()
+                    .map_err(|e| IndicatorDispatchError::InvalidParam {
+                        indicator: "bulls_v_bears".to_string(),
+                        key: "calculation_method".to_string(),
+                        reason: e,
+                    })?;
+            let normalized_bars_back =
+                get_usize_param("bulls_v_bears", params, "normalized_bars_back", 120)?;
+            let raw_rolling_period =
+                get_usize_param("bulls_v_bears", params, "raw_rolling_period", 50)?;
+            let raw_threshold_percentile =
+                get_f64_param("bulls_v_bears", params, "raw_threshold_percentile", 95.0)?;
+            let threshold_level = get_f64_param("bulls_v_bears", params, "threshold_level", 80.0)?;
+            let input = BullsVBearsInput::from_slices(
+                high,
+                low,
+                close,
+                BullsVBearsParams {
+                    period: Some(period),
+                    ma_type: Some(ma_type),
+                    calculation_method: Some(calculation_method),
+                    normalized_bars_back: Some(normalized_bars_back),
+                    raw_rolling_period: Some(raw_rolling_period),
+                    raw_threshold_percentile: Some(raw_threshold_percentile),
+                    threshold_level: Some(threshold_level),
+                },
+            );
+            let out = bulls_v_bears_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "bulls_v_bears".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.value);
             }
-        })?;
-        if output_id.eq_ignore_ascii_case("value") {
-            return Ok(out.value);
-        }
-        if output_id.eq_ignore_ascii_case("bull") {
-            return Ok(out.bull);
-        }
-        if output_id.eq_ignore_ascii_case("bear") {
-            return Ok(out.bear);
-        }
-        if output_id.eq_ignore_ascii_case("ma") {
-            return Ok(out.ma);
-        }
-        if output_id.eq_ignore_ascii_case("upper") {
-            return Ok(out.upper);
-        }
-        if output_id.eq_ignore_ascii_case("lower") {
-            return Ok(out.lower);
-        }
-        if output_id.eq_ignore_ascii_case("bullish_signal") {
-            return Ok(out.bullish_signal);
-        }
-        if output_id.eq_ignore_ascii_case("bearish_signal") {
-            return Ok(out.bearish_signal);
-        }
-        if output_id.eq_ignore_ascii_case("zero_cross_up") {
-            return Ok(out.zero_cross_up);
-        }
-        if output_id.eq_ignore_ascii_case("zero_cross_down") {
-            return Ok(out.zero_cross_down);
-        }
-        Err(IndicatorDispatchError::UnknownOutput {
-            indicator: "bulls_v_bears".to_string(),
-            output: output_id.to_string(),
-        })
-    })
+            if output_id.eq_ignore_ascii_case("bull") {
+                return Ok(out.bull);
+            }
+            if output_id.eq_ignore_ascii_case("bear") {
+                return Ok(out.bear);
+            }
+            if output_id.eq_ignore_ascii_case("ma") {
+                return Ok(out.ma);
+            }
+            if output_id.eq_ignore_ascii_case("upper") {
+                return Ok(out.upper);
+            }
+            if output_id.eq_ignore_ascii_case("lower") {
+                return Ok(out.lower);
+            }
+            if output_id.eq_ignore_ascii_case("bullish_signal") {
+                return Ok(out.bullish_signal);
+            }
+            if output_id.eq_ignore_ascii_case("bearish_signal") {
+                return Ok(out.bearish_signal);
+            }
+            if output_id.eq_ignore_ascii_case("zero_cross_up") {
+                return Ok(out.zero_cross_up);
+            }
+            if output_id.eq_ignore_ascii_case("zero_cross_down") {
+                return Ok(out.zero_cross_down);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "bulls_v_bears".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
 }
 
 fn compute_smooth_theil_sen_batch(
@@ -10717,88 +10815,100 @@ fn compute_smooth_theil_sen_batch(
 ) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
     let data = extract_slice_input("smooth_theil_sen", req.data, "close")?;
     let kernel = req.kernel.to_non_batch();
-    collect_f64("smooth_theil_sen", output_id, req.combos, data.len(), |params| {
-        let length = get_usize_param("smooth_theil_sen", params, "length", 25)?;
-        let offset = get_usize_param("smooth_theil_sen", params, "offset", 0)?;
-        let multiplier = get_f64_param("smooth_theil_sen", params, "multiplier", 2.0)?;
-        let slope_style = get_enum_param("smooth_theil_sen", params, "slope_style", "smooth_median")?
+    collect_f64(
+        "smooth_theil_sen",
+        output_id,
+        req.combos,
+        data.len(),
+        |params| {
+            let length = get_usize_param("smooth_theil_sen", params, "length", 25)?;
+            let offset = get_usize_param("smooth_theil_sen", params, "offset", 0)?;
+            let multiplier = get_f64_param("smooth_theil_sen", params, "multiplier", 2.0)?;
+            let slope_style =
+                get_enum_param("smooth_theil_sen", params, "slope_style", "smooth_median")?
+                    .parse::<SmoothTheilSenStatStyle>()
+                    .map_err(|e| IndicatorDispatchError::InvalidParam {
+                        indicator: "smooth_theil_sen".to_string(),
+                        key: "slope_style".to_string(),
+                        reason: e,
+                    })?;
+            let residual_style = get_enum_param(
+                "smooth_theil_sen",
+                params,
+                "residual_style",
+                "smooth_median",
+            )?
             .parse::<SmoothTheilSenStatStyle>()
             .map_err(|e| IndicatorDispatchError::InvalidParam {
                 indicator: "smooth_theil_sen".to_string(),
-                key: "slope_style".to_string(),
+                key: "residual_style".to_string(),
                 reason: e,
             })?;
-        let residual_style =
-            get_enum_param("smooth_theil_sen", params, "residual_style", "smooth_median")?
-                .parse::<SmoothTheilSenStatStyle>()
-                .map_err(|e| IndicatorDispatchError::InvalidParam {
+            let deviation_style =
+                get_enum_param("smooth_theil_sen", params, "deviation_style", "mad")?
+                    .parse::<SmoothTheilSenDeviationType>()
+                    .map_err(|e| IndicatorDispatchError::InvalidParam {
+                        indicator: "smooth_theil_sen".to_string(),
+                        key: "deviation_style".to_string(),
+                        reason: e,
+                    })?;
+            let mad_style =
+                get_enum_param("smooth_theil_sen", params, "mad_style", "smooth_median")?
+                    .parse::<SmoothTheilSenStatStyle>()
+                    .map_err(|e| IndicatorDispatchError::InvalidParam {
+                        indicator: "smooth_theil_sen".to_string(),
+                        key: "mad_style".to_string(),
+                        reason: e,
+                    })?;
+            let include_prediction_in_deviation = get_bool_param(
+                "smooth_theil_sen",
+                params,
+                "include_prediction_in_deviation",
+                false,
+            )?;
+            let input = SmoothTheilSenInput::from_slice(
+                data,
+                SmoothTheilSenParams {
+                    length: Some(length),
+                    offset: Some(offset),
+                    multiplier: Some(multiplier),
+                    slope_style: Some(slope_style),
+                    residual_style: Some(residual_style),
+                    deviation_style: Some(deviation_style),
+                    mad_style: Some(mad_style),
+                    include_prediction_in_deviation: Some(include_prediction_in_deviation),
+                },
+            );
+            let out = smooth_theil_sen_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
                     indicator: "smooth_theil_sen".to_string(),
-                    key: "residual_style".to_string(),
-                    reason: e,
-                })?;
-        let deviation_style =
-            get_enum_param("smooth_theil_sen", params, "deviation_style", "mad")?
-                .parse::<SmoothTheilSenDeviationType>()
-                .map_err(|e| IndicatorDispatchError::InvalidParam {
-                    indicator: "smooth_theil_sen".to_string(),
-                    key: "deviation_style".to_string(),
-                    reason: e,
-                })?;
-        let mad_style = get_enum_param("smooth_theil_sen", params, "mad_style", "smooth_median")?
-            .parse::<SmoothTheilSenStatStyle>()
-            .map_err(|e| IndicatorDispatchError::InvalidParam {
-                indicator: "smooth_theil_sen".to_string(),
-                key: "mad_style".to_string(),
-                reason: e,
+                    details: e.to_string(),
+                }
             })?;
-        let include_prediction_in_deviation = get_bool_param(
-            "smooth_theil_sen",
-            params,
-            "include_prediction_in_deviation",
-            false,
-        )?;
-        let input = SmoothTheilSenInput::from_slice(
-            data,
-            SmoothTheilSenParams {
-                length: Some(length),
-                offset: Some(offset),
-                multiplier: Some(multiplier),
-                slope_style: Some(slope_style),
-                residual_style: Some(residual_style),
-                deviation_style: Some(deviation_style),
-                mad_style: Some(mad_style),
-                include_prediction_in_deviation: Some(include_prediction_in_deviation),
-            },
-        );
-        let out = smooth_theil_sen_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
-                indicator: "smooth_theil_sen".to_string(),
-                details: e.to_string(),
+            if output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.value);
             }
-        })?;
-        if output_id.eq_ignore_ascii_case("value") {
-            return Ok(out.value);
-        }
-        if output_id.eq_ignore_ascii_case("upper") {
-            return Ok(out.upper);
-        }
-        if output_id.eq_ignore_ascii_case("lower") {
-            return Ok(out.lower);
-        }
-        if output_id.eq_ignore_ascii_case("slope") {
-            return Ok(out.slope);
-        }
-        if output_id.eq_ignore_ascii_case("intercept") {
-            return Ok(out.intercept);
-        }
-        if output_id.eq_ignore_ascii_case("deviation") {
-            return Ok(out.deviation);
-        }
-        Err(IndicatorDispatchError::UnknownOutput {
-            indicator: "smooth_theil_sen".to_string(),
-            output: output_id.to_string(),
-        })
-    })
+            if output_id.eq_ignore_ascii_case("upper") {
+                return Ok(out.upper);
+            }
+            if output_id.eq_ignore_ascii_case("lower") {
+                return Ok(out.lower);
+            }
+            if output_id.eq_ignore_ascii_case("slope") {
+                return Ok(out.slope);
+            }
+            if output_id.eq_ignore_ascii_case("intercept") {
+                return Ok(out.intercept);
+            }
+            if output_id.eq_ignore_ascii_case("deviation") {
+                return Ok(out.deviation);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "smooth_theil_sen".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
 }
 
 fn compute_regression_slope_oscillator_batch(
@@ -10902,8 +11012,7 @@ fn compute_linear_regression_intensity_batch(
         req.combos,
         data_len,
         |params| {
-            let source =
-                get_enum_param("linear_regression_intensity", params, "source", "close")?;
+            let source = get_enum_param("linear_regression_intensity", params, "source", "close")?;
             let lookback_period =
                 get_usize_param("linear_regression_intensity", params, "lookback_period", 12)?;
             let range_tolerance = get_f64_param(
@@ -10968,28 +11077,32 @@ fn compute_moving_average_cross_probability_batch(
         req.combos,
         data_len,
         |params| {
-            let ma_type = get_enum_param(
-                "moving_average_cross_probability",
-                params,
-                "ma_type",
-                "ema",
-            )?
-            .parse::<MovingAverageCrossProbabilityMaType>()
-            .map_err(|e| IndicatorDispatchError::InvalidParam {
-                indicator: "moving_average_cross_probability".to_string(),
-                key: "ma_type".to_string(),
-                reason: e,
-            })?;
+            let ma_type =
+                get_enum_param("moving_average_cross_probability", params, "ma_type", "ema")?
+                    .parse::<MovingAverageCrossProbabilityMaType>()
+                    .map_err(|e| IndicatorDispatchError::InvalidParam {
+                        indicator: "moving_average_cross_probability".to_string(),
+                        key: "ma_type".to_string(),
+                        reason: e,
+                    })?;
             let smoothing_window = get_usize_param(
                 "moving_average_cross_probability",
                 params,
                 "smoothing_window",
                 7,
             )?;
-            let slow_length =
-                get_usize_param("moving_average_cross_probability", params, "slow_length", 30)?;
-            let fast_length =
-                get_usize_param("moving_average_cross_probability", params, "fast_length", 14)?;
+            let slow_length = get_usize_param(
+                "moving_average_cross_probability",
+                params,
+                "slow_length",
+                30,
+            )?;
+            let fast_length = get_usize_param(
+                "moving_average_cross_probability",
+                params,
+                "fast_length",
+                14,
+            )?;
             let resolution =
                 get_usize_param("moving_average_cross_probability", params, "resolution", 50)?;
             let params = MovingAverageCrossProbabilityParams {
@@ -11008,12 +11121,13 @@ fn compute_moving_average_cross_probability_batch(
                 }
                 _ => unreachable!(),
             };
-            let out = moving_average_cross_probability_with_kernel(&input, kernel).map_err(
-                |e| IndicatorDispatchError::ComputeFailed {
-                    indicator: "moving_average_cross_probability".to_string(),
-                    details: e.to_string(),
-                },
-            )?;
+            let out =
+                moving_average_cross_probability_with_kernel(&input, kernel).map_err(|e| {
+                    IndicatorDispatchError::ComputeFailed {
+                        indicator: "moving_average_cross_probability".to_string(),
+                        details: e.to_string(),
+                    }
+                })?;
             if output_id.eq_ignore_ascii_case("value") {
                 return Ok(out.value);
             }
@@ -11057,12 +11171,8 @@ fn compute_volume_zone_oscillator_batch(
         close.len(),
         |params| {
             let length = get_usize_param("volume_zone_oscillator", params, "length", 14)?;
-            let intraday_smoothing = get_bool_param(
-                "volume_zone_oscillator",
-                params,
-                "intraday_smoothing",
-                true,
-            )?;
+            let intraday_smoothing =
+                get_bool_param("volume_zone_oscillator", params, "intraday_smoothing", true)?;
             let noise_filter =
                 get_usize_param("volume_zone_oscillator", params, "noise_filter", 4)?;
             let input = VolumeZoneOscillatorInput::from_slices(
@@ -11101,53 +11211,65 @@ fn compute_market_meanness_index_batch(
         }
     };
     let kernel = req.kernel.to_non_batch();
-    collect_f64("market_meanness_index", output_id, req.combos, data_len, |params| {
-        let length = get_usize_param("market_meanness_index", params, "length", 300)?;
-        let source_mode =
-            get_enum_param("market_meanness_index", params, "source_mode", "Price")?;
-        let input = match req.data {
-            IndicatorDataRef::Candles { candles, .. } => MarketMeannessIndexInput::from_candles(
-                candles,
-                MarketMeannessIndexParams {
-                    length: Some(length),
-                    source_mode: Some(source_mode),
-                },
-            ),
-            IndicatorDataRef::Ohlc { open, close, .. } => MarketMeannessIndexInput::from_slices(
-                open,
-                close,
-                MarketMeannessIndexParams {
-                    length: Some(length),
-                    source_mode: Some(source_mode),
-                },
-            ),
-            IndicatorDataRef::Ohlcv { open, close, .. } => MarketMeannessIndexInput::from_slices(
-                open,
-                close,
-                MarketMeannessIndexParams {
-                    length: Some(length),
-                    source_mode: Some(source_mode),
-                },
-            ),
-            _ => unreachable!(),
-        };
-        let out = market_meanness_index_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
-                indicator: "market_meanness_index".to_string(),
-                details: e.to_string(),
+    collect_f64(
+        "market_meanness_index",
+        output_id,
+        req.combos,
+        data_len,
+        |params| {
+            let length = get_usize_param("market_meanness_index", params, "length", 300)?;
+            let source_mode =
+                get_enum_param("market_meanness_index", params, "source_mode", "Price")?;
+            let input = match req.data {
+                IndicatorDataRef::Candles { candles, .. } => {
+                    MarketMeannessIndexInput::from_candles(
+                        candles,
+                        MarketMeannessIndexParams {
+                            length: Some(length),
+                            source_mode: Some(source_mode),
+                        },
+                    )
+                }
+                IndicatorDataRef::Ohlc { open, close, .. } => {
+                    MarketMeannessIndexInput::from_slices(
+                        open,
+                        close,
+                        MarketMeannessIndexParams {
+                            length: Some(length),
+                            source_mode: Some(source_mode),
+                        },
+                    )
+                }
+                IndicatorDataRef::Ohlcv { open, close, .. } => {
+                    MarketMeannessIndexInput::from_slices(
+                        open,
+                        close,
+                        MarketMeannessIndexParams {
+                            length: Some(length),
+                            source_mode: Some(source_mode),
+                        },
+                    )
+                }
+                _ => unreachable!(),
+            };
+            let out = market_meanness_index_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "market_meanness_index".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("mmi") || output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.mmi);
             }
-        })?;
-        if output_id.eq_ignore_ascii_case("mmi") || output_id.eq_ignore_ascii_case("value") {
-            return Ok(out.mmi);
-        }
-        if output_id.eq_ignore_ascii_case("mmi_smoothed") {
-            return Ok(out.mmi_smoothed);
-        }
-        Err(IndicatorDispatchError::UnknownOutput {
-            indicator: "market_meanness_index".to_string(),
-            output: output_id.to_string(),
-        })
-    })
+            if output_id.eq_ignore_ascii_case("mmi_smoothed") {
+                return Ok(out.mmi_smoothed);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "market_meanness_index".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
 }
 
 fn compute_momentum_ratio_oscillator_batch(
@@ -11232,70 +11354,95 @@ fn compute_pretty_good_oscillator_batch(
         }
     };
     let kernel = req.kernel.to_non_batch();
-    collect_f64("pretty_good_oscillator", output_id, req.combos, data_len, |params| {
-        let source = get_enum_param("pretty_good_oscillator", params, "source", "close")?;
-        let length = get_usize_param("pretty_good_oscillator", params, "length", 14)?;
-        let input = match req.data {
-            IndicatorDataRef::Candles { candles, .. } => PrettyGoodOscillatorInput::from_candles(
-                candles,
-                &source,
-                PrettyGoodOscillatorParams {
-                    length: Some(length),
-                },
-            ),
-            IndicatorDataRef::Ohlc { high, low, close, open } => {
-                ensure_same_len_4("pretty_good_oscillator", open.len(), high.len(), low.len(), close.len())?;
-                let src = match source.to_ascii_lowercase().as_str() {
-                    "open" => open,
-                    "high" => high,
-                    "low" => low,
-                    _ => close,
-                };
-                PrettyGoodOscillatorInput::from_slices(
+    collect_f64(
+        "pretty_good_oscillator",
+        output_id,
+        req.combos,
+        data_len,
+        |params| {
+            let source = get_enum_param("pretty_good_oscillator", params, "source", "close")?;
+            let length = get_usize_param("pretty_good_oscillator", params, "length", 14)?;
+            let input = match req.data {
+                IndicatorDataRef::Candles { candles, .. } => {
+                    PrettyGoodOscillatorInput::from_candles(
+                        candles,
+                        &source,
+                        PrettyGoodOscillatorParams {
+                            length: Some(length),
+                        },
+                    )
+                }
+                IndicatorDataRef::Ohlc {
                     high,
                     low,
                     close,
-                    src,
-                    PrettyGoodOscillatorParams {
-                        length: Some(length),
-                    },
-                )
-            }
-            IndicatorDataRef::Ohlcv { high, low, close, open, volume } => {
-                ensure_same_len_5(
-                    "pretty_good_oscillator",
-                    open.len(),
-                    high.len(),
-                    low.len(),
-                    close.len(),
-                    volume.len(),
-                )?;
-                let src = match source.to_ascii_lowercase().as_str() {
-                    "open" => open,
-                    "high" => high,
-                    "low" => low,
-                    _ => close,
-                };
-                PrettyGoodOscillatorInput::from_slices(
+                    open,
+                } => {
+                    ensure_same_len_4(
+                        "pretty_good_oscillator",
+                        open.len(),
+                        high.len(),
+                        low.len(),
+                        close.len(),
+                    )?;
+                    let src = match source.to_ascii_lowercase().as_str() {
+                        "open" => open,
+                        "high" => high,
+                        "low" => low,
+                        _ => close,
+                    };
+                    PrettyGoodOscillatorInput::from_slices(
+                        high,
+                        low,
+                        close,
+                        src,
+                        PrettyGoodOscillatorParams {
+                            length: Some(length),
+                        },
+                    )
+                }
+                IndicatorDataRef::Ohlcv {
                     high,
                     low,
                     close,
-                    src,
-                    PrettyGoodOscillatorParams {
-                        length: Some(length),
-                    },
-                )
-            }
-            _ => unreachable!(),
-        };
-        let out = pretty_good_oscillator_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
-                indicator: "pretty_good_oscillator".to_string(),
-                details: e.to_string(),
-            }
-        })?;
-        Ok(out.values)
-    })
+                    open,
+                    volume,
+                } => {
+                    ensure_same_len_5(
+                        "pretty_good_oscillator",
+                        open.len(),
+                        high.len(),
+                        low.len(),
+                        close.len(),
+                        volume.len(),
+                    )?;
+                    let src = match source.to_ascii_lowercase().as_str() {
+                        "open" => open,
+                        "high" => high,
+                        "low" => low,
+                        _ => close,
+                    };
+                    PrettyGoodOscillatorInput::from_slices(
+                        high,
+                        low,
+                        close,
+                        src,
+                        PrettyGoodOscillatorParams {
+                            length: Some(length),
+                        },
+                    )
+                }
+                _ => unreachable!(),
+            };
+            let out = pretty_good_oscillator_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "pretty_good_oscillator".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            Ok(out.values)
+        },
+    )
 }
 
 fn compute_price_density_market_noise_batch(
@@ -11328,7 +11475,8 @@ fn compute_price_density_market_noise_batch(
                     details: e.to_string(),
                 }
             })?;
-            if output_id.eq_ignore_ascii_case("price_density") || output_id.eq_ignore_ascii_case("value")
+            if output_id.eq_ignore_ascii_case("price_density")
+                || output_id.eq_ignore_ascii_case("value")
             {
                 return Ok(out.price_density);
             }
@@ -11361,33 +11509,39 @@ fn compute_psychological_line_batch(
         }
     };
     let kernel = req.kernel.to_non_batch();
-    collect_f64("psychological_line", output_id, req.combos, data_len, |params| {
-        let source = get_enum_param("psychological_line", params, "source", "close")?;
-        let length = get_usize_param("psychological_line", params, "length", 20)?;
-        let input = match req.data {
-            IndicatorDataRef::Candles { candles, .. } => PsychologicalLineInput::from_candles(
-                candles,
-                &source,
-                PsychologicalLineParams {
-                    length: Some(length),
-                },
-            ),
-            IndicatorDataRef::Slice { values } => PsychologicalLineInput::from_slice(
-                values,
-                PsychologicalLineParams {
-                    length: Some(length),
-                },
-            ),
-            _ => unreachable!(),
-        };
-        let out = psychological_line_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
-                indicator: "psychological_line".to_string(),
-                details: e.to_string(),
-            }
-        })?;
-        Ok(out.values)
-    })
+    collect_f64(
+        "psychological_line",
+        output_id,
+        req.combos,
+        data_len,
+        |params| {
+            let source = get_enum_param("psychological_line", params, "source", "close")?;
+            let length = get_usize_param("psychological_line", params, "length", 20)?;
+            let input = match req.data {
+                IndicatorDataRef::Candles { candles, .. } => PsychologicalLineInput::from_candles(
+                    candles,
+                    &source,
+                    PsychologicalLineParams {
+                        length: Some(length),
+                    },
+                ),
+                IndicatorDataRef::Slice { values } => PsychologicalLineInput::from_slice(
+                    values,
+                    PsychologicalLineParams {
+                        length: Some(length),
+                    },
+                ),
+                _ => unreachable!(),
+            };
+            let out = psychological_line_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "psychological_line".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            Ok(out.values)
+        },
+    )
 }
 
 fn compute_rank_correlation_index_batch(
@@ -11408,33 +11562,41 @@ fn compute_rank_correlation_index_batch(
         }
     };
     let kernel = req.kernel.to_non_batch();
-    collect_f64("rank_correlation_index", output_id, req.combos, data_len, |params| {
-        let source = get_enum_param("rank_correlation_index", params, "source", "close")?;
-        let length = get_usize_param("rank_correlation_index", params, "length", 12)?;
-        let input = match req.data {
-            IndicatorDataRef::Candles { candles, .. } => RankCorrelationIndexInput::from_candles(
-                candles,
-                &source,
-                RankCorrelationIndexParams {
-                    length: Some(length),
-                },
-            ),
-            IndicatorDataRef::Slice { values } => RankCorrelationIndexInput::from_slice(
-                values,
-                RankCorrelationIndexParams {
-                    length: Some(length),
-                },
-            ),
-            _ => unreachable!(),
-        };
-        let out = rank_correlation_index_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
-                indicator: "rank_correlation_index".to_string(),
-                details: e.to_string(),
-            }
-        })?;
-        Ok(out.values)
-    })
+    collect_f64(
+        "rank_correlation_index",
+        output_id,
+        req.combos,
+        data_len,
+        |params| {
+            let source = get_enum_param("rank_correlation_index", params, "source", "close")?;
+            let length = get_usize_param("rank_correlation_index", params, "length", 12)?;
+            let input = match req.data {
+                IndicatorDataRef::Candles { candles, .. } => {
+                    RankCorrelationIndexInput::from_candles(
+                        candles,
+                        &source,
+                        RankCorrelationIndexParams {
+                            length: Some(length),
+                        },
+                    )
+                }
+                IndicatorDataRef::Slice { values } => RankCorrelationIndexInput::from_slice(
+                    values,
+                    RankCorrelationIndexParams {
+                        length: Some(length),
+                    },
+                ),
+                _ => unreachable!(),
+            };
+            let out = rank_correlation_index_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "rank_correlation_index".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            Ok(out.values)
+        },
+    )
 }
 
 fn compute_smoothed_gaussian_trend_filter_batch(
@@ -11455,20 +11617,15 @@ fn compute_smoothed_gaussian_trend_filter_batch(
                 "gaussian_length",
                 15,
             )?;
-            let poles =
-                get_usize_param("smoothed_gaussian_trend_filter", params, "poles", 3)?;
+            let poles = get_usize_param("smoothed_gaussian_trend_filter", params, "poles", 3)?;
             let smoothing_length = get_usize_param(
                 "smoothed_gaussian_trend_filter",
                 params,
                 "smoothing_length",
                 22,
             )?;
-            let linreg_offset = get_usize_param(
-                "smoothed_gaussian_trend_filter",
-                params,
-                "linreg_offset",
-                7,
-            )?;
+            let linreg_offset =
+                get_usize_param("smoothed_gaussian_trend_filter", params, "linreg_offset", 7)?;
             let input = SmoothedGaussianTrendFilterInput::from_slices(
                 high,
                 low,
@@ -11512,45 +11669,50 @@ fn compute_stochastic_adaptive_d_batch(
 ) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
     let (high, low, close) = extract_ohlc_input("stochastic_adaptive_d", req.data)?;
     let kernel = req.kernel.to_non_batch();
-    collect_f64("stochastic_adaptive_d", output_id, req.combos, close.len(), |params| {
-        let k_length = get_usize_param("stochastic_adaptive_d", params, "k_length", 20)?;
-        let d_smoothing =
-            get_usize_param("stochastic_adaptive_d", params, "d_smoothing", 9)?;
-        let pre_smooth =
-            get_usize_param("stochastic_adaptive_d", params, "pre_smooth", 20)?;
-        let attenuation =
-            get_f64_param("stochastic_adaptive_d", params, "attenuation", 2.0)?;
-        let input = StochasticAdaptiveDInput::from_slices(
-            high,
-            low,
-            close,
-            StochasticAdaptiveDParams {
-                k_length: Some(k_length),
-                d_smoothing: Some(d_smoothing),
-                pre_smooth: Some(pre_smooth),
-                attenuation: Some(attenuation),
-            },
-        );
-        let out = stochastic_adaptive_d_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
-                indicator: "stochastic_adaptive_d".to_string(),
-                details: e.to_string(),
+    collect_f64(
+        "stochastic_adaptive_d",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let k_length = get_usize_param("stochastic_adaptive_d", params, "k_length", 20)?;
+            let d_smoothing = get_usize_param("stochastic_adaptive_d", params, "d_smoothing", 9)?;
+            let pre_smooth = get_usize_param("stochastic_adaptive_d", params, "pre_smooth", 20)?;
+            let attenuation = get_f64_param("stochastic_adaptive_d", params, "attenuation", 2.0)?;
+            let input = StochasticAdaptiveDInput::from_slices(
+                high,
+                low,
+                close,
+                StochasticAdaptiveDParams {
+                    k_length: Some(k_length),
+                    d_smoothing: Some(d_smoothing),
+                    pre_smooth: Some(pre_smooth),
+                    attenuation: Some(attenuation),
+                },
+            );
+            let out = stochastic_adaptive_d_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "stochastic_adaptive_d".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("standard_d")
+                || output_id.eq_ignore_ascii_case("value")
+            {
+                return Ok(out.standard_d);
             }
-        })?;
-        if output_id.eq_ignore_ascii_case("standard_d") || output_id.eq_ignore_ascii_case("value") {
-            return Ok(out.standard_d);
-        }
-        if output_id.eq_ignore_ascii_case("adaptive_d") {
-            return Ok(out.adaptive_d);
-        }
-        if output_id.eq_ignore_ascii_case("difference") {
-            return Ok(out.difference);
-        }
-        Err(IndicatorDispatchError::UnknownOutput {
-            indicator: "stochastic_adaptive_d".to_string(),
-            output: output_id.to_string(),
-        })
-    })
+            if output_id.eq_ignore_ascii_case("adaptive_d") {
+                return Ok(out.adaptive_d);
+            }
+            if output_id.eq_ignore_ascii_case("difference") {
+                return Ok(out.difference);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "stochastic_adaptive_d".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
 }
 
 fn compute_stochastic_connors_rsi_batch(
@@ -11570,59 +11732,67 @@ fn compute_stochastic_connors_rsi_batch(
         }
     };
     let kernel = req.kernel.to_non_batch();
-    collect_f64("stochastic_connors_rsi", output_id, req.combos, data_len, |params| {
-        let source = get_enum_param("stochastic_connors_rsi", params, "source", "close")?;
-        let stoch_length =
-            get_usize_param("stochastic_connors_rsi", params, "stoch_length", 3)?;
-        let smooth_k = get_usize_param("stochastic_connors_rsi", params, "smooth_k", 3)?;
-        let smooth_d = get_usize_param("stochastic_connors_rsi", params, "smooth_d", 3)?;
-        let rsi_length = get_usize_param("stochastic_connors_rsi", params, "rsi_length", 3)?;
-        let updown_length =
-            get_usize_param("stochastic_connors_rsi", params, "updown_length", 2)?;
-        let roc_length = get_usize_param("stochastic_connors_rsi", params, "roc_length", 100)?;
-        let input = match req.data {
-            IndicatorDataRef::Candles { candles, .. } => StochasticConnorsRsiInput::from_candles(
-                candles,
-                &source,
-                StochasticConnorsRsiParams {
-                    stoch_length: Some(stoch_length),
-                    smooth_k: Some(smooth_k),
-                    smooth_d: Some(smooth_d),
-                    rsi_length: Some(rsi_length),
-                    updown_length: Some(updown_length),
-                    roc_length: Some(roc_length),
-                },
-            ),
-            IndicatorDataRef::Slice { values } => StochasticConnorsRsiInput::from_slice(
-                values,
-                StochasticConnorsRsiParams {
-                    stoch_length: Some(stoch_length),
-                    smooth_k: Some(smooth_k),
-                    smooth_d: Some(smooth_d),
-                    rsi_length: Some(rsi_length),
-                    updown_length: Some(updown_length),
-                    roc_length: Some(roc_length),
-                },
-            ),
-            _ => unreachable!(),
-        };
-        let out = stochastic_connors_rsi_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
-                indicator: "stochastic_connors_rsi".to_string(),
-                details: e.to_string(),
+    collect_f64(
+        "stochastic_connors_rsi",
+        output_id,
+        req.combos,
+        data_len,
+        |params| {
+            let source = get_enum_param("stochastic_connors_rsi", params, "source", "close")?;
+            let stoch_length =
+                get_usize_param("stochastic_connors_rsi", params, "stoch_length", 3)?;
+            let smooth_k = get_usize_param("stochastic_connors_rsi", params, "smooth_k", 3)?;
+            let smooth_d = get_usize_param("stochastic_connors_rsi", params, "smooth_d", 3)?;
+            let rsi_length = get_usize_param("stochastic_connors_rsi", params, "rsi_length", 3)?;
+            let updown_length =
+                get_usize_param("stochastic_connors_rsi", params, "updown_length", 2)?;
+            let roc_length = get_usize_param("stochastic_connors_rsi", params, "roc_length", 100)?;
+            let input = match req.data {
+                IndicatorDataRef::Candles { candles, .. } => {
+                    StochasticConnorsRsiInput::from_candles(
+                        candles,
+                        &source,
+                        StochasticConnorsRsiParams {
+                            stoch_length: Some(stoch_length),
+                            smooth_k: Some(smooth_k),
+                            smooth_d: Some(smooth_d),
+                            rsi_length: Some(rsi_length),
+                            updown_length: Some(updown_length),
+                            roc_length: Some(roc_length),
+                        },
+                    )
+                }
+                IndicatorDataRef::Slice { values } => StochasticConnorsRsiInput::from_slice(
+                    values,
+                    StochasticConnorsRsiParams {
+                        stoch_length: Some(stoch_length),
+                        smooth_k: Some(smooth_k),
+                        smooth_d: Some(smooth_d),
+                        rsi_length: Some(rsi_length),
+                        updown_length: Some(updown_length),
+                        roc_length: Some(roc_length),
+                    },
+                ),
+                _ => unreachable!(),
+            };
+            let out = stochastic_connors_rsi_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "stochastic_connors_rsi".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("k") || output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.k);
             }
-        })?;
-        if output_id.eq_ignore_ascii_case("k") || output_id.eq_ignore_ascii_case("value") {
-            return Ok(out.k);
-        }
-        if output_id.eq_ignore_ascii_case("d") {
-            return Ok(out.d);
-        }
-        Err(IndicatorDispatchError::UnknownOutput {
-            indicator: "stochastic_connors_rsi".to_string(),
-            output: output_id.to_string(),
-        })
-    })
+            if output_id.eq_ignore_ascii_case("d") {
+                return Ok(out.d);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "stochastic_connors_rsi".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
 }
 
 fn compute_supertrend_oscillator_batch(
@@ -11643,88 +11813,116 @@ fn compute_supertrend_oscillator_batch(
         }
     };
     let kernel = req.kernel.to_non_batch();
-    collect_f64("supertrend_oscillator", output_id, req.combos, data_len, |params| {
-        let source = get_enum_param("supertrend_oscillator", params, "source", "close")?;
-        let length = get_usize_param("supertrend_oscillator", params, "length", 10)?;
-        let mult = get_f64_param("supertrend_oscillator", params, "mult", 2.0)?;
-        let smooth = get_usize_param("supertrend_oscillator", params, "smooth", 72)?;
-        let input = match req.data {
-            IndicatorDataRef::Candles { candles, .. } => SuperTrendOscillatorInput::from_candles(
-                candles,
-                &source,
-                SuperTrendOscillatorParams {
-                    length: Some(length),
-                    mult: Some(mult),
-                    smooth: Some(smooth),
-                },
-            ),
-            IndicatorDataRef::Ohlc { high, low, close, open } => {
-                ensure_same_len_4("supertrend_oscillator", open.len(), high.len(), low.len(), close.len())?;
-                let src = match source.to_ascii_lowercase().as_str() {
-                    "open" => open,
-                    "high" => high,
-                    "low" => low,
-                    _ => close,
-                };
-                SuperTrendOscillatorInput::from_slices(
+    collect_f64(
+        "supertrend_oscillator",
+        output_id,
+        req.combos,
+        data_len,
+        |params| {
+            let source = get_enum_param("supertrend_oscillator", params, "source", "close")?;
+            let length = get_usize_param("supertrend_oscillator", params, "length", 10)?;
+            let mult = get_f64_param("supertrend_oscillator", params, "mult", 2.0)?;
+            let smooth = get_usize_param("supertrend_oscillator", params, "smooth", 72)?;
+            let input = match req.data {
+                IndicatorDataRef::Candles { candles, .. } => {
+                    SuperTrendOscillatorInput::from_candles(
+                        candles,
+                        &source,
+                        SuperTrendOscillatorParams {
+                            length: Some(length),
+                            mult: Some(mult),
+                            smooth: Some(smooth),
+                        },
+                    )
+                }
+                IndicatorDataRef::Ohlc {
                     high,
                     low,
-                    src,
-                    SuperTrendOscillatorParams {
-                        length: Some(length),
-                        mult: Some(mult),
-                        smooth: Some(smooth),
-                    },
-                )
-            }
-            IndicatorDataRef::Ohlcv { high, low, close, open, volume } => {
-                ensure_same_len_5(
-                    "supertrend_oscillator",
-                    open.len(),
-                    high.len(),
-                    low.len(),
-                    close.len(),
-                    volume.len(),
-                )?;
-                let src = match source.to_ascii_lowercase().as_str() {
-                    "open" => open,
-                    "high" => high,
-                    "low" => low,
-                    _ => close,
-                };
-                SuperTrendOscillatorInput::from_slices(
+                    close,
+                    open,
+                } => {
+                    ensure_same_len_4(
+                        "supertrend_oscillator",
+                        open.len(),
+                        high.len(),
+                        low.len(),
+                        close.len(),
+                    )?;
+                    let src = match source.to_ascii_lowercase().as_str() {
+                        "open" => open,
+                        "high" => high,
+                        "low" => low,
+                        _ => close,
+                    };
+                    SuperTrendOscillatorInput::from_slices(
+                        high,
+                        low,
+                        src,
+                        SuperTrendOscillatorParams {
+                            length: Some(length),
+                            mult: Some(mult),
+                            smooth: Some(smooth),
+                        },
+                    )
+                }
+                IndicatorDataRef::Ohlcv {
                     high,
                     low,
-                    src,
-                    SuperTrendOscillatorParams {
-                        length: Some(length),
-                        mult: Some(mult),
-                        smooth: Some(smooth),
-                    },
-                )
+                    close,
+                    open,
+                    volume,
+                } => {
+                    ensure_same_len_5(
+                        "supertrend_oscillator",
+                        open.len(),
+                        high.len(),
+                        low.len(),
+                        close.len(),
+                        volume.len(),
+                    )?;
+                    let src = match source.to_ascii_lowercase().as_str() {
+                        "open" => open,
+                        "high" => high,
+                        "low" => low,
+                        _ => close,
+                    };
+                    SuperTrendOscillatorInput::from_slices(
+                        high,
+                        low,
+                        src,
+                        SuperTrendOscillatorParams {
+                            length: Some(length),
+                            mult: Some(mult),
+                            smooth: Some(smooth),
+                        },
+                    )
+                }
+                _ => unreachable!(),
+            };
+            let out = supertrend_oscillator_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "supertrend_oscillator".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("oscillator")
+                || output_id.eq_ignore_ascii_case("value")
+            {
+                return Ok(out.oscillator);
             }
-            _ => unreachable!(),
-        };
-        let out = supertrend_oscillator_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
+            if output_id.eq_ignore_ascii_case("signal") {
+                return Ok(out.signal);
+            }
+            if output_id.eq_ignore_ascii_case("histogram") || output_id.eq_ignore_ascii_case("hist")
+            {
+                return Ok(out.histogram);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
                 indicator: "supertrend_oscillator".to_string(),
-                details: e.to_string(),
-            }
-        })?;
-        if output_id.eq_ignore_ascii_case("oscillator") || output_id.eq_ignore_ascii_case("value") {
-            return Ok(out.oscillator);
-        }
-        if output_id.eq_ignore_ascii_case("signal") {
-            return Ok(out.signal);
-        }
-        if output_id.eq_ignore_ascii_case("histogram") || output_id.eq_ignore_ascii_case("hist") {
-            return Ok(out.histogram);
-        }
-        Err(IndicatorDispatchError::UnknownOutput {
-            indicator: "supertrend_oscillator".to_string(),
-            output: output_id.to_string(),
-        })
-    })
+                output: output_id.to_string(),
+            })
+        },
+    )
 }
 
 fn compute_trend_continuation_factor_batch(
@@ -11750,8 +11948,7 @@ fn compute_trend_continuation_factor_batch(
         req.combos,
         data_len,
         |params| {
-            let source =
-                get_enum_param("trend_continuation_factor", params, "source", "close")?;
+            let source = get_enum_param("trend_continuation_factor", params, "source", "close")?;
             let length = get_usize_param("trend_continuation_factor", params, "length", 35)?;
             let input = match req.data {
                 IndicatorDataRef::Candles { candles, .. } => {
@@ -11777,7 +11974,8 @@ fn compute_trend_continuation_factor_batch(
                     details: e.to_string(),
                 }
             })?;
-            if output_id.eq_ignore_ascii_case("plus_tcf") || output_id.eq_ignore_ascii_case("value") {
+            if output_id.eq_ignore_ascii_case("plus_tcf") || output_id.eq_ignore_ascii_case("value")
+            {
                 return Ok(out.plus_tcf);
             }
             if output_id.eq_ignore_ascii_case("minus_tcf") {
@@ -11870,26 +12068,15 @@ fn compute_logarithmic_moving_average_batch(
         req.combos,
         data_len,
         |params| {
-            let source =
-                get_enum_param("logarithmic_moving_average", params, "source", "close")?;
+            let source = get_enum_param("logarithmic_moving_average", params, "source", "close")?;
             let period = get_usize_param("logarithmic_moving_average", params, "period", 100)?;
-            let steepness =
-                get_f64_param("logarithmic_moving_average", params, "steepness", 2.5)?;
-            let ma_type =
-                get_enum_param("logarithmic_moving_average", params, "ma_type", "ema")?;
+            let steepness = get_f64_param("logarithmic_moving_average", params, "steepness", 2.5)?;
+            let ma_type = get_enum_param("logarithmic_moving_average", params, "ma_type", "ema")?;
             let smooth = get_usize_param("logarithmic_moving_average", params, "smooth", 10)?;
-            let momentum_weight = get_f64_param(
-                "logarithmic_moving_average",
-                params,
-                "momentum_weight",
-                1.2,
-            )?;
-            let long_threshold = get_f64_param(
-                "logarithmic_moving_average",
-                params,
-                "long_threshold",
-                0.5,
-            )?;
+            let momentum_weight =
+                get_f64_param("logarithmic_moving_average", params, "momentum_weight", 1.2)?;
+            let long_threshold =
+                get_f64_param("logarithmic_moving_average", params, "long_threshold", 0.5)?;
             let short_threshold = get_f64_param(
                 "logarithmic_moving_average",
                 params,
@@ -11974,8 +12161,12 @@ fn compute_adaptive_schaff_trend_cycle_batch(
                 get_usize_param("adaptive_schaff_trend_cycle", params, "adaptive_length", 55)?;
             let stc_length =
                 get_usize_param("adaptive_schaff_trend_cycle", params, "stc_length", 12)?;
-            let smoothing_factor =
-                get_f64_param("adaptive_schaff_trend_cycle", params, "smoothing_factor", 0.45)?;
+            let smoothing_factor = get_f64_param(
+                "adaptive_schaff_trend_cycle",
+                params,
+                "smoothing_factor",
+                0.45,
+            )?;
             let fast_length =
                 get_usize_param("adaptive_schaff_trend_cycle", params, "fast_length", 26)?;
             let slow_length =
@@ -12039,13 +12230,15 @@ fn compute_ehlers_detrending_filter_batch(
             let source = get_enum_param("ehlers_detrending_filter", params, "source", "hlcc4")?;
             let length = get_usize_param("ehlers_detrending_filter", params, "length", 10)?;
             let input = match req.data {
-                IndicatorDataRef::Candles { candles, .. } => EhlersDetrendingFilterInput::from_candles(
-                    candles,
-                    &source,
-                    EhlersDetrendingFilterParams {
-                        length: Some(length),
-                    },
-                ),
+                IndicatorDataRef::Candles { candles, .. } => {
+                    EhlersDetrendingFilterInput::from_candles(
+                        candles,
+                        &source,
+                        EhlersDetrendingFilterParams {
+                            length: Some(length),
+                        },
+                    )
+                }
                 IndicatorDataRef::Slice { values } => EhlersDetrendingFilterInput::from_slice(
                     values,
                     EhlersDetrendingFilterParams {
@@ -12107,7 +12300,12 @@ fn compute_hypertrend_batch(
                     width_percent: Some(width_percent),
                 },
             ),
-            IndicatorDataRef::Ohlc { high, low, close, open } => {
+            IndicatorDataRef::Ohlc {
+                high,
+                low,
+                close,
+                open,
+            } => {
                 ensure_same_len_4("hypertrend", open.len(), high.len(), low.len(), close.len())?;
                 let src = match source.to_ascii_lowercase().as_str() {
                     "open" => open,
@@ -12126,8 +12324,21 @@ fn compute_hypertrend_batch(
                     },
                 )
             }
-            IndicatorDataRef::Ohlcv { high, low, close, open, volume } => {
-                ensure_same_len_5("hypertrend", open.len(), high.len(), low.len(), close.len(), volume.len())?;
+            IndicatorDataRef::Ohlcv {
+                high,
+                low,
+                close,
+                open,
+                volume,
+            } => {
+                ensure_same_len_5(
+                    "hypertrend",
+                    open.len(),
+                    high.len(),
+                    low.len(),
+                    close.len(),
+                    volume.len(),
+                )?;
                 let src = match source.to_ascii_lowercase().as_str() {
                     "open" => open,
                     "high" => high,
@@ -12181,84 +12392,86 @@ fn compute_ict_propulsion_block_batch(
 ) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
     let (open, high, low, close) = extract_ohlc_full_input("ict_propulsion_block", req.data)?;
     let kernel = req.kernel.to_non_batch();
-    collect_f64("ict_propulsion_block", output_id, req.combos, close.len(), |params| {
-        let swing_length = get_usize_param("ict_propulsion_block", params, "swing_length", 3)?;
-        let mitigation_price = match get_enum_param(
-            "ict_propulsion_block",
-            params,
-            "mitigation_price",
-            "close",
-        )?
-        .to_ascii_lowercase()
-        .as_str()
-        {
-            "close" => IctPropulsionBlockMitigationPrice::Close,
-            "wick" => IctPropulsionBlockMitigationPrice::Wick,
-            other => {
-                return Err(IndicatorDispatchError::InvalidParam {
+    collect_f64(
+        "ict_propulsion_block",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let swing_length = get_usize_param("ict_propulsion_block", params, "swing_length", 3)?;
+            let mitigation_price =
+                match get_enum_param("ict_propulsion_block", params, "mitigation_price", "close")?
+                    .to_ascii_lowercase()
+                    .as_str()
+                {
+                    "close" => IctPropulsionBlockMitigationPrice::Close,
+                    "wick" => IctPropulsionBlockMitigationPrice::Wick,
+                    other => {
+                        return Err(IndicatorDispatchError::InvalidParam {
+                            indicator: "ict_propulsion_block".to_string(),
+                            key: "mitigation_price".to_string(),
+                            reason: format!("unsupported value '{other}'"),
+                        })
+                    }
+                };
+            let input = IctPropulsionBlockInput::from_slices(
+                open,
+                high,
+                low,
+                close,
+                IctPropulsionBlockParams {
+                    swing_length: Some(swing_length),
+                    mitigation_price: Some(mitigation_price),
+                },
+            );
+            let out = ict_propulsion_block_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
                     indicator: "ict_propulsion_block".to_string(),
-                    key: "mitigation_price".to_string(),
-                    reason: format!("unsupported value '{other}'"),
-                })
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("bullish_high") {
+                return Ok(out.bullish_high);
             }
-        };
-        let input = IctPropulsionBlockInput::from_slices(
-            open,
-            high,
-            low,
-            close,
-            IctPropulsionBlockParams {
-                swing_length: Some(swing_length),
-                mitigation_price: Some(mitigation_price),
-            },
-        );
-        let out = ict_propulsion_block_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
+            if output_id.eq_ignore_ascii_case("bullish_low") {
+                return Ok(out.bullish_low);
+            }
+            if output_id.eq_ignore_ascii_case("bullish_kind") {
+                return Ok(out.bullish_kind);
+            }
+            if output_id.eq_ignore_ascii_case("bullish_active") {
+                return Ok(out.bullish_active);
+            }
+            if output_id.eq_ignore_ascii_case("bullish_mitigated") {
+                return Ok(out.bullish_mitigated);
+            }
+            if output_id.eq_ignore_ascii_case("bullish_new") {
+                return Ok(out.bullish_new);
+            }
+            if output_id.eq_ignore_ascii_case("bearish_high") {
+                return Ok(out.bearish_high);
+            }
+            if output_id.eq_ignore_ascii_case("bearish_low") {
+                return Ok(out.bearish_low);
+            }
+            if output_id.eq_ignore_ascii_case("bearish_kind") {
+                return Ok(out.bearish_kind);
+            }
+            if output_id.eq_ignore_ascii_case("bearish_active") {
+                return Ok(out.bearish_active);
+            }
+            if output_id.eq_ignore_ascii_case("bearish_mitigated") {
+                return Ok(out.bearish_mitigated);
+            }
+            if output_id.eq_ignore_ascii_case("bearish_new") {
+                return Ok(out.bearish_new);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
                 indicator: "ict_propulsion_block".to_string(),
-                details: e.to_string(),
-            }
-        })?;
-        if output_id.eq_ignore_ascii_case("bullish_high") {
-            return Ok(out.bullish_high);
-        }
-        if output_id.eq_ignore_ascii_case("bullish_low") {
-            return Ok(out.bullish_low);
-        }
-        if output_id.eq_ignore_ascii_case("bullish_kind") {
-            return Ok(out.bullish_kind);
-        }
-        if output_id.eq_ignore_ascii_case("bullish_active") {
-            return Ok(out.bullish_active);
-        }
-        if output_id.eq_ignore_ascii_case("bullish_mitigated") {
-            return Ok(out.bullish_mitigated);
-        }
-        if output_id.eq_ignore_ascii_case("bullish_new") {
-            return Ok(out.bullish_new);
-        }
-        if output_id.eq_ignore_ascii_case("bearish_high") {
-            return Ok(out.bearish_high);
-        }
-        if output_id.eq_ignore_ascii_case("bearish_low") {
-            return Ok(out.bearish_low);
-        }
-        if output_id.eq_ignore_ascii_case("bearish_kind") {
-            return Ok(out.bearish_kind);
-        }
-        if output_id.eq_ignore_ascii_case("bearish_active") {
-            return Ok(out.bearish_active);
-        }
-        if output_id.eq_ignore_ascii_case("bearish_mitigated") {
-            return Ok(out.bearish_mitigated);
-        }
-        if output_id.eq_ignore_ascii_case("bearish_new") {
-            return Ok(out.bearish_new);
-        }
-        Err(IndicatorDispatchError::UnknownOutput {
-            indicator: "ict_propulsion_block".to_string(),
-            output: output_id.to_string(),
-        })
-    })
+                output: output_id.to_string(),
+            })
+        },
+    )
 }
 
 fn compute_impulse_macd_batch(
@@ -12267,42 +12480,49 @@ fn compute_impulse_macd_batch(
 ) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
     let (high, low, close) = extract_ohlc_input("impulse_macd", req.data)?;
     let kernel = req.kernel.to_non_batch();
-    collect_f64("impulse_macd", output_id, req.combos, close.len(), |params| {
-        let length_ma = get_usize_param("impulse_macd", params, "length_ma", 34)?;
-        let length_signal = get_usize_param("impulse_macd", params, "length_signal", 9)?;
-        let input = ImpulseMacdInput::from_slices(
-            high,
-            low,
-            close,
-            ImpulseMacdParams {
-                length_ma: Some(length_ma),
-                length_signal: Some(length_signal),
-            },
-        );
-        let out = impulse_macd_with_kernel(&input, kernel).map_err(|e| {
-            IndicatorDispatchError::ComputeFailed {
-                indicator: "impulse_macd".to_string(),
-                details: e.to_string(),
+    collect_f64(
+        "impulse_macd",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let length_ma = get_usize_param("impulse_macd", params, "length_ma", 34)?;
+            let length_signal = get_usize_param("impulse_macd", params, "length_signal", 9)?;
+            let input = ImpulseMacdInput::from_slices(
+                high,
+                low,
+                close,
+                ImpulseMacdParams {
+                    length_ma: Some(length_ma),
+                    length_signal: Some(length_signal),
+                },
+            );
+            let out = impulse_macd_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "impulse_macd".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("impulse_macd")
+                || output_id.eq_ignore_ascii_case("value")
+            {
+                return Ok(out.impulse_macd);
             }
-        })?;
-        if output_id.eq_ignore_ascii_case("impulse_macd") || output_id.eq_ignore_ascii_case("value")
-        {
-            return Ok(out.impulse_macd);
-        }
-        if output_id.eq_ignore_ascii_case("impulse_histo")
-            || output_id.eq_ignore_ascii_case("histogram")
-            || output_id.eq_ignore_ascii_case("hist")
-        {
-            return Ok(out.impulse_histo);
-        }
-        if output_id.eq_ignore_ascii_case("signal") {
-            return Ok(out.signal);
-        }
-        Err(IndicatorDispatchError::UnknownOutput {
-            indicator: "impulse_macd".to_string(),
-            output: output_id.to_string(),
-        })
-    })
+            if output_id.eq_ignore_ascii_case("impulse_histo")
+                || output_id.eq_ignore_ascii_case("histogram")
+                || output_id.eq_ignore_ascii_case("hist")
+            {
+                return Ok(out.impulse_histo);
+            }
+            if output_id.eq_ignore_ascii_case("signal") {
+                return Ok(out.signal);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "impulse_macd".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
 }
 
 fn compute_keltner_channel_width_oscillator_batch(
@@ -12317,12 +12537,19 @@ fn compute_keltner_channel_width_oscillator_batch(
         req.combos,
         close.len(),
         |params| {
-            let source =
-                get_enum_param("keltner_channel_width_oscillator", params, "source", "close")?;
-            let length =
-                get_usize_param("keltner_channel_width_oscillator", params, "length", 20)?;
-            let multiplier =
-                get_f64_param("keltner_channel_width_oscillator", params, "multiplier", 2.0)?;
+            let source = get_enum_param(
+                "keltner_channel_width_oscillator",
+                params,
+                "source",
+                "close",
+            )?;
+            let length = get_usize_param("keltner_channel_width_oscillator", params, "length", 20)?;
+            let multiplier = get_f64_param(
+                "keltner_channel_width_oscillator",
+                params,
+                "multiplier",
+                2.0,
+            )?;
             let use_exponential = get_bool_param(
                 "keltner_channel_width_oscillator",
                 params,
@@ -12339,7 +12566,12 @@ fn compute_keltner_channel_width_oscillator_batch(
                 get_usize_param("keltner_channel_width_oscillator", params, "atr_length", 10)?;
             let src = match req.data {
                 IndicatorDataRef::Candles { candles, .. } => source_type(candles, &source),
-                IndicatorDataRef::Ohlc { open, high, low, close } => {
+                IndicatorDataRef::Ohlc {
+                    open,
+                    high,
+                    low,
+                    close,
+                } => {
                     ensure_same_len_4(
                         "keltner_channel_width_oscillator",
                         open.len(),
@@ -12391,12 +12623,13 @@ fn compute_keltner_channel_width_oscillator_batch(
                     atr_length: Some(atr_length),
                 },
             );
-            let out = keltner_channel_width_oscillator_with_kernel(&input, kernel).map_err(|e| {
-                IndicatorDispatchError::ComputeFailed {
-                    indicator: "keltner_channel_width_oscillator".to_string(),
-                    details: e.to_string(),
-                }
-            })?;
+            let out =
+                keltner_channel_width_oscillator_with_kernel(&input, kernel).map_err(|e| {
+                    IndicatorDispatchError::ComputeFailed {
+                        indicator: "keltner_channel_width_oscillator".to_string(),
+                        details: e.to_string(),
+                    }
+                })?;
             if output_id.eq_ignore_ascii_case("kbw") || output_id.eq_ignore_ascii_case("value") {
                 return Ok(out.kbw);
             }
@@ -12434,12 +12667,19 @@ fn compute_leavitt_convolution_acceleration_batch(
         req.combos,
         data_len,
         |params| {
-            let source =
-                get_enum_param("leavitt_convolution_acceleration", params, "source", "close")?;
-            let length =
-                get_usize_param("leavitt_convolution_acceleration", params, "length", 70)?;
-            let norm_length =
-                get_usize_param("leavitt_convolution_acceleration", params, "norm_length", 150)?;
+            let source = get_enum_param(
+                "leavitt_convolution_acceleration",
+                params,
+                "source",
+                "close",
+            )?;
+            let length = get_usize_param("leavitt_convolution_acceleration", params, "length", 70)?;
+            let norm_length = get_usize_param(
+                "leavitt_convolution_acceleration",
+                params,
+                "norm_length",
+                150,
+            )?;
             let use_norm_hyperbolic = get_bool_param(
                 "leavitt_convolution_acceleration",
                 params,
@@ -12458,22 +12698,25 @@ fn compute_leavitt_convolution_acceleration_batch(
                         },
                     )
                 }
-                IndicatorDataRef::Slice { values } => LeavittConvolutionAccelerationInput::from_slice(
-                    values,
-                    LeavittConvolutionAccelerationParams {
-                        length: Some(length),
-                        norm_length: Some(norm_length),
-                        use_norm_hyperbolic: Some(use_norm_hyperbolic),
-                    },
-                ),
+                IndicatorDataRef::Slice { values } => {
+                    LeavittConvolutionAccelerationInput::from_slice(
+                        values,
+                        LeavittConvolutionAccelerationParams {
+                            length: Some(length),
+                            norm_length: Some(norm_length),
+                            use_norm_hyperbolic: Some(use_norm_hyperbolic),
+                        },
+                    )
+                }
                 _ => unreachable!(),
             };
-            let out = leavitt_convolution_acceleration_with_kernel(&input, kernel).map_err(|e| {
-                IndicatorDispatchError::ComputeFailed {
-                    indicator: "leavitt_convolution_acceleration".to_string(),
-                    details: e.to_string(),
-                }
-            })?;
+            let out =
+                leavitt_convolution_acceleration_with_kernel(&input, kernel).map_err(|e| {
+                    IndicatorDispatchError::ComputeFailed {
+                        indicator: "leavitt_convolution_acceleration".to_string(),
+                        details: e.to_string(),
+                    }
+                })?;
             if output_id.eq_ignore_ascii_case("conv_acceleration")
                 || output_id.eq_ignore_ascii_case("value")
             {
@@ -15262,8 +15505,7 @@ fn compute_market_structure_confluence_batch(
                 get_usize_param("market_structure_confluence", params, "atr_length", 14)?;
             let atr_smooth =
                 get_usize_param("market_structure_confluence", params, "atr_smooth", 21)?;
-            let vol_mult =
-                get_f64_param("market_structure_confluence", params, "vol_mult", 2.0)?;
+            let vol_mult = get_f64_param("market_structure_confluence", params, "vol_mult", 2.0)?;
             let input = MarketStructureConfluenceInput::from_slices(
                 high,
                 low,
@@ -16689,6 +16931,10 @@ mod tests {
         absolute_strength_index_oscillator_with_kernel, AbsoluteStrengthIndexOscillatorInput,
         AbsoluteStrengthIndexOscillatorParams,
     };
+    use crate::indicators::accumulation_swing_index::{
+        accumulation_swing_index_with_kernel, AccumulationSwingIndexInput,
+        AccumulationSwingIndexParams,
+    };
     use crate::indicators::ad::{ad_with_kernel, AdInput, AdParams};
     use crate::indicators::adaptive_bandpass_trigger_oscillator::{
         adaptive_bandpass_trigger_oscillator_with_kernel, AdaptiveBandpassTriggerOscillatorInput,
@@ -16696,10 +16942,6 @@ mod tests {
     };
     use crate::indicators::advance_decline_line::{
         advance_decline_line_with_kernel, AdvanceDeclineLineInput, AdvanceDeclineLineParams,
-    };
-    use crate::indicators::accumulation_swing_index::{
-        accumulation_swing_index_with_kernel, AccumulationSwingIndexInput,
-        AccumulationSwingIndexParams,
     };
     use crate::indicators::adx::{adx_with_kernel, AdxInput, AdxParams};
     use crate::indicators::ao::{ao_with_kernel, AoInput, AoParams};
@@ -16712,6 +16954,13 @@ mod tests {
     };
     use crate::indicators::cg::{cg_with_kernel, CgInput, CgParams};
     use crate::indicators::cmo::{cmo_with_kernel, CmoInput, CmoParams};
+    use crate::indicators::cycle_channel_oscillator::{
+        cycle_channel_oscillator_with_kernel, CycleChannelOscillatorInput,
+        CycleChannelOscillatorParams,
+    };
+    use crate::indicators::daily_factor::{
+        daily_factor_with_kernel, DailyFactorInput, DailyFactorParams,
+    };
     use crate::indicators::decisionpoint_breadth_swenlin_trading_oscillator::{
         decisionpoint_breadth_swenlin_trading_oscillator_with_kernel,
         DecisionPointBreadthSwenlinTradingOscillatorInput,
@@ -16725,13 +16974,6 @@ mod tests {
         dx_batch_with_kernel, dx_with_kernel, DxBatchRange, DxInput, DxParams,
     };
     use crate::indicators::efi::{efi_with_kernel, EfiInput, EfiParams};
-    use crate::indicators::cycle_channel_oscillator::{
-        cycle_channel_oscillator_with_kernel, CycleChannelOscillatorInput,
-        CycleChannelOscillatorParams,
-    };
-    use crate::indicators::daily_factor::{
-        daily_factor_with_kernel, DailyFactorInput, DailyFactorParams,
-    };
     use crate::indicators::ehlers_adaptive_cyber_cycle::{
         ehlers_adaptive_cyber_cycle_with_kernel, EhlersAdaptiveCyberCycleInput,
         EhlersAdaptiveCyberCycleParams,
@@ -16786,8 +17028,8 @@ mod tests {
         HullButterflyOscillatorParams,
     };
     use crate::indicators::ichimoku_oscillator::{
-        ichimoku_oscillator_with_kernel, IchimokuOscillatorInput,
-        IchimokuOscillatorNormalizeMode, IchimokuOscillatorParams,
+        ichimoku_oscillator_with_kernel, IchimokuOscillatorInput, IchimokuOscillatorNormalizeMode,
+        IchimokuOscillatorParams,
     };
     use crate::indicators::ift_rsi::{ift_rsi_with_kernel, IftRsiInput, IftRsiParams};
     use crate::indicators::intraday_momentum_index::{
@@ -16843,13 +17085,13 @@ mod tests {
         PercentileNearestRankParams,
     };
     use crate::indicators::ppo::{ppo_with_kernel, PpoInput, PpoParams};
+    use crate::indicators::premier_rsi_oscillator::{
+        premier_rsi_oscillator_with_kernel, PremierRsiOscillatorInput, PremierRsiOscillatorParams,
+    };
     use crate::indicators::price_moving_average_ratio_percentile::{
         price_moving_average_ratio_percentile_with_kernel, PriceMovingAverageRatioPercentileInput,
         PriceMovingAverageRatioPercentileLineMode, PriceMovingAverageRatioPercentileMaType,
         PriceMovingAverageRatioPercentileParams,
-    };
-    use crate::indicators::premier_rsi_oscillator::{
-        premier_rsi_oscillator_with_kernel, PremierRsiOscillatorInput, PremierRsiOscillatorParams,
     };
     use crate::indicators::pvi::{pvi_with_kernel, PviInput, PviParams};
     use crate::indicators::random_walk_index::{
@@ -16865,21 +17107,21 @@ mod tests {
     use crate::indicators::stochastic_distance::{
         stochastic_distance_with_kernel, StochasticDistanceInput, StochasticDistanceParams,
     };
-    use crate::indicators::trix::{
-        trix_batch_with_kernel, trix_with_kernel, TrixBatchRange, TrixInput, TrixParams,
-    };
     use crate::indicators::trend_trigger_factor::{
         trend_trigger_factor_with_kernel, TrendTriggerFactorInput, TrendTriggerFactorParams,
     };
-    use crate::indicators::ttm_trend::{ttm_trend_with_kernel, TtmTrendInput, TtmTrendParams};
-    use crate::indicators::velocity_acceleration_indicator::{
-        velocity_acceleration_indicator_with_kernel, VelocityAccelerationIndicatorInput,
-        VelocityAccelerationIndicatorParams,
+    use crate::indicators::trix::{
+        trix_batch_with_kernel, trix_with_kernel, TrixBatchRange, TrixInput, TrixParams,
     };
+    use crate::indicators::ttm_trend::{ttm_trend_with_kernel, TtmTrendInput, TtmTrendParams};
     use crate::indicators::velocity_acceleration_convergence_divergence_indicator::{
         velocity_acceleration_convergence_divergence_indicator_with_kernel,
         VelocityAccelerationConvergenceDivergenceIndicatorInput,
         VelocityAccelerationConvergenceDivergenceIndicatorParams,
+    };
+    use crate::indicators::velocity_acceleration_indicator::{
+        velocity_acceleration_indicator_with_kernel, VelocityAccelerationIndicatorInput,
+        VelocityAccelerationIndicatorParams,
     };
     use crate::indicators::volatility_quality_index::{
         volatility_quality_index_with_kernel, VolatilityQualityIndexInput,
@@ -20440,8 +20682,8 @@ mod tests {
                         info.id, output.id, e
                     )
                 });
-                let direct =
-                    dispatch_cpu_batch_by_indicator(req, info.id, output.id).unwrap_or_else(|e| {
+                let direct = dispatch_cpu_batch_by_indicator(req, info.id, output.id)
+                    .unwrap_or_else(|e| {
                         panic!("direct route failed for {}:{}: {}", info.id, output.id, e)
                     });
 

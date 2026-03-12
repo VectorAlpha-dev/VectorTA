@@ -702,13 +702,13 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn compile_prefer_cuda_rejects_non_cuda_indicator() {
-        let err = compile_call("adx", Some("value"), &[], true).unwrap_err();
+        let err = compile_call("historical_volatility", Some("value"), &[], true).unwrap_err();
         match err {
             IndicatorDispatchError::UnsupportedCapability {
                 indicator,
                 capability,
             } => {
-                assert_eq!(indicator, "adx");
+                assert_eq!(indicator, "historical_volatility");
                 assert_eq!(capability, "cuda_batch");
             }
             other => panic!("expected UnsupportedCapability, got {other:?}"),

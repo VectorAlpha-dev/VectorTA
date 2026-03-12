@@ -116,6 +116,25 @@ fn compute_pattern_recognition(
     })
 }
 
+fn normalize_output_token(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch.to_ascii_lowercase());
+        }
+    }
+    if normalized == "values" {
+        "value".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn output_id_matches(candidate: &str, requested: &str) -> bool {
+    candidate.eq_ignore_ascii_case(requested)
+        || normalize_output_token(candidate) == normalize_output_token(requested)
+}
+
 fn resolve_output_id<'a>(
     info: &'a IndicatorInfo,
     requested: Option<&str>,
@@ -130,7 +149,7 @@ fn resolve_output_id<'a>(
     if info.outputs.len() == 1 {
         let only = info.outputs[0].id;
         if let Some(req) = requested {
-            if !req.eq_ignore_ascii_case(only) {
+            if !output_id_matches(only, req) {
                 return Err(IndicatorDispatchError::UnknownOutput {
                     indicator: info.id.to_string(),
                     output: req.to_string(),
@@ -148,7 +167,7 @@ fn resolve_output_id<'a>(
 
     info.outputs
         .iter()
-        .find(|o| o.id.eq_ignore_ascii_case(req))
+        .find(|o| output_id_matches(o.id, req))
         .map(|o| o.id)
         .ok_or_else(|| IndicatorDispatchError::UnknownOutput {
             indicator: info.id.to_string(),

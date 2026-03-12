@@ -193,8 +193,9 @@ const ENUM_VALUES_N_ORDER_EMA_IIR_STYLE: &[&str] =
     &["all_pole", "impulse_matched", "matched_z", "bilinear"];
 const ENUM_VALUES_FVG_POSITIONING_AVERAGE_LOOKBACK_TYPE: &[&str] = &["Bar Count", "FVG Count"];
 const ENUM_VALUES_MS_TS_RESET_ON: &[&str] = &["CHoCH", "All"];
-const ENUM_VALUES_PRICE_SOURCE: &[&str] =
-    &["open", "high", "low", "close", "hl2", "hlc3", "ohlc4", "hlcc4"];
+const ENUM_VALUES_PRICE_SOURCE: &[&str] = &[
+    "open", "high", "low", "close", "hl2", "hlc3", "ohlc4", "hlcc4",
+];
 const ENUM_VALUES_VDO_SESSION_MODE: &[&str] =
     &["4_hours", "daily", "weekly", "rolling_bars", "rolling_days"];
 const ENUM_VALUES_VDO_DEVIATION_MODE: &[&str] = &["percent", "absolute", "zscore"];
@@ -212,8 +213,7 @@ const ENUM_VALUES_NORMALIZED_VOLUME_TRUE_RANGE_OUTPUT: &[&str] = &[
 const ENUM_VALUES_MOVING_AVERAGE_CROSS_PROBABILITY_MA_TYPE: &[&str] = &["ema", "sma"];
 const ENUM_VALUES_BULLS_V_BEARS_MA_TYPE: &[&str] = &["ema", "sma", "wma"];
 const ENUM_VALUES_BULLS_V_BEARS_CALCULATION_METHOD: &[&str] = &["normalized", "raw"];
-const ENUM_VALUES_SMOOTH_THEIL_SEN_STAT_STYLE: &[&str] =
-    &["mean", "smooth_median", "median"];
+const ENUM_VALUES_SMOOTH_THEIL_SEN_STAT_STYLE: &[&str] = &["mean", "smooth_median", "median"];
 const ENUM_VALUES_SMOOTH_THEIL_SEN_DEVIATION_STYLE: &[&str] = &["mad", "rmsd"];
 const ENUM_VALUES_PMARP_MA_TYPE: &[&str] = &["sma", "ema", "hma", "rma", "vwma"];
 const ENUM_VALUES_PMARP_LINE_MODE: &[&str] = &["pmar", "pmarp"];
@@ -6555,6 +6555,19 @@ const PARAM_GARMAN_KLASS: &[IndicatorParamInfo] = &[IndicatorParamInfo {
     notes: None,
 }];
 
+const PARAM_PARKINSON: &[IndicatorParamInfo] = &[IndicatorParamInfo {
+    key: "period",
+    label: "Period",
+    kind: IndicatorParamKind::Int,
+    required: false,
+    default: Some(ParamValueStatic::Int(8)),
+    min: Some(1.0),
+    max: None,
+    step: Some(1.0),
+    enum_values: EMPTY_ENUM_VALUES,
+    notes: None,
+}];
+
 const PARAM_GOPALAKRISHNAN_RANGE_INDEX: &[IndicatorParamInfo] = &[IndicatorParamInfo {
     key: "length",
     label: "Length",
@@ -11051,6 +11064,14 @@ const SUPPLEMENTAL_INDICATORS: &[SupplementalIndicatorSeed] = &[
         params: PARAM_GARMAN_KLASS,
     },
     SupplementalIndicatorSeed {
+        id: "parkinson_volatility",
+        label: "Parkinson Volatility",
+        category: "volatility",
+        input_kind: IndicatorInputKind::HighLow,
+        outputs: OUTPUTS_PARKINSON,
+        params: PARAM_PARKINSON,
+    },
+    SupplementalIndicatorSeed {
         id: "atr_percentile",
         label: "ATR Percentile",
         category: "volatility",
@@ -13173,6 +13194,23 @@ mod tests {
         assert_eq!(info.outputs[0].id, "value");
         assert_eq!(info.params.len(), 1);
         assert_eq!(info.params[0].key, "lookback");
+        assert!(info.capabilities.supports_cpu_single);
+        assert!(info.capabilities.supports_cpu_batch);
+        assert!(info.capabilities.supports_cuda_batch);
+        assert!(info.capabilities.supports_cuda_vram);
+    }
+
+    #[test]
+    fn parkinson_volatility_is_registered_for_cpu_and_cuda_batch() {
+        assert!(supplemental_supports_cpu_batch("parkinson_volatility"));
+        assert!(supplemental_supports_cuda_batch("parkinson_volatility"));
+        let info = get_indicator("parkinson_volatility").unwrap();
+        assert_eq!(info.input_kind, IndicatorInputKind::HighLow);
+        assert_eq!(info.outputs.len(), 2);
+        assert_eq!(info.outputs[0].id, "volatility");
+        assert_eq!(info.outputs[1].id, "variance");
+        assert_eq!(info.params.len(), 1);
+        assert_eq!(info.params[0].key, "period");
         assert!(info.capabilities.supports_cpu_single);
         assert!(info.capabilities.supports_cpu_batch);
         assert!(info.capabilities.supports_cuda_batch);
