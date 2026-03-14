@@ -1,8 +1,8 @@
 # vector-ta
 
-VectorTA is a Rust crate of over 350 implemented technical analysis indicators focused on speed, predictable allocations, and practical execution flexibility, with optional SIMD/CUDA acceleration and optional Python/WASM bindings. In addition to standard single-call APIs, much of the library also supports streaming/stateful updates, batch parameter sweeps, and registry-driven dispatch across multiple input and output shapes.
+VectorTA is a Rust crate of 340 implemented technical analysis indicators focused on speed, predictable allocations, and practical execution flexibility, with optional SIMD/CUDA acceleration and optional Python/WASM bindings. In addition to standard single call APIs, much of the library also supports streaming/stateful updates, batch parameter sweeps, and registry-driven dispatch across multiple input and output shapes.
 
-It is intended for workloads where throughput and execution behavior actually matter, including research pipelines, backtesting systems, and high-throughput production use cases. The library is not limited to close-only, single-output indicators either; it spans a wide range of input structures, multi-output studies, and execution paths across Rust, Python, WASM, and CUDA.
+It is intended for workloads where throughput and execution behavior actually matter, including research pipelines, backtesting systems, and high throughput production use cases. The library is not limited to close only, single output indicators either. It spans a wide range of input structures, multi-output studies, and execution paths across Rust, Python, WASM, and CUDA.
 
 The CUDA bindings are predominantly only worth using if used in a VRAM-resident workflow. For example, it is possible to achieve a benchmark timing of 3.69 ms for 250 million calculated ALMA indicator data points on an RTX 4090, whereas the CPU (AMD 9950X) AVX-512, AVX2, and scalar timings are approximately 140.61 ms, 188.64 ms, and 386.20 ms, respectively. The Python bindings also expose GPU-oriented workflows for a subset of indicators, including device-resident outputs intended for high-throughput research pipelines.
 
