@@ -217,6 +217,16 @@ pub struct IndicatorCudaRequest<'a> {
 }
 
 #[cfg(feature = "cuda")]
+#[derive(Debug, Clone, Copy)]
+pub struct IndicatorCudaBitmaskRequest<'a> {
+    pub indicator_id: &'a str,
+    pub output_id: Option<&'a str>,
+    pub data: IndicatorCudaDataRef<'a>,
+    pub params: &'a [ParamKV<'a>],
+    pub kernel: Kernel,
+}
+
+#[cfg(feature = "cuda")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndicatorCudaDeviceDataRef {
     Slice { values: CudaDeviceSliceF32Ref },
@@ -238,6 +248,16 @@ pub struct IndicatorCudaDeviceRequest<'a> {
 }
 
 #[cfg(feature = "cuda")]
+#[derive(Debug, Clone, Copy)]
+pub struct IndicatorCudaDeviceBitmaskRequest<'a> {
+    pub indicator_id: &'a str,
+    pub output_id: Option<&'a str>,
+    pub data: IndicatorCudaDeviceDataRef,
+    pub params: &'a [ParamKV<'a>],
+    pub kernel: Kernel,
+}
+
+#[cfg(feature = "cuda")]
 #[derive(Debug, Clone, PartialEq)]
 pub enum IndicatorCudaSeries {
     DeviceF32(DeviceMatrixF32),
@@ -253,4 +273,31 @@ pub struct IndicatorCudaOutput {
     pub rows: usize,
     pub cols: usize,
     pub pattern_ids: Option<Vec<String>>,
+}
+
+#[cfg(feature = "cuda")]
+pub struct PatternRecognitionCudaBitmaskOutput {
+    pub output_id: String,
+    pub series: crate::cuda::pattern_recognition_wrapper::DevicePatternBitmaskU64,
+    pub warmup: Option<usize>,
+    pub rows: usize,
+    pub cols: usize,
+    pub words_per_row: usize,
+    pub pattern_ids: Vec<String>,
+}
+
+#[cfg(feature = "cuda")]
+impl std::fmt::Debug for PatternRecognitionCudaBitmaskOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PatternRecognitionCudaBitmaskOutput")
+            .field("output_id", &self.output_id)
+            .field("device_ptr", &self.series.device_ptr())
+            .field("rows", &self.rows)
+            .field("cols", &self.cols)
+            .field("words_per_row", &self.words_per_row)
+            .field("device_id", &self.series.device_id)
+            .field("warmup", &self.warmup)
+            .field("pattern_ids", &self.pattern_ids)
+            .finish()
+    }
 }

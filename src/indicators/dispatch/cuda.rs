@@ -1,7 +1,8 @@
 use super::{
-    CudaOutputTarget, DeviceMatrixF32, IndicatorCudaDataRef, IndicatorCudaDeviceDataRef,
-    IndicatorCudaDeviceRequest, IndicatorCudaOutput, IndicatorCudaRequest, IndicatorCudaSeries,
-    IndicatorDispatchError, ParamKV, ParamValue,
+    CudaOutputTarget, DeviceMatrixF32, IndicatorCudaBitmaskRequest, IndicatorCudaDataRef,
+    IndicatorCudaDeviceBitmaskRequest, IndicatorCudaDeviceDataRef, IndicatorCudaDeviceRequest,
+    IndicatorCudaOutput, IndicatorCudaRequest, IndicatorCudaSeries, IndicatorDispatchError,
+    ParamKV, ParamValue, PatternRecognitionCudaBitmaskOutput,
 };
 use crate::cuda::moving_averages::ma_selector::{CudaMaParamKV, CudaMaParamValue};
 use crate::cuda::moving_averages::{
@@ -13899,28 +13900,18 @@ fn compute_pattern_recognition_cuda(
             details: e.to_string(),
         }
     })?;
-    let features = cuda
-        .compute_features_device(open, high, low, close)
-        .map_err(|e| IndicatorDispatchError::KernelUnavailable {
-            details: e.to_string(),
-        })?;
     let native_ids = CudaPatternRecognition::native_supported_pattern_ids();
     let rows = native_ids.len();
     let cols = close.len();
-    let row_map: Vec<(&str, usize)> = native_ids
-        .iter()
-        .enumerate()
-        .map(|(row, id)| (*id, row))
-        .collect();
-    let d_u8 = cuda
-        .compute_native_matrix_device(&features, rows, cols, row_map.as_slice())
-        .map_err(|e| IndicatorDispatchError::KernelUnavailable {
-            details: e.to_string(),
-        })?;
     let pattern_ids: Vec<String> = native_ids.iter().map(|id| id.to_string()).collect();
 
     match req.target {
         CudaOutputTarget::HostF32 => {
+            let d_u8 = cuda
+                .compute_native_matrix_device_from_host_inputs(open, high, low, close)
+                .map_err(|e| IndicatorDispatchError::KernelUnavailable {
+                    details: e.to_string(),
+                })?;
             cuda.synchronize()
                 .map_err(|e| IndicatorDispatchError::KernelUnavailable {
                     details: e.to_string(),
@@ -13946,7 +13937,7 @@ fn compute_pattern_recognition_cuda(
         }
         CudaOutputTarget::DeviceF32 => {
             let dev = cuda
-                .matrix_u8_to_f32_device(&d_u8, rows, cols)
+                .compute_native_matrix_f32_device_from_host_inputs(open, high, low, close)
                 .map_err(|e| IndicatorDispatchError::KernelUnavailable {
                     details: e.to_string(),
                 })?;
@@ -13995,40 +13986,24 @@ fn compute_pattern_recognition_cuda_device(
             details: e.to_string(),
         }
     })?;
-    let mut features = cuda.allocate_feature_buffers(close.len()).map_err(|e| {
-        IndicatorDispatchError::KernelUnavailable {
-            details: e.to_string(),
-        }
-    })?;
-    cuda.compute_features_device_into(
-        open_buf.as_buffer(),
-        high_buf.as_buffer(),
-        low_buf.as_buffer(),
-        close_buf.as_buffer(),
-        close.len(),
-        &mut features,
-    )
-    .map_err(|e| IndicatorDispatchError::KernelUnavailable {
-        details: e.to_string(),
-    })?;
-
     let native_ids = CudaPatternRecognition::native_supported_pattern_ids();
     let rows = native_ids.len();
     let cols = close.len();
-    let row_map: Vec<(&str, usize)> = native_ids
-        .iter()
-        .enumerate()
-        .map(|(row, id)| (*id, row))
-        .collect();
-    let d_u8 = cuda
-        .compute_native_matrix_device(&features, rows, cols, row_map.as_slice())
-        .map_err(|e| IndicatorDispatchError::KernelUnavailable {
-            details: e.to_string(),
-        })?;
     let pattern_ids: Vec<String> = native_ids.iter().map(|id| id.to_string()).collect();
 
     match req.target {
         CudaOutputTarget::HostF32 => {
+            let d_u8 = cuda
+                .compute_native_matrix_device_from_device_inputs(
+                    open_buf.as_buffer(),
+                    high_buf.as_buffer(),
+                    low_buf.as_buffer(),
+                    close_buf.as_buffer(),
+                    close.len(),
+                )
+                .map_err(|e| IndicatorDispatchError::KernelUnavailable {
+                    details: e.to_string(),
+                })?;
             cuda.synchronize()
                 .map_err(|e| IndicatorDispatchError::KernelUnavailable {
                     details: e.to_string(),
@@ -14054,7 +14029,13 @@ fn compute_pattern_recognition_cuda_device(
         }
         CudaOutputTarget::DeviceF32 => {
             let dev = cuda
-                .matrix_u8_to_f32_device(&d_u8, rows, cols)
+                .compute_native_matrix_f32_device_from_device_inputs(
+                    open_buf.as_buffer(),
+                    high_buf.as_buffer(),
+                    low_buf.as_buffer(),
+                    close_buf.as_buffer(),
+                    close.len(),
+                )
                 .map_err(|e| IndicatorDispatchError::KernelUnavailable {
                     details: e.to_string(),
                 })?;
@@ -14068,6 +14049,128 @@ fn compute_pattern_recognition_cuda_device(
             })
         }
     }
+}
+
+pub fn compute_pattern_recognition_cuda_bitmask(
+    req: IndicatorCudaBitmaskRequest<'_>,
+) -> Result<PatternRecognitionCudaBitmaskOutput, IndicatorDispatchError> {
+    let normalized_id = normalize_cuda_dispatch_id(req.indicator_id);
+    let info = get_indicator(normalized_id.as_str()).ok_or_else(|| {
+        IndicatorDispatchError::UnknownIndicator {
+            id: req.indicator_id.to_string(),
+        }
+    })?;
+    if !info.id.eq_ignore_ascii_case("pattern_recognition") {
+        return Err(IndicatorDispatchError::UnsupportedCapability {
+            indicator: info.id.to_string(),
+            capability: "cuda_pattern_bitmask",
+        });
+    }
+    if !info.capabilities.supports_cuda_single {
+        return Err(IndicatorDispatchError::UnsupportedCapability {
+            indicator: info.id.to_string(),
+            capability: "cuda_single",
+        });
+    }
+
+    let output_id = resolve_output_id(info, req.output_id)?;
+    validate_pattern_params(info.id, req.params)?;
+    let device_id = resolve_device_id(info.id, req.params)? as usize;
+    let (open, high, low, close) = pattern_ohlc_from_req(info.id, req.data)?;
+    if close.is_empty() {
+        return Err(IndicatorDispatchError::DataLengthMismatch {
+            details: "pattern_recognition: empty OHLC input".to_string(),
+        });
+    }
+
+    let cuda = CudaPatternRecognition::new(device_id).map_err(|e| {
+        IndicatorDispatchError::KernelUnavailable {
+            details: e.to_string(),
+        }
+    })?;
+    let native_ids = CudaPatternRecognition::native_supported_pattern_ids();
+    let pattern_ids = native_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+    let series = cuda
+        .compute_native_matrix_bitmask_u64_device_from_host_inputs(open, high, low, close)
+        .map_err(|e| IndicatorDispatchError::KernelUnavailable {
+            details: e.to_string(),
+        })?;
+
+    Ok(PatternRecognitionCudaBitmaskOutput {
+        output_id: output_id.to_string(),
+        rows: series.rows,
+        cols: series.cols,
+        words_per_row: series.words_per_row,
+        series,
+        warmup: None,
+        pattern_ids,
+    })
+}
+
+pub fn compute_pattern_recognition_cuda_device_bitmask(
+    req: IndicatorCudaDeviceBitmaskRequest<'_>,
+) -> Result<PatternRecognitionCudaBitmaskOutput, IndicatorDispatchError> {
+    let normalized_id = normalize_cuda_dispatch_id(req.indicator_id);
+    let info = get_indicator(normalized_id.as_str()).ok_or_else(|| {
+        IndicatorDispatchError::UnknownIndicator {
+            id: req.indicator_id.to_string(),
+        }
+    })?;
+    if !info.id.eq_ignore_ascii_case("pattern_recognition") {
+        return Err(IndicatorDispatchError::UnsupportedCapability {
+            indicator: info.id.to_string(),
+            capability: "cuda_pattern_bitmask",
+        });
+    }
+    if !info.capabilities.supports_cuda_single {
+        return Err(IndicatorDispatchError::UnsupportedCapability {
+            indicator: info.id.to_string(),
+            capability: "cuda_single",
+        });
+    }
+
+    let output_id = resolve_output_id(info, req.output_id)?;
+    validate_pattern_params(info.id, req.params)?;
+    let (open, high, low, close, source_device_id) = cuda_device_ohlc_from_req(info.id, req.data)?;
+    if close.is_empty() {
+        return Err(IndicatorDispatchError::DataLengthMismatch {
+            details: "pattern_recognition: empty OHLC input".to_string(),
+        });
+    }
+    let device_id = resolve_device_runtime_id(info.id, req.params, source_device_id)?;
+
+    let open_buf = unsafe { BorrowedCudaDeviceSeries::from_view(open) };
+    let high_buf = unsafe { BorrowedCudaDeviceSeries::from_view(high) };
+    let low_buf = unsafe { BorrowedCudaDeviceSeries::from_view(low) };
+    let close_buf = unsafe { BorrowedCudaDeviceSeries::from_view(close) };
+    let cuda = CudaPatternRecognition::new(device_id as usize).map_err(|e| {
+        IndicatorDispatchError::KernelUnavailable {
+            details: e.to_string(),
+        }
+    })?;
+    let native_ids = CudaPatternRecognition::native_supported_pattern_ids();
+    let pattern_ids = native_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+    let series = cuda
+        .compute_native_matrix_bitmask_u64_device_from_device_inputs(
+            open_buf.as_buffer(),
+            high_buf.as_buffer(),
+            low_buf.as_buffer(),
+            close_buf.as_buffer(),
+            close.len(),
+        )
+        .map_err(|e| IndicatorDispatchError::KernelUnavailable {
+            details: e.to_string(),
+        })?;
+
+    Ok(PatternRecognitionCudaBitmaskOutput {
+        output_id: output_id.to_string(),
+        rows: series.rows,
+        cols: series.cols,
+        words_per_row: series.words_per_row,
+        series,
+        warmup: None,
+        pattern_ids,
+    })
 }
 
 fn pattern_ohlc_from_req<'a>(
@@ -28510,6 +28613,74 @@ mod tests {
                 assert_eq!(dev.cols, out.cols);
             }
             other => panic!("expected DeviceF32, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pattern_bitmask_device_path_matches_host_cuda_when_gpu_available() {
+        if !crate::cuda::cuda_available() {
+            return;
+        }
+
+        let (open, high, low, close) = sample_ohlc(160);
+        let runtime = CudaRuntime::new(0).expect("runtime");
+        let device_ohlc = runtime
+            .upload_ohlc(&open, &high, &low, &close, None)
+            .expect("upload ohlc");
+
+        let host_out = compute_cuda(IndicatorCudaRequest {
+            indicator_id: "pattern_recognition",
+            output_id: Some("matrix"),
+            data: IndicatorCudaDataRef::Ohlc {
+                open: &open,
+                high: &high,
+                low: &low,
+                close: &close,
+                source: None,
+            },
+            params: &[],
+            kernel: Kernel::Auto,
+            target: CudaOutputTarget::HostF32,
+        })
+        .expect("host path");
+        let bitmask_out =
+            compute_pattern_recognition_cuda_device_bitmask(IndicatorCudaDeviceBitmaskRequest {
+                indicator_id: "pattern_recognition",
+                output_id: Some("matrix"),
+                data: IndicatorCudaDeviceDataRef::Ohlc(device_ohlc.as_view()),
+                params: &[],
+                kernel: Kernel::Auto,
+            })
+            .expect("bitmask device path");
+
+        let dense = match host_out.series {
+            IndicatorCudaSeries::HostF32(values) => values,
+            other => panic!("expected HostF32, got {other:?}"),
+        };
+        assert_eq!(bitmask_out.rows, host_out.rows);
+        assert_eq!(bitmask_out.cols, host_out.cols);
+        assert_eq!(bitmask_out.pattern_ids, host_out.pattern_ids.unwrap());
+        assert_eq!(bitmask_out.words_per_row, bitmask_out.cols.div_ceil(64));
+        assert_ne!(bitmask_out.series.device_ptr(), 0);
+        assert_eq!(
+            bitmask_out.series.len(),
+            bitmask_out.rows * bitmask_out.words_per_row
+        );
+
+        let mut words = vec![0u64; bitmask_out.series.len()];
+        bitmask_out
+            .series
+            .buf
+            .copy_to(words.as_mut_slice())
+            .expect("download words");
+        for row in 0..bitmask_out.rows {
+            for col in 0..bitmask_out.cols {
+                let dense_idx = row * bitmask_out.cols + col;
+                let word = row * bitmask_out.words_per_row + (col / 64);
+                let bit = col % 64;
+                let packed_hit = ((words[word] >> bit) & 1) != 0;
+                assert_eq!(packed_hit, dense[dense_idx] != 0.0, "row={row} col={col}");
+            }
         }
     }
 

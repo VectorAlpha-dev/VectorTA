@@ -55,6 +55,39 @@ def _cuda_device_available() -> bool:
         return True
 
 
+def _bitmask_device_available() -> bool:
+    if cp is None:
+        return False
+    if not hasattr(ti, 'pattern_recognition_cuda_bitmask_dev'):
+        return False
+    try:
+        n = 128
+        base = np.linspace(100.0, 110.0, n, dtype=np.float32)
+        open_ = base
+        high = base + 1.0
+        low = base - 1.0
+        close = base + 0.2
+        handle = ti.pattern_recognition_cuda_bitmask_dev(open_, high, low, close)
+        _ = cp.asarray(handle['values'])
+        return True
+    except Exception as exc:
+        msg = str(exc).lower()
+        if 'cuda not available' in msg or 'ptx' in msg or 'nvcc' in msg:
+            return False
+        return True
+
+
+def _unpack_u64_bitmask(words: np.ndarray, rows: int, cols: int, words_per_row: int) -> np.ndarray:
+    dense = np.zeros((rows, cols), dtype=np.uint8)
+    for row in range(rows):
+        row_words = words[row]
+        for col in range(cols):
+            word = col // 64
+            bit = col % 64
+            dense[row, col] = np.uint8((int(row_words[word]) >> bit) & 1)
+    return dense
+
+
 class TestPatternRecognitionCuda:
     @pytest.fixture(scope='class')
     def test_data(self):
@@ -120,10 +153,27 @@ class TestPatternRecognitionCuda:
 
         assert host['values'].shape == cpu['values'].shape
         cpu_f32 = cpu['values'].astype(np.float32)
-        mismatches = np.count_nonzero(host['values'] != cpu_f32)
-        ratio = mismatches / cpu_f32.size
-        assert ratio <= 0.01, f"mismatch ratio too high: {mismatches}/{cpu_f32.size} ({ratio:.6f})"
+        np.testing.assert_array_equal(host['values'], cpu_f32)
         assert host['pattern_ids'] == cpu['pattern_ids']
+
+    @pytest.mark.skipif(not _bitmask_device_available(), reason='CUDA bitmask device path unavailable')
+    def test_pattern_recognition_cuda_bitmask_device_matches_host(self, test_data):
+        n = 512
+        open_ = test_data['open'][:n].astype(np.float32)
+        high = test_data['high'][:n].astype(np.float32)
+        low = test_data['low'][:n].astype(np.float32)
+        close = test_data['close'][:n].astype(np.float32)
+
+        host = ti.pattern_recognition_cuda_host_f32(open_, high, low, close)
+        bitmask = ti.pattern_recognition_cuda_bitmask_dev(open_, high, low, close)
+        words = cp.asnumpy(cp.asarray(bitmask['values']))
+        dense = _unpack_u64_bitmask(words, bitmask['rows'], bitmask['cols'], bitmask['words_per_row'])
+
+        assert dense.shape == host['values'].shape
+        np.testing.assert_array_equal(dense, host['values'].astype(np.uint8))
+        assert bitmask['pattern_ids'] == host['pattern_ids']
+        assert bitmask['rows'] == host['rows']
+        assert bitmask['cols'] == host['cols']
 
 
 if __name__ == '__main__':

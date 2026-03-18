@@ -84,6 +84,530 @@ extern "C" __global__ void pattern_doji_predicate_kernel_f32(
     }
 }
 
+extern "C" __global__ void pattern_rolling_stats_10_f32_kernel(
+    const float* __restrict__ body,
+    const float* __restrict__ upper_shadow,
+    const float* __restrict__ lower_shadow,
+    const int8_t* __restrict__ direction,
+    int len,
+    float* __restrict__ body_avg10,
+    float* __restrict__ body_avg5,
+    float* __restrict__ upper_avg10,
+    float* __restrict__ lower_avg10,
+    float* __restrict__ max_shadow_avg10,
+    float* __restrict__ belt_shadow_avg10,
+    float* __restrict__ closing_shadow_avg10)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = blockDim.x * gridDim.x;
+
+    for (int i = tid; i < len; i += stride) {
+        if (i < 10) {
+            body_avg10[i] = 0.0f;
+            upper_avg10[i] = 0.0f;
+            lower_avg10[i] = 0.0f;
+            max_shadow_avg10[i] = 0.0f;
+            belt_shadow_avg10[i] = 0.0f;
+            closing_shadow_avg10[i] = 0.0f;
+        } else {
+            float sum_body = 0.0f;
+            float sum_upper = 0.0f;
+            float sum_lower = 0.0f;
+            float sum_max_shadow = 0.0f;
+            float sum_belt_shadow = 0.0f;
+            float sum_closing_shadow = 0.0f;
+            for (int j = i - 10; j < i; ++j) {
+                const float upper = upper_shadow[j];
+                const float lower = lower_shadow[j];
+                sum_body += body[j];
+                sum_upper += upper;
+                sum_lower += lower;
+                sum_max_shadow += fmaxf(upper, lower);
+                if (direction[j] >= 0) {
+                    sum_belt_shadow += lower;
+                    sum_closing_shadow += upper;
+                } else {
+                    sum_belt_shadow += upper;
+                    sum_closing_shadow += lower;
+                }
+            }
+
+            body_avg10[i] = sum_body * 0.1f;
+            upper_avg10[i] = sum_upper * 0.1f;
+            lower_avg10[i] = sum_lower * 0.1f;
+            max_shadow_avg10[i] = sum_max_shadow * 0.1f;
+            belt_shadow_avg10[i] = sum_belt_shadow * 0.1f;
+            closing_shadow_avg10[i] = sum_closing_shadow * 0.1f;
+        }
+
+        if (i < 5) {
+            body_avg5[i] = 0.0f;
+        } else {
+            float sum_body5 = 0.0f;
+            for (int j = i - 5; j < i; ++j) {
+                sum_body5 += body[j];
+            }
+            body_avg5[i] = sum_body5 * 0.2f;
+        }
+    }
+}
+
+extern "C" __global__ void pattern_rows_simple10_u8_kernel(
+    const float* __restrict__ body,
+    const float* __restrict__ body_avg10,
+    const float* __restrict__ upper_shadow,
+    const float* __restrict__ lower_shadow,
+    const float* __restrict__ upper_avg10,
+    const float* __restrict__ max_shadow_avg10,
+    int len,
+    uint8_t* __restrict__ matrix,
+    int cols,
+    int row_cdldoji,
+    int row_cdldragonflydoji,
+    int row_cdlgravestonedoji,
+    int row_cdllongleggeddoji,
+    int row_cdlmarubozu,
+    int row_cdlhighwave,
+    int row_cdllongline,
+    int row_cdlshortline,
+    int row_cdlspinningtop)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = blockDim.x * gridDim.x;
+
+    for (int i = tid; i < len; i += stride) {
+        const bool warmup = i < 10;
+        const float b = body[i];
+        const float avg_body = body_avg10[i];
+        const float upper = upper_shadow[i];
+        const float lower = lower_shadow[i];
+        const float avg_upper = upper_avg10[i];
+        const float avg_shadow = max_shadow_avg10[i];
+
+        if (row_cdldoji >= 0) {
+            matrix[row_cdldoji * cols + i] = warmup ? 0u : ((b <= avg_body) ? 1u : 0u);
+        }
+        if (row_cdldragonflydoji >= 0) {
+            const bool hit = !warmup && (b <= avg_body) && (upper < avg_shadow) && (lower > avg_shadow);
+            matrix[row_cdldragonflydoji * cols + i] = hit ? 1u : 0u;
+        }
+        if (row_cdlgravestonedoji >= 0) {
+            const bool hit = !warmup && (b <= avg_body) && (lower < avg_upper) && (upper > avg_upper);
+            matrix[row_cdlgravestonedoji * cols + i] = hit ? 1u : 0u;
+        }
+        if (row_cdllongleggeddoji >= 0) {
+            const bool hit = !warmup && (b <= avg_body) && ((lower > avg_upper) || (upper > avg_upper));
+            matrix[row_cdllongleggeddoji * cols + i] = hit ? 1u : 0u;
+        }
+        if (row_cdlmarubozu >= 0) {
+            const bool hit = !warmup && (b > avg_body) && (upper < avg_upper) && (lower < avg_upper);
+            matrix[row_cdlmarubozu * cols + i] = hit ? 1u : 0u;
+        }
+        if (row_cdlhighwave >= 0) {
+            const bool hit = !warmup && (b < avg_body) && (upper > avg_upper) && (lower > avg_upper);
+            matrix[row_cdlhighwave * cols + i] = hit ? 1u : 0u;
+        }
+        if (row_cdllongline >= 0) {
+            const bool hit = !warmup && (b > avg_body) && (upper < avg_upper) && (lower < avg_upper);
+            matrix[row_cdllongline * cols + i] = hit ? 1u : 0u;
+        }
+        if (row_cdlshortline >= 0) {
+            const bool hit = !warmup && (b < avg_body) && (upper < avg_upper) && (lower < avg_upper);
+            matrix[row_cdlshortline * cols + i] = hit ? 1u : 0u;
+        }
+        if (row_cdlspinningtop >= 0) {
+            const bool hit = !warmup && (b < avg_body) && (upper > b) && (lower > b);
+            matrix[row_cdlspinningtop * cols + i] = hit ? 1u : 0u;
+        }
+    }
+}
+
+extern "C" __global__ void pattern_rows_two_bar_body10_u8_kernel(
+    const float* __restrict__ body,
+    const float* __restrict__ body_avg10,
+    const float* __restrict__ body_low,
+    const float* __restrict__ body_high,
+    const int8_t* __restrict__ direction,
+    const uint8_t* __restrict__ body_gap_up,
+    const uint8_t* __restrict__ body_gap_down,
+    int len,
+    uint8_t* __restrict__ matrix,
+    int cols,
+    int row_cdldojistar,
+    int row_cdlharami,
+    int row_cdlharamicross,
+    int row_cdlhomingpigeon)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = blockDim.x * gridDim.x;
+    const int lookback = 11;
+
+    for (int i = tid; i < len; i += stride) {
+        const bool warmup = i < lookback;
+        if (row_cdldojistar >= 0) {
+            bool hit = false;
+            if (!warmup) {
+                const float avg_long = body_avg10[i - 1];
+                const float avg_doji = body_avg10[i];
+                const int8_t prev_dir = direction[i - 1];
+                hit = body[i - 1] > avg_long
+                    && body[i] <= avg_doji
+                    && ((prev_dir > 0 && body_gap_up[i] != 0u) || (prev_dir < 0 && body_gap_down[i] != 0u));
+            }
+            matrix[row_cdldojistar * cols + i] = hit ? 1u : 0u;
+        }
+        if (row_cdlharami >= 0 || row_cdlharamicross >= 0) {
+            bool hit = false;
+            if (!warmup) {
+                const float avg_long = body_avg10[i - 1];
+                const float avg_short = body_avg10[i];
+                if (body[i - 1] > avg_long && body[i] <= avg_short) {
+                    const float hi0 = body_high[i - 1];
+                    const float lo0 = body_low[i - 1];
+                    const float hi1 = body_high[i];
+                    const float lo1 = body_low[i];
+                    hit = (hi1 <= hi0 && lo1 >= lo0);
+                }
+            }
+            if (row_cdlharami >= 0) {
+                matrix[row_cdlharami * cols + i] = hit ? 1u : 0u;
+            }
+            if (row_cdlharamicross >= 0) {
+                matrix[row_cdlharamicross * cols + i] = hit ? 1u : 0u;
+            }
+        }
+        if (row_cdlhomingpigeon >= 0) {
+            bool hit = false;
+            if (!warmup) {
+                const float avg_long = body_avg10[i - 1];
+                const float avg_short = body_avg10[i];
+                hit = direction[i - 1] < 0
+                    && direction[i] < 0
+                    && body[i - 1] > avg_long
+                    && body[i] <= avg_short
+                    && body_high[i] < body_high[i - 1]
+                    && body_low[i] > body_low[i - 1];
+            }
+            matrix[row_cdlhomingpigeon * cols + i] = hit ? 1u : 0u;
+        }
+    }
+}
+
+extern "C" __global__ void pattern_rows_single_bar_shadow_u8_kernel(
+    const float* __restrict__ body,
+    const float* __restrict__ body_low,
+    const float* __restrict__ body_high,
+    const float* __restrict__ body_avg10,
+    const float* __restrict__ body_avg5,
+    const float* __restrict__ upper_shadow,
+    const float* __restrict__ lower_shadow,
+    const float* __restrict__ upper_avg10,
+    const float* __restrict__ lower_avg10,
+    const uint8_t* __restrict__ body_gap_up,
+    const uint8_t* __restrict__ body_gap_down,
+    int len,
+    uint8_t* __restrict__ matrix,
+    int cols,
+    int row_cdlhammer,
+    int row_cdlhangingman,
+    int row_cdlinvertedhammer,
+    int row_cdlshootingstar,
+    int row_cdltakuri,
+    int row_cdlrickshawman)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = blockDim.x * gridDim.x;
+
+    for (int i = tid; i < len; i += stride) {
+        const bool warmup10 = i < 10;
+        const bool warmup11 = i < 11;
+        const float b = body[i];
+        const float body_avg_i = body_avg10[i];
+        const float upper_i = upper_shadow[i];
+        const float lower_i = lower_shadow[i];
+        const float upper_avg_i = upper_avg10[i];
+        const float lower_avg_i = lower_avg10[i];
+
+        if (row_cdlhammer >= 0) {
+            bool hit = false;
+            if (!warmup11) {
+                const float prev_low = pr_low(body_low[i - 1], lower_shadow[i - 1]);
+                hit = b < body_avg_i
+                    && lower_i > lower_avg_i
+                    && upper_i < upper_avg_i
+                    && body_low[i] <= prev_low + body_avg10[i - 1];
+            }
+            matrix[row_cdlhammer * cols + i] = hit ? 1u : 0u;
+        }
+
+        if (row_cdlhangingman >= 0) {
+            bool hit = false;
+            if (!warmup11) {
+                const float prev_high = pr_high(body_high[i - 1], upper_shadow[i - 1]);
+                hit = b < body_avg_i
+                    && lower_i > lower_avg_i
+                    && upper_i < upper_avg_i
+                    && body_low[i] >= prev_high - body_avg10[i - 1];
+            }
+            matrix[row_cdlhangingman * cols + i] = hit ? 1u : 0u;
+        }
+
+        if (row_cdlinvertedhammer >= 0) {
+            bool hit = false;
+            if (!warmup11) {
+                hit = b < body_avg10[i - 1]
+                    && upper_i > upper_avg10[i - 1]
+                    && lower_i < lower_avg10[i - 1]
+                    && body_gap_down[i] != 0u;
+            }
+            matrix[row_cdlinvertedhammer * cols + i] = hit ? 1u : 0u;
+        }
+
+        if (row_cdlshootingstar >= 0) {
+            bool hit = false;
+            if (!warmup11) {
+                hit = b < body_avg10[i - 1]
+                    && upper_i > upper_avg10[i - 1]
+                    && lower_i < lower_avg10[i - 1]
+                    && body_gap_up[i] != 0u;
+            }
+            matrix[row_cdlshootingstar * cols + i] = hit ? 1u : 0u;
+        }
+
+        if (row_cdltakuri >= 0) {
+            const bool hit = !warmup10
+                && (b <= body_avg_i)
+                && (upper_i < upper_avg_i)
+                && (lower_i > lower_avg_i);
+            matrix[row_cdltakuri * cols + i] = hit ? 1u : 0u;
+        }
+
+        if (row_cdlrickshawman >= 0) {
+            bool hit = false;
+            if (!warmup10) {
+                const float high_i = pr_high(body_high[i], upper_i);
+                const float low_i = pr_low(body_low[i], lower_i);
+                const float mid = low_i + (high_i - low_i) * 0.5f;
+                hit = b <= body_avg_i
+                    && lower_i > upper_avg_i
+                    && upper_i > upper_avg_i
+                    && body_low[i] <= mid + body_avg5[i]
+                    && body_high[i] >= mid - body_avg5[i];
+            }
+            matrix[row_cdlrickshawman * cols + i] = hit ? 1u : 0u;
+        }
+    }
+}
+
+extern "C" __global__ void pattern_rows_directional_shadow_u8_kernel(
+    const float* __restrict__ body,
+    const float* __restrict__ body_avg10,
+    const float* __restrict__ upper_shadow,
+    const float* __restrict__ lower_shadow,
+    const float* __restrict__ max_shadow_avg10,
+    const float* __restrict__ belt_shadow_avg10,
+    const float* __restrict__ closing_shadow_avg10,
+    const int8_t* __restrict__ direction,
+    const uint8_t* __restrict__ body_gap_up,
+    const uint8_t* __restrict__ body_gap_down,
+    int len,
+    uint8_t* __restrict__ matrix,
+    int cols,
+    int row_cdlbelthold,
+    int row_cdlclosingmarubozu,
+    int row_cdlkicking,
+    int row_cdlkickingbylength)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = blockDim.x * gridDim.x;
+
+    for (int i = tid; i < len; i += stride) {
+        const bool warmup10 = i < 10;
+        const bool warmup11 = i < 11;
+        const float b = body[i];
+        const int8_t dir_i = direction[i];
+        const float upper_i = upper_shadow[i];
+        const float lower_i = lower_shadow[i];
+        const float max_shadow_i = fmaxf(upper_i, lower_i);
+
+        if (row_cdlbelthold >= 0) {
+            bool hit = false;
+            if (!warmup10) {
+                const float avg_shadow = belt_shadow_avg10[i];
+                hit = b > body_avg10[i]
+                    && ((dir_i >= 0 && lower_i < avg_shadow) || (dir_i < 0 && upper_i < avg_shadow));
+            }
+            matrix[row_cdlbelthold * cols + i] = hit ? 1u : 0u;
+        }
+
+        if (row_cdlclosingmarubozu >= 0) {
+            bool hit = false;
+            if (!warmup10) {
+                const float avg_shadow = closing_shadow_avg10[i];
+                hit = b > body_avg10[i]
+                    && ((dir_i >= 0 && upper_i < avg_shadow) || (dir_i < 0 && lower_i < avg_shadow));
+            }
+            matrix[row_cdlclosingmarubozu * cols + i] = hit ? 1u : 0u;
+        }
+
+        if (row_cdlkicking >= 0 || row_cdlkickingbylength >= 0) {
+            bool hit = false;
+            if (!warmup11) {
+                const int8_t dir_prev = direction[i - 1];
+                const bool gap_cond = (dir_prev < 0 && body_gap_up[i] != 0u)
+                    || (dir_prev >= 0 && body_gap_down[i] != 0u);
+                hit = dir_prev == -dir_i
+                    && body[i - 1] > body_avg10[i - 1]
+                    && fmaxf(upper_shadow[i - 1], lower_shadow[i - 1]) < max_shadow_avg10[i - 1]
+                    && b > body_avg10[i]
+                    && max_shadow_i < max_shadow_avg10[i]
+                    && gap_cond;
+            }
+            if (row_cdlkicking >= 0) {
+                matrix[row_cdlkicking * cols + i] = hit ? 1u : 0u;
+            }
+            if (row_cdlkickingbylength >= 0) {
+                matrix[row_cdlkickingbylength * cols + i] = hit ? 1u : 0u;
+            }
+        }
+    }
+}
+
+extern "C" __global__ void pattern_rows_star3_u8_kernel(
+    const float* __restrict__ body,
+    const float* __restrict__ body_low,
+    const float* __restrict__ body_high,
+    const float* __restrict__ body_avg10,
+    const int8_t* __restrict__ direction,
+    const uint8_t* __restrict__ body_gap_up,
+    const uint8_t* __restrict__ body_gap_down,
+    int len,
+    float penetration,
+    uint8_t* __restrict__ matrix,
+    int cols,
+    int row_cdleveningdojistar,
+    int row_cdleveningstar,
+    int row_cdlmorningdojistar,
+    int row_cdlmorningstar)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = blockDim.x * gridDim.x;
+    const int lookback = 12;
+
+    for (int i = tid; i < len; i += stride) {
+        const bool warmup = i < lookback;
+
+        const float close_i = pr_close(body_low[i], body_high[i], direction[i]);
+        const float close_prev2 = pr_close(body_low[i - 2], body_high[i - 2], direction[i - 2]);
+        const float avg_long = body_avg10[i - 2];
+        const float avg_mid = body_avg10[i - 1];
+        const float avg_short = body_avg10[i];
+
+        if (row_cdleveningdojistar >= 0) {
+            bool hit = false;
+            if (!warmup) {
+                hit = body[i - 2] > avg_long
+                    && direction[i - 2] >= 0
+                    && body[i - 1] <= avg_mid
+                    && body_gap_up[i - 1] != 0u
+                    && body[i] > avg_short
+                    && direction[i] < 0
+                    && close_i < close_prev2 - body[i - 2] * penetration;
+            }
+            matrix[row_cdleveningdojistar * cols + i] = hit ? 1u : 0u;
+        }
+
+        if (row_cdleveningstar >= 0) {
+            bool hit = false;
+            if (!warmup) {
+                hit = body[i - 2] > avg_long
+                    && direction[i - 2] >= 0
+                    && body[i - 1] <= avg_mid
+                    && body_gap_up[i - 1] != 0u
+                    && body[i] > avg_short
+                    && direction[i] < 0
+                    && close_i < close_prev2 - body[i - 2] * penetration;
+            }
+            matrix[row_cdleveningstar * cols + i] = hit ? 1u : 0u;
+        }
+
+        if (row_cdlmorningdojistar >= 0) {
+            bool hit = false;
+            if (!warmup) {
+                hit = body[i - 2] > avg_long
+                    && direction[i - 2] < 0
+                    && body[i - 1] <= avg_mid
+                    && body_gap_down[i - 1] != 0u
+                    && body[i] > avg_short
+                    && direction[i] >= 0
+                    && close_i > close_prev2 + body[i - 2] * penetration;
+            }
+            matrix[row_cdlmorningdojistar * cols + i] = hit ? 1u : 0u;
+        }
+
+        if (row_cdlmorningstar >= 0) {
+            bool hit = false;
+            if (!warmup) {
+                hit = body[i - 2] > avg_long
+                    && direction[i - 2] < 0
+                    && body[i - 1] <= avg_mid
+                    && body_gap_down[i - 1] != 0u
+                    && body[i] > avg_short
+                    && direction[i] >= 0
+                    && close_i > close_prev2 + body[i - 2] * penetration;
+            }
+            matrix[row_cdlmorningstar * cols + i] = hit ? 1u : 0u;
+        }
+    }
+}
+
+extern "C" __global__ void pattern_rolling_mean_f32_kernel(
+    const float* __restrict__ input,
+    int len,
+    int period,
+    float* __restrict__ out_avg)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = blockDim.x * gridDim.x;
+
+    for (int i = tid; i < len; i += stride) {
+        if (i < period) {
+            out_avg[i] = 0.0f;
+            continue;
+        }
+
+        float sum = 0.0f;
+        for (int j = i - period; j < i; ++j) {
+            sum += input[j];
+        }
+        out_avg[i] = sum / (float)period;
+    }
+}
+
+extern "C" __global__ void pattern_rolling_max_shadow_mean_f32_kernel(
+    const float* __restrict__ upper_shadow,
+    const float* __restrict__ lower_shadow,
+    int len,
+    int period,
+    float* __restrict__ out_avg)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = blockDim.x * gridDim.x;
+
+    for (int i = tid; i < len; i += stride) {
+        if (i < period) {
+            out_avg[i] = 0.0f;
+            continue;
+        }
+
+        float sum = 0.0f;
+        for (int j = i - period; j < i; ++j) {
+            sum += fmaxf(upper_shadow[j], lower_shadow[j]);
+        }
+        out_avg[i] = sum / (float)period;
+    }
+}
+
 extern "C" __global__ void pattern_matrix_zero_u8_kernel(
     uint8_t* __restrict__ matrix,
     int total)
@@ -98,8 +622,8 @@ extern "C" __global__ void pattern_matrix_zero_u8_kernel(
 
 extern "C" __global__ void pattern_row_cdldoji_u8_kernel(
     const float* __restrict__ body,
+    const float* __restrict__ body_avg10,
     int len,
-    int period,
     uint8_t* __restrict__ matrix,
     int cols,
     int row)
@@ -109,26 +633,21 @@ extern "C" __global__ void pattern_row_cdldoji_u8_kernel(
     const int base = row * cols;
 
     for (int i = tid; i < len; i += stride) {
-        if (i < period) {
+        if (i < 10) {
             matrix[base + i] = 0;
             continue;
         }
-
-        float sum_body = 0.0f;
-        for (int j = i - period; j < i; ++j) {
-            sum_body += body[j];
-        }
-        const float avg_body = sum_body / (float)period;
-        matrix[base + i] = (body[i] <= avg_body) ? 1u : 0u;
+        matrix[base + i] = (body[i] <= body_avg10[i]) ? 1u : 0u;
     }
 }
 
 extern "C" __global__ void pattern_row_cdldragonflydoji_u8_kernel(
     const float* __restrict__ body,
+    const float* __restrict__ body_avg10,
     const float* __restrict__ upper_shadow,
     const float* __restrict__ lower_shadow,
+    const float* __restrict__ max_shadow_avg10,
     int len,
-    int period,
     uint8_t* __restrict__ matrix,
     int cols,
     int row)
@@ -138,20 +657,13 @@ extern "C" __global__ void pattern_row_cdldragonflydoji_u8_kernel(
     const int base = row * cols;
 
     for (int i = tid; i < len; i += stride) {
-        if (i < period) {
+        if (i < 10) {
             matrix[base + i] = 0;
             continue;
         }
 
-        float sum_body = 0.0f;
-        float sum_shadow = 0.0f;
-        for (int j = i - period; j < i; ++j) {
-            sum_body += body[j];
-            sum_shadow += fmaxf(upper_shadow[j], lower_shadow[j]);
-        }
-
-        const float avg_body = sum_body / (float)period;
-        const float avg_shadow = sum_shadow / (float)period;
+        const float avg_body = body_avg10[i];
+        const float avg_shadow = max_shadow_avg10[i];
         const bool hit = (body[i] <= avg_body)
             && (upper_shadow[i] < avg_shadow)
             && (lower_shadow[i] > avg_shadow);
@@ -161,10 +673,11 @@ extern "C" __global__ void pattern_row_cdldragonflydoji_u8_kernel(
 
 extern "C" __global__ void pattern_row_cdlgravestonedoji_u8_kernel(
     const float* __restrict__ body,
+    const float* __restrict__ body_avg10,
     const float* __restrict__ upper_shadow,
     const float* __restrict__ lower_shadow,
+    const float* __restrict__ upper_avg10,
     int len,
-    int period,
     uint8_t* __restrict__ matrix,
     int cols,
     int row)
@@ -174,20 +687,13 @@ extern "C" __global__ void pattern_row_cdlgravestonedoji_u8_kernel(
     const int base = row * cols;
 
     for (int i = tid; i < len; i += stride) {
-        if (i < period) {
+        if (i < 10) {
             matrix[base + i] = 0;
             continue;
         }
 
-        float sum_body = 0.0f;
-        float sum_upper = 0.0f;
-        for (int j = i - period; j < i; ++j) {
-            sum_body += body[j];
-            sum_upper += upper_shadow[j];
-        }
-
-        const float avg_body = sum_body / (float)period;
-        const float avg_upper = sum_upper / (float)period;
+        const float avg_body = body_avg10[i];
+        const float avg_upper = upper_avg10[i];
         const bool hit = (body[i] <= avg_body)
             && (lower_shadow[i] < avg_upper)
             && (upper_shadow[i] > avg_upper);
@@ -197,10 +703,11 @@ extern "C" __global__ void pattern_row_cdlgravestonedoji_u8_kernel(
 
 extern "C" __global__ void pattern_row_cdllongleggeddoji_u8_kernel(
     const float* __restrict__ body,
+    const float* __restrict__ body_avg10,
     const float* __restrict__ upper_shadow,
     const float* __restrict__ lower_shadow,
+    const float* __restrict__ upper_avg10,
     int len,
-    int period,
     uint8_t* __restrict__ matrix,
     int cols,
     int row)
@@ -210,20 +717,13 @@ extern "C" __global__ void pattern_row_cdllongleggeddoji_u8_kernel(
     const int base = row * cols;
 
     for (int i = tid; i < len; i += stride) {
-        if (i < period) {
+        if (i < 10) {
             matrix[base + i] = 0;
             continue;
         }
 
-        float sum_body = 0.0f;
-        float sum_upper = 0.0f;
-        for (int j = i - period; j < i; ++j) {
-            sum_body += body[j];
-            sum_upper += upper_shadow[j];
-        }
-
-        const float avg_body = sum_body / (float)period;
-        const float avg_upper = sum_upper / (float)period;
+        const float avg_body = body_avg10[i];
+        const float avg_upper = upper_avg10[i];
         const bool hit = (body[i] <= avg_body)
             && ((lower_shadow[i] > avg_upper) || (upper_shadow[i] > avg_upper));
         matrix[base + i] = hit ? 1u : 0u;
@@ -232,10 +732,11 @@ extern "C" __global__ void pattern_row_cdllongleggeddoji_u8_kernel(
 
 extern "C" __global__ void pattern_row_cdlmarubozu_u8_kernel(
     const float* __restrict__ body,
+    const float* __restrict__ body_avg10,
     const float* __restrict__ upper_shadow,
     const float* __restrict__ lower_shadow,
+    const float* __restrict__ upper_avg10,
     int len,
-    int period,
     uint8_t* __restrict__ matrix,
     int cols,
     int row)
@@ -245,20 +746,13 @@ extern "C" __global__ void pattern_row_cdlmarubozu_u8_kernel(
     const int base = row * cols;
 
     for (int i = tid; i < len; i += stride) {
-        if (i < period) {
+        if (i < 10) {
             matrix[base + i] = 0;
             continue;
         }
 
-        float sum_body = 0.0f;
-        float sum_upper = 0.0f;
-        for (int j = i - period; j < i; ++j) {
-            sum_body += body[j];
-            sum_upper += upper_shadow[j];
-        }
-
-        const float avg_body = sum_body / (float)period;
-        const float avg_upper = sum_upper / (float)period;
+        const float avg_body = body_avg10[i];
+        const float avg_upper = upper_avg10[i];
         const bool hit = (body[i] > avg_body)
             && (upper_shadow[i] < avg_upper)
             && (lower_shadow[i] < avg_upper);
@@ -268,12 +762,11 @@ extern "C" __global__ void pattern_row_cdlmarubozu_u8_kernel(
 
 extern "C" __global__ void pattern_row_cdldojistar_u8_kernel(
     const float* __restrict__ body,
+    const float* __restrict__ body_avg10,
     const int8_t* __restrict__ direction,
     const uint8_t* __restrict__ body_gap_up,
     const uint8_t* __restrict__ body_gap_down,
     int len,
-    int period_long,
-    int period_doji,
     uint8_t* __restrict__ matrix,
     int cols,
     int row)
@@ -281,25 +774,15 @@ extern "C" __global__ void pattern_row_cdldojistar_u8_kernel(
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
     const int base = row * cols;
-    const int lookback = 1 + ((period_long > period_doji) ? period_long : period_doji);
+    const int lookback = 11;
 
     for (int i = tid; i < len; i += stride) {
         if (i < lookback) {
             matrix[base + i] = 0;
             continue;
         }
-
-        float sum_long = 0.0f;
-        for (int j = i - 1 - period_long; j < i - 1; ++j) {
-            sum_long += body[j];
-        }
-        float sum_doji = 0.0f;
-        for (int j = i - period_doji; j < i; ++j) {
-            sum_doji += body[j];
-        }
-
-        const float avg_long = sum_long / (float)period_long;
-        const float avg_doji = sum_doji / (float)period_doji;
+        const float avg_long = body_avg10[i - 1];
+        const float avg_doji = body_avg10[i];
         const int8_t prev_dir = direction[i - 1];
         const bool hit = body[i - 1] > avg_long
             && body[i] <= avg_doji
@@ -341,11 +824,10 @@ extern "C" __global__ void pattern_row_cdlengulfing_u8_kernel(
 
 extern "C" __global__ void pattern_row_cdlharami_u8_kernel(
     const float* __restrict__ body,
+    const float* __restrict__ body_avg10,
     const float* __restrict__ body_low,
     const float* __restrict__ body_high,
     int len,
-    int period_long,
-    int period_short,
     uint8_t* __restrict__ matrix,
     int cols,
     int row)
@@ -353,24 +835,15 @@ extern "C" __global__ void pattern_row_cdlharami_u8_kernel(
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
     const int base = row * cols;
-    const int lookback = 1 + ((period_long > period_short) ? period_long : period_short);
+    const int lookback = 11;
 
     for (int i = tid; i < len; i += stride) {
         if (i < lookback) {
             matrix[base + i] = 0;
             continue;
         }
-
-        float sum_long = 0.0f;
-        for (int j = i - 1 - period_long; j < i - 1; ++j) {
-            sum_long += body[j];
-        }
-        float sum_short = 0.0f;
-        for (int j = i - period_short; j < i; ++j) {
-            sum_short += body[j];
-        }
-        const float avg_long = sum_long / (float)period_long;
-        const float avg_short = sum_short / (float)period_short;
+        const float avg_long = body_avg10[i - 1];
+        const float avg_short = body_avg10[i];
 
         bool hit = false;
         if (body[i - 1] > avg_long && body[i] <= avg_short) {
@@ -387,10 +860,11 @@ extern "C" __global__ void pattern_row_cdlharami_u8_kernel(
 
 extern "C" __global__ void pattern_row_cdlhighwave_u8_kernel(
     const float* __restrict__ body,
+    const float* __restrict__ body_avg10,
     const float* __restrict__ upper_shadow,
     const float* __restrict__ lower_shadow,
+    const float* __restrict__ upper_avg10,
     int len,
-    int period,
     uint8_t* __restrict__ matrix,
     int cols,
     int row)
@@ -400,19 +874,12 @@ extern "C" __global__ void pattern_row_cdlhighwave_u8_kernel(
     const int base = row * cols;
 
     for (int i = tid; i < len; i += stride) {
-        if (i < period) {
+        if (i < 10) {
             matrix[base + i] = 0;
             continue;
         }
-
-        float sum_body = 0.0f;
-        float sum_upper = 0.0f;
-        for (int j = i - period; j < i; ++j) {
-            sum_body += body[j];
-            sum_upper += upper_shadow[j];
-        }
-        const float avg_body = sum_body / (float)period;
-        const float avg_upper = sum_upper / (float)period;
+        const float avg_body = body_avg10[i];
+        const float avg_upper = upper_avg10[i];
         const bool hit = body[i] < avg_body && upper_shadow[i] > avg_upper && lower_shadow[i] > avg_upper;
         matrix[base + i] = hit ? 1u : 0u;
     }
@@ -420,13 +887,13 @@ extern "C" __global__ void pattern_row_cdlhighwave_u8_kernel(
 
 extern "C" __global__ void pattern_row_cdlinvertedhammer_u8_kernel(
     const float* __restrict__ body,
+    const float* __restrict__ body_avg10,
     const float* __restrict__ upper_shadow,
+    const float* __restrict__ upper_avg10,
     const float* __restrict__ lower_shadow,
+    const float* __restrict__ lower_avg10,
     const uint8_t* __restrict__ body_gap_down,
     int len,
-    int period_body_short,
-    int period_shadow_long,
-    int period_shadow_very_short,
     uint8_t* __restrict__ matrix,
     int cols,
     int row)
@@ -434,31 +901,16 @@ extern "C" __global__ void pattern_row_cdlinvertedhammer_u8_kernel(
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
     const int base = row * cols;
-    const int max_p = period_body_short > period_shadow_long ? period_body_short : period_shadow_long;
-    const int lookback = 1 + (max_p > period_shadow_very_short ? max_p : period_shadow_very_short);
+    const int lookback = 11;
 
     for (int i = tid; i < len; i += stride) {
         if (i < lookback) {
             matrix[base + i] = 0;
             continue;
         }
-
-        float sum_body = 0.0f;
-        for (int j = i - 1 - period_body_short; j < i - 1; ++j) {
-            sum_body += body[j];
-        }
-        float sum_upper = 0.0f;
-        for (int j = i - 1 - period_shadow_long; j < i - 1; ++j) {
-            sum_upper += upper_shadow[j];
-        }
-        float sum_lower = 0.0f;
-        for (int j = i - 1 - period_shadow_very_short; j < i - 1; ++j) {
-            sum_lower += lower_shadow[j];
-        }
-
-        const float avg_body = sum_body / (float)period_body_short;
-        const float avg_upper = sum_upper / (float)period_shadow_long;
-        const float avg_lower = sum_lower / (float)period_shadow_very_short;
+        const float avg_body = body_avg10[i - 1];
+        const float avg_upper = upper_avg10[i - 1];
+        const float avg_lower = lower_avg10[i - 1];
         const bool hit = body[i] < avg_body
             && upper_shadow[i] > avg_upper
             && lower_shadow[i] < avg_lower
@@ -469,11 +921,11 @@ extern "C" __global__ void pattern_row_cdlinvertedhammer_u8_kernel(
 
 extern "C" __global__ void pattern_row_cdllongline_u8_kernel(
     const float* __restrict__ body,
+    const float* __restrict__ body_avg10,
     const float* __restrict__ upper_shadow,
     const float* __restrict__ lower_shadow,
+    const float* __restrict__ upper_avg10,
     int len,
-    int period_body_long,
-    int period_shadow_short,
     uint8_t* __restrict__ matrix,
     int cols,
     int row)
@@ -481,25 +933,15 @@ extern "C" __global__ void pattern_row_cdllongline_u8_kernel(
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
     const int base = row * cols;
-    const int lookback = period_body_long > period_shadow_short ? period_body_long : period_shadow_short;
+    const int lookback = 10;
 
     for (int i = tid; i < len; i += stride) {
         if (i < lookback) {
             matrix[base + i] = 0;
             continue;
         }
-
-        float sum_body = 0.0f;
-        for (int j = i - period_body_long; j < i; ++j) {
-            sum_body += body[j];
-        }
-        float sum_upper = 0.0f;
-        for (int j = i - period_shadow_short; j < i; ++j) {
-            sum_upper += upper_shadow[j];
-        }
-
-        const float avg_body = sum_body / (float)period_body_long;
-        const float avg_upper = sum_upper / (float)period_shadow_short;
+        const float avg_body = body_avg10[i];
+        const float avg_upper = upper_avg10[i];
         const bool hit = body[i] > avg_body && upper_shadow[i] < avg_upper && lower_shadow[i] < avg_upper;
         matrix[base + i] = hit ? 1u : 0u;
     }
@@ -600,11 +1042,11 @@ extern "C" __global__ void pattern_row_cdlshootingstar_u8_kernel(
 
 extern "C" __global__ void pattern_row_cdlshortline_u8_kernel(
     const float* __restrict__ body,
+    const float* __restrict__ body_avg10,
     const float* __restrict__ upper_shadow,
     const float* __restrict__ lower_shadow,
+    const float* __restrict__ upper_avg10,
     int len,
-    int period_body_short,
-    int period_shadow_short,
     uint8_t* __restrict__ matrix,
     int cols,
     int row)
@@ -612,25 +1054,15 @@ extern "C" __global__ void pattern_row_cdlshortline_u8_kernel(
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
     const int base = row * cols;
-    const int lookback = period_body_short > period_shadow_short ? period_body_short : period_shadow_short;
+    const int lookback = 10;
 
     for (int i = tid; i < len; i += stride) {
         if (i < lookback) {
             matrix[base + i] = 0;
             continue;
         }
-
-        float sum_body = 0.0f;
-        for (int j = i - period_body_short; j < i; ++j) {
-            sum_body += body[j];
-        }
-        float sum_upper = 0.0f;
-        for (int j = i - period_shadow_short; j < i; ++j) {
-            sum_upper += upper_shadow[j];
-        }
-
-        const float avg_body = sum_body / (float)period_body_short;
-        const float avg_upper = sum_upper / (float)period_shadow_short;
+        const float avg_body = body_avg10[i];
+        const float avg_upper = upper_avg10[i];
         const bool hit = body[i] < avg_body && upper_shadow[i] < avg_upper && lower_shadow[i] < avg_upper;
         matrix[base + i] = hit ? 1u : 0u;
     }
@@ -638,10 +1070,10 @@ extern "C" __global__ void pattern_row_cdlshortline_u8_kernel(
 
 extern "C" __global__ void pattern_row_cdlspinningtop_u8_kernel(
     const float* __restrict__ body,
+    const float* __restrict__ body_avg10,
     const float* __restrict__ upper_shadow,
     const float* __restrict__ lower_shadow,
     int len,
-    int period_body_short,
     uint8_t* __restrict__ matrix,
     int cols,
     int row)
@@ -651,17 +1083,11 @@ extern "C" __global__ void pattern_row_cdlspinningtop_u8_kernel(
     const int base = row * cols;
 
     for (int i = tid; i < len; i += stride) {
-        if (i < period_body_short) {
+        if (i < 10) {
             matrix[base + i] = 0;
             continue;
         }
-
-        float sum_body = 0.0f;
-        for (int j = i - period_body_short; j < i; ++j) {
-            sum_body += body[j];
-        }
-
-        const float avg_body = sum_body / (float)period_body_short;
+        const float avg_body = body_avg10[i];
         const bool hit = body[i] < avg_body && upper_shadow[i] > body[i] && lower_shadow[i] > body[i];
         matrix[base + i] = hit ? 1u : 0u;
     }

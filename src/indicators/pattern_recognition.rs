@@ -1,9 +1,15 @@
 use crate::utilities::data_loader::Candles;
 #[cfg(all(feature = "python", feature = "cuda"))]
 pub use crate::utilities::dlpack_cuda::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_u64_cuda_dlpack_2d;
 use crate::utilities::enums::Kernel;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArrayMethods};
 #[cfg(feature = "python")]
@@ -12,6 +18,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 use std::mem::MaybeUninit;
@@ -6904,22 +6912,13 @@ pub fn pattern_recognition_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
-        let features = cuda
-            .compute_features_device(open_slice, high_slice, low_slice, close_slice)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let native_ids = CudaPatternRecognition::native_supported_pattern_ids();
-        let rows = native_ids.len();
-        let cols = close_slice.len();
-        let row_map: Vec<(&str, usize)> = native_ids
-            .iter()
-            .enumerate()
-            .map(|(row, id)| (*id, row))
-            .collect();
-        let d_u8 = cuda
-            .compute_native_matrix_device(&features, rows, cols, row_map.as_slice())
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let d_f32 = cuda
-            .matrix_u8_to_f32_device(&d_u8, rows, cols)
+            .compute_native_matrix_f32_device_from_host_inputs(
+                open_slice,
+                high_slice,
+                low_slice,
+                close_slice,
+            )
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((d_f32, ctx, dev_id))
     })?;
@@ -6957,19 +6956,16 @@ pub fn pattern_recognition_cuda_host_f32_py<'py>(
     let (values_f32, pattern_ids, rows, cols) = py.allow_threads(|| {
         let cuda = CudaPatternRecognition::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let features = cuda
-            .compute_features_device(open_slice, high_slice, low_slice, close_slice)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let native_ids = CudaPatternRecognition::native_supported_pattern_ids();
         let rows = native_ids.len();
         let cols = close_slice.len();
-        let row_map: Vec<(&str, usize)> = native_ids
-            .iter()
-            .enumerate()
-            .map(|(row, id)| (*id, row))
-            .collect();
-        let host_u8 = cuda
-            .compute_native_matrix_host(&features, rows, cols, row_map.as_slice())
+        let d_u8 = cuda
+            .compute_native_matrix_device_from_host_inputs(open_slice, high_slice, low_slice, close_slice)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.synchronize()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut host_u8 = vec![0u8; rows.saturating_mul(cols)];
+        d_u8.copy_to(host_u8.as_mut_slice())
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let mut values_f32 = Vec::with_capacity(host_u8.len());
         values_f32.extend(host_u8.into_iter().map(|x| x as f32));
@@ -6986,6 +6982,159 @@ pub fn pattern_recognition_cuda_host_f32_py<'py>(
     dict.set_item("pattern_ids", pattern_ids)?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
+    dict.set_item("warmup", py.None())?;
+    Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct PatternRecognitionDeviceBitmaskU64Py {
+    pub(crate) buf: Option<DeviceBuffer<u64>>,
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) words_per_row: usize,
+    pub(crate) _ctx: Arc<Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl PatternRecognitionDeviceBitmaskU64Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("shape", (self.rows, self.words_per_row))?;
+        d.set_item("typestr", "<u8")?;
+        d.set_item(
+            "strides",
+            (
+                self.words_per_row * std::mem::size_of::<u64>(),
+                std::mem::size_of::<u64>(),
+            ),
+        )?;
+        let ptr = self
+            .buf
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
+            .as_device_ptr()
+            .as_raw() as usize;
+        d.set_item("data", (ptr, false))?;
+        d.set_item("version", 3)?;
+        Ok(d)
+    }
+
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: Python<'py>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<pyo3::PyObject>,
+        dl_device: Option<pyo3::PyObject>,
+        copy: Option<pyo3::PyObject>,
+    ) -> PyResult<PyObject> {
+        let (kdl, alloc_dev) = self.__dlpack_device__();
+        if let Some(dev_obj) = dl_device.as_ref() {
+            if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
+                if dev_ty != kdl || dev_id != alloc_dev {
+                    let wants_copy = copy
+                        .as_ref()
+                        .and_then(|c| c.extract::<bool>(py).ok())
+                        .unwrap_or(false);
+                    if wants_copy {
+                        return Err(PyValueError::new_err(
+                            "device copy not implemented for __dlpack__",
+                        ));
+                    } else {
+                        return Err(PyValueError::new_err("dl_device mismatch for __dlpack__"));
+                    }
+                }
+            }
+        }
+
+        if let Some(obj) = stream.as_ref() {
+            if let Ok(i) = obj.extract::<i64>(py) {
+                if i == 0 {
+                    return Err(PyValueError::new_err(
+                        "__dlpack__: stream 0 is disallowed for CUDA",
+                    ));
+                }
+            }
+        }
+
+        let buf = self
+            .buf
+            .take()
+            .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
+        let rows = self.rows;
+        let cols = self.words_per_row;
+        let max_version_bound = max_version.map(|obj| obj.into_bound(py));
+        export_u64_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "pattern_recognition_cuda_bitmask_dev")]
+#[pyo3(signature = (open_f32, high_f32, low_f32, close_f32, device_id=0))]
+pub fn pattern_recognition_cuda_bitmask_dev_py<'py>(
+    py: Python<'py>,
+    open_f32: numpy::PyReadonlyArray1<'py, f32>,
+    high_f32: numpy::PyReadonlyArray1<'py, f32>,
+    low_f32: numpy::PyReadonlyArray1<'py, f32>,
+    close_f32: numpy::PyReadonlyArray1<'py, f32>,
+    device_id: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::pattern_recognition_wrapper::CudaPatternRecognition;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let open_slice = open_f32.as_slice()?;
+    let high_slice = high_f32.as_slice()?;
+    let low_slice = low_f32.as_slice()?;
+    let close_slice = close_f32.as_slice()?;
+
+    let (bitmask, pattern_ids) = py.allow_threads(|| {
+        let cuda = CudaPatternRecognition::new(device_id)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let bitmask = cuda
+            .compute_native_matrix_bitmask_u64_device_from_host_inputs(
+                open_slice,
+                high_slice,
+                low_slice,
+                close_slice,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let pattern_ids = CudaPatternRecognition::native_supported_pattern_ids()
+            .iter()
+            .map(|x| (*x).to_string())
+            .collect::<Vec<_>>();
+        Ok::<_, PyErr>((bitmask, pattern_ids))
+    })?;
+
+    let handle = Py::new(
+        py,
+        PatternRecognitionDeviceBitmaskU64Py {
+            buf: Some(bitmask.buf),
+            rows: bitmask.rows,
+            cols: bitmask.cols,
+            words_per_row: bitmask.words_per_row,
+            _ctx: bitmask.ctx,
+            device_id: bitmask.device_id,
+        },
+    )?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("values", handle)?;
+    dict.set_item("pattern_ids", pattern_ids)?;
+    dict.set_item("rows", bitmask.rows)?;
+    dict.set_item("cols", bitmask.cols)?;
+    dict.set_item("words_per_row", bitmask.words_per_row)?;
     dict.set_item("warmup", py.None())?;
     Ok(dict)
 }

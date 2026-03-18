@@ -1,6 +1,6 @@
 [package]
 name = "vector-ta"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "High-performance technical analysis indicators with optional SIMD/CUDA and language bindings."
 license = "Apache-2.0"
@@ -53,6 +53,11 @@ required-features = ["cuda"]
 
 [[bench]]
 name = "cuda_dispatch_vram_benchmark"
+harness = false
+required-features = ["cuda"]
+
+[[bench]]
+name = "pattern_recognition_cuda_benchmark"
 harness = false
 required-features = ["cuda"]
 

@@ -1404,7 +1404,8 @@ use crate::indicators::otto::{otto_cuda_batch_dev_py, otto_cuda_many_series_one_
 use crate::indicators::pattern_recognition::pattern_recognition_py;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::pattern_recognition::{
-    pattern_recognition_cuda_batch_dev_py, pattern_recognition_cuda_host_f32_py,
+    pattern_recognition_cuda_batch_dev_py, pattern_recognition_cuda_bitmask_dev_py,
+    pattern_recognition_cuda_host_f32_py, PatternRecognitionDeviceBitmaskU64Py,
 };
 #[cfg(feature = "python")]
 use crate::indicators::percentile_nearest_rank::{
@@ -2654,7 +2655,9 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pattern_recognition_py, m)?)?;
     #[cfg(feature = "cuda")]
     {
+        m.add_class::<PatternRecognitionDeviceBitmaskU64Py>()?;
         m.add_function(wrap_pyfunction!(pattern_recognition_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(pattern_recognition_cuda_bitmask_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(pattern_recognition_cuda_host_f32_py, m)?)?;
     }
 

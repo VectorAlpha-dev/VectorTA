@@ -8,8 +8,11 @@ use cust::memory::{CopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use cust::sys::{self as cuda, CUfunction};
+use std::collections::HashMap;
 use std::ffi::c_void;
-use std::sync::Arc;
+use std::ptr;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -38,6 +41,107 @@ impl DevicePatternFeatures {
     pub fn len(&self) -> usize {
         self.body.len()
     }
+}
+
+pub struct DevicePatternBitmaskU64 {
+    pub buf: DeviceBuffer<u64>,
+    pub rows: usize,
+    pub cols: usize,
+    pub words_per_row: usize,
+    pub ctx: Arc<Context>,
+    pub device_id: u32,
+}
+
+impl DevicePatternBitmaskU64 {
+    #[inline]
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.buf.len()
+    }
+}
+
+pub struct DevicePatternRollingStats {
+    pub body_avg10: DeviceBuffer<f32>,
+    pub body_avg5: DeviceBuffer<f32>,
+    pub upper_avg10: DeviceBuffer<f32>,
+    pub lower_avg10: DeviceBuffer<f32>,
+    pub max_shadow_avg10: DeviceBuffer<f32>,
+    pub belt_shadow_avg10: DeviceBuffer<f32>,
+    pub closing_shadow_avg10: DeviceBuffer<f32>,
+}
+
+impl DevicePatternRollingStats {
+    pub fn len(&self) -> usize {
+        self.body_avg10.len()
+    }
+}
+
+fn row_index_or_neg1(row_map: &[(&str, usize)], pattern_id: &str) -> i32 {
+    row_map
+        .iter()
+        .find(|(id, _)| *id == pattern_id)
+        .map(|(_, row)| *row as i32)
+        .unwrap_or(-1)
+}
+
+fn is_canonical_full_native_row_map(row_map: &[(&str, usize)]) -> bool {
+    row_map.len() == NATIVE_SUPPORTED_PATTERN_IDS.len()
+        && row_map
+            .iter()
+            .enumerate()
+            .all(|(idx, (pattern_id, row))| *pattern_id == NATIVE_SUPPORTED_PATTERN_IDS[idx] && *row == idx)
+}
+
+fn is_simple10_fused_pattern(pattern_id: &str) -> bool {
+    matches!(
+        pattern_id,
+        "cdldoji"
+            | "cdldragonflydoji"
+            | "cdlgravestonedoji"
+            | "cdllongleggeddoji"
+            | "cdlmarubozu"
+            | "cdlhighwave"
+            | "cdllongline"
+            | "cdlshortline"
+            | "cdlspinningtop"
+    )
+}
+
+fn is_two_bar_body10_fused_pattern(pattern_id: &str) -> bool {
+    matches!(
+        pattern_id,
+        "cdldojistar" | "cdlharami" | "cdlharamicross" | "cdlhomingpigeon"
+    )
+}
+
+fn is_single_bar_shadow_fused_pattern(pattern_id: &str) -> bool {
+    matches!(
+        pattern_id,
+        "cdlhammer"
+            | "cdlhangingman"
+            | "cdlinvertedhammer"
+            | "cdlshootingstar"
+            | "cdltakuri"
+            | "cdlrickshawman"
+    )
+}
+
+fn is_directional_shadow_fused_pattern(pattern_id: &str) -> bool {
+    matches!(
+        pattern_id,
+        "cdlbelthold" | "cdlclosingmarubozu" | "cdlkicking" | "cdlkickingbylength"
+    )
+}
+
+fn is_star3_fused_pattern(pattern_id: &str) -> bool {
+    matches!(
+        pattern_id,
+        "cdleveningdojistar" | "cdleveningstar" | "cdlmorningdojistar" | "cdlmorningstar"
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -117,6 +221,7 @@ pub struct CudaPatternRecognition {
     module: Module,
     stream: Stream,
     context: Arc<Context>,
+    kernel_handles: Mutex<HashMap<&'static str, CUfunction>>,
     device_id: u32,
 }
 
@@ -135,6 +240,7 @@ impl CudaPatternRecognition {
             module,
             stream,
             context,
+            kernel_handles: Mutex::new(HashMap::new()),
             device_id: device_id as u32,
         })
     }
@@ -185,7 +291,41 @@ impl CudaPatternRecognition {
         })
     }
 
+    fn allocate_rolling_stat_buffers(
+        &self,
+        len: usize,
+    ) -> Result<DevicePatternRollingStats, CudaPatternRecognitionError> {
+        if len == 0 {
+            return Err(CudaPatternRecognitionError::InvalidInput(
+                "len must be > 0".to_string(),
+            ));
+        }
+
+        Ok(DevicePatternRollingStats {
+            body_avg10: unsafe { DeviceBuffer::<f32>::uninitialized(len) }?,
+            body_avg5: unsafe { DeviceBuffer::<f32>::uninitialized(len) }?,
+            upper_avg10: unsafe { DeviceBuffer::<f32>::uninitialized(len) }?,
+            lower_avg10: unsafe { DeviceBuffer::<f32>::uninitialized(len) }?,
+            max_shadow_avg10: unsafe { DeviceBuffer::<f32>::uninitialized(len) }?,
+            belt_shadow_avg10: unsafe { DeviceBuffer::<f32>::uninitialized(len) }?,
+            closing_shadow_avg10: unsafe { DeviceBuffer::<f32>::uninitialized(len) }?,
+        })
+    }
+
     pub fn compute_features_device(
+        &self,
+        open: &[f32],
+        high: &[f32],
+        low: &[f32],
+        close: &[f32],
+    ) -> Result<DevicePatternFeatures, CudaPatternRecognitionError> {
+        let out = self.compute_features_device_async(open, high, low, close)?;
+        self.synchronize()?;
+
+        Ok(out)
+    }
+
+    pub fn compute_features_device_async(
         &self,
         open: &[f32],
         high: &[f32],
@@ -201,9 +341,60 @@ impl CudaPatternRecognition {
 
         let mut out = self.allocate_feature_buffers(len)?;
         self.compute_features_device_into(&d_open, &d_high, &d_low, &d_close, len, &mut out)?;
-        self.synchronize()?;
 
         Ok(out)
+    }
+
+    fn cached_function(&self, name: &'static str) -> Result<CUfunction, CudaPatternRecognitionError> {
+        let mut cache = self.kernel_handles.lock().map_err(|_| {
+            CudaPatternRecognitionError::InvalidInput("kernel handle cache poisoned".to_string())
+        })?;
+        if let Some(&func) = cache.get(name) {
+            return Ok(func);
+        }
+
+        let func = self
+            .module
+            .get_function(name)
+            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol { name })?
+            .to_raw();
+        cache.insert(name, func);
+        Ok(func)
+    }
+
+    unsafe fn launch_raw_function<G, B>(
+        &self,
+        func: CUfunction,
+        grid_size: G,
+        block_size: B,
+        shared_mem_bytes: u32,
+        args: &[*mut c_void],
+    ) -> Result<(), CudaPatternRecognitionError>
+    where
+        G: Into<GridSize>,
+        B: Into<BlockSize>,
+    {
+        let grid_size: GridSize = grid_size.into();
+        let block_size: BlockSize = block_size.into();
+
+        let result = cuda::cuLaunchKernel(
+            func,
+            grid_size.x,
+            grid_size.y,
+            grid_size.z,
+            block_size.x,
+            block_size.y,
+            block_size.z,
+            shared_mem_bytes,
+            self.stream.as_inner(),
+            args.as_ptr() as *mut _,
+            ptr::null_mut(),
+        );
+        if result == cuda::CUresult::CUDA_SUCCESS {
+            Ok(())
+        } else {
+            Err(unsafe { std::mem::transmute::<u32, cust::error::CudaError>(result as u32) }.into())
+        }
     }
 
     pub fn compute_features_device_into(
@@ -233,12 +424,7 @@ impl CudaPatternRecognition {
             ));
         }
 
-        let func = self
-            .module
-            .get_function("pattern_features_kernel_f32")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_features_kernel_f32",
-            })?;
+        let func = self.cached_function("pattern_features_kernel_f32")?;
 
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
@@ -275,10 +461,156 @@ impl CudaPatternRecognition {
                 &mut gap_up_ptr as *mut _ as *mut c_void,
                 &mut gap_down_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
+    }
+
+    fn rolling_mean_f32_device_into(
+        &self,
+        input: &DeviceBuffer<f32>,
+        len: usize,
+        period: i32,
+        out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaPatternRecognitionError> {
+        if len == 0 || period <= 0 {
+            return Err(CudaPatternRecognitionError::InvalidInput(
+                "len must be > 0 and period must be > 0".to_string(),
+            ));
+        }
+        if input.len() < len || out.len() < len {
+            return Err(CudaPatternRecognitionError::InvalidInput(
+                "buffer too small for rolling mean".to_string(),
+            ));
+        }
+
+        let func = self.cached_function("pattern_rolling_mean_f32_kernel")?;
+        let block_x: u32 = 256;
+        let (grid, block) = grid_1d_for(len, block_x);
+
+        unsafe {
+            let mut in_ptr = input.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut period_i = period;
+            let mut out_ptr = out.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut in_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut period_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.launch_raw_function(func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
+    fn rolling_max_shadow_mean_f32_device_into(
+        &self,
+        upper: &DeviceBuffer<f32>,
+        lower: &DeviceBuffer<f32>,
+        len: usize,
+        period: i32,
+        out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaPatternRecognitionError> {
+        if len == 0 || period <= 0 {
+            return Err(CudaPatternRecognitionError::InvalidInput(
+                "len must be > 0 and period must be > 0".to_string(),
+            ));
+        }
+        if upper.len() < len || lower.len() < len || out.len() < len {
+            return Err(CudaPatternRecognitionError::InvalidInput(
+                "buffer too small for rolling max shadow mean".to_string(),
+            ));
+        }
+
+        let func = self.cached_function("pattern_rolling_max_shadow_mean_f32_kernel")?;
+        let block_x: u32 = 256;
+        let (grid, block) = grid_1d_for(len, block_x);
+
+        unsafe {
+            let mut upper_ptr = upper.as_device_ptr().as_raw();
+            let mut lower_ptr = lower.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut period_i = period;
+            let mut out_ptr = out.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut upper_ptr as *mut _ as *mut c_void,
+                &mut lower_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut period_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.launch_raw_function(func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
+    fn rolling_stats_10_device_into(
+        &self,
+        features: &DevicePatternFeatures,
+        len: usize,
+        out: &mut DevicePatternRollingStats,
+    ) -> Result<(), CudaPatternRecognitionError> {
+        if features.len() < len || out.len() < len {
+            return Err(CudaPatternRecognitionError::InvalidInput(
+                "buffer too small for rolling stats".to_string(),
+            ));
+        }
+
+        let func = self.cached_function("pattern_rolling_stats_10_f32_kernel")?;
+        let block_x: u32 = 256;
+        let (grid, block) = grid_1d_for(len, block_x);
+
+        unsafe {
+            let mut body_ptr = features.body.as_device_ptr().as_raw();
+            let mut upper_ptr = features.upper_shadow.as_device_ptr().as_raw();
+            let mut lower_ptr = features.lower_shadow.as_device_ptr().as_raw();
+            let mut direction_ptr = features.direction.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut body_avg_ptr = out.body_avg10.as_device_ptr().as_raw();
+            let mut body_avg5_ptr = out.body_avg5.as_device_ptr().as_raw();
+            let mut upper_avg_ptr = out.upper_avg10.as_device_ptr().as_raw();
+            let mut lower_avg_ptr = out.lower_avg10.as_device_ptr().as_raw();
+            let mut max_shadow_avg_ptr = out.max_shadow_avg10.as_device_ptr().as_raw();
+            let mut belt_shadow_avg_ptr = out.belt_shadow_avg10.as_device_ptr().as_raw();
+            let mut closing_shadow_avg_ptr = out.closing_shadow_avg10.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut body_ptr as *mut _ as *mut c_void,
+                &mut upper_ptr as *mut _ as *mut c_void,
+                &mut lower_ptr as *mut _ as *mut c_void,
+                &mut direction_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut body_avg_ptr as *mut _ as *mut c_void,
+                &mut body_avg5_ptr as *mut _ as *mut c_void,
+                &mut upper_avg_ptr as *mut _ as *mut c_void,
+                &mut lower_avg_ptr as *mut _ as *mut c_void,
+                &mut max_shadow_avg_ptr as *mut _ as *mut c_void,
+                &mut belt_shadow_avg_ptr as *mut _ as *mut c_void,
+                &mut closing_shadow_avg_ptr as *mut _ as *mut c_void,
+            ];
+            self.launch_raw_function(func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
+    fn compute_shared_rolling_stats_device(
+        &self,
+        features: &DevicePatternFeatures,
+        len: usize,
+    ) -> Result<DevicePatternRollingStats, CudaPatternRecognitionError> {
+        if features.len() < len {
+            return Err(CudaPatternRecognitionError::InvalidInput(
+                "features length mismatch for rolling stats".to_string(),
+            ));
+        }
+
+        let mut out = self.allocate_rolling_stat_buffers(len)?;
+        self.rolling_stats_10_device_into(features, len, &mut out)?;
+        Ok(out)
     }
 
     pub fn doji_mask_from_features_device_into(
@@ -301,12 +633,7 @@ impl CudaPatternRecognition {
             ));
         }
 
-        let func = self
-            .module
-            .get_function("pattern_doji_predicate_kernel_f32")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_doji_predicate_kernel_f32",
-            })?;
+        let func = self.cached_function("pattern_doji_predicate_kernel_f32")?;
 
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
@@ -325,7 +652,7 @@ impl CudaPatternRecognition {
                 &mut threshold_f as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -392,10 +719,35 @@ impl CudaPatternRecognition {
         let total = rows.checked_mul(cols).ok_or_else(|| {
             CudaPatternRecognitionError::InvalidInput("rows*cols overflow".to_string())
         })?;
-        let mut d_matrix = DeviceBuffer::<u8>::zeroed(total)?;
+        let mut d_matrix = if is_canonical_full_native_row_map(row_map) {
+            unsafe { DeviceBuffer::<u8>::uninitialized(total) }?
+        } else {
+            DeviceBuffer::<u8>::zeroed(total)?
+        };
+        let rolling = self.compute_shared_rolling_stats_device(features, cols)?;
+        self.launch_simple10_rows(features, &rolling, cols, &mut d_matrix, cols, row_map)?;
+        self.launch_two_bar_body10_rows(features, &rolling, cols, &mut d_matrix, cols, row_map)?;
+        self.launch_single_bar_shadow_rows(features, &rolling, cols, &mut d_matrix, cols, row_map)?;
+        self.launch_directional_shadow_rows(features, &rolling, cols, &mut d_matrix, cols, row_map)?;
+        self.launch_star3_rows(features, &rolling, cols, &mut d_matrix, cols, row_map)?;
 
         for (pattern_id, row) in row_map {
-            self.launch_pattern_row(features, cols, &mut d_matrix, cols, *row, pattern_id)?;
+            if is_simple10_fused_pattern(pattern_id) {
+                continue;
+            }
+            if is_two_bar_body10_fused_pattern(pattern_id) {
+                continue;
+            }
+            if is_single_bar_shadow_fused_pattern(pattern_id) {
+                continue;
+            }
+            if is_directional_shadow_fused_pattern(pattern_id) {
+                continue;
+            }
+            if is_star3_fused_pattern(pattern_id) {
+                continue;
+            }
+            self.launch_pattern_row(features, &rolling, cols, &mut d_matrix, cols, *row, pattern_id)?;
         }
 
         Ok(d_matrix)
@@ -413,6 +765,130 @@ impl CudaPatternRecognition {
         let mut host = vec![0u8; rows.saturating_mul(cols)];
         d_matrix.copy_to(&mut host)?;
         Ok(host)
+    }
+
+    pub fn compute_native_matrix_device_from_device_inputs(
+        &self,
+        d_open: &DeviceBuffer<f32>,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+    ) -> Result<DeviceBuffer<u8>, CudaPatternRecognitionError> {
+        if len == 0 {
+            return Err(CudaPatternRecognitionError::InvalidInput(
+                "len must be > 0".to_string(),
+            ));
+        }
+        if d_open.len() < len || d_high.len() < len || d_low.len() < len || d_close.len() < len {
+            return Err(CudaPatternRecognitionError::InvalidInput(
+                "device input buffer too small for len".to_string(),
+            ));
+        }
+
+        let mut features = self.allocate_feature_buffers(len)?;
+        self.compute_features_device_into(d_open, d_high, d_low, d_close, len, &mut features)?;
+
+        let native_ids = Self::native_supported_pattern_ids();
+        let rows = native_ids.len();
+        let row_map: Vec<(&str, usize)> = native_ids
+            .iter()
+            .enumerate()
+            .map(|(row, id)| (*id, row))
+            .collect();
+        self.compute_native_matrix_device(&features, rows, len, row_map.as_slice())
+    }
+
+    pub fn compute_native_matrix_device_from_host_inputs(
+        &self,
+        open: &[f32],
+        high: &[f32],
+        low: &[f32],
+        close: &[f32],
+    ) -> Result<DeviceBuffer<u8>, CudaPatternRecognitionError> {
+        let len = validate_ohlc_len(open, high, low, close)?;
+        let d_open = DeviceBuffer::from_slice(open)?;
+        let d_high = DeviceBuffer::from_slice(high)?;
+        let d_low = DeviceBuffer::from_slice(low)?;
+        let d_close = DeviceBuffer::from_slice(close)?;
+        self.compute_native_matrix_device_from_device_inputs(&d_open, &d_high, &d_low, &d_close, len)
+    }
+
+    pub fn compute_native_matrix_f32_device_from_device_inputs(
+        &self,
+        d_open: &DeviceBuffer<f32>,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+    ) -> Result<DeviceArrayF32, CudaPatternRecognitionError> {
+        let native_ids = Self::native_supported_pattern_ids();
+        let rows = native_ids.len();
+        let d_u8 =
+            self.compute_native_matrix_device_from_device_inputs(d_open, d_high, d_low, d_close, len)?;
+        self.matrix_u8_to_f32_device(&d_u8, rows, len)
+    }
+
+    pub fn compute_native_matrix_f32_device_from_host_inputs(
+        &self,
+        open: &[f32],
+        high: &[f32],
+        low: &[f32],
+        close: &[f32],
+    ) -> Result<DeviceArrayF32, CudaPatternRecognitionError> {
+        let len = validate_ohlc_len(open, high, low, close)?;
+        let d_u8 = self.compute_native_matrix_device_from_host_inputs(open, high, low, close)?;
+        let rows = Self::native_supported_pattern_ids().len();
+        self.matrix_u8_to_f32_device(&d_u8, rows, len)
+    }
+
+    pub fn compute_native_matrix_bitmask_u64_device_from_device_inputs(
+        &self,
+        d_open: &DeviceBuffer<f32>,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+    ) -> Result<DevicePatternBitmaskU64, CudaPatternRecognitionError> {
+        let native_ids = Self::native_supported_pattern_ids();
+        let rows = native_ids.len();
+        let d_u8 =
+            self.compute_native_matrix_device_from_device_inputs(d_open, d_high, d_low, d_close, len)?;
+        let words_per_row = len.div_ceil(64);
+        let total_words = rows.checked_mul(words_per_row).ok_or_else(|| {
+            CudaPatternRecognitionError::InvalidInput("rows*words overflow".to_string())
+        })?;
+        let mut d_words = unsafe { DeviceBuffer::<u64>::uninitialized(total_words) }?;
+        self.pack_matrix_u8_device_into(&d_u8, rows, len, &mut d_words)?;
+        Ok(DevicePatternBitmaskU64 {
+            buf: d_words,
+            rows,
+            cols: len,
+            words_per_row,
+            ctx: self.context.clone(),
+            device_id: self.device_id,
+        })
+    }
+
+    pub fn compute_native_matrix_bitmask_u64_device_from_host_inputs(
+        &self,
+        open: &[f32],
+        high: &[f32],
+        low: &[f32],
+        close: &[f32],
+    ) -> Result<DevicePatternBitmaskU64, CudaPatternRecognitionError> {
+        let len = validate_ohlc_len(open, high, low, close)?;
+        let d_open = DeviceBuffer::from_slice(open)?;
+        let d_high = DeviceBuffer::from_slice(high)?;
+        let d_low = DeviceBuffer::from_slice(low)?;
+        let d_close = DeviceBuffer::from_slice(close)?;
+        self.compute_native_matrix_bitmask_u64_device_from_device_inputs(
+            &d_open,
+            &d_high,
+            &d_low,
+            &d_close,
+            len,
+        )
     }
 
     pub fn compute_native_subset_matrix_device(
@@ -449,9 +925,367 @@ impl CudaPatternRecognition {
         self.compute_native_matrix_host(features, rows, cols, &row_map)
     }
 
+    fn launch_simple10_rows(
+        &self,
+        features: &DevicePatternFeatures,
+        rolling: &DevicePatternRollingStats,
+        len: usize,
+        matrix: &mut DeviceBuffer<u8>,
+        cols: usize,
+        row_map: &[(&str, usize)],
+    ) -> Result<(), CudaPatternRecognitionError> {
+        let row_cdldoji = row_index_or_neg1(row_map, "cdldoji");
+        let row_cdldragonflydoji = row_index_or_neg1(row_map, "cdldragonflydoji");
+        let row_cdlgravestonedoji = row_index_or_neg1(row_map, "cdlgravestonedoji");
+        let row_cdllongleggeddoji = row_index_or_neg1(row_map, "cdllongleggeddoji");
+        let row_cdlmarubozu = row_index_or_neg1(row_map, "cdlmarubozu");
+        let row_cdlhighwave = row_index_or_neg1(row_map, "cdlhighwave");
+        let row_cdllongline = row_index_or_neg1(row_map, "cdllongline");
+        let row_cdlshortline = row_index_or_neg1(row_map, "cdlshortline");
+        let row_cdlspinningtop = row_index_or_neg1(row_map, "cdlspinningtop");
+
+        if row_cdldoji < 0
+            && row_cdldragonflydoji < 0
+            && row_cdlgravestonedoji < 0
+            && row_cdllongleggeddoji < 0
+            && row_cdlmarubozu < 0
+            && row_cdlhighwave < 0
+            && row_cdllongline < 0
+            && row_cdlshortline < 0
+            && row_cdlspinningtop < 0
+        {
+            return Ok(());
+        }
+
+        let func = self.cached_function("pattern_rows_simple10_u8_kernel")?;
+        let block_x: u32 = 256;
+        let (grid, block) = grid_1d_for(len, block_x);
+
+        unsafe {
+            let mut body_ptr = features.body.as_device_ptr().as_raw();
+            let mut body_avg_ptr = rolling.body_avg10.as_device_ptr().as_raw();
+            let mut upper_ptr = features.upper_shadow.as_device_ptr().as_raw();
+            let mut lower_ptr = features.lower_shadow.as_device_ptr().as_raw();
+            let mut upper_avg_ptr = rolling.upper_avg10.as_device_ptr().as_raw();
+            let mut max_shadow_avg_ptr = rolling.max_shadow_avg10.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut matrix_ptr = matrix.as_device_ptr().as_raw();
+            let mut cols_i = cols as i32;
+            let mut row_cdldoji_i = row_cdldoji;
+            let mut row_cdldragonflydoji_i = row_cdldragonflydoji;
+            let mut row_cdlgravestonedoji_i = row_cdlgravestonedoji;
+            let mut row_cdllongleggeddoji_i = row_cdllongleggeddoji;
+            let mut row_cdlmarubozu_i = row_cdlmarubozu;
+            let mut row_cdlhighwave_i = row_cdlhighwave;
+            let mut row_cdllongline_i = row_cdllongline;
+            let mut row_cdlshortline_i = row_cdlshortline;
+            let mut row_cdlspinningtop_i = row_cdlspinningtop;
+            let args: &mut [*mut c_void] = &mut [
+                &mut body_ptr as *mut _ as *mut c_void,
+                &mut body_avg_ptr as *mut _ as *mut c_void,
+                &mut upper_ptr as *mut _ as *mut c_void,
+                &mut lower_ptr as *mut _ as *mut c_void,
+                &mut upper_avg_ptr as *mut _ as *mut c_void,
+                &mut max_shadow_avg_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut matrix_ptr as *mut _ as *mut c_void,
+                &mut cols_i as *mut _ as *mut c_void,
+                &mut row_cdldoji_i as *mut _ as *mut c_void,
+                &mut row_cdldragonflydoji_i as *mut _ as *mut c_void,
+                &mut row_cdlgravestonedoji_i as *mut _ as *mut c_void,
+                &mut row_cdllongleggeddoji_i as *mut _ as *mut c_void,
+                &mut row_cdlmarubozu_i as *mut _ as *mut c_void,
+                &mut row_cdlhighwave_i as *mut _ as *mut c_void,
+                &mut row_cdllongline_i as *mut _ as *mut c_void,
+                &mut row_cdlshortline_i as *mut _ as *mut c_void,
+                &mut row_cdlspinningtop_i as *mut _ as *mut c_void,
+            ];
+            self.launch_raw_function(func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
+    fn launch_two_bar_body10_rows(
+        &self,
+        features: &DevicePatternFeatures,
+        rolling: &DevicePatternRollingStats,
+        len: usize,
+        matrix: &mut DeviceBuffer<u8>,
+        cols: usize,
+        row_map: &[(&str, usize)],
+    ) -> Result<(), CudaPatternRecognitionError> {
+        let row_cdldojistar = row_index_or_neg1(row_map, "cdldojistar");
+        let row_cdlharami = row_index_or_neg1(row_map, "cdlharami");
+        let row_cdlharamicross = row_index_or_neg1(row_map, "cdlharamicross");
+        let row_cdlhomingpigeon = row_index_or_neg1(row_map, "cdlhomingpigeon");
+
+        if row_cdldojistar < 0
+            && row_cdlharami < 0
+            && row_cdlharamicross < 0
+            && row_cdlhomingpigeon < 0
+        {
+            return Ok(());
+        }
+
+        let func = self.cached_function("pattern_rows_two_bar_body10_u8_kernel")?;
+        let block_x: u32 = 256;
+        let (grid, block) = grid_1d_for(len, block_x);
+
+        unsafe {
+            let mut body_ptr = features.body.as_device_ptr().as_raw();
+            let mut body_avg_ptr = rolling.body_avg10.as_device_ptr().as_raw();
+            let mut body_low_ptr = features.body_low.as_device_ptr().as_raw();
+            let mut body_high_ptr = features.body_high.as_device_ptr().as_raw();
+            let mut direction_ptr = features.direction.as_device_ptr().as_raw();
+            let mut gap_up_ptr = features.body_gap_up.as_device_ptr().as_raw();
+            let mut gap_down_ptr = features.body_gap_down.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut matrix_ptr = matrix.as_device_ptr().as_raw();
+            let mut cols_i = cols as i32;
+            let mut row_cdldojistar_i = row_cdldojistar;
+            let mut row_cdlharami_i = row_cdlharami;
+            let mut row_cdlharamicross_i = row_cdlharamicross;
+            let mut row_cdlhomingpigeon_i = row_cdlhomingpigeon;
+            let args: &mut [*mut c_void] = &mut [
+                &mut body_ptr as *mut _ as *mut c_void,
+                &mut body_avg_ptr as *mut _ as *mut c_void,
+                &mut body_low_ptr as *mut _ as *mut c_void,
+                &mut body_high_ptr as *mut _ as *mut c_void,
+                &mut direction_ptr as *mut _ as *mut c_void,
+                &mut gap_up_ptr as *mut _ as *mut c_void,
+                &mut gap_down_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut matrix_ptr as *mut _ as *mut c_void,
+                &mut cols_i as *mut _ as *mut c_void,
+                &mut row_cdldojistar_i as *mut _ as *mut c_void,
+                &mut row_cdlharami_i as *mut _ as *mut c_void,
+                &mut row_cdlharamicross_i as *mut _ as *mut c_void,
+                &mut row_cdlhomingpigeon_i as *mut _ as *mut c_void,
+            ];
+            self.launch_raw_function(func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
+    fn launch_single_bar_shadow_rows(
+        &self,
+        features: &DevicePatternFeatures,
+        rolling: &DevicePatternRollingStats,
+        len: usize,
+        matrix: &mut DeviceBuffer<u8>,
+        cols: usize,
+        row_map: &[(&str, usize)],
+    ) -> Result<(), CudaPatternRecognitionError> {
+        let row_cdlhammer = row_index_or_neg1(row_map, "cdlhammer");
+        let row_cdlhangingman = row_index_or_neg1(row_map, "cdlhangingman");
+        let row_cdlinvertedhammer = row_index_or_neg1(row_map, "cdlinvertedhammer");
+        let row_cdlshootingstar = row_index_or_neg1(row_map, "cdlshootingstar");
+        let row_cdltakuri = row_index_or_neg1(row_map, "cdltakuri");
+        let row_cdlrickshawman = row_index_or_neg1(row_map, "cdlrickshawman");
+
+        if row_cdlhammer < 0
+            && row_cdlhangingman < 0
+            && row_cdlinvertedhammer < 0
+            && row_cdlshootingstar < 0
+            && row_cdltakuri < 0
+            && row_cdlrickshawman < 0
+        {
+            return Ok(());
+        }
+
+        let func = self.cached_function("pattern_rows_single_bar_shadow_u8_kernel")?;
+        let block_x: u32 = 256;
+        let (grid, block) = grid_1d_for(len, block_x);
+
+        unsafe {
+            let mut body_ptr = features.body.as_device_ptr().as_raw();
+            let mut body_low_ptr = features.body_low.as_device_ptr().as_raw();
+            let mut body_high_ptr = features.body_high.as_device_ptr().as_raw();
+            let mut body_avg_ptr = rolling.body_avg10.as_device_ptr().as_raw();
+            let mut body_avg5_ptr = rolling.body_avg5.as_device_ptr().as_raw();
+            let mut upper_ptr = features.upper_shadow.as_device_ptr().as_raw();
+            let mut lower_ptr = features.lower_shadow.as_device_ptr().as_raw();
+            let mut upper_avg_ptr = rolling.upper_avg10.as_device_ptr().as_raw();
+            let mut lower_avg_ptr = rolling.lower_avg10.as_device_ptr().as_raw();
+            let mut gap_up_ptr = features.body_gap_up.as_device_ptr().as_raw();
+            let mut gap_down_ptr = features.body_gap_down.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut matrix_ptr = matrix.as_device_ptr().as_raw();
+            let mut cols_i = cols as i32;
+            let mut row_cdlhammer_i = row_cdlhammer;
+            let mut row_cdlhangingman_i = row_cdlhangingman;
+            let mut row_cdlinvertedhammer_i = row_cdlinvertedhammer;
+            let mut row_cdlshootingstar_i = row_cdlshootingstar;
+            let mut row_cdltakuri_i = row_cdltakuri;
+            let mut row_cdlrickshawman_i = row_cdlrickshawman;
+            let args: &mut [*mut c_void] = &mut [
+                &mut body_ptr as *mut _ as *mut c_void,
+                &mut body_low_ptr as *mut _ as *mut c_void,
+                &mut body_high_ptr as *mut _ as *mut c_void,
+                &mut body_avg_ptr as *mut _ as *mut c_void,
+                &mut body_avg5_ptr as *mut _ as *mut c_void,
+                &mut upper_ptr as *mut _ as *mut c_void,
+                &mut lower_ptr as *mut _ as *mut c_void,
+                &mut upper_avg_ptr as *mut _ as *mut c_void,
+                &mut lower_avg_ptr as *mut _ as *mut c_void,
+                &mut gap_up_ptr as *mut _ as *mut c_void,
+                &mut gap_down_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut matrix_ptr as *mut _ as *mut c_void,
+                &mut cols_i as *mut _ as *mut c_void,
+                &mut row_cdlhammer_i as *mut _ as *mut c_void,
+                &mut row_cdlhangingman_i as *mut _ as *mut c_void,
+                &mut row_cdlinvertedhammer_i as *mut _ as *mut c_void,
+                &mut row_cdlshootingstar_i as *mut _ as *mut c_void,
+                &mut row_cdltakuri_i as *mut _ as *mut c_void,
+                &mut row_cdlrickshawman_i as *mut _ as *mut c_void,
+            ];
+            self.launch_raw_function(func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
+    fn launch_directional_shadow_rows(
+        &self,
+        features: &DevicePatternFeatures,
+        rolling: &DevicePatternRollingStats,
+        len: usize,
+        matrix: &mut DeviceBuffer<u8>,
+        cols: usize,
+        row_map: &[(&str, usize)],
+    ) -> Result<(), CudaPatternRecognitionError> {
+        let row_cdlbelthold = row_index_or_neg1(row_map, "cdlbelthold");
+        let row_cdlclosingmarubozu = row_index_or_neg1(row_map, "cdlclosingmarubozu");
+        let row_cdlkicking = row_index_or_neg1(row_map, "cdlkicking");
+        let row_cdlkickingbylength = row_index_or_neg1(row_map, "cdlkickingbylength");
+
+        if row_cdlbelthold < 0
+            && row_cdlclosingmarubozu < 0
+            && row_cdlkicking < 0
+            && row_cdlkickingbylength < 0
+        {
+            return Ok(());
+        }
+
+        let func = self.cached_function("pattern_rows_directional_shadow_u8_kernel")?;
+        let block_x: u32 = 256;
+        let (grid, block) = grid_1d_for(len, block_x);
+
+        unsafe {
+            let mut body_ptr = features.body.as_device_ptr().as_raw();
+            let mut body_avg_ptr = rolling.body_avg10.as_device_ptr().as_raw();
+            let mut upper_ptr = features.upper_shadow.as_device_ptr().as_raw();
+            let mut lower_ptr = features.lower_shadow.as_device_ptr().as_raw();
+            let mut max_shadow_avg_ptr = rolling.max_shadow_avg10.as_device_ptr().as_raw();
+            let mut belt_shadow_avg_ptr = rolling.belt_shadow_avg10.as_device_ptr().as_raw();
+            let mut closing_shadow_avg_ptr = rolling.closing_shadow_avg10.as_device_ptr().as_raw();
+            let mut direction_ptr = features.direction.as_device_ptr().as_raw();
+            let mut gap_up_ptr = features.body_gap_up.as_device_ptr().as_raw();
+            let mut gap_down_ptr = features.body_gap_down.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut matrix_ptr = matrix.as_device_ptr().as_raw();
+            let mut cols_i = cols as i32;
+            let mut row_cdlbelthold_i = row_cdlbelthold;
+            let mut row_cdlclosingmarubozu_i = row_cdlclosingmarubozu;
+            let mut row_cdlkicking_i = row_cdlkicking;
+            let mut row_cdlkickingbylength_i = row_cdlkickingbylength;
+            let args: &mut [*mut c_void] = &mut [
+                &mut body_ptr as *mut _ as *mut c_void,
+                &mut body_avg_ptr as *mut _ as *mut c_void,
+                &mut upper_ptr as *mut _ as *mut c_void,
+                &mut lower_ptr as *mut _ as *mut c_void,
+                &mut max_shadow_avg_ptr as *mut _ as *mut c_void,
+                &mut belt_shadow_avg_ptr as *mut _ as *mut c_void,
+                &mut closing_shadow_avg_ptr as *mut _ as *mut c_void,
+                &mut direction_ptr as *mut _ as *mut c_void,
+                &mut gap_up_ptr as *mut _ as *mut c_void,
+                &mut gap_down_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut matrix_ptr as *mut _ as *mut c_void,
+                &mut cols_i as *mut _ as *mut c_void,
+                &mut row_cdlbelthold_i as *mut _ as *mut c_void,
+                &mut row_cdlclosingmarubozu_i as *mut _ as *mut c_void,
+                &mut row_cdlkicking_i as *mut _ as *mut c_void,
+                &mut row_cdlkickingbylength_i as *mut _ as *mut c_void,
+            ];
+            self.launch_raw_function(func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
+    fn launch_star3_rows(
+        &self,
+        features: &DevicePatternFeatures,
+        rolling: &DevicePatternRollingStats,
+        len: usize,
+        matrix: &mut DeviceBuffer<u8>,
+        cols: usize,
+        row_map: &[(&str, usize)],
+    ) -> Result<(), CudaPatternRecognitionError> {
+        let row_cdleveningdojistar = row_index_or_neg1(row_map, "cdleveningdojistar");
+        let row_cdleveningstar = row_index_or_neg1(row_map, "cdleveningstar");
+        let row_cdlmorningdojistar = row_index_or_neg1(row_map, "cdlmorningdojistar");
+        let row_cdlmorningstar = row_index_or_neg1(row_map, "cdlmorningstar");
+
+        if row_cdleveningdojistar < 0
+            && row_cdleveningstar < 0
+            && row_cdlmorningdojistar < 0
+            && row_cdlmorningstar < 0
+        {
+            return Ok(());
+        }
+
+        let func = self.cached_function("pattern_rows_star3_u8_kernel")?;
+        let block_x: u32 = 256;
+        let (grid, block) = grid_1d_for(len, block_x);
+
+        unsafe {
+            let mut body_ptr = features.body.as_device_ptr().as_raw();
+            let mut body_low_ptr = features.body_low.as_device_ptr().as_raw();
+            let mut body_high_ptr = features.body_high.as_device_ptr().as_raw();
+            let mut body_avg_ptr = rolling.body_avg10.as_device_ptr().as_raw();
+            let mut direction_ptr = features.direction.as_device_ptr().as_raw();
+            let mut gap_up_ptr = features.body_gap_up.as_device_ptr().as_raw();
+            let mut gap_down_ptr = features.body_gap_down.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut penetration = 0.3f32;
+            let mut matrix_ptr = matrix.as_device_ptr().as_raw();
+            let mut cols_i = cols as i32;
+            let mut row_cdleveningdojistar_i = row_cdleveningdojistar;
+            let mut row_cdleveningstar_i = row_cdleveningstar;
+            let mut row_cdlmorningdojistar_i = row_cdlmorningdojistar;
+            let mut row_cdlmorningstar_i = row_cdlmorningstar;
+            let args: &mut [*mut c_void] = &mut [
+                &mut body_ptr as *mut _ as *mut c_void,
+                &mut body_low_ptr as *mut _ as *mut c_void,
+                &mut body_high_ptr as *mut _ as *mut c_void,
+                &mut body_avg_ptr as *mut _ as *mut c_void,
+                &mut direction_ptr as *mut _ as *mut c_void,
+                &mut gap_up_ptr as *mut _ as *mut c_void,
+                &mut gap_down_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut penetration as *mut _ as *mut c_void,
+                &mut matrix_ptr as *mut _ as *mut c_void,
+                &mut cols_i as *mut _ as *mut c_void,
+                &mut row_cdleveningdojistar_i as *mut _ as *mut c_void,
+                &mut row_cdleveningstar_i as *mut _ as *mut c_void,
+                &mut row_cdlmorningdojistar_i as *mut _ as *mut c_void,
+                &mut row_cdlmorningstar_i as *mut _ as *mut c_void,
+            ];
+            self.launch_raw_function(func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
     fn launch_pattern_row(
         &self,
         features: &DevicePatternFeatures,
+        rolling: &DevicePatternRollingStats,
         len: usize,
         matrix: &mut DeviceBuffer<u8>,
         cols: usize,
@@ -511,9 +1345,10 @@ impl CudaPatternRecognition {
                 cols,
                 row,
             ),
-            "cdldoji" => self.launch_row_cdldoji(&features.body, len, matrix, cols, row),
+            "cdldoji" => self.launch_row_cdldoji(&features.body, &rolling.body_avg10, len, matrix, cols, row),
             "cdldojistar" => self.launch_row_cdldojistar(
                 &features.body,
+                &rolling.body_avg10,
                 &features.direction,
                 &features.body_gap_up,
                 &features.body_gap_down,
@@ -535,8 +1370,10 @@ impl CudaPatternRecognition {
             ),
             "cdldragonflydoji" => self.launch_row_cdldragonflydoji(
                 &features.body,
+                &rolling.body_avg10,
                 &features.upper_shadow,
                 &features.lower_shadow,
+                &rolling.max_shadow_avg10,
                 len,
                 matrix,
                 cols,
@@ -565,8 +1402,10 @@ impl CudaPatternRecognition {
             ),
             "cdlgravestonedoji" => self.launch_row_cdlgravestonedoji(
                 &features.body,
+                &rolling.body_avg10,
                 &features.upper_shadow,
                 &features.lower_shadow,
+                &rolling.upper_avg10,
                 len,
                 matrix,
                 cols,
@@ -596,6 +1435,7 @@ impl CudaPatternRecognition {
             ),
             "cdlharami" => self.launch_row_cdlharami(
                 &features.body,
+                &rolling.body_avg10,
                 &features.body_low,
                 &features.body_high,
                 len,
@@ -605,6 +1445,7 @@ impl CudaPatternRecognition {
             ),
             "cdlharamicross" => self.launch_row_cdlharami(
                 &features.body,
+                &rolling.body_avg10,
                 &features.body_low,
                 &features.body_high,
                 len,
@@ -637,8 +1478,10 @@ impl CudaPatternRecognition {
             ),
             "cdlhighwave" => self.launch_row_cdlhighwave(
                 &features.body,
+                &rolling.body_avg10,
                 &features.upper_shadow,
                 &features.lower_shadow,
+                &rolling.upper_avg10,
                 len,
                 matrix,
                 cols,
@@ -667,8 +1510,11 @@ impl CudaPatternRecognition {
             ),
             "cdlinvertedhammer" => self.launch_row_cdlinvertedhammer(
                 &features.body,
+                &rolling.body_avg10,
                 &features.upper_shadow,
+                &rolling.upper_avg10,
                 &features.lower_shadow,
+                &rolling.lower_avg10,
                 &features.body_gap_down,
                 len,
                 matrix,
@@ -687,8 +1533,10 @@ impl CudaPatternRecognition {
             ),
             "cdllongleggeddoji" => self.launch_row_cdllongleggeddoji(
                 &features.body,
+                &rolling.body_avg10,
                 &features.upper_shadow,
                 &features.lower_shadow,
+                &rolling.upper_avg10,
                 len,
                 matrix,
                 cols,
@@ -696,8 +1544,10 @@ impl CudaPatternRecognition {
             ),
             "cdllongline" => self.launch_row_cdllongline(
                 &features.body,
+                &rolling.body_avg10,
                 &features.upper_shadow,
                 &features.lower_shadow,
+                &rolling.upper_avg10,
                 len,
                 matrix,
                 cols,
@@ -705,8 +1555,10 @@ impl CudaPatternRecognition {
             ),
             "cdlmarubozu" => self.launch_row_cdlmarubozu(
                 &features.body,
+                &rolling.body_avg10,
                 &features.upper_shadow,
                 &features.lower_shadow,
+                &rolling.upper_avg10,
                 len,
                 matrix,
                 cols,
@@ -801,8 +1653,10 @@ impl CudaPatternRecognition {
             ),
             "cdlshortline" => self.launch_row_cdlshortline(
                 &features.body,
+                &rolling.body_avg10,
                 &features.upper_shadow,
                 &features.lower_shadow,
+                &rolling.upper_avg10,
                 len,
                 matrix,
                 cols,
@@ -810,6 +1664,7 @@ impl CudaPatternRecognition {
             ),
             "cdlspinningtop" => self.launch_row_cdlspinningtop(
                 &features.body,
+                &rolling.body_avg10,
                 &features.upper_shadow,
                 &features.lower_shadow,
                 len,
@@ -1101,36 +1956,32 @@ impl CudaPatternRecognition {
     fn launch_row_cdldoji(
         &self,
         body: &DeviceBuffer<f32>,
+        body_avg10: &DeviceBuffer<f32>,
         len: usize,
         matrix: &mut DeviceBuffer<u8>,
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdldoji_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdldoji_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdldoji_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
         unsafe {
             let mut body_ptr = body.as_device_ptr().as_raw();
+            let mut body_avg_ptr = body_avg10.as_device_ptr().as_raw();
             let mut len_i = len as i32;
-            let mut period_i = 10i32;
             let mut matrix_ptr = matrix.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
             let mut row_i = row as i32;
             let args: &mut [*mut c_void] = &mut [
                 &mut body_ptr as *mut _ as *mut c_void,
+                &mut body_avg_ptr as *mut _ as *mut c_void,
                 &mut len_i as *mut _ as *mut c_void,
-                &mut period_i as *mut _ as *mut c_void,
                 &mut matrix_ptr as *mut _ as *mut c_void,
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -1139,42 +1990,41 @@ impl CudaPatternRecognition {
     fn launch_row_cdldragonflydoji(
         &self,
         body: &DeviceBuffer<f32>,
+        body_avg10: &DeviceBuffer<f32>,
         upper: &DeviceBuffer<f32>,
         lower: &DeviceBuffer<f32>,
+        max_shadow_avg10: &DeviceBuffer<f32>,
         len: usize,
         matrix: &mut DeviceBuffer<u8>,
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdldragonflydoji_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdldragonflydoji_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdldragonflydoji_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
         unsafe {
             let mut body_ptr = body.as_device_ptr().as_raw();
+            let mut body_avg_ptr = body_avg10.as_device_ptr().as_raw();
             let mut upper_ptr = upper.as_device_ptr().as_raw();
             let mut lower_ptr = lower.as_device_ptr().as_raw();
+            let mut shadow_avg_ptr = max_shadow_avg10.as_device_ptr().as_raw();
             let mut len_i = len as i32;
-            let mut period_i = 10i32;
             let mut matrix_ptr = matrix.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
             let mut row_i = row as i32;
             let args: &mut [*mut c_void] = &mut [
                 &mut body_ptr as *mut _ as *mut c_void,
+                &mut body_avg_ptr as *mut _ as *mut c_void,
                 &mut upper_ptr as *mut _ as *mut c_void,
                 &mut lower_ptr as *mut _ as *mut c_void,
+                &mut shadow_avg_ptr as *mut _ as *mut c_void,
                 &mut len_i as *mut _ as *mut c_void,
-                &mut period_i as *mut _ as *mut c_void,
                 &mut matrix_ptr as *mut _ as *mut c_void,
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -1183,42 +2033,41 @@ impl CudaPatternRecognition {
     fn launch_row_cdlgravestonedoji(
         &self,
         body: &DeviceBuffer<f32>,
+        body_avg10: &DeviceBuffer<f32>,
         upper: &DeviceBuffer<f32>,
         lower: &DeviceBuffer<f32>,
+        upper_avg10: &DeviceBuffer<f32>,
         len: usize,
         matrix: &mut DeviceBuffer<u8>,
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlgravestonedoji_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlgravestonedoji_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlgravestonedoji_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
         unsafe {
             let mut body_ptr = body.as_device_ptr().as_raw();
+            let mut body_avg_ptr = body_avg10.as_device_ptr().as_raw();
             let mut upper_ptr = upper.as_device_ptr().as_raw();
             let mut lower_ptr = lower.as_device_ptr().as_raw();
+            let mut upper_avg_ptr = upper_avg10.as_device_ptr().as_raw();
             let mut len_i = len as i32;
-            let mut period_i = 10i32;
             let mut matrix_ptr = matrix.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
             let mut row_i = row as i32;
             let args: &mut [*mut c_void] = &mut [
                 &mut body_ptr as *mut _ as *mut c_void,
+                &mut body_avg_ptr as *mut _ as *mut c_void,
                 &mut upper_ptr as *mut _ as *mut c_void,
                 &mut lower_ptr as *mut _ as *mut c_void,
+                &mut upper_avg_ptr as *mut _ as *mut c_void,
                 &mut len_i as *mut _ as *mut c_void,
-                &mut period_i as *mut _ as *mut c_void,
                 &mut matrix_ptr as *mut _ as *mut c_void,
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -1227,42 +2076,41 @@ impl CudaPatternRecognition {
     fn launch_row_cdllongleggeddoji(
         &self,
         body: &DeviceBuffer<f32>,
+        body_avg10: &DeviceBuffer<f32>,
         upper: &DeviceBuffer<f32>,
         lower: &DeviceBuffer<f32>,
+        upper_avg10: &DeviceBuffer<f32>,
         len: usize,
         matrix: &mut DeviceBuffer<u8>,
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdllongleggeddoji_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdllongleggeddoji_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdllongleggeddoji_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
         unsafe {
             let mut body_ptr = body.as_device_ptr().as_raw();
+            let mut body_avg_ptr = body_avg10.as_device_ptr().as_raw();
             let mut upper_ptr = upper.as_device_ptr().as_raw();
             let mut lower_ptr = lower.as_device_ptr().as_raw();
+            let mut upper_avg_ptr = upper_avg10.as_device_ptr().as_raw();
             let mut len_i = len as i32;
-            let mut period_i = 10i32;
             let mut matrix_ptr = matrix.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
             let mut row_i = row as i32;
             let args: &mut [*mut c_void] = &mut [
                 &mut body_ptr as *mut _ as *mut c_void,
+                &mut body_avg_ptr as *mut _ as *mut c_void,
                 &mut upper_ptr as *mut _ as *mut c_void,
                 &mut lower_ptr as *mut _ as *mut c_void,
+                &mut upper_avg_ptr as *mut _ as *mut c_void,
                 &mut len_i as *mut _ as *mut c_void,
-                &mut period_i as *mut _ as *mut c_void,
                 &mut matrix_ptr as *mut _ as *mut c_void,
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -1271,42 +2119,41 @@ impl CudaPatternRecognition {
     fn launch_row_cdlmarubozu(
         &self,
         body: &DeviceBuffer<f32>,
+        body_avg10: &DeviceBuffer<f32>,
         upper: &DeviceBuffer<f32>,
         lower: &DeviceBuffer<f32>,
+        upper_avg10: &DeviceBuffer<f32>,
         len: usize,
         matrix: &mut DeviceBuffer<u8>,
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlmarubozu_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlmarubozu_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlmarubozu_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
         unsafe {
             let mut body_ptr = body.as_device_ptr().as_raw();
+            let mut body_avg_ptr = body_avg10.as_device_ptr().as_raw();
             let mut upper_ptr = upper.as_device_ptr().as_raw();
             let mut lower_ptr = lower.as_device_ptr().as_raw();
+            let mut upper_avg_ptr = upper_avg10.as_device_ptr().as_raw();
             let mut len_i = len as i32;
-            let mut period_i = 10i32;
             let mut matrix_ptr = matrix.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
             let mut row_i = row as i32;
             let args: &mut [*mut c_void] = &mut [
                 &mut body_ptr as *mut _ as *mut c_void,
+                &mut body_avg_ptr as *mut _ as *mut c_void,
                 &mut upper_ptr as *mut _ as *mut c_void,
                 &mut lower_ptr as *mut _ as *mut c_void,
+                &mut upper_avg_ptr as *mut _ as *mut c_void,
                 &mut len_i as *mut _ as *mut c_void,
-                &mut period_i as *mut _ as *mut c_void,
                 &mut matrix_ptr as *mut _ as *mut c_void,
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -1323,12 +2170,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlbelthold_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlbelthold_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlbelthold_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -1355,7 +2197,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -1372,12 +2214,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlclosingmarubozu_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlclosingmarubozu_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlclosingmarubozu_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -1404,7 +2241,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -1422,12 +2259,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlhammer_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlhammer_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlhammer_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -1460,7 +2292,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -1478,12 +2310,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlhangingman_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlhangingman_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlhangingman_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -1516,7 +2343,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -1534,12 +2361,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlrickshawman_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlrickshawman_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlrickshawman_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -1570,7 +2392,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -1587,12 +2409,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlmatchinglow_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlmatchinglow_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlmatchinglow_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -1617,7 +2434,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -1635,12 +2452,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlinneck_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlinneck_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlinneck_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -1669,7 +2481,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -1687,12 +2499,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlonneck_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlonneck_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlonneck_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -1721,7 +2528,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -1739,12 +2546,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlpiercing_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlpiercing_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlpiercing_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -1771,7 +2573,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -1789,12 +2591,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlthrusting_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlthrusting_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlthrusting_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -1823,7 +2620,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -1841,12 +2638,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdleveningdojistar_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdleveningdojistar_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdleveningdojistar_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -1879,7 +2671,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -1897,12 +2689,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdleveningstar_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdleveningstar_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdleveningstar_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -1935,7 +2722,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -1953,12 +2740,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlmorningdojistar_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlmorningdojistar_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlmorningdojistar_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -1991,7 +2773,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -2009,12 +2791,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlmorningstar_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlmorningstar_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlmorningstar_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -2047,7 +2824,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -2066,12 +2843,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlgapsidesidewhite_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlgapsidesidewhite_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlgapsidesidewhite_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -2102,7 +2874,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -2121,12 +2893,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlkicking_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlkicking_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlkicking_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -2157,7 +2924,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -2176,12 +2943,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlkickingbylength_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlkickingbylength_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlkickingbylength_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -2212,7 +2974,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -2230,12 +2992,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlidentical3crows_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlidentical3crows_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlidentical3crows_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -2264,7 +3021,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -2282,12 +3039,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlsticksandwich_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlsticksandwich_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlsticksandwich_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -2314,7 +3066,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -2333,12 +3085,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlseparatinglines_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlseparatinglines_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlseparatinglines_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -2371,7 +3118,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -2388,12 +3135,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlcounterattack_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlcounterattack_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlcounterattack_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -2420,7 +3162,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -2437,12 +3179,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdldarkcloudcover_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdldarkcloudcover_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdldarkcloudcover_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -2471,7 +3208,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -2488,12 +3225,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlxsidegap3methods_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlxsidegap3methods_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlxsidegap3methods_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
         unsafe {
@@ -2517,7 +3249,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -2534,12 +3266,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlupsidegap2crows_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlupsidegap2crows_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlupsidegap2crows_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
         unsafe {
@@ -2567,7 +3294,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -2584,12 +3311,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlunique3river_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlunique3river_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlunique3river_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
         unsafe {
@@ -2617,7 +3339,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -2635,12 +3357,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdltasukigap_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdltasukigap_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdltasukigap_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
         unsafe {
@@ -2668,7 +3385,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -2684,12 +3401,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlladderbottom_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlladderbottom_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlladderbottom_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
         unsafe {
@@ -2713,7 +3425,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -2730,12 +3442,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlstalledpattern_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlstalledpattern_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlstalledpattern_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
         unsafe {
@@ -2767,7 +3474,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -2784,12 +3491,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlhikkake_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlhikkake_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlhikkake_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
         unsafe {
@@ -2813,7 +3515,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -2831,12 +3533,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlhikkakemod_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlhikkakemod_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlhikkakemod_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
         unsafe {
@@ -2864,7 +3561,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
         Ok(())
     }
@@ -2872,6 +3569,7 @@ impl CudaPatternRecognition {
     fn launch_row_cdldojistar(
         &self,
         body: &DeviceBuffer<f32>,
+        body_avg10: &DeviceBuffer<f32>,
         direction: &DeviceBuffer<i8>,
         body_gap_up: &DeviceBuffer<u8>,
         body_gap_down: &DeviceBuffer<u8>,
@@ -2880,39 +3578,32 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdldojistar_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdldojistar_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdldojistar_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
         unsafe {
             let mut body_ptr = body.as_device_ptr().as_raw();
+            let mut body_avg_ptr = body_avg10.as_device_ptr().as_raw();
             let mut dir_ptr = direction.as_device_ptr().as_raw();
             let mut gap_up_ptr = body_gap_up.as_device_ptr().as_raw();
             let mut gap_down_ptr = body_gap_down.as_device_ptr().as_raw();
             let mut len_i = len as i32;
-            let mut period_long_i = 10i32;
-            let mut period_doji_i = 10i32;
             let mut matrix_ptr = matrix.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
             let mut row_i = row as i32;
             let args: &mut [*mut c_void] = &mut [
                 &mut body_ptr as *mut _ as *mut c_void,
+                &mut body_avg_ptr as *mut _ as *mut c_void,
                 &mut dir_ptr as *mut _ as *mut c_void,
                 &mut gap_up_ptr as *mut _ as *mut c_void,
                 &mut gap_down_ptr as *mut _ as *mut c_void,
                 &mut len_i as *mut _ as *mut c_void,
-                &mut period_long_i as *mut _ as *mut c_void,
-                &mut period_doji_i as *mut _ as *mut c_void,
                 &mut matrix_ptr as *mut _ as *mut c_void,
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -2928,12 +3619,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlengulfing_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlengulfing_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlengulfing_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -2954,7 +3640,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -2963,6 +3649,7 @@ impl CudaPatternRecognition {
     fn launch_row_cdlharami(
         &self,
         body: &DeviceBuffer<f32>,
+        body_avg10: &DeviceBuffer<f32>,
         body_low: &DeviceBuffer<f32>,
         body_high: &DeviceBuffer<f32>,
         len: usize,
@@ -2970,37 +3657,30 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlharami_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlharami_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlharami_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
         unsafe {
             let mut body_ptr = body.as_device_ptr().as_raw();
+            let mut body_avg_ptr = body_avg10.as_device_ptr().as_raw();
             let mut body_low_ptr = body_low.as_device_ptr().as_raw();
             let mut body_high_ptr = body_high.as_device_ptr().as_raw();
             let mut len_i = len as i32;
-            let mut period_long_i = 10i32;
-            let mut period_short_i = 10i32;
             let mut matrix_ptr = matrix.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
             let mut row_i = row as i32;
             let args: &mut [*mut c_void] = &mut [
                 &mut body_ptr as *mut _ as *mut c_void,
+                &mut body_avg_ptr as *mut _ as *mut c_void,
                 &mut body_low_ptr as *mut _ as *mut c_void,
                 &mut body_high_ptr as *mut _ as *mut c_void,
                 &mut len_i as *mut _ as *mut c_void,
-                &mut period_long_i as *mut _ as *mut c_void,
-                &mut period_short_i as *mut _ as *mut c_void,
                 &mut matrix_ptr as *mut _ as *mut c_void,
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -3009,42 +3689,41 @@ impl CudaPatternRecognition {
     fn launch_row_cdlhighwave(
         &self,
         body: &DeviceBuffer<f32>,
+        body_avg10: &DeviceBuffer<f32>,
         upper: &DeviceBuffer<f32>,
         lower: &DeviceBuffer<f32>,
+        upper_avg10: &DeviceBuffer<f32>,
         len: usize,
         matrix: &mut DeviceBuffer<u8>,
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlhighwave_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlhighwave_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlhighwave_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
         unsafe {
             let mut body_ptr = body.as_device_ptr().as_raw();
+            let mut body_avg_ptr = body_avg10.as_device_ptr().as_raw();
             let mut upper_ptr = upper.as_device_ptr().as_raw();
             let mut lower_ptr = lower.as_device_ptr().as_raw();
+            let mut upper_avg_ptr = upper_avg10.as_device_ptr().as_raw();
             let mut len_i = len as i32;
-            let mut period_i = 10i32;
             let mut matrix_ptr = matrix.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
             let mut row_i = row as i32;
             let args: &mut [*mut c_void] = &mut [
                 &mut body_ptr as *mut _ as *mut c_void,
+                &mut body_avg_ptr as *mut _ as *mut c_void,
                 &mut upper_ptr as *mut _ as *mut c_void,
                 &mut lower_ptr as *mut _ as *mut c_void,
+                &mut upper_avg_ptr as *mut _ as *mut c_void,
                 &mut len_i as *mut _ as *mut c_void,
-                &mut period_i as *mut _ as *mut c_void,
                 &mut matrix_ptr as *mut _ as *mut c_void,
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -3061,12 +3740,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlhomingpigeon_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlhomingpigeon_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlhomingpigeon_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -3093,7 +3767,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -3102,49 +3776,47 @@ impl CudaPatternRecognition {
     fn launch_row_cdlinvertedhammer(
         &self,
         body: &DeviceBuffer<f32>,
+        body_avg10: &DeviceBuffer<f32>,
         upper: &DeviceBuffer<f32>,
+        upper_avg10: &DeviceBuffer<f32>,
         lower: &DeviceBuffer<f32>,
+        lower_avg10: &DeviceBuffer<f32>,
         body_gap_down: &DeviceBuffer<u8>,
         len: usize,
         matrix: &mut DeviceBuffer<u8>,
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlinvertedhammer_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlinvertedhammer_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlinvertedhammer_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
         unsafe {
             let mut body_ptr = body.as_device_ptr().as_raw();
+            let mut body_avg_ptr = body_avg10.as_device_ptr().as_raw();
             let mut upper_ptr = upper.as_device_ptr().as_raw();
+            let mut upper_avg_ptr = upper_avg10.as_device_ptr().as_raw();
             let mut lower_ptr = lower.as_device_ptr().as_raw();
+            let mut lower_avg_ptr = lower_avg10.as_device_ptr().as_raw();
             let mut gap_ptr = body_gap_down.as_device_ptr().as_raw();
             let mut len_i = len as i32;
-            let mut period_body_i = 10i32;
-            let mut period_upper_i = 10i32;
-            let mut period_lower_i = 10i32;
             let mut matrix_ptr = matrix.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
             let mut row_i = row as i32;
             let args: &mut [*mut c_void] = &mut [
                 &mut body_ptr as *mut _ as *mut c_void,
+                &mut body_avg_ptr as *mut _ as *mut c_void,
                 &mut upper_ptr as *mut _ as *mut c_void,
+                &mut upper_avg_ptr as *mut _ as *mut c_void,
                 &mut lower_ptr as *mut _ as *mut c_void,
+                &mut lower_avg_ptr as *mut _ as *mut c_void,
                 &mut gap_ptr as *mut _ as *mut c_void,
                 &mut len_i as *mut _ as *mut c_void,
-                &mut period_body_i as *mut _ as *mut c_void,
-                &mut period_upper_i as *mut _ as *mut c_void,
-                &mut period_lower_i as *mut _ as *mut c_void,
                 &mut matrix_ptr as *mut _ as *mut c_void,
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -3153,44 +3825,41 @@ impl CudaPatternRecognition {
     fn launch_row_cdllongline(
         &self,
         body: &DeviceBuffer<f32>,
+        body_avg10: &DeviceBuffer<f32>,
         upper: &DeviceBuffer<f32>,
         lower: &DeviceBuffer<f32>,
+        upper_avg10: &DeviceBuffer<f32>,
         len: usize,
         matrix: &mut DeviceBuffer<u8>,
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdllongline_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdllongline_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdllongline_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
         unsafe {
             let mut body_ptr = body.as_device_ptr().as_raw();
+            let mut body_avg_ptr = body_avg10.as_device_ptr().as_raw();
             let mut upper_ptr = upper.as_device_ptr().as_raw();
             let mut lower_ptr = lower.as_device_ptr().as_raw();
+            let mut upper_avg_ptr = upper_avg10.as_device_ptr().as_raw();
             let mut len_i = len as i32;
-            let mut body_period_i = 10i32;
-            let mut shadow_period_i = 10i32;
             let mut matrix_ptr = matrix.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
             let mut row_i = row as i32;
             let args: &mut [*mut c_void] = &mut [
                 &mut body_ptr as *mut _ as *mut c_void,
+                &mut body_avg_ptr as *mut _ as *mut c_void,
                 &mut upper_ptr as *mut _ as *mut c_void,
                 &mut lower_ptr as *mut _ as *mut c_void,
+                &mut upper_avg_ptr as *mut _ as *mut c_void,
                 &mut len_i as *mut _ as *mut c_void,
-                &mut body_period_i as *mut _ as *mut c_void,
-                &mut shadow_period_i as *mut _ as *mut c_void,
                 &mut matrix_ptr as *mut _ as *mut c_void,
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -3207,12 +3876,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlshootingstar_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlshootingstar_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlshootingstar_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -3241,7 +3905,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -3250,44 +3914,41 @@ impl CudaPatternRecognition {
     fn launch_row_cdlshortline(
         &self,
         body: &DeviceBuffer<f32>,
+        body_avg10: &DeviceBuffer<f32>,
         upper: &DeviceBuffer<f32>,
         lower: &DeviceBuffer<f32>,
+        upper_avg10: &DeviceBuffer<f32>,
         len: usize,
         matrix: &mut DeviceBuffer<u8>,
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlshortline_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlshortline_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlshortline_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
         unsafe {
             let mut body_ptr = body.as_device_ptr().as_raw();
+            let mut body_avg_ptr = body_avg10.as_device_ptr().as_raw();
             let mut upper_ptr = upper.as_device_ptr().as_raw();
             let mut lower_ptr = lower.as_device_ptr().as_raw();
+            let mut upper_avg_ptr = upper_avg10.as_device_ptr().as_raw();
             let mut len_i = len as i32;
-            let mut body_period_i = 10i32;
-            let mut shadow_period_i = 10i32;
             let mut matrix_ptr = matrix.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
             let mut row_i = row as i32;
             let args: &mut [*mut c_void] = &mut [
                 &mut body_ptr as *mut _ as *mut c_void,
+                &mut body_avg_ptr as *mut _ as *mut c_void,
                 &mut upper_ptr as *mut _ as *mut c_void,
                 &mut lower_ptr as *mut _ as *mut c_void,
+                &mut upper_avg_ptr as *mut _ as *mut c_void,
                 &mut len_i as *mut _ as *mut c_void,
-                &mut body_period_i as *mut _ as *mut c_void,
-                &mut shadow_period_i as *mut _ as *mut c_void,
                 &mut matrix_ptr as *mut _ as *mut c_void,
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -3296,6 +3957,7 @@ impl CudaPatternRecognition {
     fn launch_row_cdlspinningtop(
         &self,
         body: &DeviceBuffer<f32>,
+        body_avg10: &DeviceBuffer<f32>,
         upper: &DeviceBuffer<f32>,
         lower: &DeviceBuffer<f32>,
         len: usize,
@@ -3303,35 +3965,30 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlspinningtop_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlspinningtop_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlspinningtop_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
         unsafe {
             let mut body_ptr = body.as_device_ptr().as_raw();
+            let mut body_avg_ptr = body_avg10.as_device_ptr().as_raw();
             let mut upper_ptr = upper.as_device_ptr().as_raw();
             let mut lower_ptr = lower.as_device_ptr().as_raw();
             let mut len_i = len as i32;
-            let mut body_period_i = 10i32;
             let mut matrix_ptr = matrix.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
             let mut row_i = row as i32;
             let args: &mut [*mut c_void] = &mut [
                 &mut body_ptr as *mut _ as *mut c_void,
+                &mut body_avg_ptr as *mut _ as *mut c_void,
                 &mut upper_ptr as *mut _ as *mut c_void,
                 &mut lower_ptr as *mut _ as *mut c_void,
                 &mut len_i as *mut _ as *mut c_void,
-                &mut body_period_i as *mut _ as *mut c_void,
                 &mut matrix_ptr as *mut _ as *mut c_void,
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -3347,12 +4004,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdltakuri_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdltakuri_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdltakuri_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -3379,7 +4031,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -3397,12 +4049,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdltristar_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdltristar_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdltristar_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -3429,7 +4076,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -3446,12 +4093,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdl2crows_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdl2crows_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdl2crows_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -3476,7 +4118,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -3494,12 +4136,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdl3blackcrows_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdl3blackcrows_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdl3blackcrows_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -3526,7 +4163,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -3543,12 +4180,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdl3inside_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdl3inside_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdl3inside_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -3575,7 +4207,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -3592,12 +4224,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdl3linestrike_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdl3linestrike_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdl3linestrike_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -3622,7 +4249,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -3638,12 +4265,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdl3outside_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdl3outside_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdl3outside_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -3664,7 +4286,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -3683,12 +4305,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdl3starsinsouth_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdl3starsinsouth_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdl3starsinsouth_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -3723,7 +4340,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -3741,12 +4358,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdl3whitesoldiers_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdl3whitesoldiers_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdl3whitesoldiers_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -3779,7 +4391,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -3798,12 +4410,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlabandonedbaby_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlabandonedbaby_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlabandonedbaby_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -3838,7 +4445,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -3856,12 +4463,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdladvanceblock_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdladvanceblock_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdladvanceblock_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -3896,7 +4498,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -3915,12 +4517,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlbreakaway_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlbreakaway_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlbreakaway_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -3949,7 +4546,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -3967,12 +4564,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlconcealbabyswall_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlconcealbabyswall_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlconcealbabyswall_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -3999,7 +4591,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -4017,12 +4609,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlmathold_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlmathold_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlmathold_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -4053,7 +4640,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -4072,12 +4659,7 @@ impl CudaPatternRecognition {
         cols: usize,
         row: usize,
     ) -> Result<(), CudaPatternRecognitionError> {
-        let func = self
-            .module
-            .get_function("pattern_row_cdlrisefall3methods_u8_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_row_cdlrisefall3methods_u8_kernel",
-            })?;
+        let func = self.cached_function("pattern_row_cdlrisefall3methods_u8_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -4108,7 +4690,7 @@ impl CudaPatternRecognition {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut row_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -4146,12 +4728,7 @@ impl CudaPatternRecognition {
             ));
         }
 
-        let func = self
-            .module
-            .get_function("pattern_pack_u8_to_u64_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_pack_u8_to_u64_kernel",
-            })?;
+        let func = self.cached_function("pattern_pack_u8_to_u64_kernel")?;
 
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(total_words, block_x);
@@ -4170,7 +4747,7 @@ impl CudaPatternRecognition {
                 &mut words_per_row_i as *mut _ as *mut c_void,
                 &mut words_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(())
@@ -4237,12 +4814,7 @@ impl CudaPatternRecognition {
         }
 
         let mut out = unsafe { DeviceBuffer::<f32>::uninitialized(len) }?;
-        let func = self
-            .module
-            .get_function("pattern_u8_to_f32_kernel")
-            .map_err(|_| CudaPatternRecognitionError::MissingKernelSymbol {
-                name: "pattern_u8_to_f32_kernel",
-            })?;
+        let func = self.cached_function("pattern_u8_to_f32_kernel")?;
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x);
 
@@ -4255,7 +4827,7 @@ impl CudaPatternRecognition {
                 &mut out_ptr as *mut _ as *mut c_void,
                 &mut total_i as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.launch_raw_function(func, grid, block, 0, args)?;
         }
 
         Ok(DeviceArrayF32 {
