@@ -63,7 +63,7 @@ Enable the CUDA feature:
 
 ```toml
 [dependencies]
-vector-ta = { version = "0.1.8", features = ["cuda"] }
+vector-ta = { version = "0.2.0", features = ["cuda"] }
 ```
 
 Notes:
