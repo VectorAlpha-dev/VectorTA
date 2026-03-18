@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub enum BatchThreadsPerOutput {
     One,
     Two,
+    Four,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -60,6 +61,7 @@ pub enum BatchKernelSelected {
     Plain { block_x: u32 },
     Tiled1x { tile: u32 },
     Tiled2x { tile: u32 },
+    Tiled4x { tile: u32 },
     OnDevice { block_x: u32 },
 }
 
@@ -1022,7 +1024,7 @@ impl CudaAlma {
         let mut use_tiled = series_len > 8192;
         let mut block_x: u32 = 256;
         let mut force_tile: Option<u32> = None;
-        let mut force_two_per_thread: Option<bool> = None;
+        let mut force_threads_per_output: Option<BatchThreadsPerOutput> = None;
         match self.policy.batch {
             BatchKernelPolicy::Auto => {}
             BatchKernelPolicy::Plain { block_x: bx } => {
@@ -1032,7 +1034,7 @@ impl CudaAlma {
             BatchKernelPolicy::Tiled { tile, per_thread } => {
                 use_tiled = true;
                 force_tile = Some(tile);
-                force_two_per_thread = Some(matches!(per_thread, BatchThreadsPerOutput::Two));
+                force_threads_per_output = Some(per_thread);
             }
         }
 
@@ -1048,48 +1050,75 @@ impl CudaAlma {
                 _ => "",
             };
             let two_x_available = !two_x_name.is_empty() && self.has_function(two_x_name);
+            let four_x_name = match block_x {
+                512 => "alma_batch_tiled_f32_4x_tile512",
+                _ => "",
+            };
+            let four_x_available = !four_x_name.is_empty() && self.has_function(four_x_name);
 
-            let use_two_per_thread = if let Some(v) = force_two_per_thread {
+            let threads_per_output = if let Some(v) = force_threads_per_output {
                 v
             } else {
                 let force_2x = matches!(std::env::var("ALMA_FORCE_2X"), Ok(v) if v == "1" || v.eq_ignore_ascii_case("true"));
+                let force_4x = matches!(std::env::var("ALMA_FORCE_4X"), Ok(v) if v == "1" || v.eq_ignore_ascii_case("true"));
                 let force_1x = matches!(std::env::var("ALMA_FORCE_1X"), Ok(v) if v == "1" || v.eq_ignore_ascii_case("true"));
-                if force_2x && two_x_available {
-                    true
+                if force_4x && four_x_available {
+                    BatchThreadsPerOutput::Four
+                } else if force_2x && two_x_available {
+                    BatchThreadsPerOutput::Two
                 } else if force_1x {
-                    false
+                    BatchThreadsPerOutput::One
+                } else if two_x_available {
+                    BatchThreadsPerOutput::Two
                 } else {
-                    two_x_available
+                    BatchThreadsPerOutput::One
                 }
             };
-            let threads_x = if use_two_per_thread {
-                (block_x / 2).max(1)
-            } else {
-                block_x
+            let threads_x = match threads_per_output {
+                BatchThreadsPerOutput::One => block_x,
+                BatchThreadsPerOutput::Two => (block_x / 2).max(1),
+                BatchThreadsPerOutput::Four => (block_x / 4).max(1),
             };
+            if matches!(threads_per_output, BatchThreadsPerOutput::Four)
+                && (!four_x_available || block_x != 512)
+            {
+                return Err(CudaAlmaError::InvalidPolicy(
+                    "ALMA 4x tiled batch kernel is only available for tile=512",
+                ));
+            }
 
             let elems = max_period + (tile + max_period - 1);
             let shared_bytes = (elems * std::mem::size_of::<f32>()) as u32;
 
-            let base = if use_two_per_thread {
-                if block_x == 128 {
-                    "alma_batch_tiled_f32_2x_tile128"
-                } else if block_x == 256 {
-                    "alma_batch_tiled_f32_2x_tile256"
-                } else if block_x == 512 {
-                    "alma_batch_tiled_f32_2x_tile512"
-                } else {
-                    "alma_batch_tiled_f32_2x_tile256"
+            let base = match threads_per_output {
+                BatchThreadsPerOutput::Four => {
+                    if block_x == 512 {
+                        "alma_batch_tiled_f32_4x_tile512"
+                    } else {
+                        "alma_batch_tiled_f32_4x_tile512"
+                    }
                 }
-            } else {
-                if block_x == 128 {
-                    "alma_batch_tiled_f32_tile128"
-                } else if block_x == 256 {
-                    "alma_batch_tiled_f32_tile256"
-                } else if block_x == 512 {
-                    "alma_batch_tiled_f32_tile512"
-                } else {
-                    "alma_batch_tiled_f32_tile256"
+                BatchThreadsPerOutput::Two => {
+                    if block_x == 128 {
+                        "alma_batch_tiled_f32_2x_tile128"
+                    } else if block_x == 256 {
+                        "alma_batch_tiled_f32_2x_tile256"
+                    } else if block_x == 512 {
+                        "alma_batch_tiled_f32_2x_tile512"
+                    } else {
+                        "alma_batch_tiled_f32_2x_tile256"
+                    }
+                }
+                BatchThreadsPerOutput::One => {
+                    if block_x == 128 {
+                        "alma_batch_tiled_f32_tile128"
+                    } else if block_x == 256 {
+                        "alma_batch_tiled_f32_tile256"
+                    } else if block_x == 512 {
+                        "alma_batch_tiled_f32_tile512"
+                    } else {
+                        "alma_batch_tiled_f32_tile256"
+                    }
                 }
             };
             let func = self
@@ -1099,10 +1128,10 @@ impl CudaAlma {
 
             unsafe {
                 let this = self as *const _ as *mut CudaAlma;
-                (*this).last_batch = Some(if use_two_per_thread {
-                    BatchKernelSelected::Tiled2x { tile: block_x }
-                } else {
-                    BatchKernelSelected::Tiled1x { tile: block_x }
+                (*this).last_batch = Some(match threads_per_output {
+                    BatchThreadsPerOutput::One => BatchKernelSelected::Tiled1x { tile: block_x },
+                    BatchThreadsPerOutput::Two => BatchKernelSelected::Tiled2x { tile: block_x },
+                    BatchThreadsPerOutput::Four => BatchKernelSelected::Tiled4x { tile: block_x },
                 });
             }
             self.maybe_log_batch_debug();
@@ -1200,7 +1229,7 @@ impl CudaAlma {
         let mut use_tiled = series_len > 8192;
         let mut block_x: u32 = 256;
         let mut force_tile: Option<u32> = None;
-        let mut force_two_per_thread: Option<bool> = None;
+        let mut force_threads_per_output: Option<BatchThreadsPerOutput> = None;
         match self.policy.batch {
             BatchKernelPolicy::Auto => {}
             BatchKernelPolicy::Plain { block_x: bx } => {
@@ -1210,7 +1239,7 @@ impl CudaAlma {
             BatchKernelPolicy::Tiled { tile, per_thread } => {
                 use_tiled = true;
                 force_tile = Some(tile);
-                force_two_per_thread = Some(matches!(per_thread, BatchThreadsPerOutput::Two));
+                force_threads_per_output = Some(per_thread);
             }
         }
 
@@ -1229,54 +1258,87 @@ impl CudaAlma {
                 Some(n) => self.has_function(n),
                 None => false,
             };
+            let four_x_name = match block_x {
+                512 => Some("alma_batch_tiled_f32_4x_tile512_tm"),
+                _ => None,
+            };
+            let four_x_available = match four_x_name {
+                Some(n) => self.has_function(n),
+                None => false,
+            };
 
-            let use_two_per_thread = if let Some(v) = force_two_per_thread {
+            let threads_per_output = if let Some(v) = force_threads_per_output {
                 v
             } else {
                 let force_2x = matches!(
                     std::env::var("ALMA_FORCE_2X"),
                     Ok(v) if v == "1" || v.eq_ignore_ascii_case("true")
                 );
+                let force_4x = matches!(
+                    std::env::var("ALMA_FORCE_4X"),
+                    Ok(v) if v == "1" || v.eq_ignore_ascii_case("true")
+                );
                 let force_1x = matches!(
                     std::env::var("ALMA_FORCE_1X"),
                     Ok(v) if v == "1" || v.eq_ignore_ascii_case("true")
                 );
-                if force_2x && two_x_available {
-                    true
+                if force_4x && four_x_available {
+                    BatchThreadsPerOutput::Four
+                } else if force_2x && two_x_available {
+                    BatchThreadsPerOutput::Two
                 } else if force_1x {
-                    false
+                    BatchThreadsPerOutput::One
+                } else if two_x_available {
+                    BatchThreadsPerOutput::Two
                 } else {
-                    two_x_available
+                    BatchThreadsPerOutput::One
                 }
             };
-            let threads_x = if use_two_per_thread {
-                (block_x / 2).max(1)
-            } else {
-                block_x
+            let threads_x = match threads_per_output {
+                BatchThreadsPerOutput::One => block_x,
+                BatchThreadsPerOutput::Two => (block_x / 2).max(1),
+                BatchThreadsPerOutput::Four => (block_x / 4).max(1),
             };
+            if matches!(threads_per_output, BatchThreadsPerOutput::Four)
+                && (!four_x_available || block_x != 512)
+            {
+                return Err(CudaAlmaError::InvalidPolicy(
+                    "ALMA 4x tiled batch TM kernel is only available for tile=512",
+                ));
+            }
 
             let elems = max_period + (tile + max_period - 1);
             let shared_bytes = (elems * std::mem::size_of::<f32>()) as u32;
 
-            let base = if use_two_per_thread {
-                if block_x == 128 {
-                    "alma_batch_tiled_f32_2x_tile128_tm"
-                } else if block_x == 256 {
-                    "alma_batch_tiled_f32_2x_tile256_tm"
-                } else if block_x == 512 {
-                    "alma_batch_tiled_f32_2x_tile512_tm"
-                } else {
-                    "alma_batch_tiled_f32_2x_tile256_tm"
+            let base = match threads_per_output {
+                BatchThreadsPerOutput::Four => {
+                    if block_x == 512 {
+                        "alma_batch_tiled_f32_4x_tile512_tm"
+                    } else {
+                        "alma_batch_tiled_f32_4x_tile512_tm"
+                    }
                 }
-            } else {
-                if block_x == 128 {
-                    "alma_batch_tiled_f32_tile128_tm"
-                } else if block_x == 256 {
-                    "alma_batch_tiled_f32_tile256_tm"
-                } else if block_x == 512 {
-                    "alma_batch_tiled_f32_tile512_tm"
-                } else {
-                    "alma_batch_tiled_f32_tile256_tm"
+                BatchThreadsPerOutput::Two => {
+                    if block_x == 128 {
+                        "alma_batch_tiled_f32_2x_tile128_tm"
+                    } else if block_x == 256 {
+                        "alma_batch_tiled_f32_2x_tile256_tm"
+                    } else if block_x == 512 {
+                        "alma_batch_tiled_f32_2x_tile512_tm"
+                    } else {
+                        "alma_batch_tiled_f32_2x_tile256_tm"
+                    }
+                }
+                BatchThreadsPerOutput::One => {
+                    if block_x == 128 {
+                        "alma_batch_tiled_f32_tile128_tm"
+                    } else if block_x == 256 {
+                        "alma_batch_tiled_f32_tile256_tm"
+                    } else if block_x == 512 {
+                        "alma_batch_tiled_f32_tile512_tm"
+                    } else {
+                        "alma_batch_tiled_f32_tile256_tm"
+                    }
                 }
             };
             let func = self
@@ -1286,10 +1348,10 @@ impl CudaAlma {
 
             unsafe {
                 let this = self as *const _ as *mut CudaAlma;
-                (*this).last_batch = Some(if use_two_per_thread {
-                    BatchKernelSelected::Tiled2x { tile: block_x }
-                } else {
-                    BatchKernelSelected::Tiled1x { tile: block_x }
+                (*this).last_batch = Some(match threads_per_output {
+                    BatchThreadsPerOutput::One => BatchKernelSelected::Tiled1x { tile: block_x },
+                    BatchThreadsPerOutput::Two => BatchKernelSelected::Tiled2x { tile: block_x },
+                    BatchThreadsPerOutput::Four => BatchKernelSelected::Tiled4x { tile: block_x },
                 });
             }
             self.maybe_log_batch_debug();
@@ -1935,6 +1997,140 @@ pub mod benches {
         })
     }
 
+    fn prep_alma_one_series_many_params_4x() -> Box<dyn CudaBenchState> {
+        let mut cuda = CudaAlma::new(0).expect("cuda alma");
+        cuda.set_policy(CudaAlmaPolicy {
+            batch: BatchKernelPolicy::Tiled {
+                tile: 512,
+                per_thread: BatchThreadsPerOutput::Four,
+            },
+            many_series: ManySeriesKernelPolicy::Auto,
+        });
+        let price = gen_series(ONE_SERIES_LEN);
+        let start_period = 10usize;
+        let end_period = start_period + PARAM_SWEEP - 1;
+        let sweep = AlmaBatchRange {
+            period: (start_period, end_period, 1),
+            offset: (0.85, 0.85, 0.0),
+            sigma: (6.0, 6.0, 0.0),
+        };
+        let first_valid = price.iter().position(|x| !x.is_nan()).unwrap_or(0);
+        let combos = super::expand_grid(&sweep).expect("expand_grid");
+        let n_combos = combos.len();
+        let max_period = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        let mut periods_i32 = vec![0i32; n_combos];
+        let mut inv_norms = vec![0f32; n_combos];
+        let mut weights_flat = vec![0f32; n_combos * max_period];
+        for (idx, prm) in combos.iter().enumerate() {
+            let period = prm.period.unwrap() as usize;
+            let offset = prm.offset.unwrap();
+            let sigma = prm.sigma.unwrap();
+            let (mut weights, inv_norm) = super::compute_weights_cpu_f32(period, offset, sigma);
+            periods_i32[idx] = period as i32;
+            if inv_norm != 0.0 {
+                for w in &mut weights {
+                    *w *= inv_norm;
+                }
+            }
+            inv_norms[idx] = 1.0;
+            let base = idx * max_period;
+            weights_flat[base..base + period].copy_from_slice(&weights);
+        }
+        let d_prices =
+            unsafe { DeviceBuffer::from_slice_async(&price, &cuda.stream) }.expect("d_prices");
+        let d_weights = DeviceBuffer::from_slice(&weights_flat).expect("d_weights");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_inv_norms = DeviceBuffer::from_slice(&inv_norms).expect("d_inv_norms");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * ONE_SERIES_LEN, &cuda.stream) }
+                .expect("d_out");
+        cuda.synchronize().expect("sync after prep");
+        Box::new(AlmaBatchDeviceState {
+            cuda,
+            d_prices,
+            d_weights,
+            d_periods,
+            d_inv_norms,
+            d_out,
+            series_len: ONE_SERIES_LEN,
+            n_combos,
+            max_period,
+            first_valid,
+            warmed: false,
+        })
+    }
+
+    fn prep_batch_len_sweep_4x<const LEN: usize, const SWEEP: usize>() -> Box<dyn CudaBenchState> {
+        let mut cuda = CudaAlma::new(0).expect("cuda alma");
+
+        cuda.set_policy(CudaAlmaPolicy {
+            batch: BatchKernelPolicy::Tiled {
+                tile: 512,
+                per_thread: BatchThreadsPerOutput::Four,
+            },
+            many_series: ManySeriesKernelPolicy::Auto,
+        });
+        let price = gen_series(LEN);
+        let start_period = 10usize;
+        let end_period = start_period + SWEEP - 1;
+        let sweep = AlmaBatchRange {
+            period: (start_period, end_period, 1),
+            offset: (0.85, 0.85, 0.0),
+            sigma: (6.0, 6.0, 0.0),
+        };
+        let first_valid = price.iter().position(|x| !x.is_nan()).unwrap_or(0);
+        let combos = super::expand_grid(&sweep).expect("expand_grid");
+        let n_combos = combos.len();
+        let max_period = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        let mut periods_i32 = vec![0i32; n_combos];
+        let mut inv_norms = vec![0f32; n_combos];
+        let mut weights_flat = vec![0f32; n_combos * max_period];
+        for (idx, prm) in combos.iter().enumerate() {
+            let period = prm.period.unwrap() as usize;
+            let (mut weights, inv_norm) =
+                super::compute_weights_cpu_f32(period, prm.offset.unwrap(), prm.sigma.unwrap());
+            periods_i32[idx] = period as i32;
+            if inv_norm != 0.0 {
+                for w in &mut weights {
+                    *w *= inv_norm;
+                }
+            }
+            inv_norms[idx] = 1.0;
+            let base = idx * max_period;
+            weights_flat[base..base + period].copy_from_slice(&weights);
+        }
+        let d_prices =
+            unsafe { DeviceBuffer::from_slice_async(&price, &cuda.stream) }.expect("d_prices");
+        let d_weights = DeviceBuffer::from_slice(&weights_flat).expect("d_weights");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_inv_norms = DeviceBuffer::from_slice(&inv_norms).expect("d_inv_norms");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * LEN, &cuda.stream) }
+                .expect("d_out");
+        cuda.synchronize().expect("sync after prep");
+        Box::new(AlmaBatchDeviceState {
+            cuda,
+            d_prices,
+            d_weights,
+            d_periods,
+            d_inv_norms,
+            d_out,
+            series_len: LEN,
+            n_combos,
+            max_period,
+            first_valid,
+            warmed: false,
+        })
+    }
+
     struct AlmaManySeriesDeviceState {
         cuda: CudaAlma,
         d_prices_tm: DeviceBuffer<f32>,
@@ -2092,6 +2288,19 @@ pub mod benches {
                 "alma",
                 "one_series_many_params",
                 "alma_cuda_batch_dev",
+                "250k_x_250_4x512",
+                prep_batch_len_sweep_4x::<{ ONE_SERIES_LEN_SMALL }, { PARAM_SWEEP }>,
+            )
+            .with_sample_size(12)
+            .with_mem_required(
+                ONE_SERIES_LEN_SMALL * 4
+                    + ONE_SERIES_LEN_SMALL * PARAM_SWEEP * 4
+                    + 64 * 1024 * 1024,
+            ),
+            CudaBenchScenario::new(
+                "alma",
+                "one_series_many_params",
+                "alma_cuda_batch_dev",
                 "1m_x_250",
                 prep_alma_one_series_many_params,
             )
@@ -2101,8 +2310,28 @@ pub mod benches {
                 "alma",
                 "one_series_many_params",
                 "alma_cuda_batch_dev",
+                "4x512_1m_x_250",
+                prep_alma_one_series_many_params_4x,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "alma",
+                "one_series_many_params",
+                "alma_cuda_batch_dev",
                 "4m_x_250",
                 prep_batch_len_sweep::<{ ONE_SERIES_LEN_XL }, { PARAM_SWEEP }>,
+            )
+            .with_sample_size(6)
+            .with_mem_required(
+                ONE_SERIES_LEN_XL * 4 + ONE_SERIES_LEN_XL * PARAM_SWEEP * 4 + 64 * 1024 * 1024,
+            ),
+            CudaBenchScenario::new(
+                "alma",
+                "one_series_many_params",
+                "alma_cuda_batch_dev",
+                "4m_x_250_4x512",
+                prep_batch_len_sweep_4x::<{ ONE_SERIES_LEN_XL }, { PARAM_SWEEP }>,
             )
             .with_sample_size(6)
             .with_mem_required(

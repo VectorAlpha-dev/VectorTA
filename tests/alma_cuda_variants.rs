@@ -169,6 +169,19 @@ fn alma_batch_tiled_2x_matches_cpu() {
 
 #[cfg(feature = "cuda")]
 #[test]
+fn alma_batch_tiled_4x_matches_cpu() {
+    let policy = CudaAlmaPolicy {
+        batch: BatchKernelPolicy::Tiled {
+            tile: 512,
+            per_thread: BatchThreadsPerOutput::Four,
+        },
+        many_series: ManySeriesKernelPolicy::Auto,
+    };
+    compare_batch(policy, 131072, 12, 128);
+}
+
+#[cfg(feature = "cuda")]
+#[test]
 fn alma_many_series_1d_matches_cpu() {
     let policy = CudaAlmaPolicy {
         batch: BatchKernelPolicy::Auto,

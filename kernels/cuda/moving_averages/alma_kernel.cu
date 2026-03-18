@@ -139,6 +139,23 @@ void alma_dot2_shared(const float* __restrict__ buf, int b,
   s0_out = s0; s1_out = s1;
 }
 
+__device__ __forceinline__
+void alma_dot4_shared(const float* __restrict__ buf, int b,
+                      const float* __restrict__ w, int n,
+                      float& s0_out, float& s1_out,
+                      float& s2_out, float& s3_out) {
+  float s0 = 0.f, s1 = 0.f, s2 = 0.f, s3 = 0.f;
+  #pragma unroll 8
+  for (int i = 0; i < n; ++i) {
+    float wi = w[i];
+    s0 = __fmaf_rn(buf[b + i],     wi, s0);
+    s1 = __fmaf_rn(buf[b + i + 1], wi, s1);
+    s2 = __fmaf_rn(buf[b + i + 2], wi, s2);
+    s3 = __fmaf_rn(buf[b + i + 3], wi, s3);
+  }
+  s0_out = s0; s1_out = s1; s2_out = s2; s3_out = s3;
+}
+
 
 __device__ __forceinline__
 float alma_dot_stride(const float* __restrict__ x,
@@ -788,6 +805,243 @@ extern "C" __global__ void NAME(                                                
 DEFINE_ALMA_BATCH_TILED_PRECOMP_2X_TM(alma_batch_tiled_f32_2x_tile128_tm, 128)
 DEFINE_ALMA_BATCH_TILED_PRECOMP_2X_TM(alma_batch_tiled_f32_2x_tile256_tm, 256)
 DEFINE_ALMA_BATCH_TILED_PRECOMP_2X_TM(alma_batch_tiled_f32_2x_tile512_tm, 512)
+
+template<int TILE_OUT>
+struct AlmaBatchTiledPrecomputed4X {
+  static __device__ __forceinline__
+  void run(const float* __restrict__ prices,
+           const float* __restrict__ weights_flat,
+           const int*   __restrict__ periods,
+           const float* __restrict__ inv_norms,
+           int max_period,
+           int series_len,
+           int n_combos,
+           int first_valid,
+           float* __restrict__ out) {
+    static_assert(TILE_OUT % 4 == 0, "TILE_OUT must be divisible by 4");
+    constexpr int THREADS = TILE_OUT / 4;
+    if (blockDim.x != THREADS) return;
+
+    const int combo = blockIdx.y;
+    if (combo >= n_combos) return;
+
+    const int period = periods[combo];
+    const int t0 = blockIdx.x * TILE_OUT;
+    if (t0 >= series_len) return;
+
+    const int total = TILE_OUT + period - 1;
+
+    extern __shared__ __align__(16) unsigned char shraw[];
+    size_t off = 0;
+    float* w   = reinterpret_cast<float*>(shraw + off);
+    off = alma_align_up(off + size_t(period) * sizeof(float), 16);
+    float* buf = reinterpret_cast<float*>(shraw + off);
+
+    const float* wsrc = weights_flat + combo * max_period;
+    uintptr_t waddr = reinterpret_cast<uintptr_t>(wsrc);
+    if ((waddr & 0xF) == 0) {
+      int ve = period >> 2;
+      for (int vi = threadIdx.x; vi < ve; vi += THREADS) {
+        reinterpret_cast<float4*>(w)[vi] = reinterpret_cast<const float4*>(wsrc)[vi];
+      }
+      if ((threadIdx.x == 0) && ((period & 3) != 0)) {
+        int base = ve << 2;
+        for (int r = 0; r < (period & 3); ++r) w[base + r] = wsrc[base + r];
+      }
+    } else {
+      for (int i = threadIdx.x; i < period; i += THREADS) w[i] = wsrc[i];
+    }
+    __syncthreads();
+
+    const int p_base0 = t0 - (period - 1);
+    bool in_bounds = (p_base0 >= 0) && ((p_base0 + total) <= series_len);
+    if (in_bounds) {
+      const float* src = prices + p_base0;
+      uintptr_t addr = reinterpret_cast<uintptr_t>(src);
+      if ((addr & 0xF) == 0) {
+        int vec_elems = total >> 2;
+        int vec_idx = threadIdx.x;
+        float4* dst4 = reinterpret_cast<float4*>(buf);
+        const float4* src4 = reinterpret_cast<const float4*>(src);
+        while (vec_idx < vec_elems) {
+          dst4[vec_idx] = src4[vec_idx];
+          vec_idx += THREADS;
+        }
+        if ((threadIdx.x == 0) && ((total & 3) != 0)) {
+          int base = vec_elems << 2;
+          for (int r = 0; r < (total & 3); ++r) buf[base + r] = src[base + r];
+        }
+      } else {
+        for (int i = threadIdx.x; i < total; i += THREADS) buf[i] = src[i];
+      }
+    } else {
+      for (int i = threadIdx.x; i < total; i += THREADS) {
+        int idx = p_base0 + i;
+        buf[i] = (0 <= idx && idx < series_len) ? prices[idx] : 0.f;
+      }
+    }
+    __syncthreads();
+
+    const int warm = first_valid + period - 1;
+    const int combo_base = combo * series_len;
+    int b = 4 * threadIdx.x;
+    int t = t0 + b;
+    if (t >= series_len) return;
+
+    const bool can0 = (t >= warm);
+    const bool can1 = ((t + 1) < series_len) && ((t + 1) >= warm);
+    const bool can2 = ((t + 2) < series_len) && ((t + 2) >= warm);
+    const bool can3 = ((t + 3) < series_len) && ((t + 3) >= warm);
+
+    float out0 = NAN, out1 = NAN, out2 = NAN, out3 = NAN;
+    if (can0 && can1 && can2 && can3) {
+      alma_dot4_shared(buf, b, w, period, out0, out1, out2, out3);
+    } else {
+      if (can0) out0 = alma_dot(&buf[b], w, period);
+      if (can1) out1 = alma_dot(&buf[b + 1], w, period);
+      if (can2) out2 = alma_dot(&buf[b + 2], w, period);
+      if (can3) out3 = alma_dot(&buf[b + 3], w, period);
+    }
+
+    out[combo_base + t] = out0;
+    if ((t + 1) < series_len) out[combo_base + t + 1] = out1;
+    if ((t + 2) < series_len) out[combo_base + t + 2] = out2;
+    if ((t + 3) < series_len) out[combo_base + t + 3] = out3;
+  }
+};
+
+template<int TILE_OUT>
+struct AlmaBatchTiledPrecomputed4XTM {
+  static __device__ __forceinline__
+  void run(const float* __restrict__ prices,
+           const float* __restrict__ weights_flat,
+           const int*   __restrict__ periods,
+           const float* __restrict__ inv_norms,
+           int max_period,
+           int series_len,
+           int n_combos,
+           int first_valid,
+           float* __restrict__ out_tm) {
+    static_assert(TILE_OUT % 4 == 0, "TILE_OUT must be divisible by 4");
+    constexpr int THREADS = TILE_OUT / 4;
+    if (blockDim.x != THREADS) return;
+
+    const int combo = blockIdx.y;
+    if (combo >= n_combos) return;
+
+    const int period = periods[combo];
+    const int t0 = blockIdx.x * TILE_OUT;
+    if (t0 >= series_len) return;
+
+    const int total = TILE_OUT + period - 1;
+
+    extern __shared__ __align__(16) unsigned char shraw[];
+    size_t off = 0;
+    float* w   = reinterpret_cast<float*>(shraw + off);
+    off = alma_align_up(off + size_t(period) * sizeof(float), 16);
+    float* buf = reinterpret_cast<float*>(shraw + off);
+
+    const float* wsrc = weights_flat + combo * max_period;
+    uintptr_t waddr = reinterpret_cast<uintptr_t>(wsrc);
+    if ((waddr & 0xF) == 0) {
+      int ve = period >> 2;
+      for (int vi = threadIdx.x; vi < ve; vi += THREADS) {
+        reinterpret_cast<float4*>(w)[vi] = reinterpret_cast<const float4*>(wsrc)[vi];
+      }
+      if ((threadIdx.x == 0) && ((period & 3) != 0)) {
+        int base = ve << 2;
+        for (int r = 0; r < (period & 3); ++r) w[base + r] = wsrc[base + r];
+      }
+    } else {
+      for (int i = threadIdx.x; i < period; i += THREADS) w[i] = wsrc[i];
+    }
+    __syncthreads();
+
+    const int p_base0 = t0 - (period - 1);
+    bool in_bounds = (p_base0 >= 0) && ((p_base0 + total) <= series_len);
+    if (in_bounds) {
+      const float* src = prices + p_base0;
+      uintptr_t addr = reinterpret_cast<uintptr_t>(src);
+      if ((addr & 0xF) == 0) {
+        int vec_elems = total >> 2;
+        int vec_idx = threadIdx.x;
+        float4* dst4 = reinterpret_cast<float4*>(buf);
+        const float4* src4 = reinterpret_cast<const float4*>(src);
+        while (vec_idx < vec_elems) {
+          dst4[vec_idx] = src4[vec_idx];
+          vec_idx += THREADS;
+        }
+        if ((threadIdx.x == 0) && ((total & 3) != 0)) {
+          int base = vec_elems << 2;
+          for (int r = 0; r < (total & 3); ++r) buf[base + r] = src[base + r];
+        }
+      } else {
+        for (int i = threadIdx.x; i < total; i += THREADS) buf[i] = src[i];
+      }
+    } else {
+      for (int i = threadIdx.x; i < total; i += THREADS) {
+        int idx = p_base0 + i;
+        buf[i] = (0 <= idx && idx < series_len) ? prices[idx] : 0.f;
+      }
+    }
+    __syncthreads();
+
+    const int warm = first_valid + period - 1;
+    int b = 4 * threadIdx.x;
+    int t = t0 + b;
+    if (t >= series_len) return;
+
+    const bool can0 = (t >= warm);
+    const bool can1 = ((t + 1) < series_len) && ((t + 1) >= warm);
+    const bool can2 = ((t + 2) < series_len) && ((t + 2) >= warm);
+    const bool can3 = ((t + 3) < series_len) && ((t + 3) >= warm);
+
+    float out0 = NAN, out1 = NAN, out2 = NAN, out3 = NAN;
+    if (can0 && can1 && can2 && can3) {
+      alma_dot4_shared(buf, b, w, period, out0, out1, out2, out3);
+    } else {
+      if (can0) out0 = alma_dot(&buf[b], w, period);
+      if (can1) out1 = alma_dot(&buf[b + 1], w, period);
+      if (can2) out2 = alma_dot(&buf[b + 2], w, period);
+      if (can3) out3 = alma_dot(&buf[b + 3], w, period);
+    }
+
+    out_tm[(size_t)t * (size_t)n_combos + (size_t)combo] = out0;
+    if ((t + 1) < series_len) out_tm[(size_t)(t + 1) * (size_t)n_combos + (size_t)combo] = out1;
+    if ((t + 2) < series_len) out_tm[(size_t)(t + 2) * (size_t)n_combos + (size_t)combo] = out2;
+    if ((t + 3) < series_len) out_tm[(size_t)(t + 3) * (size_t)n_combos + (size_t)combo] = out3;
+  }
+};
+
+#define DEFINE_ALMA_BATCH_TILED_PRECOMP_4X(NAME, TILE_OUT)                        \
+extern "C" __global__ void NAME(                                                  \
+  const float* __restrict__ prices,                                               \
+  const float* __restrict__ weights_flat,                                         \
+  const int*   __restrict__ periods,                                              \
+  const float* __restrict__ inv_norms,                                            \
+  int max_period, int series_len, int n_combos, int first_valid,                  \
+  float* __restrict__ out) {                                                      \
+  AlmaBatchTiledPrecomputed4X<TILE_OUT>::run(                                     \
+    prices, weights_flat, periods, inv_norms, max_period,                         \
+    series_len, n_combos, first_valid, out);                                      \
+}
+
+DEFINE_ALMA_BATCH_TILED_PRECOMP_4X(alma_batch_tiled_f32_4x_tile512, 512)
+
+#define DEFINE_ALMA_BATCH_TILED_PRECOMP_4X_TM(NAME, TILE_OUT)                     \
+extern "C" __global__ void NAME(                                                  \
+  const float* __restrict__ prices,                                               \
+  const float* __restrict__ weights_flat,                                         \
+  const int*   __restrict__ periods,                                              \
+  const float* __restrict__ inv_norms,                                            \
+  int max_period, int series_len, int n_combos, int first_valid,                  \
+  float* __restrict__ out_tm) {                                                   \
+  AlmaBatchTiledPrecomputed4XTM<TILE_OUT>::run(                                   \
+    prices, weights_flat, periods, inv_norms, max_period,                         \
+    series_len, n_combos, first_valid, out_tm);                                   \
+}
+
+DEFINE_ALMA_BATCH_TILED_PRECOMP_4X_TM(alma_batch_tiled_f32_4x_tile512_tm, 512)
 
 
 
