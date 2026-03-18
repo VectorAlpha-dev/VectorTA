@@ -202,6 +202,16 @@ fn alma_many_series_2d_ty4_matches_cpu() {
 
 #[cfg(feature = "cuda")]
 #[test]
+fn alma_many_series_2d_ty4_non_multiple_of_4_matches_cpu() {
+    let policy = CudaAlmaPolicy {
+        batch: BatchKernelPolicy::Auto,
+        many_series: ManySeriesKernelPolicy::Tiled2D { tx: 128, ty: 4 },
+    };
+    compare_many_series(policy, 250, 4096, 64);
+}
+
+#[cfg(feature = "cuda")]
+#[test]
 fn alma_many_series_2d_ty2_matches_cpu() {
     let policy = CudaAlmaPolicy {
         batch: BatchKernelPolicy::Auto,

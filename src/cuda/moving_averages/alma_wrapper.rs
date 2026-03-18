@@ -1454,8 +1454,8 @@ impl CudaAlma {
 
         let try_2d = |tx: u32, ty: u32| -> Option<()> {
             let total = tx as usize + period - 1;
-
-            let shared_elems = period.checked_add(total.checked_mul(ty as usize)?)?;
+            let tile_ld = (ty as usize).checked_add(1)?;
+            let shared_elems = period.checked_add(total.checked_mul(tile_ld)?)?;
             let shared_bytes = shared_elems.checked_mul(std::mem::size_of::<f32>())? as u32;
             if (shared_bytes as usize) > max_smem {
                 return None;

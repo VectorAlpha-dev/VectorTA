@@ -1138,6 +1138,7 @@ void alma_ms1p_tiled_core(const float* __restrict__ prices_tm,
 
 
   const int total = TX_ + period - 1;
+  const int TILE_LD = TY_ + 1;
   extern __shared__ __align__(16) unsigned char shraw[];
   size_t off = 0;
   float* w = reinterpret_cast<float*>(shraw + off);
@@ -1162,30 +1163,32 @@ void alma_ms1p_tiled_core(const float* __restrict__ prices_tm,
   }
   __syncthreads();
 
-
-  const bool vec_ok = (TY_ == 4) && ((num_series & 3) == 0) && ((s0 & 3) == 0);
+  const bool vec_base_ok = (TY_ == 4) && ((s0 + 3) < num_series);
 
   const int p0 = t0 - (period - 1);
   for (int dt = threadIdx.x; dt < total; dt += blockDim.x) {
     int t = p0 + dt;
     if (t >= 0 && t < series_len) {
-      if (vec_ok && threadIdx.y == 0) {
+      const bool row_vec_ok =
+        vec_base_ok &&
+        ((((size_t)t * (size_t)num_series + (size_t)s0) & size_t(3)) == 0);
+      if (row_vec_ok && threadIdx.y == 0) {
 
         const float4* src4 = reinterpret_cast<const float4*>(&prices_tm[t * num_series + s0]);
         float4 v = src4[0];
-        tile[dt * TY_ + 0] = v.x;
-        tile[dt * TY_ + 1] = v.y;
-        tile[dt * TY_ + 2] = v.z;
-        tile[dt * TY_ + 3] = v.w;
+        tile[dt * TILE_LD + 0] = v.x;
+        tile[dt * TILE_LD + 1] = v.y;
+        tile[dt * TILE_LD + 2] = v.z;
+        tile[dt * TILE_LD + 3] = v.w;
       } else {
         int s = s0 + threadIdx.y;
         float val = 0.f;
         if (s < num_series) val = prices_tm[t * num_series + s];
-        tile[dt * TY_ + threadIdx.y] = val;
+        tile[dt * TILE_LD + threadIdx.y] = val;
       }
     } else {
-      int idx = dt * TY_ + threadIdx.y;
-      if (idx < total * TY_) tile[idx] = 0.f;
+      int idx = dt * TILE_LD + threadIdx.y;
+      if (idx < total * TILE_LD) tile[idx] = 0.f;
     }
   }
   __syncthreads();
@@ -1204,8 +1207,8 @@ void alma_ms1p_tiled_core(const float* __restrict__ prices_tm,
   }
 
   int start = threadIdx.x;
-  const float* xptr = &tile[start * TY_ + threadIdx.y];
-  float acc = alma_dot_stride(xptr, TY_, w, period);
+  const float* xptr = &tile[start * TILE_LD + threadIdx.y];
+  float acc = alma_dot_stride(xptr, TILE_LD, w, period);
 
   out_tm[out_idx] = acc;
 }
