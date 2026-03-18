@@ -135,31 +135,7 @@ impl CudaLinearregAngle {
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
 
-        let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/linearreg_angle_kernel.ptx"));
-        let module = Module::from_ptx(
-            ptx,
-            &[
-                ModuleJitOption::DetermineTargetFromContext,
-                ModuleJitOption::OptLevel(OptLevel::O2),
-            ],
-        );
-        let module = match Module::from_ptx(
-            ptx,
-            &[
-                ModuleJitOption::DetermineTargetFromContext,
-                ModuleJitOption::OptLevel(OptLevel::O2),
-            ],
-        ) {
-            Ok(m) => m,
-            Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                    m
-                } else {
-                    Module::from_ptx(ptx, &[])?
-                }
-            }
-        };
+        let module = crate::load_cuda_embedded_module!("linearreg_angle_kernel")?;
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 

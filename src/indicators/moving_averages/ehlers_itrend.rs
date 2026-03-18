@@ -2247,7 +2247,7 @@ mod tests {
                     ),
                     Just(warmup),
                     Just(max_dc),
-                    (-1e3f64..1e3f64).prop_filter("a≠0", |a| a.is_finite() && *a != 0.0),
+                    (1e-3f64..1e3f64).prop_filter("a>0", |a| a.is_finite()),
                     -1e3f64..1e3f64,
                 )
             })

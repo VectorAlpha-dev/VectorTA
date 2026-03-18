@@ -97,13 +97,7 @@ impl CudaBollingerBands {
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O3),
         ];
-        let module = match Module::from_ptx(ptx, jit) {
-            Ok(m) => m,
-            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
-                Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])?,
-            },
-        };
+        let module = crate::load_cuda_embedded_module!("bollinger_bands_kernel")?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {

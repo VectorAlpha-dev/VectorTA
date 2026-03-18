@@ -97,10 +97,7 @@ impl CudaStc {
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = match Module::from_ptx(ptx, jit) {
-            Ok(m) => m,
-            Err(_) => Module::from_ptx(ptx, &[])?,
-        };
+        let module = crate::load_cuda_embedded_module!("stc_kernel")?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {

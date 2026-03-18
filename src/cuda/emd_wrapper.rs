@@ -220,10 +220,7 @@ impl CudaEmd {
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O4),
         ];
-        let module = Module::from_ptx(ptx, jit_opts)
-            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(CudaEmdError::Cuda)?;
+        let module = crate::load_cuda_embedded_module!("emd_kernel").map_err(CudaEmdError::Cuda)?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaEmdError::Cuda)?;
 
         Ok(Self {

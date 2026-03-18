@@ -183,15 +183,7 @@ impl CudaNama {
         let context = Context::new(device)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/nama_kernel.ptx"));
-        let module = Module::from_ptx(
-            ptx,
-            &[
-                ModuleJitOption::DetermineTargetFromContext,
-                ModuleJitOption::OptLevel(OptLevel::O2),
-            ],
-        )
-        .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-        .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let module = crate::load_cuda_embedded_module!("nama_kernel")?;
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 

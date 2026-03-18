@@ -173,24 +173,7 @@ impl CudaFrama {
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/frama_kernel.ptx"));
 
-        let module = Module::from_ptx(
-            ptx,
-            &[
-                ModuleJitOption::DetermineTargetFromContext,
-                ModuleJitOption::OptLevel(OptLevel::O4),
-            ],
-        )
-        .or_else(|_| {
-            Module::from_ptx(
-                ptx,
-                &[
-                    ModuleJitOption::DetermineTargetFromContext,
-                    ModuleJitOption::OptLevel(OptLevel::O2),
-                ],
-            )
-        })
-        .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-        .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let module = crate::load_cuda_embedded_module!("frama_kernel")?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {

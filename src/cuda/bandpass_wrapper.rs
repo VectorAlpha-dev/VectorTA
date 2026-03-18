@@ -130,25 +130,9 @@ impl CudaBandpass {
         let context = Context::new(device)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/bandpass_kernel.ptx"));
-        let module = Module::from_ptx(
-            ptx,
-            &[
-                ModuleJitOption::DetermineTargetFromContext,
-                ModuleJitOption::OptLevel(OptLevel::O2),
-            ],
-        )
-        .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-        .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let module = crate::load_cuda_embedded_module!("bandpass_kernel")?;
         let highpass_ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/highpass_kernel.ptx"));
-        let highpass_module = Module::from_ptx(
-            highpass_ptx,
-            &[
-                ModuleJitOption::DetermineTargetFromContext,
-                ModuleJitOption::OptLevel(OptLevel::O2),
-            ],
-        )
-        .or_else(|_| Module::from_ptx(highpass_ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-        .or_else(|_| Module::from_ptx(highpass_ptx, &[]))?;
+        let highpass_module = crate::load_cuda_embedded_module!("highpass_kernel")?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {

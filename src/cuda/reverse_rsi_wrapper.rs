@@ -102,17 +102,7 @@ impl CudaReverseRsi {
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = match Module::from_ptx(ptx, jit_opts) {
-            Ok(m) => m,
-            Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                    m
-                } else {
-                    Module::from_ptx(ptx, &[])?
-                }
-            }
-        };
+        let module = crate::load_cuda_embedded_module!("reverse_rsi_kernel")?;
 
         let _ = cust::context::CurrentContext::set_cache_config(CacheConfig::PreferL1);
 

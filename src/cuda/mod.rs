@@ -52,6 +52,8 @@ pub mod rocr_wrapper;
 #[cfg(feature = "cuda")]
 pub mod runtime;
 #[cfg(feature = "cuda")]
+pub mod module_loader;
+#[cfg(feature = "cuda")]
 pub mod wavetrend;
 
 #[cfg(feature = "cuda")]

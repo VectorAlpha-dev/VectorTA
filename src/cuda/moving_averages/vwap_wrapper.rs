@@ -145,9 +145,7 @@ impl CudaVwap {
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O4),
         ];
-        let module = Module::from_ptx(ptx, jit_opts)
-            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let module = crate::load_cuda_embedded_module!("vwap_kernel")?;
 
         if let Ok(mut f) = module.get_function("vwap_batch_f32") {
             let _ = f.set_cache_config(CacheConfig::PreferL1);

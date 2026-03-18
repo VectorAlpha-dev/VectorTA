@@ -165,20 +165,8 @@ impl CudaTema {
             .map_err(CudaTemaError::Cuda)? as u32;
         let context = Arc::new(Context::new(device).map_err(CudaTemaError::Cuda)?);
 
-        let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/tema_kernel.ptx"));
-
-        let jit_opts = &[ModuleJitOption::DetermineTargetFromContext];
-        let module = match Module::from_ptx(ptx, jit_opts) {
-            Ok(m) => m,
-            Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                    m
-                } else {
-                    Module::from_ptx(ptx, &[]).map_err(CudaTemaError::Cuda)?
-                }
-            }
-        };
+        let module =
+            crate::load_cuda_embedded_module!("tema_kernel").map_err(CudaTemaError::Cuda)?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaTemaError::Cuda)?;
 
         let warps_per_block = env_warps_per_block();

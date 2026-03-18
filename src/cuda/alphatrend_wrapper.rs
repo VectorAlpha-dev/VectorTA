@@ -150,20 +150,11 @@ impl CudaAlphaTrend {
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = Module::from_ptx(ptx, jit_opts)
-            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))
-            .map_err(CudaAlphaTrendError::Cuda)?;
+        let module = crate::load_cuda_embedded_module!("alphatrend_kernel").map_err(CudaAlphaTrendError::Cuda)?;
         let rsi_ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/rsi_kernel.ptx"));
-        let rsi_module = Module::from_ptx(rsi_ptx, jit_opts)
-            .or_else(|_| Module::from_ptx(rsi_ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(rsi_ptx, &[]))
-            .map_err(CudaAlphaTrendError::Cuda)?;
+        let rsi_module = crate::load_cuda_embedded_module!("rsi_kernel").map_err(CudaAlphaTrendError::Cuda)?;
         let mfi_ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/mfi_kernel.ptx"));
-        let mfi_module = Module::from_ptx(mfi_ptx, jit_opts)
-            .or_else(|_| Module::from_ptx(mfi_ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(mfi_ptx, &[]))
-            .map_err(CudaAlphaTrendError::Cuda)?;
+        let mfi_module = crate::load_cuda_embedded_module!("mfi_kernel").map_err(CudaAlphaTrendError::Cuda)?;
         let stream =
             Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaAlphaTrendError::Cuda)?;
 

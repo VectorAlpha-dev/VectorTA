@@ -148,16 +148,7 @@ impl CudaRangeFilter {
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = Module::from_ptx(
-            ptx,
-            &[
-                ModuleJitOption::DetermineTargetFromContext,
-                ModuleJitOption::OptLevel(OptLevel::O2),
-            ],
-        )
-        .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-        .or_else(|_| Module::from_ptx(ptx, &[]))
-        .map_err(CudaRangeFilterError::Cuda)?;
+        let module = crate::load_cuda_embedded_module!("range_filter_kernel").map_err(CudaRangeFilterError::Cuda)?;
         let stream =
             Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaRangeFilterError::Cuda)?;
 

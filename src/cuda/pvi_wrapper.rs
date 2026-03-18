@@ -63,17 +63,7 @@ impl CudaPvi {
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O4),
         ];
-        let module = match Module::from_ptx(ptx, jit_opts) {
-            Ok(m) => m,
-            Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                    m
-                } else {
-                    Module::from_ptx(ptx, &[])?
-                }
-            }
-        };
+        let module = crate::load_cuda_embedded_module!("pvi_kernel")?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         if let Ok(mut func) = module.get_function("pvi_apply_scale_batch_f32") {

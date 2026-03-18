@@ -130,9 +130,7 @@ impl CudaVpci {
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = Module::from_ptx(ptx, &jit)
-            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let module = crate::load_cuda_embedded_module!("vpci_kernel")?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {

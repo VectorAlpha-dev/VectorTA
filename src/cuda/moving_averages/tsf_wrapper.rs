@@ -105,19 +105,7 @@ impl CudaTsf {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/tsf_kernel.ptx"));
-        let module = match Module::from_ptx(
-            ptx,
-            &[
-                ModuleJitOption::DetermineTargetFromContext,
-                ModuleJitOption::OptLevel(OptLevel::O4),
-            ],
-        ) {
-            Ok(m) => m,
-            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
-                Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])?,
-            },
-        };
+        let module = crate::load_cuda_embedded_module!("tsf_kernel")?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {

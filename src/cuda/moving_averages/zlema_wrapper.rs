@@ -142,17 +142,7 @@ impl CudaZlema {
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/zlema_kernel.ptx"));
 
         let jit_opts = &[ModuleJitOption::DetermineTargetFromContext];
-        let module = match Module::from_ptx(ptx, jit_opts) {
-            Ok(m) => m,
-            Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                    m
-                } else {
-                    Module::from_ptx(ptx, &[])?
-                }
-            }
-        };
+        let module = crate::load_cuda_embedded_module!("zlema_kernel")?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Ok(Self {

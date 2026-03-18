@@ -87,9 +87,7 @@ impl CudaPrb {
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/prb_kernel.ptx"));
 
         let jit_opts = &[ModuleJitOption::DetermineTargetFromContext];
-        let module = Module::from_ptx(ptx, jit_opts)
-            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-            .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let module = crate::load_cuda_embedded_module!("prb_kernel")?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         Ok(Self {
             module,

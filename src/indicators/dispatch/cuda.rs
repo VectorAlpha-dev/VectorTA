@@ -38,6 +38,8 @@ use crate::indicators::alphatrend::AlphaTrendBatchRange;
 use crate::indicators::ao::AoBatchRange;
 use crate::indicators::aroon::AroonBatchRange;
 use crate::indicators::aroonosc::AroonOscBatchRange;
+#[cfg(test)]
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use crate::indicators::aso::AsoBatchRange;
 use crate::indicators::atr::AtrBatchRange;
 use crate::indicators::avsl::AvslBatchRange;
@@ -268,9 +270,20 @@ impl BorrowedCudaMaInputs {
     }
 }
 
+#[cfg(test)]
+fn cuda_dispatch_test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("cuda dispatch test lock")
+}
+
 pub fn compute_cuda(
     req: IndicatorCudaRequest<'_>,
 ) -> Result<IndicatorCudaOutput, IndicatorDispatchError> {
+    #[cfg(test)]
+    let _cuda_dispatch_lock = cuda_dispatch_test_lock();
+
     let normalized_id = normalize_cuda_dispatch_id(req.indicator_id);
     let normalized_req = IndicatorCudaRequest {
         indicator_id: normalized_id.as_str(),
@@ -384,6 +397,9 @@ pub fn compute_cuda(
 pub fn compute_cuda_device(
     req: IndicatorCudaDeviceRequest<'_>,
 ) -> Result<IndicatorCudaOutput, IndicatorDispatchError> {
+    #[cfg(test)]
+    let _cuda_dispatch_lock = cuda_dispatch_test_lock();
+
     let normalized_id = normalize_cuda_dispatch_id(req.indicator_id);
     let normalized_req = IndicatorCudaDeviceRequest {
         indicator_id: normalized_id.as_str(),

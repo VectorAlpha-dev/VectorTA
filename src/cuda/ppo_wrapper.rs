@@ -133,26 +133,10 @@ impl CudaPpo {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ppo_kernel.ptx"));
-        let module = Module::from_ptx(
-            ptx,
-            &[
-                ModuleJitOption::DetermineTargetFromContext,
-                ModuleJitOption::OptLevel(OptLevel::O2),
-            ],
-        )
-        .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-        .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let module = crate::load_cuda_embedded_module!("ppo_kernel")?;
 
         let ema_ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ema_kernel.ptx"));
-        let ema_module = Module::from_ptx(
-            ema_ptx,
-            &[
-                ModuleJitOption::DetermineTargetFromContext,
-                ModuleJitOption::OptLevel(OptLevel::O2),
-            ],
-        )
-        .or_else(|_| Module::from_ptx(ema_ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-        .or_else(|_| Module::from_ptx(ema_ptx, &[]))?;
+        let ema_module = crate::load_cuda_embedded_module!("ema_kernel")?;
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 

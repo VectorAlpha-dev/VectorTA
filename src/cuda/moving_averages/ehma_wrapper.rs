@@ -124,7 +124,7 @@ impl CudaEhma {
             cust::module::ModuleJitOption::DetermineTargetFromContext,
             cust::module::ModuleJitOption::OptLevel(cust::module::OptLevel::O2),
         ];
-        let module = Module::from_ptx(ptx, jit_opts).or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let module = crate::load_cuda_embedded_module!("ehma_kernel")?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         Self::reserve_l2_persisting_quota_once(device_id as u32);

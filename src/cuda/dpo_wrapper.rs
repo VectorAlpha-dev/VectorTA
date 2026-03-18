@@ -96,7 +96,7 @@ impl CudaDpo {
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/dpo_kernel.ptx"));
 
-        let module = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])?;
+        let module = crate::load_cuda_embedded_module!("dpo_kernel")?;
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 

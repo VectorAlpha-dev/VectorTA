@@ -6,6 +6,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=kernels/cuda");
     println!("cargo:rerun-if-changed=kernels/ptx");
+    println!("cargo:rerun-if-changed=kernels/cubin");
 
     if env::var("CARGO_FEATURE_CUDA").is_ok() {
         if env::var("CARGO_FEATURE_CUDA_BUILD_PTX").is_ok() {
@@ -33,6 +34,7 @@ fn is_nightly() -> bool {
 
 fn stage_prebuilt_ptx() {
     println!("cargo:rerun-if-env-changed=VECTOR_TA_PREBUILT_PTX_DIR");
+    println!("cargo:rerun-if-env-changed=VECTOR_TA_PREBUILT_CUBIN_DIR");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
@@ -43,11 +45,25 @@ fn stage_prebuilt_ptx() {
         manifest_dir.join("kernels/ptx/compute_89")
     };
 
+    let cubin_dir = if let Ok(dir) = env::var("VECTOR_TA_PREBUILT_CUBIN_DIR") {
+        PathBuf::from(dir)
+    } else {
+        manifest_dir.join("kernels/cubin/sm_89")
+    };
+
     if !ptx_dir.is_dir() {
         panic!(
             "Prebuilt PTX directory not found: {}. \
-Enable `--features cuda-build-ptx` to compile PTX with nvcc, or set VECTOR_TA_PREBUILT_PTX_DIR to a directory containing *.ptx files.",
+Enable `--features cuda-build-ptx` to compile PTX and cubin artifacts with nvcc, or set VECTOR_TA_PREBUILT_PTX_DIR to a directory containing *.ptx files.",
             ptx_dir.display()
+        );
+    }
+
+    if !cubin_dir.is_dir() {
+        panic!(
+            "Prebuilt cubin directory not found: {}. \
+Enable `--features cuda-build-ptx` to compile PTX and cubin artifacts with nvcc, or set VECTOR_TA_PREBUILT_CUBIN_DIR to a directory containing *_sm89.cubin files.",
+            cubin_dir.display()
         );
     }
 
@@ -60,11 +76,28 @@ Enable `--features cuda-build-ptx` to compile PTX with nvcc, or set VECTOR_TA_PR
         }
     }
 
+    let mut cubin_files: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(&cubin_dir).expect("read prebuilt cubin dir") {
+        let entry = entry.expect("read prebuilt cubin dir entry");
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("cubin") {
+            cubin_files.push(path);
+        }
+    }
+
     if ptx_files.is_empty() {
         panic!(
             "No prebuilt PTX files (*.ptx) found in {}. \
-Enable `--features cuda-build-ptx` to compile PTX with nvcc.",
+Enable `--features cuda-build-ptx` to compile PTX artifacts with nvcc.",
             ptx_dir.display()
+        );
+    }
+
+    if cubin_files.is_empty() {
+        panic!(
+            "No prebuilt cubin files (*.cubin) found in {}. \
+Enable `--features cuda-build-ptx` to compile cubin artifacts with nvcc.",
+            cubin_dir.display()
         );
     }
 
@@ -84,6 +117,23 @@ Enable `--features cuda-build-ptx` to compile PTX with nvcc.",
             )
         });
     }
+
+    for src in cubin_files {
+        println!("cargo:rerun-if-changed={}", src.display());
+        let file_name = src
+            .file_name()
+            .expect("cubin file name")
+            .to_string_lossy()
+            .to_string();
+        let dst = out_dir.join(&file_name);
+        std::fs::copy(&src, &dst).unwrap_or_else(|e| {
+            panic!(
+                "Failed copying prebuilt cubin {} -> {}: {e}",
+                src.display(),
+                dst.display()
+            )
+        });
+    }
 }
 
 fn compile_cuda_kernels() {
@@ -98,6 +148,7 @@ fn compile_cuda_kernels() {
     println!("cargo:rerun-if-env-changed=CUDA_DEBUG");
     println!("cargo:rerun-if-env-changed=CUDA_FAST_MATH");
     println!("cargo:rerun-if-env-changed=VECTOR_TA_PREBUILD_PTX_DIR");
+    println!("cargo:rerun-if-env-changed=VECTOR_TA_PREBUILD_CUBIN_DIR");
 
     let cuda_path = find_cuda_path();
 
@@ -1116,6 +1167,16 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
 
     println!("cargo:rerun-if-changed={}", src_path);
 
+    let cubin_name = if let Some(stem) = ptx_name.strip_suffix(".ptx") {
+        format!("{stem}_sm89.cubin")
+    } else {
+        format!("{ptx_name}_sm89.cubin")
+    };
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    let ptx_path = out_dir.join(ptx_name);
+    let cubin_path = out_dir.join(&cubin_name);
+
     if let Ok(filt) = env::var("CUDA_FILTER") {
         let mut any = false;
         for tok in filt.split(|c: char| c == ',' || c.is_ascii_whitespace()) {
@@ -1128,16 +1189,17 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         if !any {
             eprintln!("Skipping {} due to CUDA_FILTER", rel_src);
 
-            let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
-            let ptx_path = out_dir.join(ptx_name);
             let placeholder =
-                ".version 7.0\n.target compute_80\n.address_size 64\n// placeholder PTX (no kernels)\n";
+                ".version 7.0
+.target compute_80
+.address_size 64
+// placeholder PTX (no kernels)
+";
             std::fs::write(&ptx_path, placeholder).expect("write placeholder PTX");
+            std::fs::write(&cubin_path, []).expect("write placeholder cubin");
             return;
         }
     }
-
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
 
     if cfg!(target_os = "windows") && env::var("VCINSTALLDIR").is_err() {
         eprintln!(
@@ -1152,10 +1214,6 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
     } else {
         format!("{}/bin/nvcc", cuda_path)
     };
-
-    let ptx_path = out_dir.join(ptx_name);
-
-    let mut cmd = Command::new(&nvcc);
 
     fn normalize_arch(s: &str) -> String {
         let t = s.trim();
@@ -1197,6 +1255,8 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
             "compute_89".to_string()
         }
     };
+
+    let mut cmd = Command::new(&nvcc);
 
     cmd.args(&[
         "-std=c++17",
@@ -1307,10 +1367,12 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         if cfg!(target_os = "windows")
             && String::from_utf8_lossy(&output.stderr).contains("Cannot find compiler 'cl.exe'")
         {
-            eprintln!("\n=== CUDA Build Error: Missing Visual Studio C++ Compiler ===");
+            eprintln!("
+=== CUDA Build Error: Missing Visual Studio C++ Compiler ===");
             eprintln!("nvcc requires the Microsoft Visual C++ compiler (cl.exe) to be available.");
             eprintln!("Install Visual Studio Build Tools 2022 or run cargo from a Developer Command Prompt.");
-            eprintln!("===========================================================\n");
+            eprintln!("===========================================================
+");
         }
 
         panic!("nvcc compilation failed");
@@ -1320,6 +1382,70 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         "Successfully compiled {} to {}",
         src_path,
         ptx_path.display()
+    );
+
+    let mut cubin_cmd = Command::new(&nvcc);
+    cubin_cmd.args(&[
+        "-std=c++17",
+        "--expt-relaxed-constexpr",
+        "--extended-lambda",
+        "-cubin",
+        "-O3",
+    ]);
+
+    match env::var("CUDA_FAST_MATH").as_deref() {
+        Ok("0") => {}
+        _ => {
+            cubin_cmd.arg("--use_fast_math");
+        }
+    }
+
+    if env::var("CUDA_DEBUG").ok().as_deref() == Some("1") {
+        cubin_cmd.arg("-lineinfo");
+    }
+
+    cubin_cmd.args(&[
+        "-arch",
+        "sm_89",
+        "-o",
+        cubin_path.to_str().expect("cubin path"),
+        &src_path,
+    ]);
+
+    if let Ok(extra) = env::var("NVCC_ARGS") {
+        for tok in extra.split_whitespace() {
+            if !tok.is_empty() {
+                cubin_cmd.arg(tok);
+            }
+        }
+    }
+
+    if cfg!(target_os = "windows") {
+        cubin_cmd.arg("-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH");
+        cubin_cmd.arg("-allow-unsupported-compiler");
+
+        if let Ok(vs_path) = find_vs_installation() {
+            cubin_cmd.arg("-ccbin").arg(vs_path);
+        }
+    }
+
+    eprintln!("Running nvcc command: {:?}", cubin_cmd);
+
+    let cubin_output = cubin_cmd
+        .output()
+        .expect("Failed to execute nvcc for cubin");
+
+    if !cubin_output.status.success() {
+        eprintln!("CUDA cubin compilation failed for {rel_src}!");
+        eprintln!("stdout: {}", String::from_utf8_lossy(&cubin_output.stdout));
+        eprintln!("stderr: {}", String::from_utf8_lossy(&cubin_output.stderr));
+        panic!("nvcc cubin compilation failed");
+    }
+
+    println!(
+        "Successfully compiled {} to {}",
+        src_path,
+        cubin_path.display()
     );
 
     if let Ok(prebuild_dir) = env::var("VECTOR_TA_PREBUILD_PTX_DIR") {
@@ -1334,9 +1460,22 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
             )
         });
     }
-}
 
+    if let Ok(prebuild_dir) = env::var("VECTOR_TA_PREBUILD_CUBIN_DIR") {
+        let prebuild_dir = PathBuf::from(prebuild_dir);
+        std::fs::create_dir_all(&prebuild_dir).expect("create VECTOR_TA_PREBUILD_CUBIN_DIR");
+        let dst = prebuild_dir.join(&cubin_name);
+        std::fs::copy(&cubin_path, &dst).unwrap_or_else(|e| {
+            panic!(
+                "Failed copying compiled cubin {} -> {}: {e}",
+                cubin_path.display(),
+                dst.display()
+            )
+        });
+    }
+}
 #[cfg(target_os = "windows")]
+
 fn find_vs_installation() -> Result<String, ()> {
     let vs_paths = [
         "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC",

@@ -78,17 +78,7 @@ impl CudaSuperSmoother {
             }
         }
 
-        let module = match Module::from_ptx(ptx, &jit_opts) {
-            Ok(m) => m,
-            Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-                {
-                    m
-                } else {
-                    Module::from_ptx(ptx, &[])?
-                }
-            }
-        };
+        let module = crate::load_cuda_embedded_module!("supersmoother_kernel")?;
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 

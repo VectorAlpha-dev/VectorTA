@@ -123,19 +123,8 @@ impl CudaSwma {
         let device = Device::get_device(device_id as u32).map_err(CudaSwmaError::Cuda)?;
         let context = Arc::new(Context::new(device).map_err(CudaSwmaError::Cuda)?);
 
-        let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/swma_kernel.ptx"));
-
-        let jit_opts = &[
-            ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O2),
-        ];
-        let module = match Module::from_ptx(ptx, jit_opts) {
-            Ok(m) => m,
-            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
-                Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[]).map_err(CudaSwmaError::Cuda)?,
-            },
-        };
+        let module =
+            crate::load_cuda_embedded_module!("swma_kernel").map_err(CudaSwmaError::Cuda)?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaSwmaError::Cuda)?;
 
         let (has_const_weights, max_period_const) = {

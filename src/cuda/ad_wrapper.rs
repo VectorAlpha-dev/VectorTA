@@ -88,16 +88,7 @@ impl CudaAd {
         let context = Arc::new(Context::new(device).map_err(CudaAdError::Cuda)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ad_kernel.ptx"));
-        let module = Module::from_ptx(
-            ptx,
-            &[
-                ModuleJitOption::DetermineTargetFromContext,
-                ModuleJitOption::OptLevel(OptLevel::O2),
-            ],
-        )
-        .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-        .or_else(|_| Module::from_ptx(ptx, &[]))
-        .map_err(CudaAdError::Cuda)?;
+        let module = crate::load_cuda_embedded_module!("ad_kernel").map_err(CudaAdError::Cuda)?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaAdError::Cuda)?;
 
         Ok(Self {

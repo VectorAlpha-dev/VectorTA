@@ -91,15 +91,7 @@ impl CudaAdx {
         let context = Context::new(device)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/adx_kernel.ptx"));
-        let module = Module::from_ptx(
-            ptx,
-            &[
-                ModuleJitOption::DetermineTargetFromContext,
-                ModuleJitOption::OptLevel(OptLevel::O4),
-            ],
-        )
-        .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
-        .or_else(|_| Module::from_ptx(ptx, &[]))?;
+        let module = crate::load_cuda_embedded_module!("adx_kernel")?;
 
         let pr = cust::context::CurrentContext::get_stream_priority_range()?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, Some(pr.greatest))?;

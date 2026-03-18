@@ -81,13 +81,7 @@ impl CudaCci {
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(opt),
         ];
-        let module = match Module::from_ptx(ptx, jit_opts) {
-            Ok(m) => m,
-            Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
-                Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])?,
-            },
-        };
+        let module = crate::load_cuda_embedded_module!("cci_kernel")?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         let smem_optin_limit = Self::query_optin_smem_limit_bytes();
