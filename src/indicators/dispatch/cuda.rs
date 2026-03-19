@@ -28483,7 +28483,108 @@ mod tests {
         let mismatch_ratio = mismatches as f64 / cuda_values.len() as f64;
         assert!(
             mismatch_ratio <= 0.01,
-            "CUDA pattern mismatch ratio too high: mismatches={} total={} ratio={:.6}",
+            "CUDA pattern mismatch ratio too high on sample fixture: mismatches={} total={} ratio={:.6}",
+            mismatches,
+            cuda_values.len(),
+            mismatch_ratio
+        );
+    }
+
+    #[test]
+    fn pattern_host_output_matches_cpu_on_adversarial_fixture_when_cuda_available() {
+        if !crate::cuda::cuda_available() {
+            return;
+        }
+
+        let len = 320usize;
+        let mut open = Vec::with_capacity(len);
+        let mut high = Vec::with_capacity(len);
+        let mut low = Vec::with_capacity(len);
+        let mut close = Vec::with_capacity(len);
+        let mut prev_close = 100.0f32;
+
+        for i in 0..len {
+            let phase = i % 12;
+            let (o, c, upper, lower) = match phase {
+                0 => (prev_close - 0.15, prev_close + 0.18, 0.05, 0.04),
+                1 => (prev_close + 0.02, prev_close + 0.0195, 0.55, 0.52),
+                2 => (prev_close + 1.25, prev_close + 1.48, 0.08, 0.06),
+                3 => (prev_close - 1.35, prev_close - 1.62, 0.07, 0.09),
+                4 => (prev_close + 0.01, prev_close - 0.01, 3.2, 3.0),
+                5 => (prev_close + 2.4, prev_close - 2.1, 0.11, 0.13),
+                6 => (prev_close - 0.45, prev_close - 0.12, 0.85, 0.03),
+                7 => (prev_close + 0.52, prev_close + 0.16, 0.03, 0.92),
+                8 => (prev_close + 0.36, prev_close + 0.34, 0.02, 0.02),
+                9 => (prev_close - 0.72, prev_close - 0.08, 0.18, 0.75),
+                10 => (prev_close + 0.74, prev_close + 0.04, 0.76, 0.16),
+                _ => (prev_close - 0.03, prev_close + 0.03, 0.01, 0.01),
+            };
+            let h = o.max(c) + upper;
+            let l = o.min(c) - lower;
+            open.push(o);
+            high.push(h);
+            low.push(l);
+            close.push(c);
+            prev_close = c;
+        }
+
+        let req_cuda = IndicatorCudaRequest {
+            indicator_id: "pattern_recognition",
+            output_id: Some("matrix"),
+            data: IndicatorCudaDataRef::Ohlc {
+                open: &open,
+                high: &high,
+                low: &low,
+                close: &close,
+                source: None,
+            },
+            params: &[],
+            kernel: Kernel::Auto,
+            target: CudaOutputTarget::HostF32,
+        };
+        let out_cuda = compute_cuda(req_cuda).unwrap();
+        let open_f64 = to_f64(&open);
+        let high_f64 = to_f64(&high);
+        let low_f64 = to_f64(&low);
+        let close_f64 = to_f64(&close);
+        let req_cpu = IndicatorComputeRequest {
+            indicator_id: "pattern_recognition",
+            output_id: Some("matrix"),
+            data: IndicatorDataRef::Ohlc {
+                open: &open_f64,
+                high: &high_f64,
+                low: &low_f64,
+                close: &close_f64,
+            },
+            params: &[],
+            kernel: Kernel::Auto,
+        };
+        let out_cpu = compute_cpu(req_cpu).unwrap();
+
+        assert_eq!(out_cuda.rows, out_cpu.rows);
+        assert_eq!(out_cuda.cols, out_cpu.cols);
+        assert_eq!(out_cuda.pattern_ids, out_cpu.pattern_ids);
+
+        let cuda_values = match out_cuda.series {
+            IndicatorCudaSeries::HostF32(v) => v,
+            other => panic!("expected HostF32, got {other:?}"),
+        };
+        let cpu_values = match out_cpu.series {
+            IndicatorSeries::Bool(v) => v,
+            other => panic!("expected Bool output, got {other:?}"),
+        };
+
+        let mut mismatches = 0usize;
+        for i in 0..cuda_values.len() {
+            let expected = if cpu_values[i] { 1.0 } else { 0.0 };
+            if cuda_values[i] != expected {
+                mismatches += 1;
+            }
+        }
+        let mismatch_ratio = mismatches as f64 / cuda_values.len() as f64;
+        assert!(
+            mismatch_ratio <= 0.01,
+            "CUDA pattern mismatch ratio too high on adversarial fixture: mismatches={} total={} ratio={:.6}",
             mismatches,
             cuda_values.len(),
             mismatch_ratio

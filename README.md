@@ -4,7 +4,7 @@ VectorTA is a Rust crate of 340 implemented technical analysis indicators focuse
 
 It is intended for workloads where throughput and execution behavior actually matter, including research pipelines, backtesting systems, and high throughput production use cases. The library is not limited to close only, single output indicators either. It spans a wide range of input structures, multi-output studies, and execution paths across Rust, Python, WASM, and CUDA.
 
-The CUDA bindings are predominantly only worth using if used in a VRAM-resident workflow. For example, it is possible to achieve a benchmark timing of 3.69 ms for 250 million calculated ALMA indicator data points on an RTX 4090, whereas the CPU (AMD 9950X) AVX-512, AVX2, and scalar timings are approximately 140.61 ms, 188.64 ms, and 386.20 ms, respectively. The Python bindings also expose GPU-oriented workflows for a subset of indicators, including device-resident outputs intended for high-throughput research pipelines.
+The CUDA bindings are predominantly only worth using if used in a VRAM-resident workflow. For example, it is possible to achieve a benchmark timing of 3.129 ms for 250 million calculated ALMA indicator data points on an RTX 4090, whereas the CPU (AMD 9950X) AVX-512, AVX2, and scalar timings are approximately 140.61 ms, 188.64 ms, and 386.20 ms, respectively. The Python bindings also expose GPU-oriented workflows for a subset of indicators, including device-resident outputs intended for high-throughput research pipelines.
 
 The Tauri backtest optimization demo application using this library can achieve 58,300 backtests for a double ALMA crossover strategy over 200k data points in only 85.863 milliseconds on the same hardware (RTX 4090 + AMD 9950X).
 
@@ -63,7 +63,7 @@ Enable the CUDA feature:
 
 ```toml
 [dependencies]
-vector-ta = { version = "0.2.0", features = ["cuda"] }
+vector-ta = { version = "0.2.2", features = ["cuda"] }
 ```
 
 Notes:
