@@ -10,7 +10,16 @@ The Tauri backtest optimization demo application using this library can achieve 
 
 For the full indicator list, API reference, and usage guides, see: https://vectoralpha.dev/projects/ta
 
+## Install
 
+Add the crate as `vector-ta` and import it as `vector_ta`:
+
+```toml
+[dependencies]
+vector-ta = "0.2.3"
+```
+
+For full SIMD functionality on `x86_64`, use a nightly Rust toolchain and enable the `nightly-avx` feature. Stable Rust still works for the scalar implementation.
 
 ## Rust usage
 
@@ -24,7 +33,7 @@ fn compute_adx(
     low: &[f64],
     close: &[f64],
 ) -> Result<Vec<f64>, Box<dyn std::error::Error>> {
-    let input = AdxInput::from_slices(high, low, close, AdxParams { period: Some(14) });
+    let input = AdxInput::from_slices(high, low, close, AdxParams {period: Some(14)});
     Ok(adx(&input)?.values)
 }
 ```
@@ -63,7 +72,7 @@ Enable the CUDA feature:
 
 ```toml
 [dependencies]
-vector-ta = { version = "0.2.2", features = ["cuda"] }
+vector-ta = {version = "0.2.3", features = ["cuda"]}
 ```
 
 Notes:
