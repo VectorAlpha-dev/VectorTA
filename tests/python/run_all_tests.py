@@ -16,7 +16,7 @@ from pathlib import Path
 def ensure_module_built():
     """Check if Python module is built, provide helpful message if not"""
     try:
-        import my_project
+        import vector_ta
         return True
     except ImportError:
         print("ERROR: Python module not built!")
@@ -56,7 +56,7 @@ def run_tests():
 
 
     if '--coverage' in sys.argv:
-        cmd.extend(['--cov=my_project', '--cov-report=html'])
+        cmd.extend(['--cov=vector_ta', '--cov-report=html'])
 
 
     if '-v' in sys.argv or '--verbose' in sys.argv:

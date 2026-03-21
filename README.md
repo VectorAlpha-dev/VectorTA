@@ -1,4 +1,4 @@
-# vector-ta
+# VectorTA
 
 VectorTA is a Rust crate of 340 implemented technical analysis indicators focused on speed, predictable allocations, and practical execution flexibility, with optional SIMD/CUDA acceleration and optional Python/WASM bindings. In addition to standard single call APIs, much of the library also supports streaming/stateful updates, batch parameter sweeps, and registry-driven dispatch across multiple input and output shapes.
 

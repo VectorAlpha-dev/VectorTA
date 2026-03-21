@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    import my_project
+    import vector_ta
 except ImportError:
     pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
 
@@ -29,7 +29,7 @@ class TestAso:
         expected = EXPECTED_OUTPUTS['aso']
 
 
-        bulls, bears = my_project.aso(
+        bulls, bears = vector_ta.aso(
             test_data['open'],
             test_data['high'],
             test_data['low'],
@@ -61,7 +61,7 @@ class TestAso:
     def test_aso_partial_params(self, test_data):
         """Test ASO with default parameters - mirrors check_aso_partial_params"""
 
-        bulls, bears = my_project.aso(
+        bulls, bears = vector_ta.aso(
             test_data['open'],
             test_data['high'],
             test_data['low'],
@@ -79,7 +79,7 @@ class TestAso:
         close_data = np.array([12.0, 22.0, 32.0])
 
         with pytest.raises(ValueError, match="Invalid period"):
-            my_project.aso(open_data, high_data, low_data, close_data, period=0)
+            vector_ta.aso(open_data, high_data, low_data, close_data, period=0)
 
     def test_aso_period_exceeds_length(self):
         """Test ASO fails when period exceeds data length - mirrors check_aso_period_exceeds_length"""
@@ -89,28 +89,28 @@ class TestAso:
         close_data = np.array([12.0, 22.0, 32.0])
 
         with pytest.raises(ValueError, match="Invalid period"):
-            my_project.aso(open_data, high_data, low_data, close_data, period=10)
+            vector_ta.aso(open_data, high_data, low_data, close_data, period=10)
 
     def test_aso_very_small_dataset(self):
         """Test ASO fails with insufficient data - mirrors check_aso_very_small_dataset"""
         single_point = np.array([42.0])
 
         with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
-            my_project.aso(single_point, single_point, single_point, single_point, period=10)
+            vector_ta.aso(single_point, single_point, single_point, single_point, period=10)
 
     def test_aso_empty_input(self):
         """Test ASO fails with empty input - mirrors check_aso_empty_input"""
         empty = np.array([])
 
         with pytest.raises(ValueError, match="Input data slice is empty"):
-            my_project.aso(empty, empty, empty, empty)
+            vector_ta.aso(empty, empty, empty, empty)
 
     def test_aso_all_nan(self):
         """Test ASO fails with all NaN values - mirrors check_aso_all_nan"""
         nan_data = np.full(3, np.nan)
 
         with pytest.raises(ValueError, match="All values are NaN"):
-            my_project.aso(nan_data, nan_data, nan_data, nan_data)
+            vector_ta.aso(nan_data, nan_data, nan_data, nan_data)
 
     def test_aso_mismatched_lengths(self):
         """Test ASO fails with mismatched array lengths - mirrors MissingData error"""
@@ -120,12 +120,12 @@ class TestAso:
         close_data = np.array([12.0, 22.0, 32.0])
 
         with pytest.raises(ValueError, match="All OHLC arrays must have the same length"):
-            my_project.aso(open_data, high_data, low_data, close_data)
+            vector_ta.aso(open_data, high_data, low_data, close_data)
 
     def test_aso_invalid_mode(self, test_data):
         """Test ASO fails with invalid mode - mirrors check_aso_invalid_mode"""
         with pytest.raises(ValueError, match="Invalid mode"):
-            my_project.aso(
+            vector_ta.aso(
                 test_data['open'][:100],
                 test_data['high'][:100],
                 test_data['low'][:100],
@@ -141,13 +141,13 @@ class TestAso:
         close_data = test_data['close'][:100]
 
 
-        bulls0, bears0 = my_project.aso(open_data, high_data, low_data, close_data, mode=0)
+        bulls0, bears0 = vector_ta.aso(open_data, high_data, low_data, close_data, mode=0)
 
 
-        bulls1, bears1 = my_project.aso(open_data, high_data, low_data, close_data, mode=1)
+        bulls1, bears1 = vector_ta.aso(open_data, high_data, low_data, close_data, mode=1)
 
 
-        bulls2, bears2 = my_project.aso(open_data, high_data, low_data, close_data, mode=2)
+        bulls2, bears2 = vector_ta.aso(open_data, high_data, low_data, close_data, mode=2)
 
 
 
@@ -168,7 +168,7 @@ class TestAso:
 
     def test_aso_nan_handling(self, test_data):
         """Test ASO handles NaN values correctly - mirrors check_aso_nan_handling"""
-        bulls, bears = my_project.aso(
+        bulls, bears = vector_ta.aso(
             test_data['open'],
             test_data['high'],
             test_data['low'],
@@ -197,7 +197,7 @@ class TestAso:
         mode = 0
 
 
-        batch_bulls, batch_bears = my_project.aso(
+        batch_bulls, batch_bears = vector_ta.aso(
             test_data['open'],
             test_data['high'],
             test_data['low'],
@@ -207,7 +207,7 @@ class TestAso:
         )
 
 
-        stream = my_project.AsoStream(period=period, mode=mode)
+        stream = vector_ta.AsoStream(period=period, mode=mode)
         stream_bulls = []
         stream_bears = []
 
@@ -267,7 +267,7 @@ class TestAso:
         close_data = test_data['close'][:100]
 
 
-        result = my_project.aso_batch(
+        result = vector_ta.aso_batch(
             open_data,
             high_data,
             low_data,
@@ -302,7 +302,7 @@ class TestAso:
                 batch_bears = result['bears'][combo_idx]
 
 
-                single_bulls, single_bears = my_project.aso(
+                single_bulls, single_bears = vector_ta.aso(
                     open_data, high_data, low_data, close_data,
                     period=period, mode=mode
                 )
@@ -327,7 +327,7 @@ class TestAso:
         close_data = test_data['close'][:50]
 
 
-        result = my_project.aso_batch(
+        result = vector_ta.aso_batch(
             open_data,
             high_data,
             low_data,
@@ -345,7 +345,7 @@ class TestAso:
         assert result['modes'][0] == 0
 
 
-        single_bulls, single_bears = my_project.aso(
+        single_bulls, single_bears = vector_ta.aso(
             open_data, high_data, low_data, close_data,
             period=10, mode=0
         )

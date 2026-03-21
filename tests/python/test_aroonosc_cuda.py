@@ -8,7 +8,7 @@ except Exception:
     cp = None
 
 try:
-    import my_project as ti
+    import vector_ta as ti
 except Exception:
     pytest.skip(
         "Python module not built; run `maturin develop --features python,cuda`",

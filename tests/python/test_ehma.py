@@ -11,7 +11,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 try:
-    import my_project
+    import vector_ta
 except ImportError:
     pytest.skip("Python module not built", allow_module_level=True)
 
@@ -42,7 +42,7 @@ class TestEhma:
         ]))
 
 
-        result = my_project.ehma(data, period=14)
+        result = vector_ta.ehma(data, period=14)
 
         assert len(result) == len(data), "Result length should match input length"
 
@@ -80,14 +80,14 @@ class TestEhma:
         empty = np.array([])
 
         with pytest.raises(ValueError, match="Input data slice is empty"):
-            my_project.ehma(empty, 14)
+            vector_ta.ehma(empty, 14)
 
     def test_ehma_all_nan(self):
         """Test EHMA fails with all NaN values"""
         nan_data = np.array([np.nan, np.nan, np.nan, np.nan, np.nan])
 
         with pytest.raises(ValueError, match="All values are NaN"):
-            my_project.ehma(nan_data, 5)
+            vector_ta.ehma(nan_data, 5)
 
     def test_ehma_invalid_period(self):
         """Test EHMA fails with invalid period"""
@@ -95,11 +95,11 @@ class TestEhma:
 
 
         with pytest.raises(ValueError, match="Invalid period"):
-            my_project.ehma(data, period=0)
+            vector_ta.ehma(data, period=0)
 
 
         with pytest.raises(ValueError, match="Invalid period"):
-            my_project.ehma(data, period=10)
+            vector_ta.ehma(data, period=10)
 
     def test_ehma_not_enough_data(self):
         """Test EHMA fails when not enough valid data"""
@@ -107,7 +107,7 @@ class TestEhma:
         data = np.concatenate([np.full(10, np.nan), np.array([1.0, 2.0, 3.0, 4.0, 5.0])])
 
         with pytest.raises(ValueError, match="Not enough valid data"):
-            my_project.ehma(data, 14)
+            vector_ta.ehma(data, 14)
 
     def test_ehma_default_period(self, test_data, expected):
         """Test EHMA with default period"""
@@ -115,7 +115,7 @@ class TestEhma:
         default_period = expected.get('default_params', {}).get('period', 14)
 
 
-        result = my_project.ehma(close, default_period)
+        result = vector_ta.ehma(close, default_period)
 
         assert len(result) == len(close)
 
@@ -133,7 +133,7 @@ class TestEhma:
 
         results = {}
         for period in batch_periods:
-            results[period] = my_project.ehma(close, period=period)
+            results[period] = vector_ta.ehma(close, period=period)
 
 
         for period, result in results.items():
@@ -164,7 +164,7 @@ class TestEhma:
             113.0, 114.0, 115.0, 116.0, 117.0
         ])
 
-        result = my_project.ehma(data, period=10)
+        result = vector_ta.ehma(data, period=10)
 
         assert len(result) == len(data)
 
@@ -180,7 +180,7 @@ class TestEhma:
         batch_range = expected.get('batch_range', [10, 30, 10])
 
 
-        batch_result = my_project.ehma_batch(
+        batch_result = vector_ta.ehma_batch(
             close,
             period_range=tuple(batch_range)
         )
@@ -219,7 +219,7 @@ class TestEhma:
         ])
 
 
-        stream = my_project.EhmaStream(period=14)
+        stream = vector_ta.EhmaStream(period=14)
 
 
         stream_results = []
@@ -227,7 +227,7 @@ class TestEhma:
             stream_results.append(stream.update(value))
 
 
-        batch_result = my_project.ehma(data, period=14)
+        batch_result = vector_ta.ehma(data, period=14)
 
 
         stream_results_np = np.array([v if v is not None else np.nan for v in stream_results])
@@ -248,7 +248,7 @@ class TestEhma:
         batch_periods = expected.get('batch_periods', [10, 14, 20, 28])
 
         for period in batch_periods:
-            result = my_project.ehma(close, period=period)
+            result = vector_ta.ehma(close, period=period)
 
             assert len(result) == len(close), f"Period {period}: Result length mismatch"
 
@@ -276,9 +276,9 @@ class TestEhma:
         period = expected.get('default_params', {}).get('period', 14)
 
 
-        result1 = my_project.ehma(close, period=period)
-        result2 = my_project.ehma(close, period=period)
-        result3 = my_project.ehma(close, period=period)
+        result1 = vector_ta.ehma(close, period=period)
+        result2 = vector_ta.ehma(close, period=period)
+        result3 = vector_ta.ehma(close, period=period)
 
 
         assert_close(
@@ -298,11 +298,11 @@ class TestEhma:
         period = expected.get('default_params', {}).get('period', 14)
 
 
-        first_result = my_project.ehma(close, period=period)
+        first_result = vector_ta.ehma(close, period=period)
         assert len(first_result) == len(close)
 
 
-        second_result = my_project.ehma(first_result, period=period)
+        second_result = vector_ta.ehma(first_result, period=period)
         assert len(second_result) == len(first_result)
 
 

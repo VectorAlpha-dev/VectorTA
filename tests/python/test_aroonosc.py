@@ -4,7 +4,7 @@ These tests mirror the Rust unit tests to ensure Python bindings work correctly.
 """
 import pytest
 import numpy as np
-import my_project
+import vector_ta
 
 
 def load_test_data():
@@ -25,7 +25,7 @@ def test_aroonosc_partial_params():
     _, high, low, _ = load_test_data()
 
 
-    result = my_project.aroonosc(high, low, length=20)
+    result = vector_ta.aroonosc(high, low, length=20)
 
     assert len(result) == len(high)
     assert isinstance(result, np.ndarray)
@@ -40,7 +40,7 @@ def test_aroonosc_accuracy():
     _, high, low, _ = load_test_data()
 
 
-    result = my_project.aroonosc(high, low)
+    result = vector_ta.aroonosc(high, low)
 
 
     expected_last_five = [-50.0, -50.0, -50.0, -50.0, -42.8571]
@@ -66,7 +66,7 @@ def test_aroonosc_zero_length():
     low = np.array([5.0, 15.0, 25.0])
 
     with pytest.raises(ValueError, match="Invalid length"):
-        my_project.aroonosc(high, low, length=0)
+        vector_ta.aroonosc(high, low, length=0)
 
 
 def test_aroonosc_length_exceeds_data():
@@ -75,7 +75,7 @@ def test_aroonosc_length_exceeds_data():
     low = np.array([5.0, 15.0, 25.0])
 
     with pytest.raises(ValueError, match="Not enough data"):
-        my_project.aroonosc(high, low, length=10)
+        vector_ta.aroonosc(high, low, length=10)
 
 
 def test_aroonosc_mismatched_arrays():
@@ -84,14 +84,14 @@ def test_aroonosc_mismatched_arrays():
     low = np.array([5.0, 15.0])
 
     with pytest.raises(ValueError, match="High and low arrays must have same length"):
-        my_project.aroonosc(high, low)
+        vector_ta.aroonosc(high, low)
 
 
 def test_aroonosc_nan_handling():
     """Test Aroon Oscillator handles NaN values correctly - mirrors check_aroonosc_nan_handling"""
     _, high, low, _ = load_test_data()
 
-    result = my_project.aroonosc(high, low)
+    result = vector_ta.aroonosc(high, low)
 
 
     if len(result) > 50:
@@ -104,7 +104,7 @@ def test_aroonosc_streaming():
     _, high, low, _ = load_test_data()
 
 
-    stream = my_project.AroonOscStream(length=14)
+    stream = vector_ta.AroonOscStream(length=14)
 
 
     stream_results = []
@@ -113,7 +113,7 @@ def test_aroonosc_streaming():
         stream_results.append(val if val is not None else np.nan)
 
 
-    batch_result = my_project.aroonosc(high, low, length=14)
+    batch_result = vector_ta.aroonosc(high, low, length=14)
 
 
     assert len(stream_results) == len(batch_result)
@@ -143,7 +143,7 @@ def test_aroonosc_batch_single_params():
     _, high, low, _ = load_test_data()
 
 
-    batch_result = my_project.aroonosc_batch(
+    batch_result = vector_ta.aroonosc_batch(
         high,
         low,
         length_range=(14, 14, 0)
@@ -163,7 +163,7 @@ def test_aroonosc_batch_single_params():
     assert lengths[0] == 14
 
 
-    single_result = my_project.aroonosc(high, low, length=14)
+    single_result = vector_ta.aroonosc(high, low, length=14)
     np.testing.assert_array_almost_equal(values[0], single_result, decimal=10)
 
 
@@ -172,7 +172,7 @@ def test_aroonosc_batch_multiple_lengths():
     _, high, low, _ = load_test_data()
 
 
-    batch_result = my_project.aroonosc_batch(
+    batch_result = vector_ta.aroonosc_batch(
         high,
         low,
         length_range=(10, 18, 4)
@@ -189,7 +189,7 @@ def test_aroonosc_batch_multiple_lengths():
 
 
     for i, length in enumerate(lengths):
-        single_result = my_project.aroonosc(high, low, length=int(length))
+        single_result = vector_ta.aroonosc(high, low, length=int(length))
         np.testing.assert_array_almost_equal(values[i], single_result, decimal=10,
                                            err_msg=f"Mismatch for length={length}")
 
@@ -200,7 +200,7 @@ def test_aroonosc_batch_kernel_options():
     _, high, low, _ = data[0][:100], data[1][:100], data[2][:100], data[3][:100]
 
 
-    batch_scalar = my_project.aroonosc_batch(
+    batch_scalar = vector_ta.aroonosc_batch(
         high,
         low,
         length_range=(10, 14, 2),
@@ -208,7 +208,7 @@ def test_aroonosc_batch_kernel_options():
     )
 
 
-    batch_auto = my_project.aroonosc_batch(
+    batch_auto = vector_ta.aroonosc_batch(
         high,
         low,
         length_range=(10, 14, 2),
@@ -229,7 +229,7 @@ def test_aroonosc_with_edge_cases():
     high = np.full(50, 100.0)
     low = np.full(50, 100.0)
 
-    result = my_project.aroonosc(high, low, length=14)
+    result = vector_ta.aroonosc(high, low, length=14)
 
 
     for i in range(14, len(result)):
@@ -239,7 +239,7 @@ def test_aroonosc_with_edge_cases():
     high = np.arange(50, dtype=float) + 100.0
     low = np.full(50, 100.0)
 
-    result = my_project.aroonosc(high, low, length=14)
+    result = vector_ta.aroonosc(high, low, length=14)
 
 
     for i in range(20, len(result)):
@@ -252,7 +252,7 @@ def test_aroonosc_batch_empty_data():
     low = np.array([])
 
     with pytest.raises(ValueError):
-        my_project.aroonosc_batch(high, low, length_range=(10, 20, 2))
+        vector_ta.aroonosc_batch(high, low, length_range=(10, 20, 2))
 
 
 def test_aroonosc_reinput():
@@ -260,10 +260,10 @@ def test_aroonosc_reinput():
     _, high, low, _ = load_test_data()
 
 
-    first_result = my_project.aroonosc(high, low, length=10)
+    first_result = vector_ta.aroonosc(high, low, length=10)
 
 
-    second_result = my_project.aroonosc(first_result, first_result, length=5)
+    second_result = vector_ta.aroonosc(first_result, first_result, length=5)
 
     assert len(second_result) == len(first_result)
 

@@ -10,7 +10,7 @@ from rust_comparison import compare_with_rust
 
 
 try:
-    import my_project as ta
+    import vector_ta as ta
 except ImportError:
     ta = None
     pytest.skip("Rust module not available", allow_module_level=True)

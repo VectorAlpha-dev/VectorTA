@@ -2,7 +2,7 @@ import pytest
 import numpy as np
 
 try:
-    import my_project as ta_indicators
+    import vector_ta as ta_indicators
 except ImportError:
     try:
         import vector_ta as ta_indicators

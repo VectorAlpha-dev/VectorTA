@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    import my_project as ta_indicators
+    import vector_ta as ta_indicators
 except ImportError:
     pytest.skip("Python module not built", allow_module_level=True)
 

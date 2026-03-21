@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 try:
-    import my_project as mp
+    import vector_ta as mp
 except ImportError:
     try:
         import vector_ta as mp

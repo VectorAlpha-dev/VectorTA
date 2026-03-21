@@ -3,7 +3,7 @@ Test SWMA (Symmetric Weighted Moving Average) indicator Python bindings
 """
 import numpy as np
 import pytest
-from my_project import swma, swma_batch, SwmaStream
+from vector_ta import swma, swma_batch, SwmaStream
 from rust_comparison import compare_with_rust
 from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
 

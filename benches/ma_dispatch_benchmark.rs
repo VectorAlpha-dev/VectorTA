@@ -1,12 +1,12 @@
-extern crate vector_ta as my_project;
+extern crate vector_ta;
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use my_project::indicators::moving_averages::ma::MaData;
-use my_project::indicators::moving_averages::ma_batch::{
+use vector_ta::indicators::moving_averages::ma::MaData;
+use vector_ta::indicators::moving_averages::ma_batch::{
     ma_batch_with_kernel, ma_batch_with_kernel_and_typed_params, MaBatchParamKV,
 };
-use my_project::indicators::moving_averages::sma::{sma_batch_with_kernel, SmaBatchRange};
-use my_project::utilities::enums::Kernel;
+use vector_ta::indicators::moving_averages::sma::{sma_batch_with_kernel, SmaBatchRange};
+use vector_ta::utilities::enums::Kernel;
 use std::time::Duration;
 
 fn env_usize(name: &str, default_v: usize) -> usize {
@@ -102,9 +102,9 @@ fn bench_cpu_sma_dispatch(c: &mut Criterion) {
 
 #[cfg(feature = "cuda")]
 fn bench_cuda_sma_dispatch(c: &mut Criterion) {
-    use my_project::cuda::moving_averages::{CudaMaData, CudaMaSelector, CudaSma};
+    use vector_ta::cuda::moving_averages::{CudaMaData, CudaMaSelector, CudaSma};
 
-    if !my_project::cuda::cuda_available() {
+    if !vector_ta::cuda::cuda_available() {
         let mut group = c.benchmark_group("ma_dispatch_cuda_sma");
         group.bench_function("skip_no_cuda", |b| b.iter(|| 0usize));
         group.finish();

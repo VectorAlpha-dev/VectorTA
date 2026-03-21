@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    import my_project
+    import vector_ta
 except ImportError:
     pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
 
@@ -29,7 +29,7 @@ class TestLpc:
         expected = EXPECTED_OUTPUTS['lpc']
 
 
-        filter_out, high_band, low_band = my_project.lpc(
+        filter_out, high_band, low_band = vector_ta.lpc(
             test_data['high'],
             test_data['low'],
             test_data['close'],
@@ -83,7 +83,7 @@ class TestLpc:
     def test_lpc_partial_params(self, test_data):
         """Test LPC with default parameters - mirrors check_lpc_partial_params"""
 
-        filter_out, high_band, low_band = my_project.lpc(
+        filter_out, high_band, low_band = vector_ta.lpc(
             test_data['high'],
             test_data['low'],
             test_data['close'],
@@ -96,7 +96,7 @@ class TestLpc:
 
     def test_lpc_fixed_mode(self, test_data):
         """Test LPC with fixed cutoff type"""
-        filter_out, high_band, low_band = my_project.lpc(
+        filter_out, high_band, low_band = vector_ta.lpc(
             test_data['high'],
             test_data['low'],
             test_data['close'],
@@ -120,21 +120,21 @@ class TestLpc:
         data = np.array([10.0, 20.0, 30.0])
 
         with pytest.raises(ValueError, match="Invalid period"):
-            my_project.lpc(data, data, data, data, fixed_period=0)
+            vector_ta.lpc(data, data, data, data, fixed_period=0)
 
     def test_lpc_period_exceeds_length(self):
         """Test LPC fails when period exceeds data length"""
         data = np.array([10.0, 20.0, 30.0])
 
         with pytest.raises(ValueError, match="Invalid period"):
-            my_project.lpc(data, data, data, data, fixed_period=10)
+            vector_ta.lpc(data, data, data, data, fixed_period=10)
 
     def test_lpc_empty_input(self):
         """Test LPC fails with empty input"""
         empty = np.array([])
 
         with pytest.raises(ValueError, match="Input data slice is empty"):
-            my_project.lpc(empty, empty, empty, empty)
+            vector_ta.lpc(empty, empty, empty, empty)
 
     def test_lpc_all_nan(self):
         """Test LPC handles all NaN values"""
@@ -142,7 +142,7 @@ class TestLpc:
 
 
         with pytest.raises(ValueError, match="All values are NaN"):
-            my_project.lpc(nan_data, nan_data, nan_data, nan_data)
+            vector_ta.lpc(nan_data, nan_data, nan_data, nan_data)
 
     def test_lpc_mismatched_lengths(self):
         """Test LPC fails with mismatched array lengths"""
@@ -152,12 +152,12 @@ class TestLpc:
         src_data = np.array([9.0, 19.0, 29.0])
 
         with pytest.raises(ValueError, match="All arrays must have the same length"):
-            my_project.lpc(high_data, low_data, close_data, src_data)
+            vector_ta.lpc(high_data, low_data, close_data, src_data)
 
     def test_lpc_invalid_cutoff_type(self, test_data):
         """Test LPC fails with invalid cutoff type"""
         with pytest.raises(ValueError, match="Invalid cutoff type"):
-            my_project.lpc(
+            vector_ta.lpc(
                 test_data['high'][:100],
                 test_data['low'][:100],
                 test_data['close'][:100],
@@ -168,7 +168,7 @@ class TestLpc:
     def test_lpc_different_multipliers(self, test_data):
         """Test LPC with different multiplier values"""
 
-        filter1, high1, low1 = my_project.lpc(
+        filter1, high1, low1 = vector_ta.lpc(
             test_data['high'][:100],
             test_data['low'][:100],
             test_data['close'][:100],
@@ -179,7 +179,7 @@ class TestLpc:
         )
 
 
-        filter2, high2, low2 = my_project.lpc(
+        filter2, high2, low2 = vector_ta.lpc(
             test_data['high'][:100],
             test_data['low'][:100],
             test_data['close'][:100],
@@ -200,7 +200,7 @@ class TestLpc:
 
     def test_lpc_nan_handling(self, test_data):
         """Test LPC handles NaN values correctly"""
-        filter_out, high_band, low_band = my_project.lpc(
+        filter_out, high_band, low_band = vector_ta.lpc(
             test_data['high'],
             test_data['low'],
             test_data['close'],
@@ -226,7 +226,7 @@ class TestLpc:
         fixed_period = 20
 
 
-        batch_filter, batch_high, batch_low = my_project.lpc(
+        batch_filter, batch_high, batch_low = vector_ta.lpc(
             test_data['high'][:100],
             test_data['low'][:100],
             test_data['close'][:100],
@@ -236,7 +236,7 @@ class TestLpc:
         )
 
 
-        stream = my_project.LpcStream(
+        stream = vector_ta.LpcStream(
             cutoff_type=cutoff_type,
             fixed_period=fixed_period
         )
@@ -281,7 +281,7 @@ class TestLpc:
     def test_lpc_adaptive_vs_fixed(self, test_data):
         """Test difference between adaptive and fixed modes - mirrors Rust tests"""
 
-        filter_adaptive, high_adaptive, low_adaptive = my_project.lpc(
+        filter_adaptive, high_adaptive, low_adaptive = vector_ta.lpc(
             test_data['high'][:200],
             test_data['low'][:200],
             test_data['close'][:200],
@@ -291,7 +291,7 @@ class TestLpc:
         )
 
 
-        filter_fixed, high_fixed, low_fixed = my_project.lpc(
+        filter_fixed, high_fixed, low_fixed = vector_ta.lpc(
             test_data['high'][:200],
             test_data['low'][:200],
             test_data['close'][:200],
@@ -314,7 +314,7 @@ class TestLpc:
     def test_lpc_batch(self, test_data):
         """Test LPC batch processing - mirrors check_batch_shapes from Rust"""
 
-        result = my_project.lpc_batch(
+        result = vector_ta.lpc_batch(
             test_data['high'],
             test_data['low'],
             test_data['close'],
@@ -354,7 +354,7 @@ class TestLpc:
 
         try:
 
-            filter_out, high_band, low_band = my_project.lpc(
+            filter_out, high_band, low_band = vector_ta.lpc(
                 test_data['high'][:100],
                 test_data['low'][:100],
                 test_data['close'][:100],
@@ -369,7 +369,7 @@ class TestLpc:
     def test_lpc_batch_parameter_sweep(self, test_data):
         """Test LPC batch with multiple parameter combinations"""
 
-        result = my_project.lpc_batch(
+        result = vector_ta.lpc_batch(
             test_data['high'][:100],
             test_data['low'][:100],
             test_data['close'][:100],

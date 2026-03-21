@@ -1,166 +1,166 @@
-extern crate vector_ta as my_project;
+extern crate vector_ta;
 
-use my_project::indicators::acosc::{acosc, AcoscData, AcoscInput, AcoscParams};
-use my_project::indicators::ad::{ad, AdData, AdInput, AdParams};
-use my_project::indicators::adaptive_bounds_rsi::{
+use vector_ta::indicators::acosc::{acosc, AcoscData, AcoscInput, AcoscParams};
+use vector_ta::indicators::ad::{ad, AdData, AdInput, AdParams};
+use vector_ta::indicators::adaptive_bounds_rsi::{
     adaptive_bounds_rsi, AdaptiveBoundsRsiInput, AdaptiveBoundsRsiParams,
 };
-use my_project::indicators::adjustable_ma_alternating_extremities::{
+use vector_ta::indicators::adjustable_ma_alternating_extremities::{
     adjustable_ma_alternating_extremities, AdjustableMaAlternatingExtremitiesInput,
     AdjustableMaAlternatingExtremitiesParams,
 };
-use my_project::indicators::adosc::{adosc, AdoscData, AdoscInput, AdoscParams};
-use my_project::indicators::adx::{adx, AdxData, AdxInput, AdxParams};
-use my_project::indicators::adxr::{adxr, AdxrData, AdxrInput, AdxrParams};
-use my_project::indicators::alligator::{alligator, AlligatorInput, AlligatorParams};
-use my_project::indicators::ao::{ao, AoData, AoInput, AoParams};
-use my_project::indicators::apo::{apo, ApoInput, ApoParams};
-use my_project::indicators::aroon::{aroon, AroonData, AroonInput, AroonParams};
-use my_project::indicators::aroonosc::{aroon_osc, AroonOscData, AroonOscInput, AroonOscParams};
-use my_project::indicators::atr::{atr, AtrData, AtrInput, AtrParams};
-use my_project::indicators::bandpass::{bandpass, BandPassInput, BandPassParams};
-use my_project::indicators::bollinger_bands::{
+use vector_ta::indicators::adosc::{adosc, AdoscData, AdoscInput, AdoscParams};
+use vector_ta::indicators::adx::{adx, AdxData, AdxInput, AdxParams};
+use vector_ta::indicators::adxr::{adxr, AdxrData, AdxrInput, AdxrParams};
+use vector_ta::indicators::alligator::{alligator, AlligatorInput, AlligatorParams};
+use vector_ta::indicators::ao::{ao, AoData, AoInput, AoParams};
+use vector_ta::indicators::apo::{apo, ApoInput, ApoParams};
+use vector_ta::indicators::aroon::{aroon, AroonData, AroonInput, AroonParams};
+use vector_ta::indicators::aroonosc::{aroon_osc, AroonOscData, AroonOscInput, AroonOscParams};
+use vector_ta::indicators::atr::{atr, AtrData, AtrInput, AtrParams};
+use vector_ta::indicators::bandpass::{bandpass, BandPassInput, BandPassParams};
+use vector_ta::indicators::bollinger_bands::{
     bollinger_bands, BollingerBandsInput, BollingerBandsParams,
 };
-use my_project::indicators::bollinger_bands_width::{
+use vector_ta::indicators::bollinger_bands_width::{
     bollinger_bands_width, BollingerBandsWidthInput, BollingerBandsWidthParams,
 };
-use my_project::indicators::bop::{bop, BopInput, BopParams};
-use my_project::indicators::cci::{cci, CciInput, CciParams};
-use my_project::indicators::cfo::{cfo, CfoInput, CfoParams};
-use my_project::indicators::cg::{cg, CgInput, CgParams};
-use my_project::indicators::chande::{chande, ChandeData, ChandeInput, ChandeParams};
-use my_project::indicators::chop::{chop, ChopData, ChopInput, ChopParams};
-use my_project::indicators::cmo::{cmo, CmoInput, CmoParams};
-use my_project::indicators::correl_hl::{correl_hl, CorrelHlData, CorrelHlInput, CorrelHlParams};
-use my_project::indicators::cvi::{cvi, CviInput, CviParams};
+use vector_ta::indicators::bop::{bop, BopInput, BopParams};
+use vector_ta::indicators::cci::{cci, CciInput, CciParams};
+use vector_ta::indicators::cfo::{cfo, CfoInput, CfoParams};
+use vector_ta::indicators::cg::{cg, CgInput, CgParams};
+use vector_ta::indicators::chande::{chande, ChandeData, ChandeInput, ChandeParams};
+use vector_ta::indicators::chop::{chop, ChopData, ChopInput, ChopParams};
+use vector_ta::indicators::cmo::{cmo, CmoInput, CmoParams};
+use vector_ta::indicators::correl_hl::{correl_hl, CorrelHlData, CorrelHlInput, CorrelHlParams};
+use vector_ta::indicators::cvi::{cvi, CviInput, CviParams};
 
-use my_project::indicators::damiani_volatmeter::{
+use vector_ta::indicators::damiani_volatmeter::{
     damiani_volatmeter, DamianiVolatmeterInput, DamianiVolatmeterParams,
 };
-use my_project::indicators::decycler::{decycler, DecyclerInput, DecyclerParams};
-use my_project::indicators::deviation::{deviation, DeviationInput, DeviationParams};
-use my_project::indicators::devstop::{devstop, DevStopData, DevStopInput, DevStopParams};
-use my_project::indicators::di::{di, DiData, DiInput, DiParams};
-use my_project::indicators::dpo::{dpo, DpoInput, DpoParams};
-use my_project::indicators::emv::{emv, EmvInput};
-use my_project::indicators::er::{er, ErInput, ErParams};
-use my_project::indicators::eri::{eri, EriData, EriInput, EriParams};
-use my_project::indicators::fisher::{fisher, FisherInput, FisherParams};
-use my_project::indicators::forward_backward_exponential_oscillator::{
+use vector_ta::indicators::decycler::{decycler, DecyclerInput, DecyclerParams};
+use vector_ta::indicators::deviation::{deviation, DeviationInput, DeviationParams};
+use vector_ta::indicators::devstop::{devstop, DevStopData, DevStopInput, DevStopParams};
+use vector_ta::indicators::di::{di, DiData, DiInput, DiParams};
+use vector_ta::indicators::dpo::{dpo, DpoInput, DpoParams};
+use vector_ta::indicators::emv::{emv, EmvInput};
+use vector_ta::indicators::er::{er, ErInput, ErParams};
+use vector_ta::indicators::eri::{eri, EriData, EriInput, EriParams};
+use vector_ta::indicators::fisher::{fisher, FisherInput, FisherParams};
+use vector_ta::indicators::forward_backward_exponential_oscillator::{
     forward_backward_exponential_oscillator, ForwardBackwardExponentialOscillatorInput,
     ForwardBackwardExponentialOscillatorParams,
 };
-use my_project::indicators::kst::{kst, KstInput, KstParams};
-use my_project::indicators::kurtosis::{kurtosis, KurtosisInput, KurtosisParams};
-use my_project::indicators::linearreg_intercept::{
+use vector_ta::indicators::kst::{kst, KstInput, KstParams};
+use vector_ta::indicators::kurtosis::{kurtosis, KurtosisInput, KurtosisParams};
+use vector_ta::indicators::linearreg_intercept::{
     linearreg_intercept, LinearRegInterceptInput, LinearRegInterceptParams,
 };
-use my_project::indicators::macz::{macz, MaczInput, MaczParams};
-use my_project::indicators::market_structure_confluence::{
+use vector_ta::indicators::macz::{macz, MaczInput, MaczParams};
+use vector_ta::indicators::market_structure_confluence::{
     market_structure_confluence, MarketStructureConfluenceInput, MarketStructureConfluenceParams,
 };
-use my_project::indicators::marketefi::{
+use vector_ta::indicators::marketefi::{
     marketefi, MarketefiData, MarketefiInput, MarketefiParams,
 };
-use my_project::indicators::mass::{mass, MassInput, MassParams};
-use my_project::indicators::mfi::{mfi, MfiData, MfiInput, MfiParams};
-use my_project::indicators::midpoint::{midpoint, MidpointInput, MidpointParams};
-use my_project::indicators::midprice::{midprice, MidpriceInput, MidpriceParams};
-use my_project::indicators::moving_averages::alma::{alma, AlmaInput, AlmaParams};
-use my_project::indicators::moving_averages::cwma::{cwma, CwmaInput, CwmaParams};
-use my_project::indicators::moving_averages::dema::{dema, DemaInput, DemaParams};
-use my_project::indicators::moving_averages::edcf::{edcf, EdcfInput, EdcfParams};
-use my_project::indicators::moving_averages::ehlers_ecema::{
+use vector_ta::indicators::mass::{mass, MassInput, MassParams};
+use vector_ta::indicators::mfi::{mfi, MfiData, MfiInput, MfiParams};
+use vector_ta::indicators::midpoint::{midpoint, MidpointInput, MidpointParams};
+use vector_ta::indicators::midprice::{midprice, MidpriceInput, MidpriceParams};
+use vector_ta::indicators::moving_averages::alma::{alma, AlmaInput, AlmaParams};
+use vector_ta::indicators::moving_averages::cwma::{cwma, CwmaInput, CwmaParams};
+use vector_ta::indicators::moving_averages::dema::{dema, DemaInput, DemaParams};
+use vector_ta::indicators::moving_averages::edcf::{edcf, EdcfInput, EdcfParams};
+use vector_ta::indicators::moving_averages::ehlers_ecema::{
     ehlers_ecema, EhlersEcemaInput, EhlersEcemaParams,
 };
-use my_project::indicators::moving_averages::ehlers_itrend::{
+use vector_ta::indicators::moving_averages::ehlers_itrend::{
     ehlers_itrend, EhlersITrendInput, EhlersITrendParams,
 };
-use my_project::indicators::moving_averages::ema::{ema, EmaInput, EmaParams};
-use my_project::indicators::moving_averages::epma::{epma, EpmaInput, EpmaParams};
-use my_project::indicators::moving_averages::frama::{frama, FramaInput, FramaParams};
-use my_project::indicators::moving_averages::fwma::{fwma, FwmaInput, FwmaParams};
-use my_project::indicators::moving_averages::gaussian::{gaussian, GaussianInput, GaussianParams};
-use my_project::indicators::moving_averages::highpass::{highpass, HighPassInput, HighPassParams};
-use my_project::indicators::moving_averages::highpass_2_pole::{
+use vector_ta::indicators::moving_averages::ema::{ema, EmaInput, EmaParams};
+use vector_ta::indicators::moving_averages::epma::{epma, EpmaInput, EpmaParams};
+use vector_ta::indicators::moving_averages::frama::{frama, FramaInput, FramaParams};
+use vector_ta::indicators::moving_averages::fwma::{fwma, FwmaInput, FwmaParams};
+use vector_ta::indicators::moving_averages::gaussian::{gaussian, GaussianInput, GaussianParams};
+use vector_ta::indicators::moving_averages::highpass::{highpass, HighPassInput, HighPassParams};
+use vector_ta::indicators::moving_averages::highpass_2_pole::{
     highpass_2_pole, HighPass2Input, HighPass2Params,
 };
-use my_project::indicators::moving_averages::hma::{hma, HmaInput, HmaParams};
-use my_project::indicators::moving_averages::hwma::{hwma, HwmaInput, HwmaParams};
-use my_project::indicators::moving_averages::jma::{jma, JmaInput, JmaParams};
-use my_project::indicators::moving_averages::jsa::{jsa, JsaInput, JsaParams};
-use my_project::indicators::moving_averages::kama::{kama, KamaInput, KamaParams};
-use my_project::indicators::moving_averages::linreg::{linreg, LinRegInput, LinRegParams};
-use my_project::indicators::moving_averages::maaq::{maaq, MaaqInput, MaaqParams};
-use my_project::indicators::moving_averages::mama::{mama, MamaInput, MamaParams};
-use my_project::indicators::moving_averages::mwdx::{mwdx, MwdxInput, MwdxParams};
-use my_project::indicators::moving_averages::nma::{nma, NmaInput, NmaParams};
-use my_project::indicators::moving_averages::pwma::{pwma, PwmaInput, PwmaParams};
-use my_project::indicators::moving_averages::reflex::{reflex, ReflexInput, ReflexParams};
-use my_project::indicators::moving_averages::sama::{sama, SamaInput, SamaParams};
-use my_project::indicators::moving_averages::sinwma::{sinwma, SinWmaInput, SinWmaParams};
-use my_project::indicators::moving_averages::sma::{sma, SmaInput, SmaParams};
-use my_project::indicators::moving_averages::smma::{smma, SmmaInput, SmmaParams};
-use my_project::indicators::moving_averages::sqwma::{sqwma, SqwmaInput, SqwmaParams};
-use my_project::indicators::moving_averages::srwma::{srwma, SrwmaInput, SrwmaParams};
-use my_project::indicators::moving_averages::supersmoother::{
+use vector_ta::indicators::moving_averages::hma::{hma, HmaInput, HmaParams};
+use vector_ta::indicators::moving_averages::hwma::{hwma, HwmaInput, HwmaParams};
+use vector_ta::indicators::moving_averages::jma::{jma, JmaInput, JmaParams};
+use vector_ta::indicators::moving_averages::jsa::{jsa, JsaInput, JsaParams};
+use vector_ta::indicators::moving_averages::kama::{kama, KamaInput, KamaParams};
+use vector_ta::indicators::moving_averages::linreg::{linreg, LinRegInput, LinRegParams};
+use vector_ta::indicators::moving_averages::maaq::{maaq, MaaqInput, MaaqParams};
+use vector_ta::indicators::moving_averages::mama::{mama, MamaInput, MamaParams};
+use vector_ta::indicators::moving_averages::mwdx::{mwdx, MwdxInput, MwdxParams};
+use vector_ta::indicators::moving_averages::nma::{nma, NmaInput, NmaParams};
+use vector_ta::indicators::moving_averages::pwma::{pwma, PwmaInput, PwmaParams};
+use vector_ta::indicators::moving_averages::reflex::{reflex, ReflexInput, ReflexParams};
+use vector_ta::indicators::moving_averages::sama::{sama, SamaInput, SamaParams};
+use vector_ta::indicators::moving_averages::sinwma::{sinwma, SinWmaInput, SinWmaParams};
+use vector_ta::indicators::moving_averages::sma::{sma, SmaInput, SmaParams};
+use vector_ta::indicators::moving_averages::smma::{smma, SmmaInput, SmmaParams};
+use vector_ta::indicators::moving_averages::sqwma::{sqwma, SqwmaInput, SqwmaParams};
+use vector_ta::indicators::moving_averages::srwma::{srwma, SrwmaInput, SrwmaParams};
+use vector_ta::indicators::moving_averages::supersmoother::{
     supersmoother, SuperSmootherInput, SuperSmootherParams,
 };
-use my_project::indicators::moving_averages::supersmoother_3_pole::{
+use vector_ta::indicators::moving_averages::supersmoother_3_pole::{
     supersmoother_3_pole, SuperSmoother3PoleInput, SuperSmoother3PoleParams,
 };
-use my_project::indicators::moving_averages::swma::{swma, SwmaInput, SwmaParams};
-use my_project::indicators::moving_averages::tema::{tema, TemaInput, TemaParams};
-use my_project::indicators::moving_averages::tilson::{tilson, TilsonInput, TilsonParams};
-use my_project::indicators::moving_averages::trendflex::{
+use vector_ta::indicators::moving_averages::swma::{swma, SwmaInput, SwmaParams};
+use vector_ta::indicators::moving_averages::tema::{tema, TemaInput, TemaParams};
+use vector_ta::indicators::moving_averages::tilson::{tilson, TilsonInput, TilsonParams};
+use vector_ta::indicators::moving_averages::trendflex::{
     trendflex, TrendFlexInput, TrendFlexParams,
 };
-use my_project::indicators::moving_averages::trima::{trima, TrimaInput, TrimaParams};
-use my_project::indicators::moving_averages::volatility_adjusted_ma::{
+use vector_ta::indicators::moving_averages::trima::{trima, TrimaInput, TrimaParams};
+use vector_ta::indicators::moving_averages::volatility_adjusted_ma::{
     vama, VamaInput, VamaParams,
 };
-use my_project::indicators::moving_averages::volume_adjusted_ma::{
+use vector_ta::indicators::moving_averages::volume_adjusted_ma::{
     VolumeAdjustedMa as volu_ma, VolumeAdjustedMaInput as VoluMaInput,
     VolumeAdjustedMaParams as VoluMaParams,
 };
-use my_project::indicators::moving_averages::vpwma::{vpwma, VpwmaInput, VpwmaParams};
-use my_project::indicators::moving_averages::vwap::{vwap, VwapInput, VwapParams};
-use my_project::indicators::moving_averages::vwma::{vwma, VwmaInput, VwmaParams};
-use my_project::indicators::moving_averages::wilders::{wilders, WildersInput, WildersParams};
-use my_project::indicators::moving_averages::wma::{wma, WmaInput, WmaParams};
-use my_project::indicators::moving_averages::zlema::{zlema, ZlemaInput, ZlemaParams};
-use my_project::indicators::pma::{pma, PmaInput, PmaParams};
-use my_project::indicators::ppo::{ppo, PpoInput, PpoParams};
-use my_project::indicators::qqe_weighted_oscillator::{
+use vector_ta::indicators::moving_averages::vpwma::{vpwma, VpwmaInput, VpwmaParams};
+use vector_ta::indicators::moving_averages::vwap::{vwap, VwapInput, VwapParams};
+use vector_ta::indicators::moving_averages::vwma::{vwma, VwmaInput, VwmaParams};
+use vector_ta::indicators::moving_averages::wilders::{wilders, WildersInput, WildersParams};
+use vector_ta::indicators::moving_averages::wma::{wma, WmaInput, WmaParams};
+use vector_ta::indicators::moving_averages::zlema::{zlema, ZlemaInput, ZlemaParams};
+use vector_ta::indicators::pma::{pma, PmaInput, PmaParams};
+use vector_ta::indicators::ppo::{ppo, PpoInput, PpoParams};
+use vector_ta::indicators::qqe_weighted_oscillator::{
     qqe_weighted_oscillator, QqeWeightedOscillatorInput, QqeWeightedOscillatorParams,
 };
-use my_project::indicators::range_filtered_trend_signals::{
+use vector_ta::indicators::range_filtered_trend_signals::{
     range_filtered_trend_signals, RangeFilteredTrendSignalsInput, RangeFilteredTrendSignalsParams,
 };
-use my_project::indicators::range_oscillator::{
+use vector_ta::indicators::range_oscillator::{
     range_oscillator, RangeOscillatorInput, RangeOscillatorParams,
 };
-use my_project::indicators::roc::{roc, RocInput, RocParams};
-use my_project::indicators::rocp::{rocp, RocpInput, RocpParams};
-use my_project::indicators::rsi::{rsi, RsiInput, RsiParams};
-use my_project::indicators::rsx::{rsx, RsxInput, RsxParams};
-use my_project::indicators::rvi::{rvi, RviInput, RviParams};
-use my_project::indicators::squeeze_momentum::{
+use vector_ta::indicators::roc::{roc, RocInput, RocParams};
+use vector_ta::indicators::rocp::{rocp, RocpInput, RocpParams};
+use vector_ta::indicators::rsi::{rsi, RsiInput, RsiParams};
+use vector_ta::indicators::rsx::{rsx, RsxInput, RsxParams};
+use vector_ta::indicators::rvi::{rvi, RviInput, RviParams};
+use vector_ta::indicators::squeeze_momentum::{
     squeeze_momentum, SqueezeMomentumInput, SqueezeMomentumParams,
 };
-use my_project::indicators::stddev::{stddev, StdDevInput, StdDevParams};
-use my_project::indicators::tsf::{tsf, TsfInput, TsfParams};
-use my_project::indicators::ui::{ui, UiInput, UiParams};
-use my_project::indicators::var::{var, VarInput, VarParams};
-use my_project::indicators::volume_weighted_relative_strength_index::{
+use vector_ta::indicators::stddev::{stddev, StdDevInput, StdDevParams};
+use vector_ta::indicators::tsf::{tsf, TsfInput, TsfParams};
+use vector_ta::indicators::ui::{ui, UiInput, UiParams};
+use vector_ta::indicators::var::{var, VarInput, VarParams};
+use vector_ta::indicators::volume_weighted_relative_strength_index::{
     volume_weighted_relative_strength_index, VolumeWeightedRelativeStrengthIndexInput,
     VolumeWeightedRelativeStrengthIndexParams,
 };
-use my_project::indicators::vpci::{vpci, VpciInput, VpciParams};
-use my_project::indicators::vpt::{vpt, VptInput};
-use my_project::indicators::wclprice::{wclprice, WclpriceInput};
-use my_project::utilities::data_loader::read_candles_from_csv;
+use vector_ta::indicators::vpci::{vpci, VpciInput, VpciParams};
+use vector_ta::indicators::vpt::{vpt, VptInput};
+use vector_ta::indicators::wclprice::{wclprice, WclpriceInput};
+use vector_ta::utilities::data_loader::read_candles_from_csv;
 use serde_json::json;
 use std::env;
 

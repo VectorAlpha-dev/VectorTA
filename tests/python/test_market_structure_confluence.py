@@ -7,7 +7,7 @@ try:
     import vector_ta as ta
 except ImportError:
     try:
-        import my_project as ta
+        import vector_ta as ta
     except ImportError:
         pytest.skip(
             "Python module not built. Run 'maturin develop --features python' first",

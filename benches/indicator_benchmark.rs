@@ -1,10 +1,10 @@
-extern crate vector_ta as my_project;
+extern crate vector_ta;
 
 use anyhow::anyhow;
 use criterion::{
     black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 use once_cell::sync::Lazy;
 use paste::paste;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -39,7 +39,7 @@ fn __install_broken_pipe_panic_hook() {
     }));
 }
 
-use my_project::indicators::moving_averages::{
+use vector_ta::indicators::moving_averages::{
     alma::{alma_with_kernel, AlmaBatchBuilder, AlmaInput},
     buff_averages::{
         buff_averages, buff_averages_with_kernel, BuffAveragesBatchBuilder, BuffAveragesInput,
@@ -101,7 +101,7 @@ use my_project::indicators::moving_averages::{
     zlema::{zlema_with_kernel, ZlemaBatchBuilder, ZlemaInput},
 };
 
-use my_project::indicators::{
+use vector_ta::indicators::{
     bandpass::{
         bandpass as bandpass_raw, bandpass_with_kernel, BandPassBatchBuilder, BandPassInput,
     },
@@ -114,12 +114,12 @@ use my_project::indicators::{
     reverse_rsi::{reverse_rsi, reverse_rsi_with_kernel, ReverseRsiBatchBuilder, ReverseRsiInput},
 };
 
-use my_project::indicators::moving_averages::volatility_adjusted_ma::{
+use vector_ta::indicators::moving_averages::volatility_adjusted_ma::{
     vama, vama_with_kernel, VamaBatchBuilder, VamaInput as VamaInputMv,
 };
 
-use my_project::indicators::correl_hl::correl_hl_with_kernel;
-use my_project::indicators::{
+use vector_ta::indicators::correl_hl::correl_hl_with_kernel;
+use vector_ta::indicators::{
     acosc::{acosc as acosc_raw, AcoscInput},
     ad::{ad as ad_raw, ad_with_kernel, AdInput},
     adosc::{adosc as adosc_raw, AdoscInput},
@@ -303,13 +303,13 @@ use my_project::indicators::{
     zscore::{zscore as zscore_raw, zscore_with_kernel, ZscoreBatchBuilder, ZscoreInput},
 };
 
-use my_project::indicators::dvdiqqe::{dvdiqqe_with_kernel, DvdiqqeInput};
+use vector_ta::indicators::dvdiqqe::{dvdiqqe_with_kernel, DvdiqqeInput};
 
-use my_project::indicators::stc::stc_with_kernel;
+use vector_ta::indicators::stc::stc_with_kernel;
 
-use my_project::indicators::dm::dm_with_kernel;
+use vector_ta::indicators::dm::dm_with_kernel;
 
-use my_project::utilities::data_loader::{read_candles_from_csv, source_type, Candles};
+use vector_ta::utilities::data_loader::{read_candles_from_csv, source_type, Candles};
 
 static CANDLES_10K: Lazy<Candles> =
     Lazy::new(|| read_candles_from_csv("src/data/10kCandles.csv").expect("10 k candles csv"));
@@ -1772,14 +1772,14 @@ make_kernel_wrappers!(vpt, vpt_with_kernel, VptInputS; Scalar,Avx2,Avx512);
 
 make_kernel_wrappers!(
     willr,
-    my_project::indicators::willr::willr_with_kernel,
+    vector_ta::indicators::willr::willr_with_kernel,
     WillrInputS;
     Scalar,Avx2,Avx512
 );
 
 make_kernel_wrappers!(
     acosc,
-    my_project::indicators::acosc::acosc_with_kernel,
+    vector_ta::indicators::acosc::acosc_with_kernel,
     AcoscInputS;
     Scalar,Avx2,Avx512
 );
@@ -1791,32 +1791,32 @@ make_kernel_wrappers!(ad, ad_with_kernel, AdInputS; Scalar,Avx2,Avx512);
 
 make_kernel_wrappers!(
     adosc,
-    my_project::indicators::adosc::adosc_with_kernel,
+    vector_ta::indicators::adosc::adosc_with_kernel,
     AdoscInputS;
     Scalar,Avx2,Avx512
 );
 
 make_kernel_wrappers!(
     ao,
-    my_project::indicators::ao::ao_with_kernel,
+    vector_ta::indicators::ao::ao_with_kernel,
     AoInputS;
     Scalar,Avx2,Avx512
 );
 
-make_kernel_wrappers!(atr, my_project::indicators::atr::atr_with_kernel, AtrInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(atr, vector_ta::indicators::atr::atr_with_kernel, AtrInputS; Scalar,Avx2,Avx512);
 
 make_kernel_wrappers!(dvdiqqe, dvdiqqe_with_kernel, DvdiqqeInputS; Scalar,Avx2,Avx512);
 
-make_kernel_wrappers!(macd, my_project::indicators::macd::macd_with_kernel, MacdInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(macd, vector_ta::indicators::macd::macd_with_kernel, MacdInputS; Scalar,Avx2,Avx512);
 
 make_kernel_wrappers!(
     vwmacd,
-    my_project::indicators::vwmacd::vwmacd_with_kernel,
+    vector_ta::indicators::vwmacd::vwmacd_with_kernel,
     VwmacdInputS;
     Scalar,Avx2,Avx512
 );
 
-make_kernel_wrappers!(msw, my_project::indicators::msw::msw_with_kernel, MswInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(msw, vector_ta::indicators::msw::msw_with_kernel, MswInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(adx, adx_with_kernel, AdxInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(buff_averages, buff_averages_with_kernel, BuffAveragesInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(correl_hl, correl_hl_with_kernel, CorrelHlInputS; Scalar,Avx2,Avx512);
@@ -1837,13 +1837,13 @@ make_kernel_wrappers!(ttm_trend, ttm_trend_with_kernel, TtmTrendInputS; Scalar,A
 make_kernel_wrappers!(macz, macz_with_kernel, MaczInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(mom, mom_with_kernel, MomInputS; Scalar,Avx2,Avx512);
 
-make_kernel_wrappers!(lpc, my_project::indicators::lpc::lpc_with_kernel, LpcInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(lpc, vector_ta::indicators::lpc::lpc_with_kernel, LpcInputS; Scalar,Avx2,Avx512);
 
-make_kernel_wrappers!(lrsi, my_project::indicators::lrsi::lrsi_with_kernel, LrsiInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(lrsi, vector_ta::indicators::lrsi::lrsi_with_kernel, LrsiInputS; Scalar,Avx2,Avx512);
 
 make_kernel_wrappers!(
     wad,
-    my_project::indicators::wad::wad_with_kernel,
+    vector_ta::indicators::wad::wad_with_kernel,
     WadInputS;
     Scalar,Avx2,Avx512
 );
@@ -1882,7 +1882,7 @@ make_kernel_wrappers!(linreg, linreg_with_kernel, LinRegInputS; Scalar,Avx2,Avx5
 make_kernel_wrappers!(linearreg_angle, linearreg_angle_with_kernel, LinearregAngleInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(
     linearreg_intercept,
-    my_project::indicators::linearreg_intercept::linearreg_intercept_with_kernel,
+    vector_ta::indicators::linearreg_intercept::linearreg_intercept_with_kernel,
     LinearRegInterceptInputS;
     Scalar,Avx2,Avx512
 );
@@ -1921,7 +1921,7 @@ make_kernel_wrappers!(vidya, vidya_with_kernel, VidyaInputS; Scalar,Avx2,Avx512)
 make_kernel_wrappers!(volume_adjusted_ma, VolumeAdjustedMa_with_kernel, VolumeAdjustedMaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vlma, vlma_with_kernel, VlmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vpwma, vpwma_with_kernel, VpwmaInputS; Scalar,Avx2,Avx512);
-make_kernel_wrappers!(vwap, my_project::indicators::vwap::vwap_with_kernel, VwapInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(vwap, vector_ta::indicators::vwap::vwap_with_kernel, VwapInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(vwma, vwma_with_kernel, VwmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(wclprice, wclprice_with_kernel, WclpriceInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(wilders, wilders_with_kernel, WildersInputS; Scalar,Avx2,Avx512);
@@ -1941,7 +1941,7 @@ make_kernel_wrappers!(kurtosis, kurtosis_with_kernel, KurtosisInputS; Scalar,Avx
 make_kernel_wrappers!(adxr, adxr_with_kernel, AdxrInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(
     alligator,
-    my_project::indicators::alligator::alligator_with_kernel,
+    vector_ta::indicators::alligator::alligator_with_kernel,
     AlligatorInputS;
     Scalar,Avx2,Avx512
 );
@@ -1952,20 +1952,20 @@ make_hlc_batch_wrappers!(
     supertrend_batch,
     SuperTrendBatchBuilder,
     SupertrendInputS,
-    my_project::indicators::supertrend::SuperTrendData
+    vector_ta::indicators::supertrend::SuperTrendData
 );
 
 make_hlc_batch_wrappers!(
     stoch_batch,
     StochBatchBuilder,
     StochInputS,
-    my_project::indicators::stoch::StochData
+    vector_ta::indicators::stoch::StochData
 );
 make_hl_batch_wrappers!(
     sar_batch,
     SarBatchBuilder,
     SarInputS,
-    my_project::indicators::sar::SarData
+    vector_ta::indicators::sar::SarData
 );
 
 make_pair_from_input_wrappers!(
@@ -1982,9 +1982,9 @@ make_pair_from_input_wrappers!(
 );
 make_hl_batch_wrappers!(
     fisher_batch,
-    my_project::indicators::fisher::FisherBatchBuilder,
+    vector_ta::indicators::fisher::FisherBatchBuilder,
     FisherInputS,
-    my_project::indicators::fisher::FisherData
+    vector_ta::indicators::fisher::FisherData
 );
 make_kernel_wrappers!(deviation, deviation_with_kernel, DeviationInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(correlation_cycle, correlation_cycle_with_kernel, CorrelationCycleInputS; Scalar,Avx2,Avx512);
@@ -1993,9 +1993,9 @@ make_kernel_wrappers!(stochf, stochf_with_kernel, StochfInputS; Scalar,Avx2,Avx5
 
 make_hlc_batch_wrappers!(
     stochf_batch,
-    my_project::indicators::stochf::StochfBatchBuilder,
+    vector_ta::indicators::stochf::StochfBatchBuilder,
     StochfInputS,
-    my_project::indicators::stochf::StochfData
+    vector_ta::indicators::stochf::StochfData
 );
 
 make_hl_batch_wrappers!(
@@ -2062,9 +2062,9 @@ make_batch_wrappers!(
 
 make_hlc_batch_wrappers!(
     ttm_squeeze_batch,
-    my_project::indicators::ttm_squeeze::TtmSqueezeBatchBuilder,
+    vector_ta::indicators::ttm_squeeze::TtmSqueezeBatchBuilder,
     TtmSqueezeInputS,
-    my_project::indicators::ttm_squeeze::TtmSqueezeData
+    vector_ta::indicators::ttm_squeeze::TtmSqueezeData
 );
 
 bench_variants!(
@@ -2114,40 +2114,40 @@ bench_variants!(
 
 make_kernel_wrappers!(
     mean_ad,
-    my_project::indicators::mean_ad::mean_ad_with_kernel,
+    vector_ta::indicators::mean_ad::mean_ad_with_kernel,
     MeanAdInputS;
     Scalar,Avx2,Avx512
 );
 
 make_kernel_wrappers!(
     medium_ad,
-    my_project::indicators::medium_ad::medium_ad_with_kernel,
+    vector_ta::indicators::medium_ad::medium_ad_with_kernel,
     MediumAdInputS;
     Scalar,Avx2,Avx512
 );
 
 make_batch_wrappers!(
     mean_ad_batch,
-    my_project::indicators::mean_ad::MeanAdBatchBuilder,
+    vector_ta::indicators::mean_ad::MeanAdBatchBuilder,
     MeanAdInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
 );
 
 make_kernel_wrappers!(pivot, pivot_with_kernel, PivotInputS; Scalar,Avx2,Avx512);
 
-make_kernel_wrappers!(rocp, my_project::indicators::rocp::rocp_with_kernel, RocpInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(rocp, vector_ta::indicators::rocp::rocp_with_kernel, RocpInputS; Scalar,Avx2,Avx512);
 
 make_kernel_wrappers!(stc, stc_with_kernel, StcInputS; Scalar,Avx2,Avx512);
 
 make_kernel_wrappers!(
     damiani_volatmeter,
-    my_project::indicators::damiani_volatmeter::damiani_volatmeter_with_kernel,
+    vector_ta::indicators::damiani_volatmeter::damiani_volatmeter_with_kernel,
     DamianiVolatmeterInputS;
     Scalar,Avx2,Avx512
 );
 make_kernel_wrappers!(tsf, tsf_with_kernel, TsfInputS; Scalar,Avx2,Avx512);
 
-make_kernel_wrappers!(tsi, my_project::indicators::tsi::tsi_with_kernel, TsiInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(tsi, vector_ta::indicators::tsi::tsi_with_kernel, TsiInputS; Scalar,Avx2,Avx512);
 
 make_kernel_wrappers!(rocr, rocr_with_kernel, RocrInputS; Scalar,Avx2,Avx512);
 
@@ -2206,7 +2206,7 @@ make_batch_wrappers!(
 #[inline(always)]
 fn cci_batch_scalarbatch(input: &CciInputS) -> anyhow::Result<()> {
     let slice: &[f64] = input.as_ref();
-    my_project::indicators::cci::CciBatchBuilder::new()
+    vector_ta::indicators::cci::CciBatchBuilder::new()
         .kernel(Kernel::ScalarBatch)
         .apply_slice(slice)?;
     Ok(())
@@ -2214,7 +2214,7 @@ fn cci_batch_scalarbatch(input: &CciInputS) -> anyhow::Result<()> {
 #[inline(always)]
 fn cci_batch_avx2batch(input: &CciInputS) -> anyhow::Result<()> {
     let slice: &[f64] = input.as_ref();
-    my_project::indicators::cci::CciBatchBuilder::new()
+    vector_ta::indicators::cci::CciBatchBuilder::new()
         .kernel(Kernel::Avx2Batch)
         .apply_slice(slice)?;
     Ok(())
@@ -2222,7 +2222,7 @@ fn cci_batch_avx2batch(input: &CciInputS) -> anyhow::Result<()> {
 #[inline(always)]
 fn cci_batch_avx512batch(input: &CciInputS) -> anyhow::Result<()> {
     let slice: &[f64] = input.as_ref();
-    my_project::indicators::cci::CciBatchBuilder::new()
+    vector_ta::indicators::cci::CciBatchBuilder::new()
         .kernel(Kernel::Avx512Batch)
         .apply_slice(slice)?;
     Ok(())
@@ -2281,10 +2281,10 @@ bench_variants!(
 
 make_pair_from_input_wrappers!(
     ttm_trend_batch,
-    my_project::indicators::ttm_trend::TtmTrendBatchBuilder,
+    vector_ta::indicators::ttm_trend::TtmTrendBatchBuilder,
     TtmTrendInputS,
     |input: &TtmTrendInputS| -> anyhow::Result<(&[f64], &[f64])> {
-        use my_project::indicators::ttm_trend::TtmTrendData;
+        use vector_ta::indicators::ttm_trend::TtmTrendData;
         let (src, cls): (&[f64], &[f64]) = match &input.data {
             TtmTrendData::Slices { source, close } => (*source, *close),
             TtmTrendData::Candles { candles, source } => {
@@ -2324,7 +2324,7 @@ make_batch_wrappers!(
 );
 
 make_batch_wrappers!(
-    tsi_batch, my_project::indicators::tsi::TsiBatchBuilder, TsiInputS;
+    tsi_batch, vector_ta::indicators::tsi::TsiBatchBuilder, TsiInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
 );
 bench_variants!(
@@ -2379,28 +2379,28 @@ make_kernel_wrappers!(ui, ui_with_kernel, UiInputS; Scalar,Avx2,Avx512);
 
 make_kernel_wrappers!(
     gatorosc,
-    my_project::indicators::gatorosc::gatorosc_with_kernel,
+    vector_ta::indicators::gatorosc::gatorosc_with_kernel,
     GatorOscInputS;
     Scalar,Avx2,Avx512
 );
 
 make_kernel_wrappers!(
     obv,
-    my_project::indicators::obv::obv_with_kernel,
+    vector_ta::indicators::obv::obv_with_kernel,
     ObvInputS;
     Scalar,Avx2,Avx512
 );
 
 make_kernel_wrappers!(
     coppock,
-    my_project::indicators::coppock::coppock_with_kernel,
+    vector_ta::indicators::coppock::coppock_with_kernel,
     CoppockInputS;
     Scalar,Avx2,Avx512
 );
 
 make_kernel_wrappers!(
     bop,
-    my_project::indicators::bop::bop_with_kernel,
+    vector_ta::indicators::bop::bop_with_kernel,
     BopInputS;
     Scalar,Avx2,Avx512
 );
@@ -2459,7 +2459,7 @@ make_triple_with_builder_wrappers!(
     AdxBatchBuilder,
     AdxInputS,
     |input: &AdxInputS| -> anyhow::Result<(&[f64], &[f64], &[f64])> {
-        use my_project::indicators::adx::AdxData;
+        use vector_ta::indicators::adx::AdxData;
         let (h, l, c) = match &input.data {
             AdxData::Candles { candles } => (
                 source_type(candles, "high"),
@@ -2478,7 +2478,7 @@ make_triple_with_builder_wrappers!(
     AdxBatchBuilder,
     AdxInputS,
     |input: &AdxInputS| -> anyhow::Result<(&[f64], &[f64], &[f64])> {
-        use my_project::indicators::adx::AdxData;
+        use vector_ta::indicators::adx::AdxData;
         let (h, l, c) = match &input.data {
             AdxData::Candles { candles } => (
                 source_type(candles, "high"),
@@ -2497,7 +2497,7 @@ make_triple_with_builder_and_method_wrappers!(
     DxBatchBuilder,
     DxInputS,
     |input: &DxInputS| -> anyhow::Result<(&[f64], &[f64], &[f64])> {
-        use my_project::indicators::dx::DxData;
+        use vector_ta::indicators::dx::DxData;
         let (h, l, c) = match &input.data {
             DxData::Candles { candles } => (
                 source_type(candles, "high"),
@@ -2531,14 +2531,14 @@ make_batch_wrappers!(
 
 make_ohlcv_batch_wrappers!(
     adosc_batch,
-    my_project::indicators::adosc::AdoscBatchBuilder,
+    vector_ta::indicators::adosc::AdoscBatchBuilder,
     AdoscInputS,
-    my_project::indicators::adosc::AdoscData
+    vector_ta::indicators::adosc::AdoscData
 );
 
 make_batch_wrappers!(
     ao_batch,
-    my_project::indicators::ao::AoBatchBuilder,
+    vector_ta::indicators::ao::AoBatchBuilder,
     AoInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
 );
@@ -2560,7 +2560,7 @@ make_batch_wrappers!(
 
 make_batch_wrappers!(
     linearreg_intercept_batch,
-    my_project::indicators::linearreg_intercept::LinearRegInterceptBatchBuilder,
+    vector_ta::indicators::linearreg_intercept::LinearRegInterceptBatchBuilder,
     LinearRegInterceptInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
 );
@@ -2574,14 +2574,14 @@ make_ohlcv_batch_wrappers!(
     kvo_batch,
     KvoBatchBuilder,
     KvoInputS,
-    my_project::indicators::kvo::KvoData
+    vector_ta::indicators::kvo::KvoData
 );
 
 make_hlc_batch_wrappers!(
     cksp_batch,
     CkspBatchBuilder,
     CkspInputS,
-    my_project::indicators::cksp::CkspData
+    vector_ta::indicators::cksp::CkspData
 );
 
 impl InputLen for DeviationInputS {
@@ -2599,7 +2599,7 @@ make_hlc_batch_wrappers!(
     squeeze_momentum_batch,
     SqueezeMomentumBatchBuilder,
     SqueezeMomentumInputS,
-    my_project::indicators::squeeze_momentum::SqueezeMomentumData
+    vector_ta::indicators::squeeze_momentum::SqueezeMomentumData
 );
 
 make_batch_wrappers!(
@@ -2651,7 +2651,7 @@ make_triple_with_arg_wrappers!(
 
 #[inline(always)]
 fn buff_averages_pair(input: &BuffAveragesInputS) -> anyhow::Result<(&[f64], &[f64])> {
-    use my_project::indicators::moving_averages::buff_averages::BuffAveragesData;
+    use vector_ta::indicators::moving_averages::buff_averages::BuffAveragesData;
     let price: &[f64] = input.as_ref();
     let volume: &[f64] = match (&input.volume, &input.data) {
         (Some(v), _) => *v,
@@ -2673,7 +2673,7 @@ make_pair_from_input_wrappers!(
     PviBatchBuilder,
     PviInputS,
     |input: &PviInputS| -> anyhow::Result<(&[f64], &[f64])> {
-        use my_project::indicators::pvi::PviData;
+        use vector_ta::indicators::pvi::PviData;
         let (close, volume) = match &input.data {
             PviData::Candles {
                 candles,
@@ -2693,7 +2693,7 @@ make_quad_from_input_wrappers!(
     aso_batch,
     AsoBatchBuilder,
     AsoInputS,
-    my_project::indicators::aso::AsoData,
+    vector_ta::indicators::aso::AsoData,
     |input: &AsoInputS| -> anyhow::Result<(&[f64], &[f64], &[f64], &[f64])> {
         let (o, h, l, c) = match &input.data {
             AsoData::Candles { candles, .. } => (
@@ -2724,7 +2724,7 @@ make_batch_wrappers!(
 );
 
 make_batch_wrappers!(
-    coppock_batch, my_project::indicators::coppock::CoppockBatchBuilder, CoppockInputS;
+    coppock_batch, vector_ta::indicators::coppock::CoppockBatchBuilder, CoppockInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
 );
 bench_variants!(
@@ -2771,16 +2771,16 @@ bench_variants!(
 
 make_hlc_batch_wrappers!(
     atr_batch,
-    my_project::indicators::atr::AtrBatchBuilder,
+    vector_ta::indicators::atr::AtrBatchBuilder,
     AtrInputS,
-    my_project::indicators::atr::AtrData
+    vector_ta::indicators::atr::AtrData
 );
 
 make_hlc_batch_wrappers!(
     wad_batch,
-    my_project::indicators::wad::WadBatchBuilder,
+    vector_ta::indicators::wad::WadBatchBuilder,
     WadInputS,
-    my_project::indicators::wad::WadData
+    vector_ta::indicators::wad::WadData
 );
 bench_variants!(
     atr_batch => AtrInputS; None;
@@ -2802,7 +2802,7 @@ make_batch_wrappers!(
 );
 
 make_batch_wrappers!(
-    stc_batch, my_project::indicators::stc::StcBatchBuilder, StcInputS;
+    stc_batch, vector_ta::indicators::stc::StcBatchBuilder, StcInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
 );
 
@@ -2931,9 +2931,9 @@ make_batch_wrappers!(tilson_batch, TilsonBatchBuilder, TilsonInputS; ScalarBatch
 make_batch_wrappers!(prb_batch, PrbBatchBuilder, PrbInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_hlc_batch_wrappers!(
     tradjema_batch,
-    my_project::indicators::moving_averages::tradjema::TradjemaBatchBuilder,
+    vector_ta::indicators::moving_averages::tradjema::TradjemaBatchBuilder,
     TradjemaInputS,
-    my_project::indicators::moving_averages::tradjema::TradjemaData
+    vector_ta::indicators::moving_averages::tradjema::TradjemaData
 );
 
 make_batch_wrappers!(trendflex_batch, TrendFlexBatchBuilder, TrendFlexInputS; ScalarBatch, Avx2Batch, Avx512Batch);
@@ -2946,7 +2946,7 @@ make_hlc_batch_wrappers!(
     willr_batch,
     WillrBatchBuilder,
     WillrInputS,
-    my_project::indicators::willr::WillrData
+    vector_ta::indicators::willr::WillrData
 );
 make_batch_wrappers!(vidya_batch, VidyaBatchBuilder, VidyaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(vlma_batch, VlmaBatchBuilder, VlmaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
@@ -2957,7 +2957,7 @@ make_pair_from_input_wrappers!(
     CviBatchBuilder,
     CviInputS,
     |input: &CviInputS| -> anyhow::Result<(&[f64], &[f64])> {
-        use my_project::indicators::cvi::CviData;
+        use vector_ta::indicators::cvi::CviData;
         let pair = match &input.data {
             CviData::Candles(c) => (&c.high[..], &c.low[..]),
             CviData::Slices { high, low } => (*high, *low),
@@ -2971,7 +2971,7 @@ make_pair_from_input_wrappers!(
     VolumeAdjustedMaBatchBuilder,
     VolumeAdjustedMaInputS,
     |input: &VolumeAdjustedMaInputS| -> anyhow::Result<(&[f64], &[f64])> {
-        use my_project::indicators::moving_averages::volume_adjusted_ma::VolumeAdjustedMaData;
+        use vector_ta::indicators::moving_averages::volume_adjusted_ma::VolumeAdjustedMaData;
         let (data, volume) = match &input.data {
             VolumeAdjustedMaData::Candles { candles, source } => {
                 (source_type(candles, source), &candles.volume[..])
@@ -2990,15 +2990,15 @@ make_hlc_batch_wrappers!(
     vi_batch,
     ViBatchBuilder,
     ViInputS,
-    my_project::indicators::vi::ViData
+    vector_ta::indicators::vi::ViData
 );
 
 make_quad_with_method_wrappers!(
     keltner_batch,
-    my_project::indicators::keltner::KeltnerBatchBuilder,
+    vector_ta::indicators::keltner::KeltnerBatchBuilder,
     KeltnerInputS,
     |input: &KeltnerInputS| -> anyhow::Result<(&[f64], &[f64], &[f64], &[f64])> {
-        use my_project::indicators::keltner::KeltnerData;
+        use vector_ta::indicators::keltner::KeltnerData;
         let (h, l, c, s) = match &input.data {
             KeltnerData::Candles { candles, source } => (
                 candles.high.as_slice(),
@@ -3018,7 +3018,7 @@ make_quad_with_method_wrappers!(
     YangZhangVolatilityInputS,
     |input: &YangZhangVolatilityInputS| -> anyhow::Result<(&[f64], &[f64], &[f64], &[f64])> {
         let (o, h, l, c) = match &input.data {
-            my_project::indicators::yang_zhang_volatility::YangZhangVolatilityData::Candles {
+            vector_ta::indicators::yang_zhang_volatility::YangZhangVolatilityData::Candles {
                 candles,
             } => (
                 candles.open.as_slice(),
@@ -3026,7 +3026,7 @@ make_quad_with_method_wrappers!(
                 candles.low.as_slice(),
                 candles.close.as_slice(),
             ),
-            my_project::indicators::yang_zhang_volatility::YangZhangVolatilityData::Slices {
+            vector_ta::indicators::yang_zhang_volatility::YangZhangVolatilityData::Slices {
                 open,
                 high,
                 low,
@@ -3043,7 +3043,7 @@ make_hlc_batch_wrappers!(
     chandelier_exit_batch,
     CeBatchBuilder,
     ChandelierExitInputS,
-    my_project::indicators::chandelier_exit::ChandelierExitData
+    vector_ta::indicators::chandelier_exit::ChandelierExitData
 );
 
 make_single_apply_wrappers!(
@@ -3060,14 +3060,14 @@ make_hlc_batch_wrappers!(
     natr_batch,
     NatrBatchBuilder,
     NatrInputS,
-    my_project::indicators::natr::NatrData
+    vector_ta::indicators::natr::NatrData
 );
 
 make_hl_batch_wrappers!(
     donchian_batch,
-    my_project::indicators::donchian::DonchianBatchBuilder,
+    vector_ta::indicators::donchian::DonchianBatchBuilder,
     DonchianInputS,
-    my_project::indicators::donchian::DonchianData
+    vector_ta::indicators::donchian::DonchianData
 );
 
 paste::paste! {
@@ -3077,7 +3077,7 @@ make_triple_from_input_wrappers!(
     AvslBatchBuilder,
     AvslInputS,
     |input: &AvslInputS| -> anyhow::Result<(&[f64], &[f64], &[f64])> {
-        use my_project::indicators::avsl::AvslData;
+        use vector_ta::indicators::avsl::AvslData;
         let (close, low, vol) = match &input.data {
             AvslData::Candles { candles, .. } => (&candles.close[..], &candles.low[..], &candles.volume[..]),
             AvslData::Slices { close, low, volume } => (*close, *low, *volume),
@@ -3098,7 +3098,7 @@ make_batch_wrappers!(cmo_batch, CmoBatchBuilder, CmoInputS; ScalarBatch, Avx2Bat
 
 make_batch_wrappers!(reverse_rsi_batch, ReverseRsiBatchBuilder, ReverseRsiInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 make_batch_wrappers!(vama_batch, VamaBatchBuilder, VamaInputS; ScalarBatch, Avx2Batch, Avx512Batch);
-make_batch_wrappers!(decycler_batch, my_project::indicators::decycler::DecyclerBatchBuilder, DecyclerInputS; ScalarBatch, Avx2Batch, Avx512Batch);
+make_batch_wrappers!(decycler_batch, vector_ta::indicators::decycler::DecyclerBatchBuilder, DecyclerInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 
 bench_variants!(
     bandpass => BandPassInputS; None;
@@ -3123,7 +3123,7 @@ make_batch_wrappers!(srsi_batch, SrsiBatchBuilder, SrsiInputS; ScalarBatch, Avx2
 
 make_batch_wrappers!(
     damiani_volatmeter_batch,
-    my_project::indicators::damiani_volatmeter::DamianiVolatmeterBatchBuilder,
+    vector_ta::indicators::damiani_volatmeter::DamianiVolatmeterBatchBuilder,
     DamianiVolatmeterInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
 );
@@ -3193,7 +3193,7 @@ bench_variants!(
 );
 
 make_batch_wrappers!(
-    macd_batch, my_project::indicators::macd::MacdBatchBuilder, MacdInputS;
+    macd_batch, vector_ta::indicators::macd::MacdBatchBuilder, MacdInputS;
     ScalarBatch, Avx2Batch, Avx512Batch
 );
 bench_variants!(
@@ -3415,7 +3415,7 @@ bench_variants!(
 
 make_single_apply_wrappers!(
     rocr_batch,
-    my_project::indicators::rocr::RocrBatchBuilder,
+    vector_ta::indicators::rocr::RocrBatchBuilder,
     RocrInputS,
     apply_slice
 );
@@ -3444,7 +3444,7 @@ make_hl_batch_wrappers!(
     dm_batch,
     DmBatchBuilder,
     DmInputS,
-    my_project::indicators::dm::DmData
+    vector_ta::indicators::dm::DmData
 );
 
 bench_variants!(
@@ -4930,7 +4930,7 @@ bench_variants!(
 
 make_kernel_wrappers!(
     aroon,
-    my_project::indicators::aroon::aroon_with_kernel,
+    vector_ta::indicators::aroon::aroon_with_kernel,
     AroonInputS;
     Scalar, Avx2, Avx512
 );
@@ -4944,14 +4944,14 @@ bench_variants!(
 
 make_pair_from_input_wrappers!(
     aroon_batch,
-    my_project::indicators::aroon::AroonBatchBuilder,
+    vector_ta::indicators::aroon::AroonBatchBuilder,
     AroonInputS,
     |input: &AroonInputS| -> anyhow::Result<(&[f64], &[f64])> {
         let (high, low) = match &input.data {
-            my_project::indicators::aroon::AroonData::Candles { candles } => {
+            vector_ta::indicators::aroon::AroonData::Candles { candles } => {
                 (&candles.high[..], &candles.low[..])
             }
-            my_project::indicators::aroon::AroonData::SlicesHL { high, low } => (*high, *low),
+            vector_ta::indicators::aroon::AroonData::SlicesHL { high, low } => (*high, *low),
         };
         Ok((high, low))
     }
@@ -4966,7 +4966,7 @@ bench_variants!(
 
 make_kernel_wrappers!(
     aroon_osc,
-    my_project::indicators::aroonosc::aroon_osc_with_kernel,
+    vector_ta::indicators::aroonosc::aroon_osc_with_kernel,
     AroonOscInputS;
     Scalar, Avx2, Avx512
 );
@@ -4980,7 +4980,7 @@ bench_variants!(
 
 make_pair_from_input_wrappers!(
     aroon_osc_batch,
-    my_project::indicators::aroonosc::AroonOscBatchBuilder,
+    vector_ta::indicators::aroonosc::AroonOscBatchBuilder,
     AroonOscInputS,
     |input: &AroonOscInputS| -> anyhow::Result<(&[f64], &[f64])> {
         Ok((input.get_high(), input.get_low()))
@@ -5066,7 +5066,7 @@ bench_variants!(
 
 make_batch_wrappers!(
     ui_batch,
-    my_project::indicators::ui::UiBatchBuilder,
+    vector_ta::indicators::ui::UiBatchBuilder,
     UiInputS;
     ScalarBatch,
     Avx2Batch,
@@ -5081,9 +5081,9 @@ bench_variants!(
 
 make_hlc_batch_wrappers!(
     di_batch,
-    my_project::indicators::di::DiBatchBuilder,
+    vector_ta::indicators::di::DiBatchBuilder,
     DiInputS,
-    my_project::indicators::di::DiData
+    vector_ta::indicators::di::DiData
 );
 bench_variants!(
     di_batch => DiInputS; Some(27);
@@ -5094,7 +5094,7 @@ bench_variants!(
 
 make_batch_wrappers!(
     msw_batch,
-    my_project::indicators::msw::MswBatchBuilder,
+    vector_ta::indicators::msw::MswBatchBuilder,
     MswInputS;
     ScalarBatch,
     Avx2Batch,
@@ -5109,7 +5109,7 @@ bench_variants!(
 
 make_batch_wrappers!(
     medium_ad_batch,
-    my_project::indicators::medium_ad::MediumAdBatchBuilder,
+    vector_ta::indicators::medium_ad::MediumAdBatchBuilder,
     MediumAdInputS;
     ScalarBatch,
     Avx2Batch,

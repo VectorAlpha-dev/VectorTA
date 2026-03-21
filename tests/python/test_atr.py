@@ -5,7 +5,7 @@ These tests mirror the Rust unit tests to ensure Python bindings work correctly.
 
 import pytest
 import numpy as np
-import my_project
+import vector_ta
 from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
 
 
@@ -21,7 +21,7 @@ class TestAtr:
         expected = EXPECTED_OUTPUTS['atr']
 
 
-        result = my_project.atr(
+        result = vector_ta.atr(
             high, low, close,
             expected['default_params']['length']
         )
@@ -47,7 +47,7 @@ class TestAtr:
 
 
         length = 20
-        result = my_project.atr(high, low, close, length)
+        result = vector_ta.atr(high, low, close, length)
 
         assert isinstance(result, np.ndarray)
         assert result.shape == close.shape
@@ -65,7 +65,7 @@ class TestAtr:
         empty = np.array([], dtype=np.float64)
 
         with pytest.raises(ValueError, match="No candles|no data"):
-            my_project.atr(empty, empty, empty, 14)
+            vector_ta.atr(empty, empty, empty, 14)
 
     def test_atr_mismatched_lengths(self, test_data):
         """Test ATR with mismatched array lengths."""
@@ -74,7 +74,7 @@ class TestAtr:
         close = np.array([7.0, 17.0, 27.0])
 
         with pytest.raises(ValueError, match="differing lengths|same length|Inconsistent slice lengths"):
-            my_project.atr(high, low, close, 14)
+            vector_ta.atr(high, low, close, 14)
 
     def test_atr_invalid_length(self, test_data):
         """Test ATR with invalid length parameters."""
@@ -84,7 +84,7 @@ class TestAtr:
 
 
         with pytest.raises(ValueError, match="Invalid length"):
-            my_project.atr(high, low, close, 0)
+            vector_ta.atr(high, low, close, 0)
 
     def test_atr_length_exceeds_data(self, test_data):
         """Test ATR when length exceeds data length."""
@@ -93,7 +93,7 @@ class TestAtr:
         close = np.array([7.0, 17.0, 27.0])
 
         with pytest.raises(ValueError, match="Not enough data|too short"):
-            my_project.atr(high, low, close, 10)
+            vector_ta.atr(high, low, close, 10)
 
     def test_atr_with_nan_values(self, test_data):
         """Test ATR with NaN values in input."""
@@ -106,7 +106,7 @@ class TestAtr:
         low[5:10] = np.nan
         close[5:10] = np.nan
 
-        result = my_project.atr(high, low, close, 14)
+        result = vector_ta.atr(high, low, close, 14)
 
         assert isinstance(result, np.ndarray)
         assert result.shape == close.shape
@@ -120,10 +120,10 @@ class TestAtr:
         close = test_data['close']
 
 
-        result_scalar = my_project.atr(high, low, close, 14, kernel="scalar")
+        result_scalar = vector_ta.atr(high, low, close, 14, kernel="scalar")
 
 
-        result_auto = my_project.atr(high, low, close, 14)
+        result_auto = vector_ta.atr(high, low, close, 14)
 
 
         assert_close(result_scalar, result_auto, rtol=1e-10)
@@ -135,10 +135,10 @@ class TestAtr:
         close = test_data['close']
 
 
-        batch_result = my_project.atr(high, low, close, 14)
+        batch_result = vector_ta.atr(high, low, close, 14)
 
 
-        stream = my_project.AtrStream(14)
+        stream = vector_ta.AtrStream(14)
         stream_results = []
 
         for h, l, c in zip(high, low, close):
@@ -158,11 +158,11 @@ class TestAtr:
         close = test_data['close']
 
 
-        first_result = my_project.atr(high, low, close, 14)
+        first_result = vector_ta.atr(high, low, close, 14)
 
 
 
-        second_result = my_project.atr(first_result, first_result, first_result, 5)
+        second_result = vector_ta.atr(first_result, first_result, first_result, 5)
 
         assert isinstance(second_result, np.ndarray)
         assert second_result.shape == first_result.shape
@@ -175,7 +175,7 @@ class TestAtr:
         low = np.full(length, constant_price)
         close = np.full(length, constant_price)
 
-        result = my_project.atr(high, low, close, 14)
+        result = vector_ta.atr(high, low, close, 14)
 
 
         warmup = 14 - 1
@@ -193,7 +193,7 @@ class TestAtr:
         low = base_prices - ranges
         close = base_prices
 
-        result = my_project.atr(high, low, close, 14)
+        result = vector_ta.atr(high, low, close, 14)
 
 
 
@@ -210,7 +210,7 @@ class TestAtr:
         close = test_data['close']
 
 
-        result = my_project.atr_batch(
+        result = vector_ta.atr_batch(
             high, low, close,
             (14, 14, 0)
         )
@@ -222,7 +222,7 @@ class TestAtr:
         assert values.shape == (1, len(close))
 
 
-        single_result = my_project.atr(high, low, close, 14)
+        single_result = vector_ta.atr(high, low, close, 14)
         assert_close(values[0], single_result, rtol=1e-10)
 
     def test_atr_batch_parameter_sweep(self, test_data):
@@ -231,7 +231,7 @@ class TestAtr:
         low = test_data['low'][:100]
         close = test_data['close'][:100]
 
-        result = my_project.atr_batch(
+        result = vector_ta.atr_batch(
             high, low, close,
             (10, 20, 5)
         )
@@ -252,19 +252,19 @@ class TestAtr:
 
 
         with pytest.raises(ValueError, match="Invalid length"):
-            my_project.atr(high[:50], low[:50], close[:50], 0)
+            vector_ta.atr(high[:50], low[:50], close[:50], 0)
 
 
         with pytest.raises(ValueError, match="differing lengths|same length|Inconsistent slice lengths"):
-            my_project.atr(high[:50], low[:49], close[:50], 14)
+            vector_ta.atr(high[:50], low[:49], close[:50], 14)
 
 
         with pytest.raises(ValueError, match="No candles|no data"):
-            my_project.atr(np.array([]), np.array([]), np.array([]), 14)
+            vector_ta.atr(np.array([]), np.array([]), np.array([]), 14)
 
 
         with pytest.raises(ValueError, match="Not enough data|too short"):
-            my_project.atr(high[:10], low[:10], close[:10], 20)
+            vector_ta.atr(high[:10], low[:10], close[:10], 20)
 
     def test_atr_real_world_conditions(self, test_data):
         """Test ATR under real-world conditions."""
@@ -272,7 +272,7 @@ class TestAtr:
         low = test_data['low']
         close = test_data['close']
 
-        result = my_project.atr(high, low, close, 14)
+        result = vector_ta.atr(high, low, close, 14)
 
 
         warmup = 14 - 1
@@ -302,7 +302,7 @@ class TestAtr:
         low = np.array([90.0] * length)
         close = np.array([100.0] * length)
 
-        result = my_project.atr(high, low, close, length)
+        result = vector_ta.atr(high, low, close, length)
 
         assert len(result) == length
 

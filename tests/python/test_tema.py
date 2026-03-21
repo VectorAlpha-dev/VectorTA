@@ -3,7 +3,7 @@ Test TEMA (Triple Exponential Moving Average) indicator Python bindings
 """
 import numpy as np
 import pytest
-from my_project import tema, tema_batch, TemaStream
+from vector_ta import tema, tema_batch, TemaStream
 from rust_comparison import compare_with_rust
 
 

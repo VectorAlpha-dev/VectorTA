@@ -9,7 +9,7 @@ import sys
 
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-import my_project
+import vector_ta
 
 from test_utils import (
     load_test_data,
@@ -36,7 +36,7 @@ class TestBollingerBandsWidth:
     def test_partial_params(self):
         """Test BBW with partial parameters - mirrors check_bbw_partial_params."""
 
-        result = my_project.bollinger_bands_width(
+        result = vector_ta.bollinger_bands_width(
             self.close,
             period=22,
             devup=2.2,
@@ -52,7 +52,7 @@ class TestBollingerBandsWidth:
     def test_default_params(self):
         """Test BBW with default parameters - mirrors check_bbw_default."""
 
-        result = my_project.bollinger_bands_width(
+        result = vector_ta.bollinger_bands_width(
             self.close,
             period=20,
             devup=2.0,
@@ -69,7 +69,7 @@ class TestBollingerBandsWidth:
 
     def test_accuracy(self):
         """Test BBW accuracy with expected values."""
-        result = my_project.bollinger_bands_width(
+        result = vector_ta.bollinger_bands_width(
             self.close,
             period=self.expected.get('default_params', {}).get('period', 20),
             devup=self.expected.get('default_params', {}).get('devup', 2.0),
@@ -91,7 +91,7 @@ class TestBollingerBandsWidth:
     def test_zero_period(self):
         """Test BBW fails with zero period - mirrors check_bbw_zero_period."""
         with pytest.raises(ValueError, match="period"):
-            my_project.bollinger_bands_width(
+            vector_ta.bollinger_bands_width(
                 np.array([10.0, 20.0, 30.0]),
                 period=0,
                 devup=2.0,
@@ -103,7 +103,7 @@ class TestBollingerBandsWidth:
         small_data = np.array([10.0, 20.0, 30.0])
 
         with pytest.raises(ValueError, match="period"):
-            my_project.bollinger_bands_width(
+            vector_ta.bollinger_bands_width(
                 small_data,
                 period=10,
                 devup=2.0,
@@ -115,7 +115,7 @@ class TestBollingerBandsWidth:
         single_point = np.array([42.0])
 
         with pytest.raises(ValueError):
-            my_project.bollinger_bands_width(
+            vector_ta.bollinger_bands_width(
                 single_point,
                 period=20,
                 devup=2.0,
@@ -127,7 +127,7 @@ class TestBollingerBandsWidth:
         empty = np.array([])
 
         with pytest.raises(ValueError, match="Empty"):
-            my_project.bollinger_bands_width(
+            vector_ta.bollinger_bands_width(
                 empty,
                 period=20,
                 devup=2.0,
@@ -139,7 +139,7 @@ class TestBollingerBandsWidth:
         all_nan = np.full(100, np.nan)
 
         with pytest.raises(ValueError, match="All values are NaN"):
-            my_project.bollinger_bands_width(
+            vector_ta.bollinger_bands_width(
                 all_nan,
                 period=20,
                 devup=2.0,
@@ -151,7 +151,7 @@ class TestBollingerBandsWidth:
         matypes = ["sma", "ema", "wma", "dema", "tema"]
 
         for matype in matypes:
-            result = my_project.bollinger_bands_width(
+            result = vector_ta.bollinger_bands_width(
                 self.close[:100],
                 period=14,
                 devup=2.0,
@@ -167,7 +167,7 @@ class TestBollingerBandsWidth:
         devtypes = [0, 1, 2]
 
         for devtype in devtypes:
-            result = my_project.bollinger_bands_width(
+            result = vector_ta.bollinger_bands_width(
                 self.close[:100],
                 period=14,
                 devup=2.0,
@@ -180,7 +180,7 @@ class TestBollingerBandsWidth:
 
     def test_nan_handling(self):
         """Test BBW handles NaN values correctly."""
-        result = my_project.bollinger_bands_width(
+        result = vector_ta.bollinger_bands_width(
             self.close,
             period=20,
             devup=2.0,
@@ -199,7 +199,7 @@ class TestBollingerBandsWidth:
     def test_streaming_api(self):
         """Test streaming BBW calculation."""
         period = 20
-        stream = my_project.BollingerBandsWidthStream(
+        stream = vector_ta.BollingerBandsWidthStream(
             period=period,
             devup=2.0,
             devdn=2.0,
@@ -225,7 +225,7 @@ class TestBollingerBandsWidth:
     def test_batch_single_params(self):
         """Test batch processing with single parameter set."""
 
-        result = my_project.bollinger_bands_width_batch(
+        result = vector_ta.bollinger_bands_width_batch(
             self.close,
             period_range=(20, 20, 0),
             devup_range=(2.0, 2.0, 0),
@@ -242,7 +242,7 @@ class TestBollingerBandsWidth:
         assert result['values'].shape[1] == len(self.close)
 
 
-        single_result = my_project.bollinger_bands_width(
+        single_result = vector_ta.bollinger_bands_width(
             self.close,
             period=20,
             devup=2.0,
@@ -259,7 +259,7 @@ class TestBollingerBandsWidth:
     def test_batch_multiple_params(self):
         """Test batch processing with multiple parameter combinations."""
 
-        result = my_project.bollinger_bands_width_batch(
+        result = vector_ta.bollinger_bands_width_batch(
             self.close[:100],
             period_range=(10, 30, 10),
             devup_range=(1.5, 2.5, 0.5),
@@ -286,7 +286,7 @@ class TestBollingerBandsWidth:
 
         for kernel in kernels:
             try:
-                result = my_project.bollinger_bands_width(
+                result = vector_ta.bollinger_bands_width(
                     self.close[:100],
                     period=20,
                     devup=2.0,
@@ -302,7 +302,7 @@ class TestBollingerBandsWidth:
     def test_edge_cases(self):
         """Test edge cases for BBW."""
 
-        result = my_project.bollinger_bands_width(
+        result = vector_ta.bollinger_bands_width(
             self.close[:10],
             period=2,
             devup=2.0,
@@ -312,7 +312,7 @@ class TestBollingerBandsWidth:
         assert not np.isnan(result[1])
 
 
-        result = my_project.bollinger_bands_width(
+        result = vector_ta.bollinger_bands_width(
             self.close[:50],
             period=10,
             devup=5.0,
@@ -321,7 +321,7 @@ class TestBollingerBandsWidth:
         assert len(result) == 50
 
 
-        result = my_project.bollinger_bands_width(
+        result = vector_ta.bollinger_bands_width(
             self.close[:50],
             period=10,
             devup=3.0,

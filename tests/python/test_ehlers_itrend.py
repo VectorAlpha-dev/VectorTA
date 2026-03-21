@@ -12,7 +12,7 @@ from test_utils import (
 from rust_comparison import compare_with_rust
 
 
-import my_project
+import vector_ta
 
 
 def assert_no_nan(arr, msg=""):
@@ -36,21 +36,21 @@ class TestEhlersITrend:
         """Test with default parameters - mirrors check_itrend_partial_params"""
 
 
-        result = my_project.ehlers_itrend(self.close, 12, 50)
+        result = vector_ta.ehlers_itrend(self.close, 12, 50)
         assert len(result) == len(self.close)
 
 
-        result = my_project.ehlers_itrend(self.close, 15, 50)
+        result = vector_ta.ehlers_itrend(self.close, 15, 50)
         assert len(result) == len(self.close)
 
-        result = my_project.ehlers_itrend(self.close, 12, 40)
+        result = vector_ta.ehlers_itrend(self.close, 12, 40)
         assert len(result) == len(self.close)
 
     def test_ehlers_itrend_accuracy(self):
         """Test accuracy matches expected values from Rust tests - mirrors check_itrend_accuracy"""
         expected = EXPECTED_OUTPUTS['ehlers_itrend']
 
-        result = my_project.ehlers_itrend(
+        result = vector_ta.ehlers_itrend(
             self.close,
             expected['default_params']['warmup_bars'],
             expected['default_params']['max_dc_period']
@@ -73,29 +73,29 @@ class TestEhlersITrend:
     def test_ehlers_itrend_error_empty_input(self):
         """Test error with empty input - mirrors check_itrend_no_data"""
         with pytest.raises(ValueError, match="Input data is empty"):
-            my_project.ehlers_itrend(np.array([]), 12, 50)
+            vector_ta.ehlers_itrend(np.array([]), 12, 50)
 
     def test_ehlers_itrend_error_all_nan(self):
         """Test error with all NaN values - mirrors check_itrend_all_nan_data"""
         all_nan = np.full(100, np.nan)
         with pytest.raises(ValueError, match="All values are NaN"):
-            my_project.ehlers_itrend(all_nan, 12, 50)
+            vector_ta.ehlers_itrend(all_nan, 12, 50)
 
     def test_ehlers_itrend_error_insufficient_data(self):
         """Test error with insufficient data for warmup - mirrors check_itrend_small_data_for_warmup"""
         small_data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         with pytest.raises(ValueError, match="Not enough data for warmup"):
-            my_project.ehlers_itrend(small_data, 10, 50)
+            vector_ta.ehlers_itrend(small_data, 10, 50)
 
     def test_ehlers_itrend_error_zero_warmup(self):
         """Test error with zero warmup bars - mirrors check_itrend_zero_warmup"""
         with pytest.raises(ValueError, match="Invalid warmup_bars"):
-            my_project.ehlers_itrend(self.close, 0, 50)
+            vector_ta.ehlers_itrend(self.close, 0, 50)
 
     def test_ehlers_itrend_error_invalid_max_dc(self):
         """Test error with invalid max_dc_period - mirrors check_itrend_invalid_max_dc"""
         with pytest.raises(ValueError, match="Invalid max_dc_period"):
-            my_project.ehlers_itrend(self.close, 12, 0)
+            vector_ta.ehlers_itrend(self.close, 12, 0)
 
     def test_ehlers_itrend_reinput(self):
         """Test applying indicator twice - mirrors check_itrend_reinput"""
@@ -103,7 +103,7 @@ class TestEhlersITrend:
         params = expected['default_params']
 
 
-        first_result = my_project.ehlers_itrend(
+        first_result = vector_ta.ehlers_itrend(
             self.close,
             params['warmup_bars'],
             params['max_dc_period']
@@ -111,7 +111,7 @@ class TestEhlersITrend:
         assert len(first_result) == len(self.close)
 
 
-        second_result = my_project.ehlers_itrend(
+        second_result = vector_ta.ehlers_itrend(
             first_result,
             params['warmup_bars'],
             params['max_dc_period']
@@ -130,7 +130,7 @@ class TestEhlersITrend:
         params = expected['default_params']
         warmup_bars = params['warmup_bars']
 
-        result = my_project.ehlers_itrend(
+        result = vector_ta.ehlers_itrend(
             self.close,
             params['warmup_bars'],
             params['max_dc_period']
@@ -154,10 +154,10 @@ class TestEhlersITrend:
     def test_ehlers_itrend_streaming(self):
         """Test streaming interface - mirrors check_itrend_streaming"""
 
-        batch_result = my_project.ehlers_itrend(self.close, 12, 50)
+        batch_result = vector_ta.ehlers_itrend(self.close, 12, 50)
 
 
-        stream = my_project.EhlersITrendStream(12, 50)
+        stream = vector_ta.EhlersITrendStream(12, 50)
         stream_result = []
 
         for price in self.close:
@@ -182,7 +182,7 @@ class TestEhlersITrend:
         params = expected['default_params']
 
 
-        batch_result = my_project.ehlers_itrend_batch(
+        batch_result = vector_ta.ehlers_itrend_batch(
             self.close[:100],
             (params['warmup_bars'], params['warmup_bars'], 0),
             (params['max_dc_period'], params['max_dc_period'], 0)
@@ -198,7 +198,7 @@ class TestEhlersITrend:
         assert batch_result['values'].shape == (1, 100)
 
 
-        single_result = my_project.ehlers_itrend(self.close[:100], 12, 50)
+        single_result = vector_ta.ehlers_itrend(self.close[:100], 12, 50)
 
 
 
@@ -215,7 +215,7 @@ class TestEhlersITrend:
     def test_ehlers_itrend_batch_multiple_params(self):
         """Test batch calculation with multiple parameter combinations"""
         test_data = self.close[:100]
-        batch_result = my_project.ehlers_itrend_batch(
+        batch_result = vector_ta.ehlers_itrend_batch(
             test_data,
             (10, 14, 2),
             (40, 50, 10)
@@ -237,7 +237,7 @@ class TestEhlersITrend:
         ]
 
         for idx, (warmup, max_dc) in enumerate(expected_params):
-            single_result = my_project.ehlers_itrend(test_data, warmup, max_dc)
+            single_result = vector_ta.ehlers_itrend(test_data, warmup, max_dc)
             batch_row = batch_result['values'][idx]
 
 
@@ -254,7 +254,7 @@ class TestEhlersITrend:
         """Test batch warmup period handling"""
         data = self.close[:30]
 
-        batch_result = my_project.ehlers_itrend_batch(
+        batch_result = vector_ta.ehlers_itrend_batch(
             data,
             (10, 15, 5),
             (50, 50, 0)
@@ -284,7 +284,7 @@ class TestEhlersITrend:
         """Test edge cases for the indicator"""
 
         min_data = np.array([1.0] * 13)
-        result = my_project.ehlers_itrend(min_data, 12, 50)
+        result = vector_ta.ehlers_itrend(min_data, 12, 50)
         assert len(result) == 13
 
 
@@ -299,7 +299,7 @@ class TestEhlersITrend:
 
         for warmup, max_dc in test_cases:
             if len(self.close) > warmup:
-                result = my_project.ehlers_itrend(self.close[:100], warmup, max_dc)
+                result = vector_ta.ehlers_itrend(self.close[:100], warmup, max_dc)
                 assert len(result) == 100, f"Failed for warmup={warmup}, max_dc={max_dc}"
 
                 assert_all_nan(
@@ -314,7 +314,7 @@ class TestEhlersITrend:
         data_with_nan[50:55] = np.nan
 
 
-        result = my_project.ehlers_itrend(data_with_nan, 12, 50)
+        result = vector_ta.ehlers_itrend(data_with_nan, 12, 50)
         assert len(result) == 100
 
 
@@ -332,7 +332,7 @@ class TestEhlersITrend:
 
 
         start = time.time()
-        batch_result = my_project.ehlers_itrend_batch(
+        batch_result = vector_ta.ehlers_itrend_batch(
             test_data,
             (10, 20, 2),
             (40, 60, 10)
@@ -345,7 +345,7 @@ class TestEhlersITrend:
         for warmup in range(10, 21, 2):
             for max_dc in range(40, 61, 10):
                 single_results.append(
-                    my_project.ehlers_itrend(test_data, warmup, max_dc)
+                    vector_ta.ehlers_itrend(test_data, warmup, max_dc)
                 )
         single_time = time.time() - start
 

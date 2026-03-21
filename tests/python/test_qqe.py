@@ -13,7 +13,7 @@ parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, parent_dir)
 
 try:
-    import my_project
+    import vector_ta
 except ImportError:
     pytest.skip("Python module not built", allow_module_level=True)
 
@@ -32,7 +32,7 @@ class TestQqe:
         expected = EXPECTED_OUTPUTS['qqe']
 
 
-        fast, slow = my_project.qqe(
+        fast, slow = vector_ta.qqe(
             close,
             rsi_period=expected['default_params']['rsi_period'],
             smoothing_factor=expected['default_params']['smoothing_factor'],
@@ -65,7 +65,7 @@ class TestQqe:
         close = test_data['close']
 
 
-        fast, slow = my_project.qqe(close, rsi_period=14, smoothing_factor=5, fast_factor=4.236)
+        fast, slow = vector_ta.qqe(close, rsi_period=14, smoothing_factor=5, fast_factor=4.236)
 
         assert len(fast) == len(close)
         assert len(slow) == len(close)
@@ -75,7 +75,7 @@ class TestQqe:
         close = test_data['close']
 
 
-        fast, slow = my_project.qqe(close, 14, 5, 4.236)
+        fast, slow = vector_ta.qqe(close, 14, 5, 4.236)
         assert len(fast) == len(close)
         assert len(slow) == len(close)
 
@@ -84,21 +84,21 @@ class TestQqe:
         single_point = np.array([42.0])
 
         with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
-            my_project.qqe(single_point, rsi_period=14, smoothing_factor=5, fast_factor=4.236)
+            vector_ta.qqe(single_point, rsi_period=14, smoothing_factor=5, fast_factor=4.236)
 
     def test_qqe_zero_period(self):
         """Test QQE fails with zero period - mirrors check_qqe_zero_period"""
         input_data = np.array([10.0, 20.0, 30.0])
 
         with pytest.raises(ValueError, match="Invalid period"):
-            my_project.qqe(input_data, rsi_period=0)
+            vector_ta.qqe(input_data, rsi_period=0)
 
     def test_qqe_empty_input(self):
         """Test QQE fails with empty input - mirrors check_qqe_empty_input"""
         empty = np.array([])
 
         with pytest.raises(ValueError, match="[Ee]mpty"):
-            my_project.qqe(empty)
+            vector_ta.qqe(empty)
 
     def test_qqe_all_nan(self):
         """Test QQE fails with all NaN values - mirrors check_qqe_all_nan"""
@@ -106,14 +106,14 @@ class TestQqe:
         all_nan = np.full(100, np.nan)
 
         with pytest.raises(ValueError, match="All values are NaN"):
-            my_project.qqe(all_nan, rsi_period=14, smoothing_factor=5, fast_factor=4.236)
+            vector_ta.qqe(all_nan, rsi_period=14, smoothing_factor=5, fast_factor=4.236)
 
     def test_qqe_period_exceeds_length(self):
         """Test QQE fails when period exceeds data length - mirrors check_qqe_period_exceeds_length"""
         small_data = np.array([10.0, 20.0, 30.0])
 
         with pytest.raises(ValueError, match="Invalid period|Not enough"):
-            my_project.qqe(small_data, rsi_period=10)
+            vector_ta.qqe(small_data, rsi_period=10)
 
     def test_qqe_invalid_smoothing_factor(self):
         """Test QQE fails with invalid smoothing factor"""
@@ -121,7 +121,7 @@ class TestQqe:
 
 
         with pytest.raises(ValueError, match="Invalid period"):
-            my_project.qqe(data, rsi_period=14, smoothing_factor=0, fast_factor=4.236)
+            vector_ta.qqe(data, rsi_period=14, smoothing_factor=0, fast_factor=4.236)
 
     def test_qqe_invalid_fast_factor(self):
         """Test QQE with extreme fast factor values"""
@@ -130,7 +130,7 @@ class TestQqe:
 
 
         try:
-            fast, slow = my_project.qqe(data, rsi_period=14, smoothing_factor=5, fast_factor=0.001)
+            fast, slow = vector_ta.qqe(data, rsi_period=14, smoothing_factor=5, fast_factor=0.001)
             assert len(fast) == len(data)
             assert len(slow) == len(data)
         except ValueError:
@@ -138,7 +138,7 @@ class TestQqe:
 
 
         try:
-            fast, slow = my_project.qqe(data, rsi_period=14, smoothing_factor=5, fast_factor=100.0)
+            fast, slow = vector_ta.qqe(data, rsi_period=14, smoothing_factor=5, fast_factor=100.0)
             assert len(fast) == len(data)
             assert len(slow) == len(data)
         except ValueError:
@@ -150,7 +150,7 @@ class TestQqe:
         expected = EXPECTED_OUTPUTS['qqe']
 
 
-        fast1, slow1 = my_project.qqe(
+        fast1, slow1 = vector_ta.qqe(
             close,
             rsi_period=14,
             smoothing_factor=5,
@@ -160,7 +160,7 @@ class TestQqe:
         assert len(slow1) == len(close)
 
 
-        fast2, slow2 = my_project.qqe(
+        fast2, slow2 = vector_ta.qqe(
             fast1,
             rsi_period=14,
             smoothing_factor=5,
@@ -187,7 +187,7 @@ class TestQqe:
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['qqe']
 
-        fast, slow = my_project.qqe(close, rsi_period=14, smoothing_factor=5, fast_factor=4.236)
+        fast, slow = vector_ta.qqe(close, rsi_period=14, smoothing_factor=5, fast_factor=4.236)
 
         assert len(fast) == len(close)
         assert len(slow) == len(close)
@@ -219,7 +219,7 @@ class TestQqe:
         fast_factor = 4.236
 
 
-        batch_fast, batch_slow = my_project.qqe(
+        batch_fast, batch_slow = vector_ta.qqe(
             close,
             rsi_period=rsi_period,
             smoothing_factor=smoothing_factor,
@@ -227,7 +227,7 @@ class TestQqe:
         )
 
 
-        stream = my_project.QqeStream(
+        stream = vector_ta.QqeStream(
             rsi_period=rsi_period,
             smoothing_factor=smoothing_factor,
             fast_factor=fast_factor
@@ -283,7 +283,7 @@ class TestQqe:
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['qqe']
 
-        result = my_project.qqe_batch(
+        result = vector_ta.qqe_batch(
             close,
             rsi_period_range=(14, 14, 0),
             smoothing_factor_range=(5, 5, 0),
@@ -328,7 +328,7 @@ class TestQqe:
         """Test QQE batch processing with multiple parameters"""
         close = test_data['close'][:100]
 
-        result = my_project.qqe_batch(
+        result = vector_ta.qqe_batch(
             close,
             rsi_period_range=(10, 14, 2),
             smoothing_factor_range=(3, 5, 2),
@@ -356,7 +356,7 @@ class TestQqe:
         close = test_data['close']
 
 
-        fast, slow = my_project.qqe(
+        fast, slow = vector_ta.qqe(
             close,
             rsi_period=10,
             smoothing_factor=3,
@@ -367,7 +367,7 @@ class TestQqe:
         assert len(slow) == len(close)
 
 
-        fast_default, slow_default = my_project.qqe(
+        fast_default, slow_default = vector_ta.qqe(
             close,
             rsi_period=14,
             smoothing_factor=5,
@@ -389,7 +389,7 @@ class TestQqe:
             close[:100]
         ])
 
-        fast, slow = my_project.qqe(data_with_nan, rsi_period=14, smoothing_factor=5, fast_factor=4.236)
+        fast, slow = vector_ta.qqe(data_with_nan, rsi_period=14, smoothing_factor=5, fast_factor=4.236)
 
         assert len(fast) == len(data_with_nan)
         assert len(slow) == len(data_with_nan)
@@ -412,7 +412,7 @@ class TestQqe:
         expected = EXPECTED_OUTPUTS['qqe']
 
 
-        result = my_project.qqe_batch(
+        result = vector_ta.qqe_batch(
             close,
             rsi_period_range=(14, 14, 0),
             smoothing_factor_range=(5, 5, 0),
@@ -431,7 +431,7 @@ class TestQqe:
         assert result['fast'].shape[1] == len(close)
 
 
-        fast_single, slow_single = my_project.qqe(close, 14, 5, 4.236)
+        fast_single, slow_single = vector_ta.qqe(close, 14, 5, 4.236)
 
 
         fs = result['fast'][0]
@@ -457,7 +457,7 @@ class TestQqe:
         close = test_data['close'][:100]
 
 
-        result = my_project.qqe_batch(
+        result = vector_ta.qqe_batch(
             close,
             rsi_period_range=(10, 14, 2),
             smoothing_factor_range=(3, 5, 1),
@@ -483,7 +483,7 @@ class TestQqe:
             smooth_f = result['smoothing_factors'][i]
             fast_f = result['fast_factors'][i]
 
-            fast_single, slow_single = my_project.qqe(close, rsi_p, smooth_f, fast_f)
+            fast_single, slow_single = vector_ta.qqe(close, rsi_p, smooth_f, fast_f)
 
             fs = result['fast'][i]
             start_single = int(np.argmax(~np.isnan(fast_single))) if np.any(~np.isnan(fast_single)) else 0
@@ -508,17 +508,17 @@ class TestQqe:
         close = test_data['close'][:100]
 
 
-        fast1, slow1 = my_project.qqe(close, rsi_period=14, smoothing_factor=1, fast_factor=4.236)
+        fast1, slow1 = vector_ta.qqe(close, rsi_period=14, smoothing_factor=1, fast_factor=4.236)
         assert len(fast1) == len(close)
         assert len(slow1) == len(close)
 
 
-        fast2, slow2 = my_project.qqe(close, rsi_period=14, smoothing_factor=5, fast_factor=10.0)
+        fast2, slow2 = vector_ta.qqe(close, rsi_period=14, smoothing_factor=5, fast_factor=10.0)
         assert len(fast2) == len(close)
         assert len(slow2) == len(close)
 
 
-        fast3, slow3 = my_project.qqe(close, rsi_period=14, smoothing_factor=5, fast_factor=0.1)
+        fast3, slow3 = vector_ta.qqe(close, rsi_period=14, smoothing_factor=5, fast_factor=0.1)
         assert len(fast3) == len(close)
         assert len(slow3) == len(close)
 
@@ -526,7 +526,7 @@ class TestQqe:
         """Test QQE fast/slow values stay within RSI bounds [0, 100]"""
         close = test_data['close']
 
-        fast, slow = my_project.qqe(close, rsi_period=14, smoothing_factor=5, fast_factor=4.236)
+        fast, slow = vector_ta.qqe(close, rsi_period=14, smoothing_factor=5, fast_factor=4.236)
 
 
         valid_fast = fast[~np.isnan(fast)]
@@ -542,7 +542,7 @@ class TestQqe:
 
         constant_data = np.array([50.0] * 100)
 
-        fast, slow = my_project.qqe(constant_data, rsi_period=14, smoothing_factor=5, fast_factor=4.236)
+        fast, slow = vector_ta.qqe(constant_data, rsi_period=14, smoothing_factor=5, fast_factor=4.236)
 
 
         warmup = 17

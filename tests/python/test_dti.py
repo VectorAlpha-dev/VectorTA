@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-import my_project as ta
+import vector_ta as ta
 from test_utils import (
     load_test_data,
     assert_close,

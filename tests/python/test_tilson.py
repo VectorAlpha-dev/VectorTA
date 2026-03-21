@@ -3,7 +3,7 @@ Test Tilson T3 Moving Average indicator Python bindings
 """
 import numpy as np
 import pytest
-from my_project import tilson, tilson_batch, TilsonStream
+from vector_ta import tilson, tilson_batch, TilsonStream
 from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
 from rust_comparison import compare_with_rust
 

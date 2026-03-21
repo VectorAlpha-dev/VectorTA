@@ -13983,7 +13983,7 @@ $L__BB20_33:
 	ret;
 
 }
-	.file	1 "C:\\Rust Projects\\my_project\\kernels\\cuda\\moving_averages\\alma_kernel.cu"
+	.file	1 "kernels\\cuda\\moving_averages\\alma_kernel.cu"
 	.file	2 "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.0\\include\\sm_30_intrinsics.hpp"
 	.section	.debug_str
 	{

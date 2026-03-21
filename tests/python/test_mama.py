@@ -8,7 +8,7 @@ from test_utils import load_test_data, assert_close
 
 
 try:
-    from my_project import (
+    from vector_ta import (
         mama,
         mama_batch,
         MamaStream

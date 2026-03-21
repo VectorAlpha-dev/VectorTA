@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from my_project import dvdiqqe
+from vector_ta import dvdiqqe
 from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
 
 

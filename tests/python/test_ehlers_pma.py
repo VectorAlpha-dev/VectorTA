@@ -4,7 +4,7 @@ These tests mirror the Rust unit tests to ensure Python bindings work correctly.
 """
 import pytest
 import numpy as np
-import my_project as rb
+import vector_ta as rb
 from test_utils import load_test_data
 import os
 

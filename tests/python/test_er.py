@@ -6,13 +6,13 @@ import sys
 
 
 try:
-    import my_project as ta
+    import vector_ta as ta
 except ImportError:
 
     try:
-        import my_project as ta
+        import vector_ta as ta
     except ImportError:
-        pytest.skip("my_project module not available. Run 'maturin develop --features python' first.", allow_module_level=True)
+        pytest.skip("vector_ta module not available. Run 'maturin develop --features python' first.", allow_module_level=True)
 
 from test_utils import load_test_data
 

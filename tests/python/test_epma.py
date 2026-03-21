@@ -7,7 +7,7 @@ import pytest
 import numpy as np
 
 try:
-    import my_project as ti
+    import vector_ta as ti
 except ImportError:
     pytest.skip("Python module not built. Run 'maturin develop --features python' first", allow_module_level=True)
 

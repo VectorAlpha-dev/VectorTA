@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from my_project import sgf, sgf_batch, SgfStream
+from vector_ta import sgf, sgf_batch, SgfStream
 from test_utils import assert_close
 
 

@@ -1,16 +1,16 @@
 #![cfg(feature = "cuda")]
 
-extern crate vector_ta as my_project;
+extern crate vector_ta;
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use cust::context::CurrentContext;
-use my_project::cuda::{CudaDeviceSliceF32Ref, CudaRuntime};
-use my_project::indicators::dispatch::{
+use vector_ta::cuda::{CudaDeviceSliceF32Ref, CudaRuntime};
+use vector_ta::indicators::dispatch::{
     compute_cuda, compute_cuda_device, CudaOutputTarget, IndicatorCudaDataRef,
     IndicatorCudaDeviceDataRef, IndicatorCudaDeviceRequest, IndicatorCudaRequest,
     IndicatorCudaSeries, ParamKV, ParamValue,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 use std::time::Duration;
 
 fn env_usize(name: &str, default_v: usize) -> usize {
@@ -26,7 +26,7 @@ fn gen_prices_f32(len: usize) -> Vec<f32> {
         .collect()
 }
 
-fn black_box_cuda_output(out: my_project::indicators::dispatch::IndicatorCudaOutput) {
+fn black_box_cuda_output(out: vector_ta::indicators::dispatch::IndicatorCudaOutput) {
     match out.series {
         IndicatorCudaSeries::HostF32(values) => {
             black_box((out.rows, out.cols, values.len()));
@@ -42,7 +42,7 @@ fn synchronize_cuda() {
 }
 
 fn device_matrix_row_view(
-    matrix: &my_project::indicators::dispatch::DeviceMatrixF32,
+    matrix: &vector_ta::indicators::dispatch::DeviceMatrixF32,
     row: usize,
 ) -> CudaDeviceSliceF32Ref {
     assert!(row < matrix.rows, "row out of range");
@@ -61,7 +61,7 @@ fn device_matrix_row_view(
 }
 
 fn bench_cuda_dispatch_vram_resident(c: &mut Criterion) {
-    if !my_project::cuda::cuda_available() {
+    if !vector_ta::cuda::cuda_available() {
         let mut group = c.benchmark_group("cuda_dispatch_vram_resident");
         group.bench_function("skip_no_cuda", |b| b.iter(|| 0usize));
         group.finish();

@@ -8,7 +8,7 @@ the same results as the Rust implementation.
 import pytest
 import numpy as np
 from typing import Dict, List, Tuple
-import my_project as ta
+import vector_ta as ta
 
 from test_utils import (
     load_test_data,

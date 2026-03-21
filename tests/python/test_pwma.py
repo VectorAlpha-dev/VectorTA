@@ -9,7 +9,7 @@ from rust_comparison import compare_with_rust
 
 
 try:
-    from my_project import (
+    from vector_ta import (
         pwma,
         pwma_batch,
         PwmaStream

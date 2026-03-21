@@ -7,7 +7,7 @@ import numpy as np
 from pathlib import Path
 
 try:
-    import my_project as ta_indicators
+    import vector_ta as ta_indicators
 except ImportError:
     ta_indicators = None
     pytest.skip("Rust module not available", allow_module_level=True)

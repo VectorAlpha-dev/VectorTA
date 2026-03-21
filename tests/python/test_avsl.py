@@ -11,7 +11,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 try:
-    import my_project
+    import vector_ta
 except ImportError:
     pytest.skip("Python module not built", allow_module_level=True)
 
@@ -68,7 +68,7 @@ class TestAvsl:
         ]
 
 
-        result = my_project.avsl(
+        result = vector_ta.avsl(
             close,
             low,
             volume,
@@ -94,7 +94,7 @@ class TestAvsl:
         empty = np.array([])
 
         with pytest.raises(ValueError, match="Input data slice is empty"):
-            my_project.avsl(empty, empty, empty)
+            vector_ta.avsl(empty, empty, empty)
 
     def test_avsl_mismatched_lengths(self):
         """Test AVSL fails with mismatched input lengths"""
@@ -103,7 +103,7 @@ class TestAvsl:
         volume = np.array([100.0, 200.0, 300.0])
 
         with pytest.raises(ValueError, match="Data length mismatch"):
-            my_project.avsl(close, low, volume)
+            vector_ta.avsl(close, low, volume)
 
     def test_avsl_invalid_period(self):
         """Test AVSL fails with invalid period"""
@@ -111,17 +111,17 @@ class TestAvsl:
         volume = np.array([100.0, 200.0, 300.0])
 
         with pytest.raises(ValueError, match="Invalid period"):
-            my_project.avsl(data, data, volume, fast_period=0)
+            vector_ta.avsl(data, data, volume, fast_period=0)
 
         with pytest.raises(ValueError, match="Invalid period"):
-            my_project.avsl(data, data, volume, slow_period=100)
+            vector_ta.avsl(data, data, volume, slow_period=100)
 
     def test_avsl_all_nan(self):
         """Test AVSL fails with all NaN values"""
         nan_data = np.array([np.nan, np.nan, np.nan])
 
         with pytest.raises(ValueError, match="All values are NaN"):
-            my_project.avsl(nan_data, nan_data, nan_data)
+            vector_ta.avsl(nan_data, nan_data, nan_data)
 
     def test_avsl_different_parameters(self, test_data):
         """Test AVSL with different parameter combinations"""
@@ -130,11 +130,11 @@ class TestAvsl:
         volume = test_data['volume']
 
 
-        result1 = my_project.avsl(close, low, volume, fast_period=10, slow_period=20)
+        result1 = vector_ta.avsl(close, low, volume, fast_period=10, slow_period=20)
         assert len(result1) == len(close)
 
 
-        result2 = my_project.avsl(close, low, volume, multiplier=1.5)
+        result2 = vector_ta.avsl(close, low, volume, multiplier=1.5)
         assert len(result2) == len(close)
 
 
@@ -147,19 +147,19 @@ class TestAvsl:
 
 
         with pytest.raises(ValueError, match="Invalid multiplier"):
-            my_project.avsl(data, data, volume, multiplier=-1.0)
+            vector_ta.avsl(data, data, volume, multiplier=-1.0)
 
 
         with pytest.raises(ValueError, match="Invalid multiplier"):
-            my_project.avsl(data, data, volume, multiplier=0.0)
+            vector_ta.avsl(data, data, volume, multiplier=0.0)
 
 
         with pytest.raises(ValueError, match="Invalid multiplier"):
-            my_project.avsl(data, data, volume, multiplier=float('nan'))
+            vector_ta.avsl(data, data, volume, multiplier=float('nan'))
 
 
         with pytest.raises(ValueError, match="Invalid multiplier"):
-            my_project.avsl(data, data, volume, multiplier=float('inf'))
+            vector_ta.avsl(data, data, volume, multiplier=float('inf'))
 
     def test_avsl_warmup_period(self, test_data):
         """Test AVSL warmup period NaN handling"""
@@ -170,7 +170,7 @@ class TestAvsl:
         fast_period = 12
         slow_period = 26
 
-        result = my_project.avsl(
+        result = vector_ta.avsl(
             close, low, volume,
             fast_period=fast_period,
             slow_period=slow_period,
@@ -209,7 +209,7 @@ class TestAvsl:
         multiplier = 2.0
 
 
-        batch_result = my_project.avsl(
+        batch_result = vector_ta.avsl(
             close, low, volume,
             fast_period=fast_period,
             slow_period=slow_period,
@@ -217,7 +217,7 @@ class TestAvsl:
         )
 
 
-        stream = my_project.AvslStream(
+        stream = vector_ta.AvslStream(
             fast_period=fast_period,
             slow_period=slow_period,
             multiplier=multiplier
@@ -252,7 +252,7 @@ class TestAvsl:
         volume = test_data['volume']
 
 
-        result = my_project.avsl_batch(
+        result = vector_ta.avsl_batch(
             close, low, volume,
             fast_range=(12, 12, 0),
             slow_range=(26, 26, 0),
@@ -296,7 +296,7 @@ class TestAvsl:
         low = test_data['low'][:100]
         volume = test_data['volume'][:100]
 
-        result = my_project.avsl_batch(
+        result = vector_ta.avsl_batch(
             close, low, volume,
             fast_range=(10, 15, 5),
             slow_range=(20, 30, 10),
@@ -334,7 +334,7 @@ class TestAvsl:
 
 
         try:
-            result = my_project.avsl(close, low, volume)
+            result = vector_ta.avsl(close, low, volume)
             assert len(result) == len(close)
 
 
@@ -350,10 +350,10 @@ class TestAvsl:
 
 
         with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
-            my_project.avsl(small_data, small_data, small_volume)
+            vector_ta.avsl(small_data, small_data, small_volume)
 
 
-        result = my_project.avsl(
+        result = vector_ta.avsl(
             small_data, small_data, small_volume,
             fast_period=2, slow_period=3
         )

@@ -1,11 +1,11 @@
 #![cfg(feature = "cuda")]
 
-extern crate vector_ta as my_project;
+extern crate vector_ta;
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use cust::memory::DeviceBuffer;
-use my_project::cuda::pattern_recognition_wrapper::CudaPatternRecognition;
-use my_project::indicators::pattern_recognition::list_patterns;
+use vector_ta::cuda::pattern_recognition_wrapper::CudaPatternRecognition;
+use vector_ta::indicators::pattern_recognition::list_patterns;
 use std::time::Duration;
 
 fn env_usize(name: &str, default_v: usize) -> usize {
@@ -55,7 +55,7 @@ fn native_row_map() -> Vec<(&'static str, usize)> {
 fn bench_pattern_recognition_cuda(c: &mut Criterion) {
     let mut group = c.benchmark_group("pattern_recognition_cuda");
 
-    if !my_project::cuda::cuda_available() {
+    if !vector_ta::cuda::cuda_available() {
         group.bench_function("skip_no_cuda", |b| b.iter(|| 0usize));
         group.finish();
         return;

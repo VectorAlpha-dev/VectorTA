@@ -1,7 +1,7 @@
 import numpy as np
 import csv
 import pytest
-import my_project
+import vector_ta
 
 def load_candles_csv(filepath):
     """Load candles from CSV file matching Rust's data format."""
@@ -40,7 +40,7 @@ def test_fwma_with_rust_candle_data():
 
 
     period = 5
-    result = my_project.fwma(close_prices, period)
+    result = vector_ta.fwma(close_prices, period)
 
 
     last_five = result[-5:]
@@ -97,10 +97,10 @@ def test_fwma_batch_with_candle_data():
 
     period_range = (5, 10, 1)
 
-    result = my_project.fwma_batch(close_prices, period_range)
+    result = vector_ta.fwma_batch(close_prices, period_range)
 
 
-    individual_result = my_project.fwma(close_prices, 5)
+    individual_result = vector_ta.fwma(close_prices, 5)
     batch_period_5 = result['values'][0]
 
     last_five_batch = batch_period_5[-5:]

@@ -3,7 +3,7 @@
 
 import unittest
 import numpy as np
-import my_project as ta_indicators
+import vector_ta as ta_indicators
 from test_utils import (
     load_test_data,
     assert_close,

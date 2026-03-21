@@ -4,7 +4,7 @@ Tests for the GatorOsc indicator Python bindings.
 
 import pytest
 import numpy as np
-import my_project as ta
+import vector_ta as ta
 
 def test_gatorosc_basic():
     """Test basic GatorOsc calculation."""
