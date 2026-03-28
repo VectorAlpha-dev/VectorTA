@@ -592,7 +592,7 @@ pub struct ZscoreStream {
     kind: MaKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 enum MaKind {
     Sma,
     Ema,
@@ -1126,26 +1126,27 @@ fn zscore_batch_inner(
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    let mut groups: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
+    let mut groups: HashMap<(usize, MaKind), Vec<(usize, f64)>> = HashMap::new();
     let mut fallback_rows: Vec<usize> = Vec::new();
     for (row_idx, prm) in combos.iter().enumerate() {
         let period = prm.period.unwrap();
         let ma_type = prm.ma_type.as_ref().unwrap();
         let devtype = prm.devtype.unwrap();
-        if devtype == 0 && ma_type == "sma" {
-            groups
-                .entry(period)
-                .or_default()
-                .push((row_idx, prm.nbdev.unwrap()));
-        } else {
-            fallback_rows.push(row_idx);
+        match zscore_fast_batch_kind(ma_type, devtype) {
+            Some(kind) => {
+                groups
+                    .entry((period, kind))
+                    .or_default()
+                    .push((row_idx, prm.nbdev.unwrap()));
+            }
+            None => fallback_rows.push(row_idx),
         }
     }
 
-    let prefixes = if groups.is_empty() {
-        None
-    } else {
+    let prefixes = if groups.keys().any(|(_, kind)| matches!(kind, MaKind::Sma)) {
         Some(build_sma_std_prefixes(data))
+    } else {
+        None
     };
 
     let writer = RowWriter {
@@ -1153,24 +1154,30 @@ fn zscore_batch_inner(
         cols,
     };
 
-    for (period, rows_for_period) in groups.into_iter() {
+    for ((period, kind), rows_for_period) in groups.into_iter() {
         let warmup_end = first + period - 1;
         let mut base = vec![f64::NAN; cols];
 
-        match kern {
-            Kernel::Scalar => {
-                let pre = prefixes.as_ref().expect("prefixes missing for scalar path");
-                zscore_sma_std_from_prefix_scalar(data, period, warmup_end, pre, &mut base);
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => unsafe {
-                let pre = prefixes.as_ref().expect("prefixes missing for AVX2 path");
-                zscore_sma_std_from_prefix_avx2(data, period, warmup_end, pre, &mut base);
+        match kind {
+            MaKind::Sma => match kern {
+                Kernel::Scalar => {
+                    let pre = prefixes.as_ref().expect("prefixes missing for scalar path");
+                    zscore_sma_std_from_prefix_scalar(data, period, warmup_end, pre, &mut base);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => unsafe {
+                    let pre = prefixes.as_ref().expect("prefixes missing for AVX2 path");
+                    zscore_sma_std_from_prefix_avx2(data, period, warmup_end, pre, &mut base);
+                },
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => unsafe {
+                    let pre = prefixes.as_ref().expect("prefixes missing for AVX512 path");
+                    zscore_sma_std_from_prefix_avx512(data, period, warmup_end, pre, &mut base);
+                },
+                _ => unreachable!(),
             },
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => unsafe {
-                let pre = prefixes.as_ref().expect("prefixes missing for AVX512 path");
-                zscore_sma_std_from_prefix_avx512(data, period, warmup_end, pre, &mut base);
+            MaKind::Ema => unsafe {
+                zscore_row_scalar_classic_ema(data, first, period, 1.0, &mut base);
             },
             _ => unreachable!(),
         }
@@ -1281,6 +1288,19 @@ fn zscore_batch_inner(
         rows,
         cols,
     })
+}
+
+#[inline(always)]
+fn zscore_fast_batch_kind(ma_type: &str, devtype: usize) -> Option<MaKind> {
+    if devtype != 0 {
+        None
+    } else if ma_type.eq_ignore_ascii_case("sma") {
+        Some(MaKind::Sma)
+    } else if ma_type.eq_ignore_ascii_case("ema") {
+        Some(MaKind::Ema)
+    } else {
+        None
+    }
 }
 
 #[inline(always)]
@@ -1944,26 +1964,27 @@ pub fn zscore_batch_inner_into(
         init_matrix_prefixes(out_uninit, cols, &warm);
     }
 
-    let mut groups: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
+    let mut groups: HashMap<(usize, MaKind), Vec<(usize, f64)>> = HashMap::new();
     let mut fallback_rows: Vec<usize> = Vec::new();
     for (row_idx, prm) in combos.iter().enumerate() {
         let period = prm.period.unwrap();
         let ma_type = prm.ma_type.as_ref().unwrap();
         let devtype = prm.devtype.unwrap();
-        if devtype == 0 && ma_type == "sma" {
-            groups
-                .entry(period)
-                .or_default()
-                .push((row_idx, prm.nbdev.unwrap()));
-        } else {
-            fallback_rows.push(row_idx);
+        match zscore_fast_batch_kind(ma_type, devtype) {
+            Some(kind) => {
+                groups
+                    .entry((period, kind))
+                    .or_default()
+                    .push((row_idx, prm.nbdev.unwrap()));
+            }
+            None => fallback_rows.push(row_idx),
         }
     }
 
-    let prefixes = if groups.is_empty() {
-        None
-    } else {
+    let prefixes = if groups.keys().any(|(_, kind)| matches!(kind, MaKind::Sma)) {
         Some(build_sma_std_prefixes(data))
+    } else {
+        None
     };
 
     let writer = RowWriter {
@@ -1971,24 +1992,30 @@ pub fn zscore_batch_inner_into(
         cols,
     };
 
-    for (period, rows_for_period) in groups.into_iter() {
+    for ((period, kind), rows_for_period) in groups.into_iter() {
         let warmup_end = first + period - 1;
         let mut base = vec![f64::NAN; cols];
 
-        match kern {
-            Kernel::Scalar => {
-                let pre = prefixes.as_ref().expect("prefixes missing for scalar path");
-                zscore_sma_std_from_prefix_scalar(data, period, warmup_end, pre, &mut base);
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => unsafe {
-                let pre = prefixes.as_ref().expect("prefixes missing for AVX2 path");
-                zscore_sma_std_from_prefix_avx2(data, period, warmup_end, pre, &mut base);
+        match kind {
+            MaKind::Sma => match kern {
+                Kernel::Scalar => {
+                    let pre = prefixes.as_ref().expect("prefixes missing for scalar path");
+                    zscore_sma_std_from_prefix_scalar(data, period, warmup_end, pre, &mut base);
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 => unsafe {
+                    let pre = prefixes.as_ref().expect("prefixes missing for AVX2 path");
+                    zscore_sma_std_from_prefix_avx2(data, period, warmup_end, pre, &mut base);
+                },
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 => unsafe {
+                    let pre = prefixes.as_ref().expect("prefixes missing for AVX512 path");
+                    zscore_sma_std_from_prefix_avx512(data, period, warmup_end, pre, &mut base);
+                },
+                _ => unreachable!(),
             },
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => unsafe {
-                let pre = prefixes.as_ref().expect("prefixes missing for AVX512 path");
-                zscore_sma_std_from_prefix_avx512(data, period, warmup_end, pre, &mut base);
+            MaKind::Ema => unsafe {
+                zscore_row_scalar_classic_ema(data, first, period, 1.0, &mut base);
             },
             _ => unreachable!(),
         }

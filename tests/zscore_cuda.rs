@@ -148,6 +148,68 @@ fn zscore_cuda_host_copy_matches_cpu() -> Result<(), Box<dyn std::error::Error>>
 
 #[cfg(feature = "cuda")]
 #[test]
+fn zscore_cuda_batch_ema_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[zscore_cuda_batch_ema_matches_cpu] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 3072usize;
+    let mut data = vec![f64::NAN; len];
+    for i in 6..len {
+        let x = i as f64;
+        let base = (x * 0.00041).sin() + (x * 0.00017).cos();
+        data[i] = base + 0.0008 * ((i % 9) as f64 - 4.0);
+    }
+
+    let sweep = ZscoreBatchRange {
+        period: (9, 27, 9),
+        ma_type: ("ema".to_string(), "ema".to_string(), "".to_string()),
+        nbdev: (0.5, 1.5, 0.5),
+        devtype: (0, 0, 0),
+    };
+
+    let cpu = zscore_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch)?;
+    let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+
+    let cuda = CudaZscore::new(0).expect("CudaZscore::new");
+    let (dev_arr, combos_meta) = cuda
+        .zscore_batch_dev(&data_f32, &sweep)
+        .expect("zscore_cuda_batch_dev");
+
+    assert_eq!(dev_arr.rows, cpu.rows);
+    assert_eq!(dev_arr.cols, cpu.cols);
+    assert_eq!(combos_meta.len(), cpu.combos.len());
+
+    for (combo, params) in combos_meta.iter().zip(cpu.combos.iter()) {
+        assert_eq!(combo.0, params.period.unwrap());
+        assert!((combo.1 as f64 - params.nbdev.unwrap()).abs() < 1e-6);
+        assert_eq!(params.ma_type.as_ref().unwrap(), "ema");
+        assert_eq!(params.devtype.unwrap(), 0);
+    }
+
+    let mut gpu = vec![0f32; dev_arr.len()];
+    dev_arr
+        .buf
+        .copy_to(&mut gpu)
+        .expect("copy zscore cuda ema results");
+
+    let tol = 6e-4;
+    for (idx, (&cpu_val, &gpu_val)) in cpu.values.iter().zip(gpu.iter()).enumerate() {
+        assert!(
+            approx_eq(cpu_val, gpu_val as f64, tol),
+            "ema mismatch at {}: cpu={} gpu={}",
+            idx,
+            cpu_val,
+            gpu_val
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
 fn zscore_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
         eprintln!("[zscore_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");

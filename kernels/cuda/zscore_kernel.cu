@@ -28,6 +28,10 @@ __device__ __forceinline__ dsf load_dsf_f2(const float2* __restrict__ p, int idx
     return ds_make(v.x, v.y);
 }
 
+__device__ __forceinline__ double ds_to_f64(dsf v) {
+    return (double)v.hi + (double)v.lo;
+}
+
 
 
 extern "C" __global__ void zscore_sma_prefix_f32ds(
@@ -115,6 +119,78 @@ extern "C" __global__ void zscore_sma_prefix_f32ds(
         }
 
         t += stride;
+    }
+}
+
+extern "C" __global__ void zscore_ema_prefix_f32ds(
+    const float*  __restrict__ data,
+    const float2* __restrict__ prefix_sum,
+    const float2* __restrict__ prefix_sum_sq,
+    const int*    __restrict__ prefix_nan,
+    int len,
+    int first_valid,
+    const int*   __restrict__ periods,
+    const float* __restrict__ nbdevs,
+    int n_combos,
+    float* __restrict__ out
+) {
+    int combo = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = gridDim.x * blockDim.x;
+
+    while (combo < n_combos) {
+        float* row = out + combo * len;
+        for (int t = 0; t < len; ++t) {
+            row[t] = nan_f32();
+        }
+
+        const int period = periods[combo];
+        const float nbdev = nbdevs[combo];
+        if (period > 0 && nbdev != 0.0f) {
+            const int warm = first_valid + period - 1;
+            if (warm < len) {
+                const int end = warm + 1;
+                const int start = end - period;
+                if (prefix_nan[end] == prefix_nan[start]) {
+                    const dsf sum_ds = ds_sub(load_dsf_f2(prefix_sum, end), load_dsf_f2(prefix_sum, start));
+                    const dsf sum2_ds = ds_sub(load_dsf_f2(prefix_sum_sq, end), load_dsf_f2(prefix_sum_sq, start));
+                    const double inv = 1.0 / (double)period;
+                    const double alpha = 2.0 / ((double)period + 1.0);
+                    const double one_minus_alpha = 1.0 - alpha;
+
+                    double sum = ds_to_f64(sum_ds);
+                    double sum2 = ds_to_f64(sum2_ds);
+                    double ema = sum * inv;
+                    double ex = sum * inv;
+                    double ex2 = sum2 * inv;
+                    double mse = (-2.0 * ema) * ex + (ema * ema + ex2);
+                    if (mse < 0.0) {
+                        mse = 0.0;
+                    }
+                    double sd = sqrt(mse) * (double)nbdev;
+                    const double xw = (double)data[warm];
+                    row[warm] = (sd == 0.0 || isnan(sd)) ? nan_f32() : (float)((xw - ema) / sd);
+
+                    for (int t = warm + 1; t < len; ++t) {
+                        const double new_v = (double)data[t];
+                        const double old_v = (double)data[t - period];
+                        const double dd = new_v - old_v;
+                        sum += dd;
+                        sum2 += (new_v + old_v) * dd;
+                        ex = sum * inv;
+                        ex2 = sum2 * inv;
+                        ema = ema * one_minus_alpha + alpha * new_v;
+                        mse = (-2.0 * ema) * ex + (ema * ema + ex2);
+                        if (mse < 0.0) {
+                            mse = 0.0;
+                        }
+                        sd = sqrt(mse) * (double)nbdev;
+                        row[t] = (sd == 0.0 || isnan(sd)) ? nan_f32() : (float)((new_v - ema) / sd);
+                    }
+                }
+            }
+        }
+
+        combo += stride;
     }
 }
 
@@ -250,6 +326,76 @@ extern "C" __global__ void zscore_sma_prefix_f32(
         }
 
         t += stride;
+    }
+}
+
+extern "C" __global__ void zscore_ema_prefix_f32(
+    const float* __restrict__ data,
+    const double* __restrict__ prefix_sum,
+    const double* __restrict__ prefix_sum_sq,
+    const int* __restrict__ prefix_nan,
+    int len,
+    int first_valid,
+    const int* __restrict__ periods,
+    const float* __restrict__ nbdevs,
+    int n_combos,
+    float* __restrict__ out) {
+    const float nan_f = __int_as_float(0x7fffffff);
+    int combo = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = gridDim.x * blockDim.x;
+
+    while (combo < n_combos) {
+        float* row = out + combo * len;
+        for (int t = 0; t < len; ++t) {
+            row[t] = nan_f;
+        }
+
+        const int period = periods[combo];
+        const float nbdev = nbdevs[combo];
+        if (period > 0 && nbdev != 0.0f) {
+            const int warm = first_valid + period - 1;
+            if (warm < len) {
+                const int end = warm + 1;
+                const int start = end - period;
+                if (prefix_nan[end] == prefix_nan[start]) {
+                    const double inv = 1.0 / (double)period;
+                    const double alpha = 2.0 / ((double)period + 1.0);
+                    const double one_minus_alpha = 1.0 - alpha;
+
+                    double sum = prefix_sum[end] - prefix_sum[start];
+                    double sum2 = prefix_sum_sq[end] - prefix_sum_sq[start];
+                    double ema = sum * inv;
+                    double ex = sum * inv;
+                    double ex2 = sum2 * inv;
+                    double mse = (-2.0 * ema) * ex + (ema * ema + ex2);
+                    if (mse < 0.0) {
+                        mse = 0.0;
+                    }
+                    double sd = sqrt(mse) * (double)nbdev;
+                    const double xw = (double)data[warm];
+                    row[warm] = (sd == 0.0 || isnan(sd)) ? nan_f : (float)((xw - ema) / sd);
+
+                    for (int t = warm + 1; t < len; ++t) {
+                        const double new_v = (double)data[t];
+                        const double old_v = (double)data[t - period];
+                        const double dd = new_v - old_v;
+                        sum += dd;
+                        sum2 += (new_v + old_v) * dd;
+                        ex = sum * inv;
+                        ex2 = sum2 * inv;
+                        ema = ema * one_minus_alpha + alpha * new_v;
+                        mse = (-2.0 * ema) * ex + (ema * ema + ex2);
+                        if (mse < 0.0) {
+                            mse = 0.0;
+                        }
+                        sd = sqrt(mse) * (double)nbdev;
+                        row[t] = (sd == 0.0 || isnan(sd)) ? nan_f : (float)((new_v - ema) / sd);
+                    }
+                }
+            }
+        }
+
+        combo += stride;
     }
 }
 
