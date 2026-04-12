@@ -101,6 +101,11 @@ impl CudaRsmk {
         self.device_id
     }
 
+    pub fn synchronize(&self) -> Result<(), CudaRsmkError> {
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -377,6 +382,132 @@ impl CudaRsmk {
             },
             combos,
         ))
+    }
+
+    pub fn rsmk_single_classic_ema_ema_dev_from_device_inputs(
+        &self,
+        d_main: &DeviceBuffer<f32>,
+        d_compare: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        lookback: usize,
+        period: usize,
+        signal_period: usize,
+    ) -> Result<DeviceArrayF32Pair, CudaRsmkError> {
+        if len == 0 {
+            return Err(CudaRsmkError::InvalidInput("empty input".into()));
+        }
+        if lookback == 0 || period == 0 || signal_period == 0 {
+            return Err(CudaRsmkError::InvalidInput(
+                "lookback, period, and signal_period must be positive".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaRsmkError::InvalidInput(format!(
+                "invalid first_valid {} for length {}",
+                first_valid, len
+            )));
+        }
+
+        let el = std::mem::size_of::<f32>();
+        let out_bytes = len
+            .checked_mul(2 * el)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("output size overflow".into()))?;
+        let mom_bytes = len
+            .checked_mul(el)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("momentum size overflow".into()))?;
+        let in_bytes = len
+            .checked_mul(2 * el)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("input size overflow".into()))?;
+        let required = out_bytes
+            .checked_add(mom_bytes)
+            .and_then(|x| x.checked_add(in_bytes))
+            .ok_or_else(|| CudaRsmkError::InvalidInput("VRAM size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
+
+        let mut d_indicator: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
+        let mut d_signal: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
+        let mut d_mom: DeviceBuffer<f32> = unsafe { DeviceBuffer::<f32>::uninitialized(len) }?;
+        self.memset_nan32_async(d_indicator.as_device_ptr().as_raw() as u64, len)?;
+        self.memset_nan32_async(d_signal.as_device_ptr().as_raw() as u64, len)?;
+
+        let mut k_mom: Function = self.module.get_function("rsmk_momentum_f32").map_err(|_| {
+            CudaRsmkError::MissingKernelSymbol {
+                name: "rsmk_momentum_f32",
+            }
+        })?;
+        let mut k_apply: Function = self
+            .module
+            .get_function("rsmk_apply_mom_single_row_ema_ema_classic_f32")
+            .map_err(|_| CudaRsmkError::MissingKernelSymbol {
+                name: "rsmk_apply_mom_single_row_ema_ema_classic_f32",
+            })?;
+
+        unsafe {
+            let mut main_ptr = d_main.as_device_ptr().as_raw();
+            let mut comp_ptr = d_compare.as_device_ptr().as_raw();
+            let mut lb_i = lookback as i32;
+            let mut fv_i = first_valid as i32;
+            let mut len_i = len as i32;
+            let mut mom_ptr = d_mom.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut main_ptr as *mut _ as *mut c_void,
+                &mut comp_ptr as *mut _ as *mut c_void,
+                &mut lb_i as *mut _ as *mut c_void,
+                &mut fv_i as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut mom_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(
+                &mut k_mom,
+                GridSize::xyz(1, 1, 1),
+                BlockSize::xyz(1, 1, 1),
+                0,
+                args,
+            )?;
+        }
+
+        let first_mom = first_valid
+            .checked_add(lookback)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("first_valid overflow".into()))?;
+        unsafe {
+            let mut mom_ptr = d_mom.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut fv_m_i = first_mom as i32;
+            let mut p_i = period as i32;
+            let mut s_i = signal_period as i32;
+            let mut ind_ptr = d_indicator.as_device_ptr().as_raw();
+            let mut sig_ptr = d_signal.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut mom_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut fv_m_i as *mut _ as *mut c_void,
+                &mut p_i as *mut _ as *mut c_void,
+                &mut s_i as *mut _ as *mut c_void,
+                &mut ind_ptr as *mut _ as *mut c_void,
+                &mut sig_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(
+                &mut k_apply,
+                GridSize::xyz(1, 1, 1),
+                BlockSize::xyz(1, 1, 1),
+                0,
+                args,
+            )?;
+        }
+
+        Ok(DeviceArrayF32Pair {
+            a: DeviceArrayF32 {
+                buf: d_indicator,
+                rows: 1,
+                cols: len,
+            },
+            b: DeviceArrayF32 {
+                buf: d_signal,
+                rows: 1,
+                cols: len,
+            },
+        })
     }
 
     pub fn rsmk_many_series_one_param_time_major_dev(

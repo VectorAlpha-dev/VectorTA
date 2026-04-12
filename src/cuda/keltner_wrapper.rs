@@ -321,20 +321,27 @@ impl CudaKeltner {
             other => return Err(CudaKeltnerError::UnsupportedMa(other.to_string())),
         };
 
-        let cuda_atr = crate::cuda::atr_wrapper::CudaAtr::new(self.device_id as usize)
-            .map_err(|e| CudaKeltnerError::InvalidInput(e.to_string()))?;
-        let atr_rows = cuda_atr
-            .atr_batch_from_device_ptrs(
-                d_high.as_device_ptr(),
-                d_low.as_device_ptr(),
-                d_close.as_device_ptr(),
-                len,
-                first_valid,
-                &crate::indicators::atr::AtrBatchRange {
-                    length: (min_p, max_p, 1),
-                },
-            )
-            .map_err(|e| CudaKeltnerError::InvalidInput(e.to_string()))?;
+        let atr_rows = {
+            let cuda_atr = crate::cuda::atr_wrapper::CudaAtr::new(self.device_id as usize)
+                .map_err(|e| CudaKeltnerError::InvalidInput(e.to_string()))?;
+            let atr_dev = cuda_atr
+                .atr_batch_from_device_ptrs(
+                    d_high.as_device_ptr(),
+                    d_low.as_device_ptr(),
+                    d_close.as_device_ptr(),
+                    len,
+                    0,
+                    &crate::indicators::atr::AtrBatchRange {
+                        length: (min_p, max_p, 1),
+                    },
+                )
+                .map_err(|e| CudaKeltnerError::InvalidInput(e.to_string()))?;
+            DeviceArrayF32 {
+                buf: atr_dev.buf,
+                rows: atr_dev.rows,
+                cols: atr_dev.cols,
+            }
+        };
 
         let out_elems = combos
             .len()

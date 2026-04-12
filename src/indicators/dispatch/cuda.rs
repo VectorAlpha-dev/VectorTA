@@ -10762,8 +10762,24 @@ fn compute_rsmk_cuda_device(
             details: e.to_string(),
         }
     })?;
-    let (pair, _) = cuda
-        .rsmk_batch_dev_from_device_inputs(
+    let single_combo =
+        lookback.0 == lookback.1 && period.0 == period.1 && signal_period.0 == signal_period.1;
+    let pair = if single_combo {
+        cuda.rsmk_single_classic_ema_ema_dev_from_device_inputs(
+            main_buf.as_buffer(),
+            compare_buf.as_buffer(),
+            main.len(),
+            first_valid,
+            lookback.0,
+            period.0,
+            signal_period.0,
+        )
+        .map_err(|e| IndicatorDispatchError::ComputeFailed {
+            indicator: info.id.to_string(),
+            details: e.to_string(),
+        })?
+    } else {
+        cuda.rsmk_batch_dev_from_device_inputs(
             main_buf.as_buffer(),
             compare_buf.as_buffer(),
             main.len(),
@@ -10773,7 +10789,15 @@ fn compute_rsmk_cuda_device(
         .map_err(|e| IndicatorDispatchError::ComputeFailed {
             indicator: info.id.to_string(),
             details: e.to_string(),
-        })?;
+        })?
+        .0
+    };
+    if matches!(req.target, CudaOutputTarget::HostF32) {
+        cuda.synchronize()
+            .map_err(|e| IndicatorDispatchError::KernelUnavailable {
+                details: e.to_string(),
+            })?;
+    }
     let owner = match output_index {
         0 => pair.a,
         1 => pair.b,
