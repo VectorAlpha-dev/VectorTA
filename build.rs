@@ -1,4 +1,5 @@
 use std::env;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -32,6 +33,14 @@ fn is_nightly() -> bool {
     false
 }
 
+fn sm89_cubin_name_for_ptx(ptx_name: &str) -> String {
+    if let Some(stem) = ptx_name.strip_suffix(".ptx") {
+        format!("{stem}_sm89.cubin")
+    } else {
+        format!("{ptx_name}_sm89.cubin")
+    }
+}
+
 fn stage_prebuilt_ptx() {
     println!("cargo:rerun-if-env-changed=VECTOR_TA_PREBUILT_PTX_DIR");
     println!("cargo:rerun-if-env-changed=VECTOR_TA_PREBUILT_CUBIN_DIR");
@@ -59,14 +68,6 @@ Enable `--features cuda-build-ptx` to compile PTX and cubin artifacts with nvcc,
         );
     }
 
-    if !cubin_dir.is_dir() {
-        panic!(
-            "Prebuilt cubin directory not found: {}. \
-Enable `--features cuda-build-ptx` to compile PTX and cubin artifacts with nvcc, or set VECTOR_TA_PREBUILT_CUBIN_DIR to a directory containing *_sm89.cubin files.",
-            cubin_dir.display()
-        );
-    }
-
     let mut ptx_files: Vec<PathBuf> = Vec::new();
     for entry in std::fs::read_dir(&ptx_dir).expect("read prebuilt PTX dir") {
         let entry = entry.expect("read prebuilt PTX dir entry");
@@ -77,12 +78,19 @@ Enable `--features cuda-build-ptx` to compile PTX and cubin artifacts with nvcc,
     }
 
     let mut cubin_files: Vec<PathBuf> = Vec::new();
-    for entry in std::fs::read_dir(&cubin_dir).expect("read prebuilt cubin dir") {
-        let entry = entry.expect("read prebuilt cubin dir entry");
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("cubin") {
-            cubin_files.push(path);
+    if cubin_dir.is_dir() {
+        for entry in std::fs::read_dir(&cubin_dir).expect("read prebuilt cubin dir") {
+            let entry = entry.expect("read prebuilt cubin dir entry");
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("cubin") {
+                cubin_files.push(path);
+            }
         }
+    } else {
+        println!(
+            "cargo:warning=Prebuilt cubin directory not found: {}. Continuing with PTX-only staging.",
+            cubin_dir.display()
+        );
     }
 
     if ptx_files.is_empty() {
@@ -90,14 +98,6 @@ Enable `--features cuda-build-ptx` to compile PTX and cubin artifacts with nvcc,
             "No prebuilt PTX files (*.ptx) found in {}. \
 Enable `--features cuda-build-ptx` to compile PTX artifacts with nvcc.",
             ptx_dir.display()
-        );
-    }
-
-    if cubin_files.is_empty() {
-        panic!(
-            "No prebuilt cubin files (*.cubin) found in {}. \
-Enable `--features cuda-build-ptx` to compile cubin artifacts with nvcc.",
-            cubin_dir.display()
         );
     }
 
@@ -118,6 +118,7 @@ Enable `--features cuda-build-ptx` to compile cubin artifacts with nvcc.",
         });
     }
 
+    let mut staged_cubins = HashSet::new();
     for src in cubin_files {
         println!("cargo:rerun-if-changed={}", src.display());
         let file_name = src
@@ -133,6 +134,25 @@ Enable `--features cuda-build-ptx` to compile cubin artifacts with nvcc.",
                 dst.display()
             )
         });
+        staged_cubins.insert(file_name);
+    }
+
+    for entry in std::fs::read_dir(&out_dir).expect("read staged PTX dir") {
+        let entry = entry.expect("read staged PTX dir entry");
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("ptx") {
+            continue;
+        }
+        let ptx_name = path
+            .file_name()
+            .expect("PTX file name")
+            .to_string_lossy()
+            .to_string();
+        let cubin_name = sm89_cubin_name_for_ptx(&ptx_name);
+        if staged_cubins.contains(&cubin_name) {
+            continue;
+        }
+        std::fs::write(out_dir.join(cubin_name), []).expect("write placeholder cubin");
     }
 }
 
@@ -1862,11 +1882,7 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
 
     println!("cargo:rerun-if-changed={}", src_path);
 
-    let cubin_name = if let Some(stem) = ptx_name.strip_suffix(".ptx") {
-        format!("{stem}_sm89.cubin")
-    } else {
-        format!("{ptx_name}_sm89.cubin")
-    };
+    let cubin_name = sm89_cubin_name_for_ptx(ptx_name);
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let ptx_path = out_dir.join(ptx_name);

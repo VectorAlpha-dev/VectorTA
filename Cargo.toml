@@ -35,7 +35,6 @@ include = [
   "/kernels/cuda/**/*.cu",
   "/kernels/cuda/**/*.cuh",
   "/kernels/ptx/**",
-  "/kernels/cubin/**",
 ]
 
 [dev-dependencies]
