@@ -127,7 +127,8 @@ impl CudaRocp {
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
-        let module = crate::load_cuda_embedded_module!("rocp_kernel").map_err(CudaRocpError::Cuda)?;
+        let module =
+            crate::load_cuda_embedded_module!("rocp_kernel").map_err(CudaRocpError::Cuda)?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaRocpError::Cuda)?;
         Ok(Self {
             module,

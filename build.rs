@@ -798,9 +798,19 @@ fn compile_cuda_kernels() {
         "kernels/cuda/garman_klass_volatility_kernel.cu",
         "garman_klass_volatility_kernel.ptx",
     );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/parkinson_volatility_kernel.cu",
+        "parkinson_volatility_kernel.ptx",
+    );
     compile_kernel(&cuda_path, "kernels/cuda/voss_kernel.cu", "voss_kernel.ptx");
     compile_kernel(&cuda_path, "kernels/cuda/cksp_kernel.cu", "cksp_kernel.ptx");
     compile_kernel(&cuda_path, "kernels/cuda/emd_kernel.cu", "emd_kernel.ptx");
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/emd_trend_kernel.cu",
+        "emd_trend_kernel.ptx",
+    );
 
     compile_kernel(
         &cuda_path,
@@ -908,6 +918,11 @@ fn compile_cuda_kernels() {
     compile_kernel(&cuda_path, "kernels/cuda/di_kernel.cu", "di_kernel.ptx");
 
     compile_kernel(&cuda_path, "kernels/cuda/atr_kernel.cu", "atr_kernel.ptx");
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/atr_percentile_kernel.cu",
+        "atr_percentile_kernel.ptx",
+    );
 
     compile_kernel(
         &cuda_path,
@@ -916,6 +931,11 @@ fn compile_cuda_kernels() {
     );
 
     compile_kernel(&cuda_path, "kernels/cuda/cvi_kernel.cu", "cvi_kernel.ptx");
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/cycle_channel_oscillator_kernel.cu",
+        "cycle_channel_oscillator_kernel.ptx",
+    );
 
     compile_kernel(
         &cuda_path,
@@ -948,6 +968,96 @@ fn compile_cuda_kernels() {
     compile_kernel(&cuda_path, "kernels/cuda/eri_kernel.cu", "eri_kernel.ptx");
 
     compile_kernel(&cuda_path, "kernels/cuda/obv_kernel.cu", "obv_kernel.ptx");
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/advance_decline_line_kernel.cu",
+        "advance_decline_line_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/bull_power_vs_bear_power_kernel.cu",
+        "bull_power_vs_bear_power_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/bulls_v_bears_kernel.cu",
+        "bulls_v_bears_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/psychological_line_kernel.cu",
+        "psychological_line_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/historical_volatility_kernel.cu",
+        "historical_volatility_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/historical_volatility_rank_kernel.cu",
+        "historical_volatility_rank_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/historical_volatility_percentile_kernel.cu",
+        "historical_volatility_percentile_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/half_causal_estimator_kernel.cu",
+        "half_causal_estimator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/vertical_horizontal_filter_kernel.cu",
+        "vertical_horizontal_filter_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/gopalakrishnan_range_index_kernel.cu",
+        "gopalakrishnan_range_index_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/grover_llorens_cycle_oscillator_kernel.cu",
+        "grover_llorens_cycle_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/dual_ulcer_index_kernel.cu",
+        "dual_ulcer_index_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/ewma_volatility_kernel.cu",
+        "ewma_volatility_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/momentum_ratio_oscillator_kernel.cu",
+        "momentum_ratio_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/on_balance_volume_oscillator_kernel.cu",
+        "on_balance_volume_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/pretty_good_oscillator_kernel.cu",
+        "pretty_good_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/rolling_z_score_trend_kernel.cu",
+        "rolling_z_score_trend_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/rank_correlation_index_kernel.cu",
+        "rank_correlation_index_kernel.ptx",
+    );
 
     compile_kernel(
         &cuda_path,
@@ -969,6 +1079,11 @@ fn compile_cuda_kernels() {
         "stddev_kernel.ptx",
     );
 
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/donchian_channel_width_kernel.cu",
+        "donchian_channel_width_kernel.ptx",
+    );
     compile_kernel(
         &cuda_path,
         "kernels/cuda/donchian_kernel.cu",
@@ -995,6 +1110,571 @@ fn compile_cuda_kernels() {
         &cuda_path,
         "kernels/cuda/kurtosis_kernel.cu",
         "kurtosis_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/velocity_kernel.cu",
+        "velocity_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/velocity_acceleration_indicator_kernel.cu",
+        "velocity_acceleration_indicator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/random_walk_index_kernel.cu",
+        "random_walk_index_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/regression_slope_oscillator_kernel.cu",
+        "regression_slope_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/reversal_signals_kernel.cu",
+        "reversal_signals_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/relative_strength_index_wave_indicator_kernel.cu",
+        "relative_strength_index_wave_indicator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/monotonicity_index_kernel.cu",
+        "monotonicity_index_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/market_meanness_index_kernel.cu",
+        "market_meanness_index_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/macd_wave_signal_pro_kernel.cu",
+        "macd_wave_signal_pro_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/market_structure_trailing_stop_kernel.cu",
+        "market_structure_trailing_stop_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/moving_average_cross_probability_kernel.cu",
+        "moving_average_cross_probability_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/multi_length_stochastic_average_kernel.cu",
+        "multi_length_stochastic_average_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/absolute_strength_index_oscillator_kernel.cu",
+        "absolute_strength_index_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/accumulation_swing_index_kernel.cu",
+        "accumulation_swing_index_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/autocorrelation_indicator_kernel.cu",
+        "autocorrelation_indicator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/adaptive_bounds_rsi_kernel.cu",
+        "adaptive_bounds_rsi_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/adaptive_schaff_trend_cycle_kernel.cu",
+        "adaptive_schaff_trend_cycle_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/adjustable_ma_alternating_extremities_kernel.cu",
+        "adjustable_ma_alternating_extremities_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/adaptive_momentum_oscillator_kernel.cu",
+        "adaptive_momentum_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/cyberpunk_value_trend_analyzer_kernel.cu",
+        "cyberpunk_value_trend_analyzer_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/candle_strength_oscillator_kernel.cu",
+        "candle_strength_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/hema_trend_levels_kernel.cu",
+        "hema_trend_levels_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/daily_factor_kernel.cu",
+        "daily_factor_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/demand_index_kernel.cu",
+        "demand_index_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/decisionpoint_breadth_swenlin_trading_oscillator_kernel.cu",
+        "decisionpoint_breadth_swenlin_trading_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/directional_imbalance_index_kernel.cu",
+        "directional_imbalance_index_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/ehlers_fm_demodulator_kernel.cu",
+        "ehlers_fm_demodulator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/ehlers_autocorrelation_periodogram_kernel.cu",
+        "ehlers_autocorrelation_periodogram_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/fractal_dimension_index_kernel.cu",
+        "fractal_dimension_index_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/fvg_positioning_average_kernel.cu",
+        "fvg_positioning_average_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/volume_energy_reservoirs_kernel.cu",
+        "volume_energy_reservoirs_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/fibonacci_entry_bands_kernel.cu",
+        "fibonacci_entry_bands_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/fibonacci_trailing_stop_kernel.cu",
+        "fibonacci_trailing_stop_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/disparity_index_kernel.cu",
+        "disparity_index_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/dynamic_momentum_index_kernel.cu",
+        "dynamic_momentum_index_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/forward_backward_exponential_oscillator_kernel.cu",
+        "forward_backward_exponential_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/ehlers_simple_cycle_indicator_kernel.cu",
+        "ehlers_simple_cycle_indicator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/evasive_supertrend_kernel.cu",
+        "evasive_supertrend_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/l1_ehlers_phasor_kernel.cu",
+        "l1_ehlers_phasor_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/l2_ehlers_signal_to_noise_kernel.cu",
+        "l2_ehlers_signal_to_noise_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/leavitt_convolution_acceleration_kernel.cu",
+        "leavitt_convolution_acceleration_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/linear_correlation_oscillator_kernel.cu",
+        "linear_correlation_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/ehlers_adaptive_cg_kernel.cu",
+        "ehlers_adaptive_cg_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/ehlers_detrending_filter_kernel.cu",
+        "ehlers_detrending_filter_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/ehlers_data_sampling_relative_strength_indicator_kernel.cu",
+        "ehlers_data_sampling_relative_strength_indicator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/ehlers_linear_extrapolation_predictor_kernel.cu",
+        "ehlers_linear_extrapolation_predictor_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/ehlers_smoothed_adaptive_momentum_kernel.cu",
+        "ehlers_smoothed_adaptive_momentum_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/ehlers_adaptive_cyber_cycle_kernel.cu",
+        "ehlers_adaptive_cyber_cycle_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/adaptive_bandpass_trigger_oscillator_kernel.cu",
+        "adaptive_bandpass_trigger_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/adaptive_macd_kernel.cu",
+        "adaptive_macd_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/andean_oscillator_kernel.cu",
+        "andean_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/exponential_trend_kernel.cu",
+        "exponential_trend_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/didi_index_kernel.cu",
+        "didi_index_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/geometric_bias_oscillator_kernel.cu",
+        "geometric_bias_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/gmma_oscillator_kernel.cu",
+        "gmma_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/hypertrend_kernel.cu",
+        "hypertrend_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/hull_butterfly_oscillator_kernel.cu",
+        "hull_butterfly_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/intraday_momentum_index_kernel.cu",
+        "intraday_momentum_index_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/kairi_relative_index_kernel.cu",
+        "kairi_relative_index_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/keltner_channel_width_oscillator_kernel.cu",
+        "keltner_channel_width_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/impulse_macd_kernel.cu",
+        "impulse_macd_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/linear_regression_intensity_kernel.cu",
+        "linear_regression_intensity_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/nonlinear_regression_zero_lag_moving_average_kernel.cu",
+        "nonlinear_regression_zero_lag_moving_average_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/neighboring_trailing_stop_kernel.cu",
+        "neighboring_trailing_stop_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/polynomial_regression_extrapolation_kernel.cu",
+        "polynomial_regression_extrapolation_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/range_oscillator_kernel.cu",
+        "range_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/rolling_skewness_kurtosis_kernel.cu",
+        "rolling_skewness_kurtosis_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/price_density_market_noise_kernel.cu",
+        "price_density_market_noise_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/premier_rsi_oscillator_kernel.cu",
+        "premier_rsi_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/spearman_correlation_kernel.cu",
+        "spearman_correlation_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/squeeze_index_kernel.cu",
+        "squeeze_index_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/statistical_trailing_stop_kernel.cu",
+        "statistical_trailing_stop_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/projection_oscillator_kernel.cu",
+        "projection_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/qqe_weighted_oscillator_kernel.cu",
+        "qqe_weighted_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/range_breakout_signals_kernel.cu",
+        "range_breakout_signals_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/range_filtered_trend_signals_kernel.cu",
+        "range_filtered_trend_signals_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/stochastic_distance_kernel.cu",
+        "stochastic_distance_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/stochastic_adaptive_d_kernel.cu",
+        "stochastic_adaptive_d_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/stochastic_connors_rsi_kernel.cu",
+        "stochastic_connors_rsi_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/stochastic_money_flow_index_kernel.cu",
+        "stochastic_money_flow_index_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/smoothed_gaussian_trend_filter_kernel.cu",
+        "smoothed_gaussian_trend_filter_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/trend_continuation_factor_kernel.cu",
+        "trend_continuation_factor_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/trend_follower_kernel.cu",
+        "trend_follower_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/trend_direction_force_index_kernel.cu",
+        "trend_direction_force_index_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/trend_flow_trail_kernel.cu",
+        "trend_flow_trail_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/trend_trigger_factor_kernel.cu",
+        "trend_trigger_factor_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/twiggs_money_flow_kernel.cu",
+        "twiggs_money_flow_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/volume_zone_oscillator_kernel.cu",
+        "volume_zone_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/volume_weighted_rsi_kernel.cu",
+        "volume_weighted_rsi_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/volume_weighted_relative_strength_index_kernel.cu",
+        "volume_weighted_relative_strength_index_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/price_moving_average_ratio_percentile_kernel.cu",
+        "price_moving_average_ratio_percentile_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/mesa_stochastic_multi_length_kernel.cu",
+        "mesa_stochastic_multi_length_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/normalized_volume_true_range_kernel.cu",
+        "normalized_volume_true_range_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/normalized_resonator_kernel.cu",
+        "normalized_resonator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/volatility_quality_index_kernel.cu",
+        "volatility_quality_index_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/goertzel_cycle_composite_wave_kernel.cu",
+        "goertzel_cycle_composite_wave_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/ict_propulsion_block_kernel.cu",
+        "ict_propulsion_block_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/ichimoku_oscillator_kernel.cu",
+        "ichimoku_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/insync_index_kernel.cu",
+        "insync_index_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/kase_peak_oscillator_with_divergences_kernel.cu",
+        "kase_peak_oscillator_with_divergences_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/market_structure_confluence_kernel.cu",
+        "market_structure_confluence_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/possible_rsi_kernel.cu",
+        "possible_rsi_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/smooth_theil_sen_kernel.cu",
+        "smooth_theil_sen_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/vdubus_divergence_wave_pattern_generator_kernel.cu",
+        "vdubus_divergence_wave_pattern_generator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/volatility_ratio_adaptive_rsx_kernel.cu",
+        "volatility_ratio_adaptive_rsx_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/velocity_acceleration_convergence_divergence_indicator_kernel.cu",
+        "velocity_acceleration_convergence_divergence_indicator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/vwap_deviation_oscillator_kernel.cu",
+        "vwap_deviation_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/vwap_zscore_with_signals_kernel.cu",
+        "vwap_zscore_with_signals_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/volume_weighted_stochastic_rsi_kernel.cu",
+        "volume_weighted_stochastic_rsi_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/supertrend_recovery_kernel.cu",
+        "supertrend_recovery_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/supertrend_oscillator_kernel.cu",
+        "supertrend_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/standardized_psar_oscillator_kernel.cu",
+        "standardized_psar_oscillator_kernel.ptx",
+    );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/zig_zag_channels_kernel.cu",
+        "zig_zag_channels_kernel.ptx",
     );
 
     compile_kernel(&cuda_path, "kernels/cuda/lpc_kernel.cu", "lpc_kernel.ptx");
@@ -1150,6 +1830,21 @@ fn compile_wto_kernel(cuda_path: &str) {
     compile_kernel(cuda_path, "kernels/cuda/wto_kernel.cu", "wto_kernel.ptx");
 }
 
+#[cfg(target_os = "windows")]
+fn append_windows_nvcc_host_args(cmd: &mut std::process::Command) {
+    cmd.arg("-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH");
+    cmd.arg("-DCCCL_IGNORE_MSVC_TRADITIONAL_PREPROCESSOR_WARNING");
+    cmd.arg("-allow-unsupported-compiler");
+    cmd.arg("-Xcompiler").arg("/Zc:preprocessor");
+
+    if let Ok(vs_path) = find_vs_installation() {
+        cmd.arg("-ccbin").arg(vs_path);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn append_windows_nvcc_host_args(_cmd: &mut std::process::Command) {}
+
 fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
     use std::process::Command;
 
@@ -1189,8 +1884,7 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         if !any {
             eprintln!("Skipping {} due to CUDA_FILTER", rel_src);
 
-            let placeholder =
-                ".version 7.0
+            let placeholder = ".version 7.0
 .target compute_80
 .address_size 64
 // placeholder PTX (no kernels)
@@ -1294,12 +1988,7 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
     }
 
     if cfg!(target_os = "windows") {
-        cmd.arg("-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH");
-        cmd.arg("-allow-unsupported-compiler");
-
-        if let Ok(vs_path) = find_vs_installation() {
-            cmd.arg("-ccbin").arg(vs_path);
-        }
+        append_windows_nvcc_host_args(&mut cmd);
     }
 
     eprintln!("Running nvcc command: {:?}", cmd);
@@ -1348,11 +2037,7 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
                 }
             }
             if cfg!(target_os = "windows") {
-                cmd2.arg("-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH");
-                cmd2.arg("-allow-unsupported-compiler");
-                if let Ok(vs_path) = find_vs_installation() {
-                    cmd2.arg("-ccbin").arg(vs_path);
-                }
+                append_windows_nvcc_host_args(&mut cmd2);
             }
             eprintln!("Running nvcc command: {:?}", cmd2);
             output = cmd2.output().expect("Failed to execute nvcc (fallback)");
@@ -1367,12 +2052,16 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         if cfg!(target_os = "windows")
             && String::from_utf8_lossy(&output.stderr).contains("Cannot find compiler 'cl.exe'")
         {
-            eprintln!("
-=== CUDA Build Error: Missing Visual Studio C++ Compiler ===");
+            eprintln!(
+                "
+=== CUDA Build Error: Missing Visual Studio C++ Compiler ==="
+            );
             eprintln!("nvcc requires the Microsoft Visual C++ compiler (cl.exe) to be available.");
             eprintln!("Install Visual Studio Build Tools 2022 or run cargo from a Developer Command Prompt.");
-            eprintln!("===========================================================
-");
+            eprintln!(
+                "===========================================================
+"
+            );
         }
 
         panic!("nvcc compilation failed");
@@ -1421,12 +2110,7 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
     }
 
     if cfg!(target_os = "windows") {
-        cubin_cmd.arg("-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH");
-        cubin_cmd.arg("-allow-unsupported-compiler");
-
-        if let Ok(vs_path) = find_vs_installation() {
-            cubin_cmd.arg("-ccbin").arg(vs_path);
-        }
+        append_windows_nvcc_host_args(&mut cubin_cmd);
     }
 
     eprintln!("Running nvcc command: {:?}", cubin_cmd);

@@ -14,7 +14,10 @@ const FORCE_CUBIN_ENV: &str = "VECTOR_TA_CUDA_FORCE_CUBIN";
 const DEBUG_ENV: &str = "CUDA_MODULE_LOAD_DEBUG";
 
 fn env_flag(name: &str) -> bool {
-    matches!(env::var(name).ok().as_deref(), Some("1") | Some("true") | Some("TRUE") | Some("True"))
+    matches!(
+        env::var(name).ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("True")
+    )
 }
 
 fn debug_enabled() -> bool {

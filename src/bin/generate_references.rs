@@ -35,6 +35,8 @@ use vector_ta::indicators::cmo::{cmo, CmoInput, CmoParams};
 use vector_ta::indicators::correl_hl::{correl_hl, CorrelHlData, CorrelHlInput, CorrelHlParams};
 use vector_ta::indicators::cvi::{cvi, CviInput, CviParams};
 
+use serde_json::json;
+use std::env;
 use vector_ta::indicators::damiani_volatmeter::{
     damiani_volatmeter, DamianiVolatmeterInput, DamianiVolatmeterParams,
 };
@@ -60,9 +62,7 @@ use vector_ta::indicators::macz::{macz, MaczInput, MaczParams};
 use vector_ta::indicators::market_structure_confluence::{
     market_structure_confluence, MarketStructureConfluenceInput, MarketStructureConfluenceParams,
 };
-use vector_ta::indicators::marketefi::{
-    marketefi, MarketefiData, MarketefiInput, MarketefiParams,
-};
+use vector_ta::indicators::marketefi::{marketefi, MarketefiData, MarketefiInput, MarketefiParams};
 use vector_ta::indicators::mass::{mass, MassInput, MassParams};
 use vector_ta::indicators::mfi::{mfi, MfiData, MfiInput, MfiParams};
 use vector_ta::indicators::midpoint::{midpoint, MidpointInput, MidpointParams};
@@ -117,9 +117,7 @@ use vector_ta::indicators::moving_averages::trendflex::{
     trendflex, TrendFlexInput, TrendFlexParams,
 };
 use vector_ta::indicators::moving_averages::trima::{trima, TrimaInput, TrimaParams};
-use vector_ta::indicators::moving_averages::volatility_adjusted_ma::{
-    vama, VamaInput, VamaParams,
-};
+use vector_ta::indicators::moving_averages::volatility_adjusted_ma::{vama, VamaInput, VamaParams};
 use vector_ta::indicators::moving_averages::volume_adjusted_ma::{
     VolumeAdjustedMa as volu_ma, VolumeAdjustedMaInput as VoluMaInput,
     VolumeAdjustedMaParams as VoluMaParams,
@@ -161,8 +159,6 @@ use vector_ta::indicators::vpci::{vpci, VpciInput, VpciParams};
 use vector_ta::indicators::vpt::{vpt, VptInput};
 use vector_ta::indicators::wclprice::{wclprice, WclpriceInput};
 use vector_ta::utilities::data_loader::read_candles_from_csv;
-use serde_json::json;
-use std::env;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();

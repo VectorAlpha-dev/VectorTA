@@ -4,6 +4,7 @@ extern crate vector_ta;
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use cust::context::CurrentContext;
+use std::time::Duration;
 use vector_ta::cuda::{CudaDeviceSliceF32Ref, CudaRuntime};
 use vector_ta::indicators::dispatch::{
     compute_cuda, compute_cuda_device, CudaOutputTarget, IndicatorCudaDataRef,
@@ -11,7 +12,6 @@ use vector_ta::indicators::dispatch::{
     IndicatorCudaSeries, ParamKV, ParamValue,
 };
 use vector_ta::utilities::enums::Kernel;
-use std::time::Duration;
 
 fn env_usize(name: &str, default_v: usize) -> usize {
     std::env::var(name)

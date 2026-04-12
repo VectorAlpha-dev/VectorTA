@@ -4,10 +4,10 @@ extern crate vector_ta;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use cust::memory::mem_get_info;
-use vector_ta::cuda::{self, CudaBenchScenario};
 use std::any::Any;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::{Duration, Instant};
+use vector_ta::cuda::{self, CudaBenchScenario};
 
 #[cfg(not(target_arch = "wasm32"))]
 #[ctor::ctor]

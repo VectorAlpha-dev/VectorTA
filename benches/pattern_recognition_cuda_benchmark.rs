@@ -4,9 +4,9 @@ extern crate vector_ta;
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use cust::memory::DeviceBuffer;
+use std::time::Duration;
 use vector_ta::cuda::pattern_recognition_wrapper::CudaPatternRecognition;
 use vector_ta::indicators::pattern_recognition::list_patterns;
-use std::time::Duration;
 
 fn env_usize(name: &str, default_v: usize) -> usize {
     std::env::var(name)
@@ -98,45 +98,57 @@ fn bench_pattern_recognition_cuda(c: &mut Criterion) {
         })
     });
 
-    group.bench_function(BenchmarkId::new("native_matrix_device", format!("{rows}x{cols}")), |b| {
-        b.iter(|| {
-            let out = cuda
-                .compute_native_matrix_device(&features, rows, cols, row_map.as_slice())
-                .expect("matrix");
-            cuda.synchronize().expect("matrix sync");
-            black_box(out.len());
-        })
-    });
+    group.bench_function(
+        BenchmarkId::new("native_matrix_device", format!("{rows}x{cols}")),
+        |b| {
+            b.iter(|| {
+                let out = cuda
+                    .compute_native_matrix_device(&features, rows, cols, row_map.as_slice())
+                    .expect("matrix");
+                cuda.synchronize().expect("matrix sync");
+                black_box(out.len());
+            })
+        },
+    );
 
-    group.bench_function(BenchmarkId::new("native_matrix_host", format!("{rows}x{cols}")), |b| {
-        b.iter(|| {
-            let out = cuda
-                .compute_native_matrix_host(&features, rows, cols, row_map.as_slice())
-                .expect("matrix host");
-            black_box(out.len());
-        })
-    });
+    group.bench_function(
+        BenchmarkId::new("native_matrix_host", format!("{rows}x{cols}")),
+        |b| {
+            b.iter(|| {
+                let out = cuda
+                    .compute_native_matrix_host(&features, rows, cols, row_map.as_slice())
+                    .expect("matrix host");
+                black_box(out.len());
+            })
+        },
+    );
 
-    group.bench_function(BenchmarkId::new("pack_u8_to_u64_device", format!("{rows}x{cols}")), |b| {
-        b.iter(|| {
-            let mut words = unsafe { DeviceBuffer::<u64>::uninitialized(rows * words_per_row) }
-                .expect("pack alloc");
-            cuda.pack_matrix_u8_device_into(&matrix, rows, cols, &mut words)
-                .expect("pack");
-            cuda.synchronize().expect("pack sync");
-            black_box(words.len());
-        })
-    });
+    group.bench_function(
+        BenchmarkId::new("pack_u8_to_u64_device", format!("{rows}x{cols}")),
+        |b| {
+            b.iter(|| {
+                let mut words = unsafe { DeviceBuffer::<u64>::uninitialized(rows * words_per_row) }
+                    .expect("pack alloc");
+                cuda.pack_matrix_u8_device_into(&matrix, rows, cols, &mut words)
+                    .expect("pack");
+                cuda.synchronize().expect("pack sync");
+                black_box(words.len());
+            })
+        },
+    );
 
-    group.bench_function(BenchmarkId::new("u8_to_f32_device", format!("{rows}x{cols}")), |b| {
-        b.iter(|| {
-            let out = cuda
-                .matrix_u8_to_f32_device(&matrix, rows, cols)
-                .expect("u8->f32");
-            cuda.synchronize().expect("u8->f32 sync");
-            black_box((out.rows, out.cols, out.buf.len()));
-        })
-    });
+    group.bench_function(
+        BenchmarkId::new("u8_to_f32_device", format!("{rows}x{cols}")),
+        |b| {
+            b.iter(|| {
+                let out = cuda
+                    .matrix_u8_to_f32_device(&matrix, rows, cols)
+                    .expect("u8->f32");
+                cuda.synchronize().expect("u8->f32 sync");
+                black_box((out.rows, out.cols, out.buf.len()));
+            })
+        },
+    );
 
     group.bench_function(
         BenchmarkId::new("end_to_end_host_matrix", format!("{rows}x{cols}")),
@@ -184,7 +196,10 @@ fn bench_pattern_recognition_cuda(c: &mut Criterion) {
     );
 
     group.bench_function(
-        BenchmarkId::new("end_to_end_device_inputs_packed_u64", format!("{rows}x{cols}")),
+        BenchmarkId::new(
+            "end_to_end_device_inputs_packed_u64",
+            format!("{rows}x{cols}"),
+        ),
         |b| {
             b.iter(|| {
                 let out = cuda

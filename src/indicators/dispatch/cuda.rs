@@ -39,8 +39,6 @@ use crate::indicators::alphatrend::AlphaTrendBatchRange;
 use crate::indicators::ao::AoBatchRange;
 use crate::indicators::aroon::AroonBatchRange;
 use crate::indicators::aroonosc::AroonOscBatchRange;
-#[cfg(test)]
-use std::sync::{Mutex, MutexGuard, OnceLock};
 use crate::indicators::aso::AsoBatchRange;
 use crate::indicators::atr::AtrBatchRange;
 use crate::indicators::avsl::AvslBatchRange;
@@ -58,7 +56,9 @@ use crate::indicators::correlation_cycle::CorrelationCycleBatchRange;
 use crate::indicators::damiani_volatmeter::DamianiVolatmeterBatchRange;
 use crate::indicators::decycler::DecyclerBatchRange;
 use crate::indicators::deviation::DeviationBatchRange;
-use crate::indicators::devstop::{devstop_with_kernel, DevStopBatchRange, DevStopInput, DevStopParams};
+use crate::indicators::devstop::{
+    devstop_with_kernel, DevStopBatchRange, DevStopInput, DevStopParams,
+};
 use crate::indicators::di::DiBatchRange;
 use crate::indicators::dm::DmBatchRange;
 use crate::indicators::donchian::DonchianBatchRange;
@@ -271,19 +271,11 @@ impl BorrowedCudaMaInputs {
     }
 }
 
-#[cfg(test)]
-fn cuda_dispatch_test_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("cuda dispatch test lock")
-}
-
 pub fn compute_cuda(
     req: IndicatorCudaRequest<'_>,
 ) -> Result<IndicatorCudaOutput, IndicatorDispatchError> {
     #[cfg(test)]
-    let _cuda_dispatch_lock = cuda_dispatch_test_lock();
+    let _cuda_dispatch_lock = crate::cuda::cuda_test_lock();
 
     let normalized_id = normalize_cuda_dispatch_id(req.indicator_id);
     let normalized_req = IndicatorCudaRequest {
@@ -399,7 +391,7 @@ pub fn compute_cuda_device(
     req: IndicatorCudaDeviceRequest<'_>,
 ) -> Result<IndicatorCudaOutput, IndicatorDispatchError> {
     #[cfg(test)]
-    let _cuda_dispatch_lock = cuda_dispatch_test_lock();
+    let _cuda_dispatch_lock = crate::cuda::cuda_test_lock();
 
     let normalized_id = normalize_cuda_dispatch_id(req.indicator_id);
     let normalized_req = IndicatorCudaDeviceRequest {
@@ -4697,16 +4689,18 @@ fn compute_devstop_cuda_device(
     if !is_long {
         let mut high_host = vec![0.0f32; high.len()];
         let mut low_host = vec![0.0f32; low.len()];
-        high_buf.as_buffer().copy_to(high_host.as_mut_slice()).map_err(|e| {
-            IndicatorDispatchError::KernelUnavailable {
+        high_buf
+            .as_buffer()
+            .copy_to(high_host.as_mut_slice())
+            .map_err(|e| IndicatorDispatchError::KernelUnavailable {
                 details: e.to_string(),
-            }
-        })?;
-        low_buf.as_buffer().copy_to(low_host.as_mut_slice()).map_err(|e| {
-            IndicatorDispatchError::KernelUnavailable {
+            })?;
+        low_buf
+            .as_buffer()
+            .copy_to(low_host.as_mut_slice())
+            .map_err(|e| IndicatorDispatchError::KernelUnavailable {
                 details: e.to_string(),
-            }
-        })?;
+            })?;
         let high_f64: Vec<f64> = high_host.into_iter().map(|value| value as f64).collect();
         let low_f64: Vec<f64> = low_host.into_iter().map(|value| value as f64).collect();
         let periods = expand_usize_values(sweep.period)?;
@@ -4745,12 +4739,13 @@ fn compute_devstop_cuda_device(
                             ma_type: Some(ma_type_owned.clone()),
                         },
                     );
-                    let output = devstop_with_kernel(&input, req.kernel.to_non_batch()).map_err(|e| {
-                        IndicatorDispatchError::ComputeFailed {
-                            indicator: info.id.to_string(),
-                            details: e.to_string(),
-                        }
-                    })?;
+                    let output =
+                        devstop_with_kernel(&input, req.kernel.to_non_batch()).map_err(|e| {
+                            IndicatorDispatchError::ComputeFailed {
+                                indicator: info.id.to_string(),
+                                details: e.to_string(),
+                            }
+                        })?;
                     let start = row * cols;
                     for (dst, src) in host[start..start + cols]
                         .iter_mut()
@@ -4773,7 +4768,8 @@ fn compute_devstop_cuda_device(
                 pattern_ids: None,
             }),
             CudaOutputTarget::DeviceF32 => {
-                let runtime = CudaRuntime::new(device_id as usize).map_err(map_cuda_runtime_error)?;
+                let runtime =
+                    CudaRuntime::new(device_id as usize).map_err(map_cuda_runtime_error)?;
                 let uploaded = runtime
                     .upload_matrix_f32(host.as_slice(), rows, cols)
                     .map_err(map_cuda_runtime_error)?;
@@ -14089,7 +14085,10 @@ pub fn compute_pattern_recognition_cuda_bitmask(
         }
     })?;
     let native_ids = CudaPatternRecognition::native_supported_pattern_ids();
-    let pattern_ids = native_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+    let pattern_ids = native_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>();
     let series = cuda
         .compute_native_matrix_bitmask_u64_device_from_host_inputs(open, high, low, close)
         .map_err(|e| IndicatorDispatchError::KernelUnavailable {
@@ -14149,7 +14148,10 @@ pub fn compute_pattern_recognition_cuda_device_bitmask(
         }
     })?;
     let native_ids = CudaPatternRecognition::native_supported_pattern_ids();
-    let pattern_ids = native_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+    let pattern_ids = native_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>();
     let series = cuda
         .compute_native_matrix_bitmask_u64_device_from_device_inputs(
             open_buf.as_buffer(),
@@ -17755,6 +17757,8 @@ mod tests {
         if !crate::cuda::cuda_available() {
             return;
         }
+
+        let _cuda_dispatch_lock = crate::cuda::cuda_test_lock();
 
         let (_open, high_f32, low_f32, _close_f32) = sample_ohlc(128);
         let high_f64 = to_f64(&high_f32);
@@ -28634,6 +28638,8 @@ mod tests {
         if !crate::cuda::cuda_available() {
             return;
         }
+
+        let _cuda_dispatch_lock = crate::cuda::cuda_test_lock();
 
         let (open, high, low, close) = sample_ohlc(160);
         let runtime = CudaRuntime::new(0).expect("runtime");

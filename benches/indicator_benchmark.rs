@@ -4,12 +4,12 @@ use anyhow::anyhow;
 use criterion::{
     black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
 };
-use vector_ta::utilities::enums::Kernel;
 use once_cell::sync::Lazy;
 use paste::paste;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use std::arch::is_x86_feature_detected;
 use std::time::Duration;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[ctor::ctor]

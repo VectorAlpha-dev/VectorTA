@@ -2657,7 +2657,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     {
         m.add_class::<PatternRecognitionDeviceBitmaskU64Py>()?;
         m.add_function(wrap_pyfunction!(pattern_recognition_cuda_batch_dev_py, m)?)?;
-        m.add_function(wrap_pyfunction!(pattern_recognition_cuda_bitmask_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            pattern_recognition_cuda_bitmask_dev_py,
+            m
+        )?)?;
         m.add_function(wrap_pyfunction!(pattern_recognition_cuda_host_f32_py, m)?)?;
     }
 

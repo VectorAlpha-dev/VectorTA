@@ -142,8 +142,8 @@ impl CudaTradjema {
         let device = Device::get_device(device_id as u32).map_err(CudaTradjemaError::Cuda)?;
         let context = Context::new(device).map_err(CudaTradjemaError::Cuda)?;
 
-        let module =
-            crate::load_cuda_embedded_module!("tradjema_kernel").map_err(CudaTradjemaError::Cuda)?;
+        let module = crate::load_cuda_embedded_module!("tradjema_kernel")
+            .map_err(CudaTradjemaError::Cuda)?;
         let stream =
             Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaTradjemaError::Cuda)?;
 

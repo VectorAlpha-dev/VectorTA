@@ -90,10 +90,9 @@ fn row_index_or_neg1(row_map: &[(&str, usize)], pattern_id: &str) -> i32 {
 
 fn is_canonical_full_native_row_map(row_map: &[(&str, usize)]) -> bool {
     row_map.len() == NATIVE_SUPPORTED_PATTERN_IDS.len()
-        && row_map
-            .iter()
-            .enumerate()
-            .all(|(idx, (pattern_id, row))| *pattern_id == NATIVE_SUPPORTED_PATTERN_IDS[idx] && *row == idx)
+        && row_map.iter().enumerate().all(|(idx, (pattern_id, row))| {
+            *pattern_id == NATIVE_SUPPORTED_PATTERN_IDS[idx] && *row == idx
+        })
 }
 
 fn is_simple10_fused_pattern(pattern_id: &str) -> bool {
@@ -345,7 +344,10 @@ impl CudaPatternRecognition {
         Ok(out)
     }
 
-    fn cached_function(&self, name: &'static str) -> Result<CUfunction, CudaPatternRecognitionError> {
+    fn cached_function(
+        &self,
+        name: &'static str,
+    ) -> Result<CUfunction, CudaPatternRecognitionError> {
         let mut cache = self.kernel_handles.lock().map_err(|_| {
             CudaPatternRecognitionError::InvalidInput("kernel handle cache poisoned".to_string())
         })?;
@@ -728,7 +730,14 @@ impl CudaPatternRecognition {
         self.launch_simple10_rows(features, &rolling, cols, &mut d_matrix, cols, row_map)?;
         self.launch_two_bar_body10_rows(features, &rolling, cols, &mut d_matrix, cols, row_map)?;
         self.launch_single_bar_shadow_rows(features, &rolling, cols, &mut d_matrix, cols, row_map)?;
-        self.launch_directional_shadow_rows(features, &rolling, cols, &mut d_matrix, cols, row_map)?;
+        self.launch_directional_shadow_rows(
+            features,
+            &rolling,
+            cols,
+            &mut d_matrix,
+            cols,
+            row_map,
+        )?;
         self.launch_star3_rows(features, &rolling, cols, &mut d_matrix, cols, row_map)?;
 
         for (pattern_id, row) in row_map {
@@ -747,7 +756,15 @@ impl CudaPatternRecognition {
             if is_star3_fused_pattern(pattern_id) {
                 continue;
             }
-            self.launch_pattern_row(features, &rolling, cols, &mut d_matrix, cols, *row, pattern_id)?;
+            self.launch_pattern_row(
+                features,
+                &rolling,
+                cols,
+                &mut d_matrix,
+                cols,
+                *row,
+                pattern_id,
+            )?;
         }
 
         Ok(d_matrix)
@@ -811,7 +828,9 @@ impl CudaPatternRecognition {
         let d_high = DeviceBuffer::from_slice(high)?;
         let d_low = DeviceBuffer::from_slice(low)?;
         let d_close = DeviceBuffer::from_slice(close)?;
-        self.compute_native_matrix_device_from_device_inputs(&d_open, &d_high, &d_low, &d_close, len)
+        self.compute_native_matrix_device_from_device_inputs(
+            &d_open, &d_high, &d_low, &d_close, len,
+        )
     }
 
     pub fn compute_native_matrix_f32_device_from_device_inputs(
@@ -824,8 +843,8 @@ impl CudaPatternRecognition {
     ) -> Result<DeviceArrayF32, CudaPatternRecognitionError> {
         let native_ids = Self::native_supported_pattern_ids();
         let rows = native_ids.len();
-        let d_u8 =
-            self.compute_native_matrix_device_from_device_inputs(d_open, d_high, d_low, d_close, len)?;
+        let d_u8 = self
+            .compute_native_matrix_device_from_device_inputs(d_open, d_high, d_low, d_close, len)?;
         self.matrix_u8_to_f32_device(&d_u8, rows, len)
     }
 
@@ -852,8 +871,8 @@ impl CudaPatternRecognition {
     ) -> Result<DevicePatternBitmaskU64, CudaPatternRecognitionError> {
         let native_ids = Self::native_supported_pattern_ids();
         let rows = native_ids.len();
-        let d_u8 =
-            self.compute_native_matrix_device_from_device_inputs(d_open, d_high, d_low, d_close, len)?;
+        let d_u8 = self
+            .compute_native_matrix_device_from_device_inputs(d_open, d_high, d_low, d_close, len)?;
         let words_per_row = len.div_ceil(64);
         let total_words = rows.checked_mul(words_per_row).ok_or_else(|| {
             CudaPatternRecognitionError::InvalidInput("rows*words overflow".to_string())
@@ -883,11 +902,7 @@ impl CudaPatternRecognition {
         let d_low = DeviceBuffer::from_slice(low)?;
         let d_close = DeviceBuffer::from_slice(close)?;
         self.compute_native_matrix_bitmask_u64_device_from_device_inputs(
-            &d_open,
-            &d_high,
-            &d_low,
-            &d_close,
-            len,
+            &d_open, &d_high, &d_low, &d_close, len,
         )
     }
 
@@ -1345,7 +1360,9 @@ impl CudaPatternRecognition {
                 cols,
                 row,
             ),
-            "cdldoji" => self.launch_row_cdldoji(&features.body, &rolling.body_avg10, len, matrix, cols, row),
+            "cdldoji" => {
+                self.launch_row_cdldoji(&features.body, &rolling.body_avg10, len, matrix, cols, row)
+            }
             "cdldojistar" => self.launch_row_cdldojistar(
                 &features.body,
                 &rolling.body_avg10,

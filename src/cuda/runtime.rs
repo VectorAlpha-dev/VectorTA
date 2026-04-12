@@ -87,6 +87,8 @@ impl CudaSession {
 
 pub struct CudaRuntime {
     session: Arc<CudaSession>,
+    #[cfg(test)]
+    _test_lock: super::CudaTestLock,
 }
 
 impl std::fmt::Debug for CudaRuntime {
@@ -99,8 +101,13 @@ impl std::fmt::Debug for CudaRuntime {
 
 impl CudaRuntime {
     pub fn new(device_id: usize) -> Result<Self, CudaRuntimeError> {
+        #[cfg(test)]
+        let test_lock = super::cuda_test_lock();
+
         Ok(Self {
             session: Arc::new(CudaSession::new(device_id)?),
+            #[cfg(test)]
+            _test_lock: test_lock,
         })
     }
 

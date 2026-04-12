@@ -1,8 +1,8 @@
 use crate::utilities::data_loader::Candles;
 #[cfg(all(feature = "python", feature = "cuda"))]
-pub use crate::utilities::dlpack_cuda::DeviceArrayF32Py;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_u64_cuda_dlpack_2d;
+#[cfg(all(feature = "python", feature = "cuda"))]
+pub use crate::utilities::dlpack_cuda::DeviceArrayF32Py;
 use crate::utilities::enums::Kernel;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -18,11 +18,11 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
-#[cfg(all(feature = "python", feature = "cuda"))]
-use std::sync::Arc;
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 use std::mem::MaybeUninit;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 use thiserror::Error;
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
@@ -6960,7 +6960,12 @@ pub fn pattern_recognition_cuda_host_f32_py<'py>(
         let rows = native_ids.len();
         let cols = close_slice.len();
         let d_u8 = cuda
-            .compute_native_matrix_device_from_host_inputs(open_slice, high_slice, low_slice, close_slice)
+            .compute_native_matrix_device_from_host_inputs(
+                open_slice,
+                high_slice,
+                low_slice,
+                close_slice,
+            )
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.synchronize()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
