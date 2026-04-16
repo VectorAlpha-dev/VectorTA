@@ -30,7 +30,7 @@ test.before(async () => {
             : wasmPath;
         wasm = await import(importPath);
 
-        const wasmBgPath = path.join(path.dirname(importPath.replace('file:///', '/')), 'vector_ta_bg.wasm');
+        const wasmBgPath = path.join(__dirname, '../../pkg/vector_ta_bg.wasm');
         const wasmBytes = fs.readFileSync(wasmBgPath);
         if (typeof wasm.initSync === 'function') {
             wasmInst = wasm.initSync(wasmBytes);
