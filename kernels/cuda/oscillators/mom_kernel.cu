@@ -1,10 +1,3 @@
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -49,14 +42,12 @@ void mom_batch_f32(const float* __restrict__ prices,
     }
 
 
-
     for (int t = warm + threadIdx.x; t < series_len; t += blockDim.x) {
         const float cur  = __ldg(&prices[t]);
         const float prev = __ldg(&prices[t - period]);
         out[base + t] = cur - prev;
     }
 }
-
 
 
 extern "C" __global__

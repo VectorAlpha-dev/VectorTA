@@ -415,7 +415,6 @@ fn run_registered_benches(c: &mut Criterion) {
             };
 
 
-
             if let Err(panic) = catch_unwind(AssertUnwindSafe(|| active_warmup(&mut *state))) {
                 let msg = panic_message(&panic);
                 eprintln!(
@@ -425,10 +424,6 @@ fn run_registered_benches(c: &mut Criterion) {
                 b.iter(|| 0);
                 return;
             }
-
-
-
-
 
 
             if scenario_timeout_ms > 0 {

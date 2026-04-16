@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -69,7 +68,6 @@ test('HWMA accuracy', async () => {
         1e-3,
         "HWMA last 5 values mismatch"
     );
-
 
 
 });
@@ -360,7 +358,6 @@ test('HWMA batch metadata', () => {
     );
 
 
-
     assert.strictEqual(metadata.length, 24);
 
 
@@ -386,7 +383,6 @@ test('HWMA warmup period', () => {
     const close = new Float64Array(testData.close.slice(0, 50));
 
     const result = wasm.hwma_js(close, 0.2, 0.1, 0.1);
-
 
 
     for (let i = 0; i < Math.min(result.length, 10); i++) {

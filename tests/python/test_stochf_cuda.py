@@ -94,4 +94,3 @@ class TestStochfCuda:
         assert d_gpu_tm.shape == (T, N)
         assert_close(k_gpu_tm, k_cpu_tm, rtol=1e-4, atol=2e-4, msg="CUDA many-series K vs CPU mismatch")
         assert_close(d_gpu_tm, d_cpu_tm, rtol=1e-4, atol=2e-4, msg="CUDA many-series D vs CPU mismatch")
-

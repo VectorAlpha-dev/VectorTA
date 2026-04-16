@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -417,8 +416,6 @@ test('DEMA batch MA crossover scenario', () => {
     const close = new Float64Array(testData.close.slice(0, 200));
 
 
-
-
     console.log('Skipping batch MA crossover test - needs update for new API');
     return;
 
@@ -436,7 +433,6 @@ test('DEMA batch MA crossover scenario', () => {
         assert(!isNaN(slow30[i]), `Unexpected NaN at index ${i} for slow MA`);
     }
 });
-
 
 
 test('DEMA fast API basic', () => {

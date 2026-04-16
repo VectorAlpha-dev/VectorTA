@@ -29,9 +29,6 @@ class TestMedprice:
         return load_test_data()
 
 
-
-
-
     def test_medprice_accuracy(self, test_data):
         """Test MEDPRICE matches expected values from Rust tests - mirrors check_medprice_accuracy"""
         high = test_data['high']
@@ -85,9 +82,6 @@ class TestMedprice:
         assert_close(result[0], 90.0)
 
 
-
-
-
     def test_medprice_empty_data(self):
         """Test MEDPRICE with empty data - mirrors check_medprice_empty_data"""
         high = np.array([], dtype=np.float64)
@@ -111,9 +105,6 @@ class TestMedprice:
 
         with pytest.raises(ValueError, match=r"(?i)all values are nan"):
             ta_indicators.medprice(high, low)
-
-
-
 
 
     def test_medprice_nan_handling_basic(self):
@@ -181,9 +172,6 @@ class TestMedprice:
         assert_close(result[3], 120.0)
 
 
-
-
-
     def test_medprice_boundary_values(self):
         """Test MEDPRICE with extreme values"""
 
@@ -237,9 +225,6 @@ class TestMedprice:
             assert_close(result[i], 100.0)
 
 
-
-
-
     def test_medprice_streaming(self):
         """Test MEDPRICE streaming functionality - mirrors check_medprice_streaming"""
         high = [100.0, 110.0, 120.0]
@@ -273,9 +258,6 @@ class TestMedprice:
 
         result4 = stream.update(120.0, 100.0)
         assert result4 == 110.0
-
-
-
 
 
     def test_medprice_batch(self, test_data):
@@ -327,9 +309,6 @@ class TestMedprice:
             )
 
 
-
-
-
     def test_medprice_with_kernel(self, test_data):
         """Test MEDPRICE with different kernel specifications"""
         high = test_data['high'][:100]
@@ -367,9 +346,6 @@ class TestMedprice:
                 decimal=15,
                 err_msg=f"Kernel {kernel} produces different results than {kernels[0]}"
             )
-
-
-
 
 
     def test_medprice_large_dataset(self, test_data):

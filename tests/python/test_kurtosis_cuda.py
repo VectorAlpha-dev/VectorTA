@@ -75,4 +75,3 @@ class TestKurtosisCuda:
 
         assert gpu_tm.shape == data_tm.shape
         assert_close(gpu_tm, cpu_tm, rtol=1e-3, atol=1e-3, msg="CUDA kurtosis many-series mismatch")
-

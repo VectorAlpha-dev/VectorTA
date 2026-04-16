@@ -205,7 +205,6 @@ class TestVwap:
         assert len(result) == len(prices)
 
 
-
         non_nan_count = np.sum(~np.isnan(result))
         assert non_nan_count > 0, "Expected some valid VWAP values"
 
@@ -247,9 +246,6 @@ class TestVwap:
         volumes = np.array([1.0, 2.0, 3.0])
 
         result = ta_indicators.vwap(timestamps, volumes, prices, anchor="1d")
-
-
-
 
 
         expected = [100.0, 500.0/3.0, 1400.0/6.0]

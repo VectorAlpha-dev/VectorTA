@@ -1,14 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -36,9 +25,6 @@ static __forceinline__ __device__ void kahan_add(float &sum, float &c, float x) 
     c = (t - sum) - y;
     sum = t;
 }
-
-
-
 
 
 extern "C" __global__
@@ -146,10 +132,6 @@ void mean_ad_batch_f32(const float* __restrict__ prices,
         }
     }
 }
-
-
-
-
 
 
 #ifndef SMALL_PERIOD_MAX
@@ -290,4 +272,3 @@ void mean_ad_many_series_one_param_f32(const float* __restrict__ prices_tm,
         }
     }
 }
-

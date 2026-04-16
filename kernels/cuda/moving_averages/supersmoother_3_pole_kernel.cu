@@ -1,10 +1,3 @@
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -35,7 +28,6 @@ __device__ __forceinline__ SupersmootherCoefs make_coefs(int period) {
     coefs.coef_prev3 = c * c;
     return coefs;
 }
-
 
 
 __device__ __forceinline__ void supersmoother_3_pole_row_with_coefs(
@@ -164,10 +156,6 @@ __device__ __forceinline__ void supersmoother_3_pole_row_strided(
 }
 
 
-
-
-
-
 extern "C" __global__ __launch_bounds__(256)
 void supersmoother_3_pole_batch_f32(
     const float* __restrict__ prices,
@@ -187,7 +175,6 @@ void supersmoother_3_pole_batch_f32(
 }
 
 
-
 extern "C" __global__ __launch_bounds__(256)
 void supersmoother_3_pole_batch_f32_precomp(
     const float* __restrict__ prices,
@@ -204,18 +191,6 @@ void supersmoother_3_pole_batch_f32_precomp(
     float* out_row = out + static_cast<size_t>(combo) * static_cast<size_t>(series_len);
     supersmoother_3_pole_row_with_coefs(prices, series_len, first_valid, coefs, out_row);
 }
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 extern "C" __global__
@@ -332,9 +307,6 @@ void supersmoother_3_pole_batch_warp_scan_f32(
         double v2 = 0.0;
 
 
-
-
-
         #pragma unroll
         for (int offset = 1; offset < 32; offset <<= 1) {
             const double p00_prev = __shfl_up_sync(mask, P.m00, offset);
@@ -381,7 +353,6 @@ void supersmoother_3_pole_batch_warp_scan_f32(
         s2_prev = __shfl_sync(mask, y2, last_lane);
     }
 }
-
 
 
 extern "C" __global__ __launch_bounds__(256)

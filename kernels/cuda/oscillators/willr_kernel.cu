@@ -1,8 +1,3 @@
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -190,7 +185,6 @@ void willr_batch_period_levels_f32(const float* __restrict__ close,
         out_row[t] = (denom == 0.0f) ? 0.0f : ((hmax - c) / denom) * -100.0f;
     }
 }
-
 
 
 extern "C" __global__

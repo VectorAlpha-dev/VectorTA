@@ -1,11 +1,3 @@
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -85,10 +77,6 @@ static __device__ __forceinline__ double clamp_double(double x, double lo, doubl
 }
 
 }
-
-
-
-
 
 
 extern "C" __global__
@@ -193,7 +181,6 @@ void mama_inv_dp_f32(const float* __restrict__ prices,
 }
 
 
-
 extern "C" __global__
 void mama_batch_from_inv_dp_f32(const float* __restrict__ prices,
                                 const float* __restrict__ inv_dp,
@@ -292,8 +279,6 @@ void mama_batch_from_inv_dp_f32(const float* __restrict__ prices,
         }
 
 
-
-
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float A_prev = __shfl_up_sync(mask, A_m, offset);
             const float B_prev = __shfl_up_sync(mask, B_m, offset);
@@ -354,7 +339,6 @@ void mama_batch_f32(const float* __restrict__ prices,
     const int tid    = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
     const float nanf32 = nanf("");
-
 
 
     if (n_combos == 1) {

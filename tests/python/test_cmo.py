@@ -245,7 +245,6 @@ class TestCmo:
         assert len(result_scalar) == len(close)
 
 
-
         assert_close(
             result_auto[14:],
             result_scalar[14:],

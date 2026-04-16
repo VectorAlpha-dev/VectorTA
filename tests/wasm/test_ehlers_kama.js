@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -66,7 +65,6 @@ test('Ehlers KAMA accuracy', async () => {
         1e-8,
         "Ehlers KAMA last 5 values mismatch"
     );
-
 
 
 });

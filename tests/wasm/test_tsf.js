@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -95,7 +94,6 @@ test('TSF NaN handling', () => {
 
     const result = wasm.tsf_js(close, 14);
     assert.strictEqual(result.length, close.length);
-
 
 
     assert(isNaN(result[0]), 'First value should be NaN');

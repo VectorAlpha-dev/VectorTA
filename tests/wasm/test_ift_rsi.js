@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -293,8 +292,6 @@ test('IFT RSI warmup period', () => {
         expected.defaultParams.rsiPeriod,
         expected.defaultParams.wmaPeriod
     );
-
-
 
 
     const warmup = expected.warmupPeriod;

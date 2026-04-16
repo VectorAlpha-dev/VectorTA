@@ -1,20 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -27,7 +10,6 @@
 static __device__ __forceinline__ float f32_qnan() {
     return __int_as_float(0x7fffffff);
 }
-
 
 
 extern "C" __global__
@@ -81,9 +63,6 @@ void cora_wave_batch_f32(const float* __restrict__ prices,
 }
 
 
-
-
-
 extern "C" __global__
 void cora_wave_batch_wma_from_y_f32(const float* __restrict__ y,
                                      const int*   __restrict__ smooth_periods,
@@ -131,7 +110,6 @@ void cora_wave_batch_wma_from_y_f32(const float* __restrict__ y,
 }
 
 
-
 extern "C" __global__
 void cora_wave_multi_series_one_param_time_major_f32(
     const float* __restrict__ prices_tm,
@@ -172,7 +150,6 @@ void cora_wave_multi_series_one_param_time_major_f32(
         t += stride;
     }
 }
-
 
 
 extern "C" __global__
@@ -218,4 +195,3 @@ void cora_wave_ms1p_wma_time_major_f32(const float* __restrict__ y_tm,
         t += stride;
     }
 }
-

@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 
@@ -14,7 +5,6 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846264338327950288
 #endif
-
 
 
 __device__ __forceinline__ float f32_nan() { return __int_as_float(0x7fffffff); }
@@ -26,9 +16,6 @@ __device__ __forceinline__ float voss_s1_f32(float g1) {
     const float root = sqrtf(t);
     return inv_g1 - root;
 }
-
-
-
 
 
 struct dsfloat { float hi, lo; };
@@ -83,8 +70,6 @@ extern "C" __global__ void voss_cast_f32_to_f64(
         output[idx] = (double)input[idx];
     }
 }
-
-
 
 
 extern "C" __global__ void voss_batch_f32(

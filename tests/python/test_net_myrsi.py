@@ -61,8 +61,6 @@ class TestNetMyrsi:
         )
 
 
-
-
     def test_net_myrsi_default_candles(self, test_data):
         """Test NET_MYRSI with default parameters - mirrors check_net_myrsi_default_candles"""
         close = test_data['close']
@@ -139,9 +137,6 @@ class TestNetMyrsi:
         assert len(result) == len(data_with_nan)
 
 
-
-
-
         assert not np.all(np.isnan(result[:15])), "Should have valid values before NaN"
         assert not np.all(np.isnan(result[16:])), "Should have valid values after NaN"
 
@@ -170,13 +165,11 @@ class TestNetMyrsi:
         result = ta_indicators.net_myrsi(close, period, None)
 
 
-
         warmup = first_valid + period - 1
 
 
         for i in range(warmup):
             assert np.isnan(result[i]), f"Expected NaN at index {i} (warmup period)"
-
 
 
         actual_start = first_valid + period
@@ -204,7 +197,6 @@ class TestNetMyrsi:
 
 
         batch_results = ta_indicators.net_myrsi(close, period, None)
-
 
 
         stream_first_valid = next((i for i, v in enumerate(stream_results) if not np.isnan(v)), len(stream_results))
@@ -274,7 +266,6 @@ class TestNetMyrsi:
         single_result = ta_indicators.net_myrsi(close, 14, None)
 
 
-
         assert len(results['values'][0]) == len(single_result)
 
 
@@ -285,7 +276,6 @@ class TestNetMyrsi:
         """Test NET_MYRSI produces consistent results across different kernels"""
         close = test_data['close']
         period = 14
-
 
 
         kernels = [

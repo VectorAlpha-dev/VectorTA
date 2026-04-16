@@ -111,4 +111,3 @@ class TestDonchianCuda:
         assert_close(g_m[mask], cpu_m[mask], rtol=5e-4, atol=5e-4, msg="middle many-series mismatch")
         mask = ~np.isnan(cpu_l)
         assert_close(g_l[mask], cpu_l[mask], rtol=5e-4, atol=5e-4, msg="lower many-series mismatch")
-

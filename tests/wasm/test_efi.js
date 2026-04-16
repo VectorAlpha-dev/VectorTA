@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -100,7 +99,6 @@ test('EFI nan handling', () => {
 
 
     assert(isNaN(result[0]), "First value should be NaN");
-
 
 
     const nonNanStart = result.findIndex(v => !isNaN(v));

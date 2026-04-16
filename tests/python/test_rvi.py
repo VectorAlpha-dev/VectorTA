@@ -190,7 +190,6 @@ class TestRvi:
             row_data = batch_result['values'][row]
 
 
-
             period = batch_result['periods'][row]
             ma_len = batch_result['ma_lens'][row]
             warmup = period - 1 + ma_len - 1

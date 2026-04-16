@@ -147,8 +147,8 @@ fn cuda_feature_off_noop() {
 
 #[cfg(feature = "cuda")]
 #[test]
-fn candle_strength_oscillator_cuda_bollinger_matches_cpu(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn candle_strength_oscillator_cuda_bollinger_matches_cpu() -> Result<(), Box<dyn std::error::Error>>
+{
     run_case(
         CandleStrengthOscillatorParams {
             period: None,
@@ -165,8 +165,8 @@ fn candle_strength_oscillator_cuda_bollinger_matches_cpu(
 
 #[cfg(feature = "cuda")]
 #[test]
-fn candle_strength_oscillator_cuda_donchian_matches_cpu(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn candle_strength_oscillator_cuda_donchian_matches_cpu() -> Result<(), Box<dyn std::error::Error>>
+{
     run_case(
         CandleStrengthOscillatorParams {
             period: None,

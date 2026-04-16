@@ -54,8 +54,6 @@ class TestRocr:
         )
 
 
-
-
     def test_rocr_default_candles(self, test_data):
         """Test ROCR with default parameters - mirrors check_rocr_default_candles"""
         close = test_data['close']

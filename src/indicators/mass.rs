@@ -1401,7 +1401,6 @@ mod tests {
 					mass_with_kernel(&input, Kernel::Scalar).unwrap();
 
 
-
 				let warmup_end = 16 + period - 1;
 				for i in 0..warmup_end.min(high.len()) {
 					prop_assert!(
@@ -1414,7 +1413,6 @@ mod tests {
 				for i in warmup_end..high.len() {
 					let y = out[i];
 					let r = ref_out[i];
-
 
 
 					if y.is_finite() && r.is_finite() {
@@ -1436,7 +1434,6 @@ mod tests {
 					}
 
 
-
 					if y.is_finite() {
 						prop_assert!(
 							y > 0.0,
@@ -1451,7 +1448,6 @@ mod tests {
 					}
 
 
-
 					let window_start = i.saturating_sub(period - 1);
 					let window_end = i + 1;
 					let ranges: Vec<f64> = (window_start..window_end)
@@ -1461,7 +1457,6 @@ mod tests {
 
 					let is_constant_range = ranges.windows(2)
 						.all(|w| (w[0] - w[1]).abs() < 1e-9);
-
 
 
 					if is_constant_range && y.is_finite() && i >= warmup_end + 2 * period {
@@ -1488,7 +1483,6 @@ mod tests {
 					}
 
 
-
 					for j in window_start..window_end {
 						prop_assert!(
 							high[j] >= low[j] - f64::EPSILON,
@@ -1497,18 +1491,15 @@ mod tests {
 					}
 
 
-
 					prop_assert!(
 						!y.is_infinite(),
 						"Found infinite value at idx {}: {}", i, y
 					);
 
 
-
 					if i >= warmup_end + period && y.is_finite() {
 
 						let avg_range = ranges.iter().sum::<f64>() / ranges.len() as f64;
-
 
 
 						if avg_range < 0.001 {

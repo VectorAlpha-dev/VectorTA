@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -190,7 +189,6 @@ test('NVI memory management - no leaks', () => {
 });
 
 
-
 test('NVI batch - basic single row', () => {
     const close = testData.close.slice(0, 100);
     const volume = testData.volume.slice(0, 100);
@@ -234,7 +232,6 @@ test('NVI batch - error handling with null pointers', () => {
 
 test('NVI batch - length mismatch detection', () => {
     const len = 100;
-
 
 
     const closePtr = wasm.nvi_alloc(len);

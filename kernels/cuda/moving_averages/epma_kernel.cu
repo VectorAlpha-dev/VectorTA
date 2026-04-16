@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -18,7 +9,6 @@ namespace {
 
 
     __device__ __forceinline__ constexpr int kTile() { return 8; }
-
 
 
     __device__ __forceinline__ double epma_weight_sum(int p1, int offset) {
@@ -76,8 +66,6 @@ void epma_batch_f32(const float* __restrict__ prices,
 
         int a = t0 + 1 - p1;
         int b = t0;
-
-
 
 
         double sumP  = 0.0;

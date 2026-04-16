@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -138,8 +137,6 @@ test('StochF nan handling', () => {
     const result = wasm.stochf_js(high, low, close, 5, 3, 0);
     const k = result.slice(0, high.length);
     const d = result.slice(high.length);
-
-
 
 
     if (k.length > 10) {

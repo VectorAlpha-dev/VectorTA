@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -202,7 +201,6 @@ test('MOM warmup period', () => {
     for (let i = period; i < result.length; i++) {
         assert(!isNaN(result[i]), `Unexpected NaN at index ${i} after warmup`);
     }
-
 
 
     for (let i = period; i < Math.min(period + 5, close.length); i++) {

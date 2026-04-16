@@ -1,21 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -71,7 +53,6 @@ __device__ __forceinline__ f2 f2_mul_scalar(const f2 &x, float b) {
 }
 
 
-
 __device__ __forceinline__ f2 ema_update_f2(float a, float x, float b, const f2 &y) {
 
     float p1, pe1; two_prod_fma(a, x, p1, pe1);
@@ -80,7 +61,6 @@ __device__ __forceinline__ f2 ema_update_f2(float a, float x, float b, const f2 
     e += (pe1 + pe2 + y.lo * b);
     return make_f2(s, e);
 }
-
 
 
 __device__ __forceinline__ float warp_broadcast_load(const float* __restrict__ prices, int idx) {
@@ -94,7 +74,6 @@ __device__ __forceinline__ float warp_broadcast_load(const float* __restrict__ p
     v = __shfl_sync(mask, v, 0);
     return v;
 }
-
 
 
 template <bool UseWarpBroadcast>
@@ -152,7 +131,6 @@ void range_filter_scan_one_combo(
     const float one_minus_alpha_range = 1.0f - alpha_range;
 
 
-
     for (int t = first_valid + 1; t < series_len; ++t) {
         float price = UseWarpBroadcast ? warp_broadcast_load(prices, t) : prices[t];
         const float d = price - prev_price;
@@ -204,9 +182,6 @@ void range_filter_scan_one_combo(
 }
 
 
-
-
-
 extern "C" __global__
 void range_filter_batch_f32(const float* __restrict__ prices,
                             const float* __restrict__ range_sizes,
@@ -219,8 +194,6 @@ void range_filter_batch_f32(const float* __restrict__ prices,
                             float* __restrict__ filter_out,
                             float* __restrict__ high_out,
                             float* __restrict__ low_out) {
-
-
 
 
     if (gridDim.y > 1) {
@@ -239,9 +212,6 @@ void range_filter_batch_f32(const float* __restrict__ prices,
                                           series_len, first_valid, filter_out, high_out, low_out);
     }
 }
-
-
-
 
 
 extern "C" __global__

@@ -149,7 +149,6 @@ class TestHighPass:
         assert len(result) == len(close)
 
 
-
         assert not np.isnan(result[0]), "HighPass should produce value at index 0"
 
 
@@ -320,7 +319,6 @@ class TestHighPass:
 
         constant_data = np.full(100, 50.0)
         result = ta_indicators.highpass(constant_data, 20)
-
 
 
         stabilized_start = 3 * 20

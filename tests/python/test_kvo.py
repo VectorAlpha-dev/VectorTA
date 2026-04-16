@@ -147,7 +147,6 @@ class TestKvo:
         assert np.isnan(stream_results[0]), "First streaming value should be NaN during warmup"
 
 
-
         for i in range(len(stream_results)):
             if np.isnan(batch_results[i]):
                 assert np.isnan(stream_results[i]), f"Expected NaN at index {i} in streaming"

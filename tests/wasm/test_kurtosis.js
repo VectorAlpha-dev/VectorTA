@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -347,4 +346,3 @@ test('Kurtosis batch full parameter sweep', () => {
         );
     }
 });
-

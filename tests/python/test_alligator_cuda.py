@@ -120,4 +120,3 @@ class TestAlligatorCuda:
         assert_close(jaw_gpu, jaw_cpu, rtol=1e-5, atol=1e-6, msg="jaw mismatch")
         assert_close(teeth_gpu, teeth_cpu, rtol=1e-5, atol=1e-6, msg="teeth mismatch")
         assert_close(lips_gpu, lips_cpu, rtol=1e-5, atol=1e-6, msg="lips mismatch")
-

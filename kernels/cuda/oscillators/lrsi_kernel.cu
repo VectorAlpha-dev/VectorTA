@@ -1,15 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -23,7 +11,6 @@
 #else
   #define LRDG(ptr) (*(ptr))
 #endif
-
 
 
 static __device__ __forceinline__ float warp_broadcast_ldg(const float* addr) {
@@ -61,10 +48,6 @@ void laguerre4_step(float p, float alpha, float gamma, float mgamma,
     t3 = fmaf(gamma, l3, fmaf(mgamma, t2, l2));
     l0 = t0; l1 = t1; l2 = t2; l3 = t3;
 }
-
-
-
-
 
 
 extern "C" __global__
@@ -147,10 +130,6 @@ void lrsi_batch_f32(const float* __restrict__ prices,
         }
     }
 }
-
-
-
-
 
 
 extern "C" __global__

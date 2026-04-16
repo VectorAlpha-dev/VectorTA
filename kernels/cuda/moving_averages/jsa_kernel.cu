@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -94,7 +85,6 @@ void jsa_many_series_one_param_f32(const float* __restrict__ prices_tm,
         out_tm[curr] = 0.5f * (c + p);
     }
 }
-
 
 
 #ifndef JSA_BLOCK_X

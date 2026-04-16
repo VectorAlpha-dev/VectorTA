@@ -101,4 +101,3 @@ class TestEmvCuda:
 
         assert gpu_tm.shape == data_tm.shape
         assert_close(gpu_tm, cpu_tm, rtol=1e-5, atol=1e-5, msg="CUDA EMV many-series mismatch")
-

@@ -1,20 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -23,9 +6,6 @@
 #include <math.h>
 
 __device__ __forceinline__ float mass_nan() { return __int_as_float(0x7fffffff); }
-
-
-
 
 
 __device__ __forceinline__ float2 two_sum_f32(float a, float b) {
@@ -111,7 +91,6 @@ extern "C" __global__ void mass_build_prefix_one_series_ds_f32(
 }
 
 
-
 extern "C" __global__ void mass_batch_f32(
     const float2* __restrict__ prefix_ratio_ds,
     const int*    __restrict__ prefix_nan,
@@ -153,9 +132,6 @@ extern "C" __global__ void mass_batch_f32(
 }
 
 
-
-
-
 extern "C" __global__ void mass_many_series_one_param_time_major_f32(
     const double* __restrict__ prefix_ratio_tm,
     const int*    __restrict__ prefix_nan_tm,
@@ -191,4 +167,3 @@ extern "C" __global__ void mass_many_series_one_param_time_major_f32(
         t += stride;
     }
 }
-

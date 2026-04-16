@@ -1,16 +1,9 @@
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
 
 #include <cuda_runtime.h>
 #include <math.h>
-
 
 
 #ifndef CG_NAN
@@ -30,7 +23,6 @@ static __device__ __forceinline__ bool cg_bad_den(float den) {
 }
 
 
-
 struct CompSum {
     float s;
     float c;
@@ -43,9 +35,6 @@ struct CompSum {
     __device__ __forceinline__ void sub(float x) { add(-x); }
     __device__ __forceinline__ float val() const { return s + c; }
 };
-
-
-
 
 
 extern "C" __global__ void cg_batch_f32(const float* __restrict__ prices,
@@ -87,7 +76,6 @@ extern "C" __global__ void cg_batch_f32(const float* __restrict__ prices,
     }
 
 
-
     CompSum S_acc, T_acc;
     int nan_count = 0;
 
@@ -107,9 +95,6 @@ extern "C" __global__ void cg_batch_f32(const float* __restrict__ prices,
         const float S = S_acc.val();
         out_ptr[warm] = (nan_count > 0 || cg_bad_den(S)) ? 0.0f : (-T_acc.val() / S);
     }
-
-
-
 
 
     const int REFRESH_EVERY = 512;
@@ -148,9 +133,6 @@ extern "C" __global__ void cg_batch_f32(const float* __restrict__ prices,
         }
     }
 }
-
-
-
 
 
 extern "C" __global__ void cg_many_series_one_param_f32(
@@ -254,14 +236,6 @@ extern "C" __global__ void cg_many_series_one_param_f32(
 }
 
 
-
-
-
-
-
-
-
-
 extern "C" __global__ void cg_prefix_prepare_f32(const float* __restrict__ prices,
                                                  int series_len,
                                                  float* __restrict__ P,
@@ -345,4 +319,3 @@ extern "C" __global__ void cg_batch_f32_from_prefix(
         }
     }
 }
-

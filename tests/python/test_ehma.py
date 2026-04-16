@@ -56,7 +56,6 @@ class TestEhma:
             assert np.isfinite(result[i]), f"Value at index {i} should be finite"
 
 
-
         expected_value_at_13 = expected.get('expected_value_at_13', 59309.748)
         actual_13 = result[13]
         assert_close(
@@ -251,7 +250,6 @@ class TestEhma:
             result = vector_ta.ehma(close, period=period)
 
             assert len(result) == len(close), f"Period {period}: Result length mismatch"
-
 
 
             valid_values = result[~np.isnan(result)]

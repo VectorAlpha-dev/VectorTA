@@ -43,13 +43,6 @@ class TestPvi:
         assert abs(result[0] - 1000.0) < 1e-6
 
 
-
-
-
-
-
-
-
     def test_pvi_default_candles(self, test_data):
         """Test PVI with default candles - mirrors check_pvi_default_candles"""
         close = test_data['close']

@@ -79,4 +79,3 @@ class TestFoscCuda:
 
         assert gpu_tm.shape == data_tm.shape
         assert_close(gpu_tm, cpu_tm.astype(np.float32), rtol=8e-4, atol=8e-4, msg="FOSC CUDA many-series mismatch")
-

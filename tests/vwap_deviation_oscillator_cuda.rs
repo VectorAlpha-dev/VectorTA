@@ -53,9 +53,7 @@ fn sample_ohlcv(len: usize) -> (Vec<i64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>
 }
 
 #[cfg(feature = "cuda")]
-fn run_case(
-    sweep: VwapDeviationOscillatorBatchRange,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn run_case(sweep: VwapDeviationOscillatorBatchRange) -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
         eprintln!("[vwap_deviation_oscillator_cuda] skipped - no CUDA device");
         return Ok(());
@@ -105,8 +103,7 @@ fn cuda_feature_off_noop() {
 
 #[cfg(feature = "cuda")]
 #[test]
-fn vwap_deviation_oscillator_cuda_absolute_matches_cpu() -> Result<(), Box<dyn std::error::Error>>
-{
+fn vwap_deviation_oscillator_cuda_absolute_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     run_case(VwapDeviationOscillatorBatchRange {
         rolling_period: (18, 22, 4),
         rolling_days: (30, 30, 0),
@@ -122,8 +119,7 @@ fn vwap_deviation_oscillator_cuda_absolute_matches_cpu() -> Result<(), Box<dyn s
 
 #[cfg(feature = "cuda")]
 #[test]
-fn vwap_deviation_oscillator_cuda_percent_matches_cpu() -> Result<(), Box<dyn std::error::Error>>
-{
+fn vwap_deviation_oscillator_cuda_percent_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     run_case(VwapDeviationOscillatorBatchRange {
         rolling_period: (20, 20, 0),
         rolling_days: (30, 30, 0),
@@ -139,8 +135,7 @@ fn vwap_deviation_oscillator_cuda_percent_matches_cpu() -> Result<(), Box<dyn st
 
 #[cfg(feature = "cuda")]
 #[test]
-fn vwap_deviation_oscillator_cuda_zscore_matches_cpu() -> Result<(), Box<dyn std::error::Error>>
-{
+fn vwap_deviation_oscillator_cuda_zscore_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     run_case(VwapDeviationOscillatorBatchRange {
         rolling_period: (20, 20, 0),
         rolling_days: (4, 6, 2),

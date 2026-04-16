@@ -73,4 +73,3 @@ class TestPmaCuda:
         assert gpu_trig_tm.shape == data_tm.shape
         assert_close(gpu_pred_tm, cpu_pred_tm, rtol=2e-4, atol=2e-5, msg="PMA CUDA predict many-series mismatch")
         assert_close(gpu_trig_tm, cpu_trig_tm, rtol=2e-4, atol=2e-5, msg="PMA CUDA trigger many-series mismatch")
-

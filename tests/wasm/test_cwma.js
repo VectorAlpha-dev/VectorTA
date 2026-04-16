@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -426,9 +425,6 @@ test('CWMA unified batch API validation', () => {
         wasm.cwma_batch(close, 'invalid');
     }, /Invalid config/, 'Should error on non-object config');
 });
-
-
-
 
 
 test('CWMA memory allocation and deallocation', () => {

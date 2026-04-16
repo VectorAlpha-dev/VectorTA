@@ -1,10 +1,3 @@
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -12,8 +5,6 @@
 #include <cuda_runtime.h>
 #include <math.h>
 #include <math_constants.h>
-
-
 
 
 struct dsf32 { float hi, lo; };

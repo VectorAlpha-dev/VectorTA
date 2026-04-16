@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -123,11 +114,6 @@ void pwma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
 }
 
 
-
-
-
-
-
 extern "C" __global__
 void pwma_batch_tiled_async_f32(const float* __restrict__ prices,
                                 const float* __restrict__ weights_flat,
@@ -237,8 +223,6 @@ void pwma_batch_tiled_async_f32(const float* __restrict__ prices,
         stage = (stage + 1) % STAGES;
     }
 }
-
-
 
 
 __device__ __forceinline__ size_t pwma_align_up(size_t x, size_t a) {

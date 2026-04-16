@@ -1,21 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 
@@ -66,11 +48,6 @@ extern "C" __global__ void pvi_build_scale_f32(
         }
     }
 }
-
-
-
-
-
 
 
 extern "C" __global__ void pvi_build_scale_warp16_f32(
@@ -129,7 +106,6 @@ extern "C" __global__ void pvi_build_scale_warp16_f32(
         if (lane == 0) accum0 *= tile_prod;
     }
 }
-
 
 
 extern "C" __global__ void pvi_apply_scale_batch_f32(
@@ -267,4 +243,3 @@ extern "C" __global__ void pvi_many_series_one_param_f32(
         }
     }
 }
-

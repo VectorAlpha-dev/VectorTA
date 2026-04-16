@@ -1,6 +1,3 @@
-
-
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -214,8 +211,6 @@ test('QQE zero-copy with large dataset', () => {
         const outView = new Float64Array(memory2, outPtr, size * 2);
         const fast = outView.subarray(0, size);
         const slow = outView.subarray(size, size * 2);
-
-
 
 
         const rsiStart = EXPECTED_OUTPUTS.qqe.defaultParams.rsiPeriod;

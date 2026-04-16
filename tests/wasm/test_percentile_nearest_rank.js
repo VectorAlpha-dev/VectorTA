@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -42,7 +41,6 @@ test('PNR partial params', () => {
     const data = new Float64Array(EXPECTED_OUTPUTS.percentileNearestRank.basicTest.data);
 
 
-
     const result = wasm.percentile_nearest_rank_js(data, 5, 50.0);
     assert.strictEqual(result.length, data.length);
     assert.strictEqual(result[4], EXPECTED_OUTPUTS.percentileNearestRank.basicTest.expectedAt4);
@@ -78,14 +76,11 @@ test('PNR accuracy', async () => {
     );
 
 
-
-
 });
 
 test('PNR default candles', () => {
 
     const close = new Float64Array(testData.close);
-
 
 
     const result = wasm.percentile_nearest_rank_js(close, 15, 50.0);

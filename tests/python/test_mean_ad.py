@@ -48,7 +48,6 @@ class TestMean_Ad:
         assert len(result) == len(test_data['close'])
 
 
-
         assert np.all(np.isnan(result[:8]))
         assert not np.any(np.isnan(result[240:]))
 
@@ -97,7 +96,6 @@ class TestMean_Ad:
 
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
-
 
 
         assert np.all(np.isnan(result[:8])), "Expected NaN in warmup period"
@@ -150,7 +148,6 @@ class TestMean_Ad:
 
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['mean_ad']['last_5_values']
-
 
 
         assert_close(

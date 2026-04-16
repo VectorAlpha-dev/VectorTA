@@ -177,9 +177,6 @@ class TestDecycler:
         assert len(result) == len(data_with_nan)
 
 
-
-
-
     def test_decycler_edge_case_k_values(self):
         """Test Decycler with edge case k values"""
         data = np.arange(1.0, 101.0)
@@ -195,7 +192,6 @@ class TestDecycler:
 
         result_large = ta_indicators.decycler(data, hp_period=10, k=10.0)
         assert len(result_large) == len(data)
-
 
 
         warmup_end = 12
@@ -247,7 +243,6 @@ class TestDecycler:
 
 
         assert len(batch_result) == len(stream_values)
-
 
 
         first_input = np.where(~np.isnan(close))[0][0]
@@ -329,7 +324,6 @@ class TestDecycler:
         for i, (hp, k) in enumerate(zip(expected_hp_periods, expected_ks)):
             assert result['hp_periods'][i] == hp, f"hp_period mismatch at index {i}"
             assert_close(result['ks'][i], k, rtol=1e-9, msg=f"k value mismatch at index {i}")
-
 
 
         row_idx = 4

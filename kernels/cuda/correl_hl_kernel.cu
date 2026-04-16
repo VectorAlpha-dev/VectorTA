@@ -1,11 +1,3 @@
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -14,10 +6,6 @@
 #include <math.h>
 #include <stdint.h>
 #include "ds_float2.cuh"
-
-
-
-
 
 
 extern "C" __global__ void correl_hl_build_prefix_ds_f32(
@@ -292,9 +280,6 @@ extern "C" __global__ void correl_hl_batch_f32ds(
 }
 
 
-
-
-
 extern "C" __global__ void correl_hl_many_series_one_param_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
@@ -409,4 +394,3 @@ extern "C" __global__ void correl_hl_many_series_one_param_f32(
         }
     }
 }
-

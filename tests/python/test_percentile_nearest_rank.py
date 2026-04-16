@@ -55,7 +55,6 @@ class TestPercentileNearestRank:
         assert not np.isnan(result[warmup]), f"Expected valid value at index {warmup}"
 
 
-
         assert_close(
             result[-5:],
             expected['last_5_values'],
@@ -63,9 +62,6 @@ class TestPercentileNearestRank:
             atol=1e-6,
             msg="PNR last 5 values mismatch"
         )
-
-
-
 
 
     def test_percentile_nearest_rank_default_candles(self, test_data):

@@ -182,7 +182,7 @@ __device__ inline double hlc3(double high, double low, double close) {
 __device__ inline double floor_positive(double value) {
     return value > 0.0 ? value : MIN_POSITIVE;
 }
-}  // namespace
+}
 
 extern "C" __global__ void statistical_trailing_stop_batch_f64(
     const double* high,

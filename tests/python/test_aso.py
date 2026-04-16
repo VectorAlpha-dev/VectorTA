@@ -150,11 +150,9 @@ class TestAso:
         bulls2, bears2 = vector_ta.aso(open_data, high_data, low_data, close_data, mode=2)
 
 
-
         check_idx = 50
         assert bulls0[check_idx] != bulls1[check_idx] or bulls0[check_idx] != bulls2[check_idx], \
             "Different modes should produce different results"
-
 
 
         for i in range(20, 100):
@@ -229,10 +227,6 @@ class TestAso:
 
         stream_bulls = np.array(stream_bulls)
         stream_bears = np.array(stream_bears)
-
-
-
-
 
 
         assert len(batch_bulls) == len(stream_bulls)

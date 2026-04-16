@@ -23,7 +23,7 @@ __device__ inline double raw_weight(int index, int length, double alpha, double 
     return sin(TWO_PI * pow(x, alpha)) * (1.0 - pow(x, beta));
 }
 
-}  // namespace
+}
 
 extern "C" __global__ void adjustable_ma_alternating_extremities_batch_f64(
     const double* __restrict__ high,

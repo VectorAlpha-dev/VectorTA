@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -124,7 +123,6 @@ test('SQWMA NaN handling', () => {
             assert(!isNaN(result[i]), `Found unexpected NaN at index ${i}`);
         }
     }
-
 
 
     for (let i = 0; i < 15; i++) {
@@ -263,13 +261,10 @@ test('SQWMA consistency check', () => {
     assert.strictEqual(single.length, batch.length);
 
 
-
     for (let i = 0; i < single.length; i++) {
         if (isNaN(single[i]) && isNaN(batch[i])) {
             continue;
         }
-
-
 
 
         assertClose(single[i], batch[i], 2e-9, 2e-9,
@@ -399,14 +394,10 @@ test('SQWMA batch with NaN injection', () => {
     assert.strictEqual(periods.length, 2);
 
 
-
-
     for (let p = 0; p < 2; p++) {
         const period = periods[p];
         const rowStart = p * data.length;
         const rowData = result.slice(rowStart, rowStart + data.length);
-
-
 
 
         const theoreticalEarliest = 7 + (period - 2);

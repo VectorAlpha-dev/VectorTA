@@ -148,7 +148,7 @@ __device__ inline bool valid_ohlc(double open, double high, double low, double c
     return isfinite(open) && isfinite(high) && isfinite(low) && isfinite(close);
 }
 
-}  // namespace
+}
 
 extern "C" __global__ void macd_wave_signal_pro_batch_f64(
     const double* __restrict__ open,

@@ -44,7 +44,6 @@ class TestMom:
         assert len(result) == len(close)
 
 
-
         assert_close(
             result[-5:],
             expected['last_5_values'],
@@ -223,7 +222,6 @@ class TestMom:
 
 
         assert not np.any(np.isnan(result[period:])), f"Unexpected NaN after index {period}"
-
 
 
         for i in range(period, min(period + 5, len(close))):

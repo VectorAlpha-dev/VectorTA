@@ -102,7 +102,7 @@ __device__ inline double sma_update_ignore_nan(
 
     return *count == period ? (*sum / static_cast<double>(period)) : NAN;
 }
-}  // namespace
+}
 
 extern "C" __global__ void neighboring_trailing_stop_batch_f64(
     const double* high,

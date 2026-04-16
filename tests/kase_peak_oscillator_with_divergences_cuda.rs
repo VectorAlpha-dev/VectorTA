@@ -55,8 +55,8 @@ fn cuda_feature_off_noop() {
 
 #[cfg(feature = "cuda")]
 #[test]
-fn kase_peak_oscillator_with_divergences_cuda_matches_cpu(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn kase_peak_oscillator_with_divergences_cuda_matches_cpu() -> Result<(), Box<dyn std::error::Error>>
+{
     if !cuda_available() {
         eprintln!("[kase_peak_oscillator_with_divergences_cuda] skipped - no CUDA device");
         return Ok(());

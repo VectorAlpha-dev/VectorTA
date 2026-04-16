@@ -310,7 +310,6 @@ class TestCorrelationCycle:
         default_angle = result['angle'][0]
 
 
-
         assert_close(
             default_real[-5:], expected['last_5_values']['real'], rtol=0.0, atol=1e-8,
             msg="Batch real output mismatch"

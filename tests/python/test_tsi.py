@@ -113,7 +113,6 @@ class TestTsi:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
 
 
-
         warmup = 25 + 13
         assert np.all(np.isnan(result[:warmup])), f"Expected NaN in warmup period (first {warmup} values)"
 
@@ -235,7 +234,6 @@ class TestTsi:
         assert np.isnan(result[6])
 
 
-
         valid_after_gap = result[10:]
         valid_count = np.sum(~np.isnan(valid_after_gap))
         assert valid_count > 0, "TSI should recover after mid-series NaN gap"
@@ -260,7 +258,6 @@ class TestTsi:
 
         result = ta_indicators.tsi(data, long_period=10, short_period=5)
         assert len(result) == len(data)
-
 
 
         last_values = result[-5:]

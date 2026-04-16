@@ -1,11 +1,3 @@
-
-
-
-
-
-
-
-
 #ifndef WARP_SIZE
 #define WARP_SIZE 32
 #endif
@@ -225,4 +217,3 @@ extern "C" __global__ void supertrend_many_series_one_param_f32(
         last_close = c;
     }
 }
-

@@ -1,17 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 
 #ifndef QS_NAN
@@ -129,7 +115,6 @@ extern "C" __global__ void qstick_batch_prefix_tiled_f32_tile256(
 }
 
 
-
 extern "C" __global__ void qstick_many_series_one_param_f32(
     const float* __restrict__ prefix_tm,
     int period,
@@ -164,4 +149,3 @@ extern "C" __global__ void qstick_many_series_one_param_f32(
         t += step;
     }
 }
-

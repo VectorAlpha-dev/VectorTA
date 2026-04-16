@@ -48,7 +48,6 @@ class TestReverseRsi:
         assert len(result) == len(close)
 
 
-
         assert_close(
             result[-6:-1],
             expected['last_5_values'],
@@ -165,7 +164,6 @@ class TestReverseRsi:
         assert len(result) == len(data_with_nan)
 
 
-
         assert not np.all(np.isnan(result[26:])), "Should have valid values after warmup/NaN"
 
 
@@ -214,7 +212,6 @@ class TestReverseRsi:
 
 
         batch_results = ta_indicators.reverse_rsi(close, rsi_length, rsi_level, None)
-
 
 
         stream_first_valid = next((i for i, v in enumerate(stream_results) if not np.isnan(v)), len(stream_results))
@@ -311,7 +308,6 @@ class TestReverseRsi:
         close = test_data['close'][:100]
         rsi_length = 14
         rsi_level = 50.0
-
 
 
         kernels = [

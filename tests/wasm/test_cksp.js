@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -92,9 +91,6 @@ test('CKSP accuracy', async () => {
     expectedShortLast5.forEach((expectedVal, i) => {
         assertClose(shortLast5[i], expectedVal, 1e-5, `CKSP short value mismatch at index ${i}`);
     });
-
-
-
 
 
 });

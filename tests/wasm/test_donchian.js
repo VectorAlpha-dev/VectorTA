@@ -250,7 +250,6 @@ test('Donchian - reinput test', () => {
     const firstLower = firstResult.values.slice(2 * len, 3 * len);
 
 
-
     const secondResult = wasm.donchian_js(firstMiddle, firstMiddle, period);
     const secondUpper = secondResult.values.slice(0, len);
     const secondMiddle = secondResult.values.slice(len, 2 * len);
@@ -282,7 +281,6 @@ test('Donchian - reinput test', () => {
     );
 
 
-
 });
 
 test('Donchian - invalid high/low relationship', () => {
@@ -299,12 +297,8 @@ test('Donchian - invalid high/low relationship', () => {
     const lower = result.values.slice(2 * len, 3 * len);
 
 
-
-
-
     assert(!isNaN(upper[period - 1]), 'Upper should have value after warmup');
     assert(!isNaN(lower[period - 1]), 'Lower should have value after warmup');
-
 
 
     assert(upper[period - 1] >= lower[period - 1], 'Bands should still maintain proper relationship');

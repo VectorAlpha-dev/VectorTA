@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -35,7 +34,6 @@ test.before(async () => {
 
     testData = loadTestData();
 });
-
 
 
 test('KDJ accuracy', () => {
@@ -164,7 +162,6 @@ test('KDJ with different MA types', () => {
 });
 
 
-
 test('KDJ error handling', () => {
 
     assert.throws(() => {
@@ -197,7 +194,6 @@ test('KDJ with all NaN large dataset', () => {
         wasm.kdj(allNaN, allNaN, allNaN, 9, 3, "sma", 3, "sma");
     }, 'Should throw on large all-NaN dataset');
 });
-
 
 
 test('KDJ reinput', () => {
@@ -310,7 +306,6 @@ test('KDJ numerical stability', () => {
 });
 
 
-
 test('KDJ fast API basic (no input aliasing)', () => {
     const high = testData.high;
     const low = testData.low;
@@ -356,9 +351,6 @@ test('KDJ fast API basic (no input aliasing)', () => {
         assert.ok(!isNaN(jResult[len - 1]), 'J should have valid values');
 
 
-
-
-
     } finally {
 
         if (highPtr) wasm.kdj_free(highPtr, len);
@@ -369,7 +361,6 @@ test('KDJ fast API basic (no input aliasing)', () => {
         wasm.kdj_free(jPtr, len);
     }
 });
-
 
 
 test('KDJ batch processing', () => {

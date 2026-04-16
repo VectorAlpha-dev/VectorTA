@@ -58,7 +58,6 @@ class TestStoch:
         ]
 
 
-
         k, d = ta_indicators.stoch(
             high, low, close,
             fastk_period=14,
@@ -91,7 +90,6 @@ class TestStoch:
         high = test_data['high']
         low = test_data['low']
         close = test_data['close']
-
 
 
         k, d = ta_indicators.stoch(high, low, close)
@@ -149,7 +147,6 @@ class TestStoch:
         k, d = ta_indicators.stoch(high, low, close)
         assert len(k) == len(close)
         assert len(d) == len(close)
-
 
 
         warmup = 14 + 3 + 3 - 3

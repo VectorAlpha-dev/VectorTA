@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -236,7 +235,6 @@ test('CFO batch metadata', () => {
     );
 
 
-
     assert.strictEqual(metadata.length, 9 * 2);
 
 
@@ -307,7 +305,6 @@ test('CFO constant values', () => {
     assert.strictEqual(result.length, constant.length);
 
 
-
     let foundNonNaN = false;
     for (let i = 0; i < result.length; i++) {
         if (!isNaN(result[i])) {
@@ -327,7 +324,6 @@ test('CFO linear trend', () => {
 
     const result = wasm.cfo_js(x, 14, 100.0);
     assert.strictEqual(result.length, x.length);
-
 
 
     let foundNonNaN = false;
@@ -427,7 +423,6 @@ test('CFO warmup period', () => {
 test('CFO edge values', () => {
 
 
-
     const dataWithZero = new Float64Array([10.0, 20.0, 30.0, 0.0, 40.0, 50.0, 60.0]);
     const result1 = wasm.cfo_js(dataWithZero, 3, 100.0);
     assert(isNaN(result1[3]), "Expected NaN when current value is 0");
@@ -452,14 +447,6 @@ test('CFO edge values', () => {
     }
     assert(hasValid, "Should handle very small values");
 });
-
-
-
-
-
-
-
-
 
 
 test('CFO batch error handling', () => {

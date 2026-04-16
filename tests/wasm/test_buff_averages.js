@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -469,7 +468,6 @@ test('Buff Averages zero-copy API', () => {
     }
 
 
-    
 });
 
 test('Buff Averages zero-copy error handling', () => {
@@ -477,9 +475,6 @@ test('Buff Averages zero-copy error handling', () => {
     const ptr = wasm.buff_averages_alloc(10);
     assert(ptr !== 0, 'Should allocate memory');
     wasm.buff_averages_free(ptr, 10);
-
-
-    
 
 
     assert.throws(() => {
@@ -547,10 +542,8 @@ test('Buff Averages zero-copy large dataset', () => {
         assert(!isNaN(slowResult[i]), `Unexpected NaN at slow index ${i}`);
     }
 
-    
+
 });
-
-
 
 
 test('Buff Averages Context API (deprecated)', () => {

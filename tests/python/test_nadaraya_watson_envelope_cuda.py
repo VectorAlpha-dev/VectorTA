@@ -117,4 +117,3 @@ class TestNweCuda:
         assert lo_gpu.shape == data_tm.shape
         assert_close(up_gpu, upper_cpu, rtol=1e-3, atol=2e-3, msg="NWE upper many-series mismatch")
         assert_close(lo_gpu, lower_cpu, rtol=1e-3, atol=2e-3, msg="NWE lower many-series mismatch")
-

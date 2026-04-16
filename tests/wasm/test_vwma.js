@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -162,8 +161,6 @@ test('VWMA slice reinput', () => {
     assert.strictEqual(secondResult.length, firstResult.length);
 
 
-
-
     const expectedWarmup = 28;
     for (let i = expectedWarmup; i < secondResult.length; i++) {
         assert(!isNaN(secondResult[i]), `Unexpected NaN at index ${i}`);
@@ -290,7 +287,6 @@ test('VWMA batch edge cases', () => {
         );
     }, /empty/i);
 });
-
 
 
 test('VWMA fast/unsafe API basic', () => {
@@ -538,7 +534,6 @@ test('VWMA batch fast API with aliasing', () => {
         const volumesCopy = new Float64Array(volumes);
 
 
-
         const rows = wasm.vwma_batch_into(
             pricePtr,
             volumePtr,
@@ -576,7 +571,6 @@ test('VWMA zero volume', () => {
     assert.strictEqual(result.length, prices.length);
 
 
-
     assert(!isNaN(result[2]), "Index 2 should have valid value with non-zero volumes in window");
 });
 
@@ -592,13 +586,11 @@ test('VWMA partial NaN data', () => {
     }
 
 
-
     const result = wasm.vwma_js(close, volume, 20);
     assert.strictEqual(result.length, close.length);
 
 
     assertAllNaN(result.slice(0, 19), "Expected NaN in warmup period");
-
 
 
 });
@@ -610,7 +602,6 @@ test('VWMA warmup period verification', () => {
     const period = 20;
 
     const result = wasm.vwma_js(close, volume, period);
-
 
 
     assertAllNaN(result.slice(0, 19), "First 19 values should be NaN");

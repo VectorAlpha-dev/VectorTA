@@ -1,22 +1,9 @@
-
-
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 #include <limits.h>
 
 
 __device__ __forceinline__ float f32_nan() { return __int_as_float(0x7fffffff); }
-
 
 
 struct Float2 { float hi, lo; };
@@ -129,10 +116,6 @@ extern "C" __global__ void ppo_build_prefix_one_series_f64(
 }
 
 
-
-
-
-
 extern "C" __global__ void ppo_batch_ema_manyparams_f32(
     const float* __restrict__ data,
     int len,
@@ -152,7 +135,6 @@ extern "C" __global__ void ppo_batch_ema_manyparams_f32(
     const int combos_per_block = (int)(wpb * 32);
     const int base_combo = (int)blockIdx.y * combos_per_block + (int)warp * 32;
     const int combo      = base_combo + (int)lane;
-
 
 
     const unsigned full_mask  = __activemask();
@@ -182,7 +164,6 @@ extern "C" __global__ void ppo_batch_ema_manyparams_f32(
             out[row_off + t] = nanf;
         }
     }
-
 
 
     int warp_slow_min = periods_ok ? slow : INT_MAX;
@@ -224,7 +205,6 @@ extern "C" __global__ void ppo_batch_ema_manyparams_f32(
         sb = 1.0f - sa;
         row_off = combo * len;
     }
-
 
 
     const int i_begin = first_valid + warp_fast_min;
@@ -277,10 +257,6 @@ extern "C" __global__ void ppo_batch_ema_manyparams_f32(
 }
 
 
-
-
-
-
 extern "C" __global__ void ppo_batch_f32(
     const float* __restrict__ data,
     const double* __restrict__ prefix_sum,
@@ -325,7 +301,6 @@ extern "C" __global__ void ppo_batch_f32(
         }
         return;
     }
-
 
 
     const int start_idx = first_valid + slow - 1;
@@ -384,10 +359,6 @@ extern "C" __global__ void ppo_batch_f32(
 }
 
 
-
-
-
-
 extern "C" __global__ void ppo_many_series_one_param_time_major_f32(
     const float* __restrict__ prices_tm,
     const double* __restrict__ prefix_sum_tm,
@@ -407,7 +378,6 @@ extern "C" __global__ void ppo_many_series_one_param_time_major_f32(
     const float nanf = f32_nan();
 
     if (ma_mode == 0) {
-
 
 
         const int tx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -484,8 +454,6 @@ extern "C" __global__ void ppo_many_series_one_param_time_major_f32(
 }
 
 
-
-
 extern "C" __global__ void ppo_from_ma_batch_f32(
     const float* __restrict__ fast_ma,
     const float* __restrict__ slow_ma,
@@ -518,7 +486,6 @@ extern "C" __global__ void ppo_from_ma_batch_f32(
         out[r * len + t] = y;
     }
 }
-
 
 
 extern "C" __global__ void ppo_from_ma_many_series_one_param_time_major_f32(

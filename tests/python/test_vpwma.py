@@ -154,7 +154,6 @@ class TestVpwma:
                     f"Expected first valid value at index {tc['expected_warmup']} for period={tc['period']}"
 
 
-
             assert tc['expected_warmup'] == tc['period'] - 1, \
                 f"Warmup calculation mismatch for period={tc['period']}"
 

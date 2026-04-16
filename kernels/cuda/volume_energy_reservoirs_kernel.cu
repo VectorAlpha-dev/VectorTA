@@ -96,7 +96,7 @@ struct ExtremumDeque {
     }
 };
 
-}  // namespace
+}
 
 extern "C" __global__ void volume_energy_reservoirs_batch_f64(
     const double* __restrict__ high,

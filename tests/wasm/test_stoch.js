@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -40,7 +39,6 @@ test('Stoch partial params', () => {
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
-
 
 
     const result = wasm.stoch(high, low, close, 14, 3, "sma", 3, "sma");
@@ -184,7 +182,6 @@ test('Stoch batch single parameter', () => {
 
 
     assert.strictEqual(result.combos.length, 1);
-
 
 
     assert.strictEqual(result.values.length, 2 * close.length);

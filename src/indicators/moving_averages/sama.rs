@@ -2145,7 +2145,6 @@ mod prop_tests {
                     let y = out[i];
 
 
-
                     prop_assert!(
                         y.is_finite(),
                         "Output {} at index {} is not finite",

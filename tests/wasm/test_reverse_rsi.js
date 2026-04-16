@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -57,7 +56,6 @@ test('REVERSE_RSI accuracy', () => {
 
 
     assert.strictEqual(result.length, close.length);
-
 
 
     const expectedLast5 = [
@@ -199,7 +197,6 @@ test('REVERSE_RSI all NaN', () => {
 test('REVERSE_RSI insufficient data', () => {
 
 
-
     const input_data = new Float64Array([1.0, 2.0, 3.0, 4.0, 5.0]);
 
     assert.throws(() => {
@@ -224,7 +221,6 @@ test('REVERSE_RSI nan handling', () => {
 
     const result = wasm.reverse_rsi_js(dataWithNaN, rsiLength, rsiLevel);
     assert.strictEqual(result.length, dataWithNaN.length);
-
 
 
     let hasValidAfter = false;
@@ -405,7 +401,6 @@ test('REVERSE_RSI batch processing', () => {
 });
 
 test('REVERSE_RSI numerical precision', () => {
-
 
 
     const extremeData = new Float64Array(40);

@@ -193,8 +193,11 @@ fn expand_grid_checked(
     sweep: &VolumeEnergyReservoirsBatchRange,
 ) -> Result<Vec<VolumeEnergyReservoirsParams>, CudaVolumeEnergyReservoirsError> {
     let lengths = expand_axis_usize(sweep.length)?;
-    let sensitivities =
-        expand_axis_f64(sweep.sensitivity.0, sweep.sensitivity.1, sweep.sensitivity.2)?;
+    let sensitivities = expand_axis_f64(
+        sweep.sensitivity.0,
+        sweep.sensitivity.1,
+        sweep.sensitivity.2,
+    )?;
     let mut combos = Vec::with_capacity(lengths.len().saturating_mul(sensitivities.len()));
     for length in lengths {
         if length < MIN_LENGTH {

@@ -24,8 +24,7 @@ fn cuda_feature_off_noop() {
 
 #[cfg(feature = "cuda")]
 #[test]
-fn range_filtered_trend_signals_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>>
-{
+fn range_filtered_trend_signals_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
         eprintln!("[range_filtered_trend_signals_cuda_batch_matches_cpu] skipped - no CUDA device");
         return Ok(());
@@ -59,8 +58,13 @@ fn range_filtered_trend_signals_cuda_batch_matches_cpu() -> Result<(), Box<dyn s
         supertrend_atr_period: (7, 9, 2),
     };
 
-    let cpu =
-        range_filtered_trend_signals_batch_with_kernel(&high, &low, &close, &sweep, Kernel::ScalarBatch)?;
+    let cpu = range_filtered_trend_signals_batch_with_kernel(
+        &high,
+        &low,
+        &close,
+        &sweep,
+        Kernel::ScalarBatch,
+    )?;
     let cuda = CudaRangeFilteredTrendSignals::new(0)?;
     let result = cuda.batch_dev(&high, &low, &close, &sweep)?;
 
@@ -86,10 +90,22 @@ fn range_filtered_trend_signals_cuda_batch_matches_cpu() -> Result<(), Box<dyn s
     result.outputs.upper_band.buf.copy_to(&mut got_upper_band)?;
     result.outputs.lower_band.buf.copy_to(&mut got_lower_band)?;
     result.outputs.trend.buf.copy_to(&mut got_trend)?;
-    result.outputs.kalman_trend.buf.copy_to(&mut got_kalman_trend)?;
+    result
+        .outputs
+        .kalman_trend
+        .buf
+        .copy_to(&mut got_kalman_trend)?;
     result.outputs.state.buf.copy_to(&mut got_state)?;
-    result.outputs.market_trending.buf.copy_to(&mut got_market_trending)?;
-    result.outputs.market_ranging.buf.copy_to(&mut got_market_ranging)?;
+    result
+        .outputs
+        .market_trending
+        .buf
+        .copy_to(&mut got_market_trending)?;
+    result
+        .outputs
+        .market_ranging
+        .buf
+        .copy_to(&mut got_market_ranging)?;
     result
         .outputs
         .short_term_bullish
@@ -167,13 +183,21 @@ fn range_filtered_trend_signals_cuda_batch_matches_cpu() -> Result<(), Box<dyn s
             got_market_ranging[idx]
         );
         assert!(
-            approx_eq(cpu.short_term_bullish[idx], got_short_term_bullish[idx], 1e-6),
+            approx_eq(
+                cpu.short_term_bullish[idx],
+                got_short_term_bullish[idx],
+                1e-6
+            ),
             "short_term_bullish mismatch at {idx}: cpu={} cuda={}",
             cpu.short_term_bullish[idx],
             got_short_term_bullish[idx]
         );
         assert!(
-            approx_eq(cpu.short_term_bearish[idx], got_short_term_bearish[idx], 1e-6),
+            approx_eq(
+                cpu.short_term_bearish[idx],
+                got_short_term_bearish[idx],
+                1e-6
+            ),
             "short_term_bearish mismatch at {idx}: cpu={} cuda={}",
             cpu.short_term_bearish[idx],
             got_short_term_bearish[idx]

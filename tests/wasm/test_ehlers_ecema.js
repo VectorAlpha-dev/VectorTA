@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -211,8 +210,6 @@ test('EHLERS_ECEMA invalid gain limit', () => {
     }, /Invalid gain limit/);
 
 
-
-
 });
 
 test('EHLERS_ECEMA reinput', () => {
@@ -238,8 +235,6 @@ test('EHLERS_ECEMA reinput', () => {
     for (let i = 0; i < warmupPeriod; i++) {
         assert(isNaN(firstResult[i]), `First pass should have NaN in warmup at index ${i}`);
     }
-
-
 
 
     const secondWarmup = warmupPeriod + warmupPeriod;

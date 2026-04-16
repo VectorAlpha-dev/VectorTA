@@ -2458,7 +2458,6 @@ mod tests {
 					}
 
 
-
 					let all_same = high[window_start..=i].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
 					               low[window_start..=i].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
 					               close[window_start..=i].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);

@@ -242,7 +242,6 @@ class TestCfo:
         assert len(result) == len(constant)
 
 
-
         non_nan_values = result[~np.isnan(result)]
         assert np.all(np.abs(non_nan_values) < 1e-10), "CFO should be ~0 for constant series"
 
@@ -253,7 +252,6 @@ class TestCfo:
 
         result = ta_indicators.cfo(x, period=14, scalar=100.0)
         assert len(result) == len(x)
-
 
 
         non_nan_values = result[~np.isnan(result)]

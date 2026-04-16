@@ -86,7 +86,7 @@ __device__ inline double go_short(
 
     return (prev_lhs >= prev_rhs && lhs < rhs) ? 1.0 : 0.0;
 }
-}  // namespace
+}
 
 extern "C" __global__ void ehlers_linear_extrapolation_predictor_batch_f64(
     const double* data,

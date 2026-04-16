@@ -1,9 +1,3 @@
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -84,13 +78,6 @@ void di_build_up_dn_tr_f32(const float* __restrict__ high,
 }
 
 
-
-
-
-
-
-
-
 struct ds {
     float hi;
     float lo;
@@ -134,13 +121,6 @@ static __forceinline__ __device__ void ds_rma_update(ds &s, float keep, float in
     s.lo = slo - (new_hi - sh);
     s.hi = new_hi;
 }
-
-
-
-
-
-
-
 
 
 extern "C" __global__
@@ -277,12 +257,6 @@ void di_batch_from_precomputed_f32(const float* __restrict__ up,
         __syncthreads();
     }
 }
-
-
-
-
-
-
 
 
 extern "C" __global__

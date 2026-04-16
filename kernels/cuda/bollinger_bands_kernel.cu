@@ -1,25 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 
@@ -125,7 +103,6 @@ extern "C" __global__ void bollinger_bands_sma_prefix_f32(
     const float invP = 1.0f / (float)period;
 
 
-
     const int nan_base = prefix_nan[first_valid];
     const bool any_nan_since_first = (prefix_nan[len] - nan_base) != 0;
 
@@ -216,7 +193,6 @@ extern "C" __global__ void bollinger_bands_many_series_one_param_f32(
 
                 const dsf sum_ds  = ds_sub(load_dsf(prefix_sum_tm,    p_idx), load_dsf(prefix_sum_tm,    s_idx));
                 const dsf sum2_ds = ds_sub(load_dsf(prefix_sum_sq_tm, p_idx), load_dsf(prefix_sum_sq_tm, s_idx));
-
 
 
                 const double sum_d  = (double)sum_ds.hi  + (double)sum_ds.lo;

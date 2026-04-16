@@ -52,7 +52,7 @@ struct AtrTrackerDevice {
     }
 };
 
-}  // namespace
+}
 
 extern "C" __global__ void evasive_supertrend_batch_f64(
     const double* __restrict__ open,

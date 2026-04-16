@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -98,7 +97,6 @@ test('KST accuracy', async () => {
     );
 
 
-
 });
 
 test('KST all NaN values', () => {
@@ -155,10 +153,6 @@ test('KST with NaN prefix', () => {
 
     assert.strictEqual(line.length, inputData.length);
     assert.strictEqual(signal.length, inputData.length);
-
-
-
-
 
 
     const warmup = 49;
@@ -302,7 +296,6 @@ test('KST reinput', () => {
     const warmupFirst = 44;
 
 
-
     const warmupSecond = 88;
 
 
@@ -325,7 +318,6 @@ test('KST warmup period', () => {
     const result = wasm.kst(close, 10, 10, 10, 15, 10, 15, 20, 30, 9);
     const line = result.values.slice(0, result.cols);
     const signal = result.values.slice(result.cols, 2 * result.cols);
-
 
 
     const expectedWarmup = 44;

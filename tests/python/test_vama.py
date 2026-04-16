@@ -41,7 +41,6 @@ class TestVama:
         volume = test_data['volume']
 
 
-
         expected = EXPECTED_OUTPUTS['volume_adjusted_ma']
 
 

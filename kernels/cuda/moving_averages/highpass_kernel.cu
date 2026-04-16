@@ -1,17 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -41,7 +27,6 @@ void hpf_coeffs_from_period(int period, double& c, double& oma, bool& ok) {
     if (period <= 0) return;
 
 
-
     double s, co;
     sincospi(2.0 / static_cast<double>(period), &s, &co);
     if (fabs(co) < 1e-12) return;
@@ -68,11 +53,6 @@ void hpf_coeffs_from_period_f32(int period, float& c, float& oma, bool& ok) {
     oma = 1.0f - alpha;
     ok = true;
 }
-
-
-
-
-
 
 
 extern "C" __global__

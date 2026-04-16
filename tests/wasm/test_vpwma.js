@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -379,7 +378,6 @@ test('VPWMA batch - new API with multiple parameters', () => {
 test.skip('VPWMA zero-copy API', () => {
 
 
-
     const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
     const period = 5;
     const power = 0.382;
@@ -540,7 +538,6 @@ test('VPWMA SIMD consistency', () => {
         try {
 
 
-
             results[kernel] = wasm.vpwma_js(close, period, power);
         } catch (e) {
 
@@ -567,7 +564,6 @@ test('VPWMA SIMD consistency', () => {
         }
     }
 });
-
 
 
 test.after(() => {

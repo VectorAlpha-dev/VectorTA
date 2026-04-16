@@ -83,7 +83,6 @@ def compare_with_rust(indicator_name, python_output, source='close', params=None
         return True
 
 
-
     rust_values = [float('nan') if v is None else v for v in rust_data['values']]
     rust_output = np.array(rust_values, dtype=np.float64)
 

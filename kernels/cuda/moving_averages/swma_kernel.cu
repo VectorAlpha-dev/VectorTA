@@ -1,11 +1,3 @@
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -58,10 +50,6 @@ static __device__ __forceinline__ void fill_tri_weights(float* __restrict__ w_sh
         w_sh[half] = float(half + 1) * inv_norm;
     }
 }
-
-
-
-
 
 
 extern "C" __global__
@@ -156,13 +144,6 @@ void swma_batch_f32(const float* __restrict__ prices,
 }
 
 
-
-
-
-
-
-
-
 extern "C" __global__
 void swma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
                                      const float* __restrict__ weights,
@@ -206,7 +187,6 @@ void swma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
         const int load_len_t   = max(0, load_end_t - load_begin_t + 1);
 
 
-
         const int tile_span = load_len_t * blockDim.y;
 
         int lin = threadIdx.x * blockDim.y + s_local;
@@ -220,7 +200,6 @@ void swma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
             }
         }
         __syncthreads();
-
 
 
         int local_t = threadIdx.x;

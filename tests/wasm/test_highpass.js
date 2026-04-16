@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -163,7 +162,6 @@ test('HighPass NaN handling', () => {
     assert.strictEqual(result.length, close.length);
 
 
-
     assert(!isNaN(result[0]), "HighPass should produce value at index 0");
 
 
@@ -203,8 +201,7 @@ test('HighPass leading NaN input', () => {
     const result = wasm.highpass_js(close, 48);
     assert.strictEqual(result.length, close.length);
 
-    
-    
+
     for (let i = 0; i < 5; i++) {
         assert(isNaN(result[i]), `Expected NaN at index ${i} for leading-NaN prefix`);
     }
@@ -266,7 +263,6 @@ test('HighPass edge cases', () => {
     const constantData = new Float64Array(100);
     constantData.fill(50.0);
     const resultConstant = wasm.highpass_js(constantData, 20);
-
 
 
     const stabilizedStart = 3 * 20;

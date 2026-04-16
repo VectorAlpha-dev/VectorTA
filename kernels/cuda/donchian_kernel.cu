@@ -1,13 +1,3 @@
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -39,8 +29,6 @@
 __device__ __forceinline__ int floor_log2_u32(unsigned int x) {
     return 31 - __clz(x);
 }
-
-
 
 
 extern "C" __global__ void rmq_init_level0_f32(const float* __restrict__ in,
@@ -171,7 +159,6 @@ extern "C" __global__ void donchian_batch_f32(const float* __restrict__ high,
         else { uo[i] = maxv; lo[i] = minv; mo[i] = 0.5f * (maxv + minv); }
     }
 }
-
 
 
 extern "C" __global__ void donchian_batch_from_rmq_f32(

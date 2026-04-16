@@ -461,8 +461,8 @@ impl CudaFibonacciEntryBands {
             .map_err(|_| CudaFibonacciEntryBandsError::MissingKernelSymbol {
                 name: "fibonacci_entry_bands_batch_f64",
             })?;
-        let grid_x = ((rows as u32) + FIBONACCI_ENTRY_BANDS_BLOCK_X - 1)
-            / FIBONACCI_ENTRY_BANDS_BLOCK_X;
+        let grid_x =
+            ((rows as u32) + FIBONACCI_ENTRY_BANDS_BLOCK_X - 1) / FIBONACCI_ENTRY_BANDS_BLOCK_X;
         let grid = GridSize::x(grid_x.max(1));
         let block = BlockSize::x(FIBONACCI_ENTRY_BANDS_BLOCK_X);
         self.validate_launch(grid, block)?;

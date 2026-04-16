@@ -1,7 +1,3 @@
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -16,7 +12,6 @@
 #else
   #define LDG(ptr) (*(ptr))
 #endif
-
 
 
 __device__ __forceinline__ float ftz_f32(float x) {
@@ -128,18 +123,6 @@ void srsi_build_rsi_f32(const float* __restrict__ prices,
         out[i] = (denom == 0.0) ? 50.0f : (float)(100.0 * avg_gain / denom);
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 extern "C" __global__
@@ -353,8 +336,6 @@ void srsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
     float* ring_d  = (float*)(ring_k + k_period);
 
 
-
-
     int rpos = 0; int rcnt = 0;
     float rsi = 50.0f;
     if (rsi_warmup < rows) {
@@ -420,4 +401,3 @@ void srsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
         }
     }
 }
-

@@ -98,4 +98,3 @@ class TestViCuda:
 
         assert_close(plus_gpu, plus_cpu, rtol=5e-4, atol=5e-5, msg="VI+ many-series mismatch")
         assert_close(minus_gpu, minus_cpu, rtol=5e-4, atol=5e-5, msg="VI- many-series mismatch")
-

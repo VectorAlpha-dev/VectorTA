@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -67,7 +66,6 @@ test('NAMA accuracy', () => {
     assert.strictEqual(result.length, close.length);
 
 
-
     const expectedLastFive = [
         59248.42400839,
         59226.18226649,
@@ -82,10 +80,7 @@ test('NAMA accuracy', () => {
                     "NAMA last 5 values mismatch");
 
 
-
 });
-
-
 
 
 test('NAMA edge cases', () => {
@@ -212,8 +207,6 @@ test('NAMA NaN handling', () => {
     assert(isNaN(result[1]));
 
 
-
-
     for (let i = 0; i < 4; i++) {
         assert(isNaN(result[i]), `Expected NaN at index ${i} during warmup`);
     }
@@ -311,9 +304,6 @@ test('NAMA zero-copy API', () => {
         wasm.nama_free(outPtr, data.length);
     }
 });
-
-
-
 
 
 test('NAMA all NaN input', () => {

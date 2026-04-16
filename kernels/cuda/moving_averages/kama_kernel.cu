@@ -1,13 +1,3 @@
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -38,9 +28,6 @@ __device__ __forceinline__ double warp_sum(double v) {
 }
 
 }
-
-
-
 
 
 extern "C" __global__ __launch_bounds__(32)
@@ -80,7 +67,6 @@ void kama_batch_f32(const float* __restrict__ prices,
     for (int i = threadIdx.x; i < initial_idx; i += blockDim.x) {
         out[base + i] = nan_f;
     }
-
 
 
     double sum_roc1 = 0.0;
@@ -140,11 +126,6 @@ void kama_batch_f32(const float* __restrict__ prices,
 }
 
 
-
-
-
-
-
 extern "C" __global__ __launch_bounds__(32)
 void kama_batch_prefix_f32(const float* __restrict__ prices,
                            const float* __restrict__ prefix_roc1,
@@ -182,8 +163,6 @@ void kama_batch_prefix_f32(const float* __restrict__ prices,
     if (threadIdx.x == 0) {
         out[base + initial_idx] = prices[initial_idx];
     }
-
-
 
 
     const int lane = threadIdx.x;

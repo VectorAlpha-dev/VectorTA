@@ -1,15 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -26,7 +14,6 @@
 #ifndef STC_SMALL_K
 #define STC_SMALL_K 16
 #endif
-
 
 
 #define STC_RANGE_EPS 2.2204460492503131e-16f
@@ -58,7 +45,6 @@ struct KahanF32 {
     }
     __device__ __forceinline__ float result() const { return s + c; }
 };
-
 
 
 struct IndexDeque {
@@ -94,8 +80,6 @@ struct IndexDeque {
     __device__ __forceinline__ bool empty() const { return len == 0; }
     __device__ __forceinline__ float front_val() const { return ring[ buf[head] % cap ]; }
 };
-
-
 
 
 static __device__ __forceinline__ void stc_compute_series_f32(
@@ -430,4 +414,3 @@ void stc_many_series_one_param_f32(const float* __restrict__ prices_tm,
         if (i >= warm) out_tm[i * cols + s] = out_i;
     }
 }
-

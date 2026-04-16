@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -354,7 +353,6 @@ test('JMA batch metadata', () => {
         40.0, 50.0, 10.0,
         1, 2, 1
     );
-
 
 
     assert.strictEqual(metadata.length, 24);

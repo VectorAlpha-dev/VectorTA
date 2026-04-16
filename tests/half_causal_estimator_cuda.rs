@@ -86,7 +86,11 @@ fn half_causal_estimator_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::err
             got_estimate[idx]
         );
         assert!(
-            approx_eq(cpu.expected_value_values[idx], got_expected_value[idx], 1e-6),
+            approx_eq(
+                cpu.expected_value_values[idx],
+                got_expected_value[idx],
+                1e-6
+            ),
             "expected_value mismatch at {idx}: cpu={} cuda={}",
             cpu.expected_value_values[idx],
             got_expected_value[idx]

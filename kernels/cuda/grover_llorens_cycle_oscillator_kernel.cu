@@ -147,7 +147,7 @@ struct RsiStreamState {
         return denom == 0.0 ? 50.0 : (100.0 * avg_gain / denom);
     }
 };
-}  // namespace
+}
 
 extern "C" __global__ void grover_llorens_cycle_oscillator_batch_f64(
     const double* open,
@@ -261,7 +261,7 @@ extern "C" __global__ void grover_llorens_cycle_oscillator_batch_f64(
         bool rising = false;
         bool falling = false;
         if (valid_src_count >= length) {
-            double max_prev = open[0];  // overwritten immediately
+            double max_prev = open[0];
             double min_prev = open[0];
             bool first_prev = true;
             const int start = i - length;

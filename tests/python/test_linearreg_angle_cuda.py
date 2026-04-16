@@ -69,4 +69,3 @@ class TestLinearregAngleCuda:
         mask = ~np.isnan(cpu_tm)
         assert_close(gpu_tm[mask], cpu_tm[mask], rtol=1e-4, atol=5e-4,
                      msg="LRA CUDA many-series mismatch vs CPU baseline")
-

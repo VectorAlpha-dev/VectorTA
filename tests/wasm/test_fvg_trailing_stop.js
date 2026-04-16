@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -38,8 +37,6 @@ test.describe('FVG Trailing Stop', () => {
             9,
             false
         );
-
-
 
 
         const expectedLower = [55643.00, 55643.00, 55643.00, 55643.00, 55643.00];
@@ -248,7 +245,6 @@ test.describe('FVG Trailing Stop', () => {
             testHigh, testLow, testClose,
             5, 9, false
         );
-
 
 
         const upperFromBatch = result.values.slice(0, result.cols);

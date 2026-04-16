@@ -89,4 +89,3 @@ class TestBbwCuda:
 
         assert gpu_tm.shape == data_tm.shape
         assert_close(gpu_tm, cpu_tm, rtol=1e-4, atol=2e-5, msg="BBW CUDA many-series vs CPU mismatch")
-

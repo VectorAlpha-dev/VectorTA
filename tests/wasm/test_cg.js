@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -318,7 +317,6 @@ test('CG warmup period', () => {
     const result = wasm.cg_js(close, period);
 
 
-
     assertAllNaN(result.slice(0, period), `Expected NaN in first ${period} values`);
 
 
@@ -354,10 +352,7 @@ test('CG NaN injection at specific positions', () => {
     assert.strictEqual(result.length, close.length);
 
 
-
-
     assertAllNaN(result.slice(0, 10));
-
 
 
     let hasNonNaNAfterInjection = false;
@@ -463,7 +458,6 @@ test('CG batch with invalid parameters', () => {
     const close = new Float64Array(testData.close.slice(0, 10));
 
 
-
     assert.throws(() => {
         wasm.cg_batch(close, {
             period_range: [15, 20, 5]
@@ -495,7 +489,6 @@ test('CG batch memory validation', () => {
         }
     }
 });
-
 
 
 test.after(() => {

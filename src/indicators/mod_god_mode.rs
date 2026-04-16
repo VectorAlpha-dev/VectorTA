@@ -3871,7 +3871,6 @@ mod tests {
                     }
 
 
-
                     #[test]
                     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64", target_feature = "avx2"))]
                     fn [<$test_fn _avx2>]() {

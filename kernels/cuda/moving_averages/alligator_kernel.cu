@@ -1,14 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -92,7 +81,6 @@ void alligator_batch_f32(const float* __restrict__ prices,
   }
 
 
-
   if (combo < n_combos && valid) {
     const int warm_base_j = first_valid + pj - 1;
     const int warm_base_t = first_valid + pt - 1;
@@ -106,7 +94,6 @@ void alligator_batch_f32(const float* __restrict__ prices,
 
 
   }
-
 
 
   float prev_j = 0.f, prev_t = 0.f, prev_l = 0.f;
@@ -142,11 +129,6 @@ void alligator_batch_f32(const float* __restrict__ prices,
     if (tj < series_len) out_jaw[base + tj] = prev_j;
     if (tt < series_len) out_teeth[base + tt] = prev_t;
     if (tl < series_len) out_lips[base + tl] = prev_l;
-
-
-
-
-
 
 
     const int min_base = min(min(warm_base_j, warm_base_t), warm_base_l);

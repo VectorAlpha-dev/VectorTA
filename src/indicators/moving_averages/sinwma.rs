@@ -1665,7 +1665,6 @@ mod tests {
 				prop_assert_eq!(out.len(), data.len(), "Output length should match input length");
 
 
-
 				let warmup_end = period - 1;
 				for i in 0..warmup_end.min(data.len()) {
 					prop_assert!(
@@ -1742,7 +1741,6 @@ mod tests {
 				}
 
 
-
 				for i in 0..data.len() {
 					if out[i].is_nan() && ref_out[i].is_nan() {
 						continue;
@@ -1763,10 +1761,6 @@ mod tests {
 						ref_out[i]
 					);
 				}
-
-
-
-
 
 
 				for i in warmup_end..data.len() {
@@ -1802,9 +1796,6 @@ mod tests {
 				}
 
 
-
-
-
 				if data.len() >= period * 2 {
 					for i in (warmup_end + period)..data.len().min(warmup_end + period * 3) {
 						if out[i].is_nan() {
@@ -1827,7 +1818,6 @@ mod tests {
 							let last_value = window[period - 1];
 
 
-
 							let clearly_ascending = first_value < middle_value && middle_value < last_value
 								&& (last_value - first_value) > range * 0.8;
 							let clearly_descending = first_value > middle_value && middle_value > last_value
@@ -1838,7 +1828,6 @@ mod tests {
 								let dist_to_middle = (out[i] - middle_value).abs();
 								let dist_to_first = (out[i] - first_value).abs();
 								let dist_to_last = (out[i] - last_value).abs();
-
 
 
 								prop_assert!(

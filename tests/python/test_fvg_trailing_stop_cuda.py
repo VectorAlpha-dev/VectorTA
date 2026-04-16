@@ -117,4 +117,3 @@ class TestFvgTrailingStopCuda:
         assert_close(gl, cpu_l, rtol=1e-3, atol=1e-3, msg="lower mismatch")
         assert_close(gut, cpu_ut, rtol=1e-3, atol=1e-3, msg="upper_ts mismatch")
         assert_close(glt, cpu_lt, rtol=1e-3, atol=1e-3, msg="lower_ts mismatch")
-

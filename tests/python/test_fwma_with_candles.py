@@ -46,10 +46,6 @@ def test_fwma_with_rust_candle_data():
     last_five = result[-5:]
 
 
-
-
-
-
     print("\nLast 10 close prices (Python):")
     for i in range(10):
         print(f"  [{-10+i}]: {close_prices[-10+i]}")

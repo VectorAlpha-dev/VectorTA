@@ -51,9 +51,6 @@ def test_dvdiqqe_with_default_params():
         assert np.all(np.isnan(slow_tl[:warmup])), f"Expected NaN in warmup period (0:{warmup}) for Slow TL"
 
 
-
-
-
     assert not np.any(np.isnan(dvdi[warmup:])), "Found unexpected NaN after warmup in DVDI"
     assert not np.any(np.isnan(fast_tl[warmup:])), "Found unexpected NaN after warmup in Fast TL"
     assert not np.any(np.isnan(slow_tl[warmup:])), "Found unexpected NaN after warmup in Slow TL"
@@ -68,10 +65,6 @@ def test_dvdiqqe_pinescript_reference_values():
     expected_slow_tl = np.array(expected['pinescript_slow_tl'])
     expected_fast_tl = np.array(expected['pinescript_fast_tl'])
     expected_center = np.array(expected['pinescript_center'])
-
-
-
-
 
 
     test_data = load_test_data()
@@ -101,8 +94,6 @@ def test_dvdiqqe_pinescript_reference_values():
     assert len(center_line) == n_samples
 
 
-
-
     warmup = None
     for i in range(len(dvdi)):
         if not np.isnan(dvdi[i]):
@@ -113,17 +104,6 @@ def test_dvdiqqe_pinescript_reference_values():
     if warmup > 0:
         assert np.all(np.isnan(dvdi[:warmup])), "Expected NaN in warmup period"
     assert not np.any(np.isnan(dvdi[warmup:])), "Unexpected NaN after warmup"
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_dvdiqqe_accuracy():
@@ -151,7 +131,6 @@ def test_dvdiqqe_accuracy():
     assert len(fast_tl) == n_samples
     assert len(slow_tl) == n_samples
     assert len(center_line) == n_samples
-
 
 
     warmup = None
@@ -240,7 +219,6 @@ def test_dvdiqqe_with_custom_params():
     assert len(fast_tl) == n_samples
     assert len(slow_tl) == n_samples
     assert len(center_line) == n_samples
-
 
 
     unique_center = np.unique(center_line[~np.isnan(center_line)])
@@ -428,7 +406,6 @@ def test_dvdiqqe_center_types():
     )
 
 
-
     warmup_d = None
     for i in range(len(center_d)):
         if not np.isnan(center_d[i]):
@@ -475,7 +452,6 @@ def test_dvdiqqe_volume_types():
     )
 
 
-
     warmup_real = None
     warmup_tick = None
     warmup_no_vol = None
@@ -501,10 +477,6 @@ def test_dvdiqqe_volume_types():
     compare_start = max(warmup_tick, warmup_no_vol)
     assert np.allclose(dvdi_tick[compare_start:], dvdi_no_vol[compare_start:], rtol=1e-10), \
         "Tick volume should match no-volume behavior"
-
-
-
-
 
 
 if __name__ == "__main__":

@@ -1,29 +1,9 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
 
 #include <cuda_runtime.h>
 #include <math.h>
-
-
 
 
 #if !defined(EMA_USE_L2_PREFETCH) && !defined(EMA_DISABLE_L2_PREFETCH)
@@ -102,7 +82,6 @@ void ema_batch_f32(const float* __restrict__ prices,
     }
 
 
-
     if (threadIdx.x >= 32) return;
 
     const unsigned lane = static_cast<unsigned>(threadIdx.x);
@@ -156,8 +135,6 @@ void ema_batch_f32(const float* __restrict__ prices,
         }
 
 
-
-
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float A_prev = __shfl_up_sync(mask, A, offset);
             const float B_prev = __shfl_up_sync(mask, B, offset);
@@ -180,9 +157,6 @@ void ema_batch_f32(const float* __restrict__ prices,
         prev = __shfl_sync(mask, y, last_lane);
     }
 }
-
-
-
 
 
 extern "C" __global__
@@ -356,8 +330,6 @@ void ema_many_series_one_param_f32(const float* __restrict__ prices_tm,
         out_tm[t * stride + series_idx] = prev;
     }
 }
-
-
 
 
 extern "C" __global__

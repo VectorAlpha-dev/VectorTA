@@ -36,7 +36,7 @@ __device__ double compute_increment(
     }
     return 0.0;
 }
-}  // namespace
+}
 
 extern "C" __global__ void accumulation_swing_index_batch_f64(
     const double* __restrict__ open,

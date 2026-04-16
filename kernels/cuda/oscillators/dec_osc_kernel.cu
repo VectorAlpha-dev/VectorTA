@@ -1,17 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -26,7 +12,6 @@
 #ifndef UNLIKELY
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
-
 
 
 static __forceinline__ __device__

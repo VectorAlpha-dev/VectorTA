@@ -77,7 +77,6 @@ class TestMab:
         ]
 
 
-
         assert_close(
             upper[-5:],
             expected_upper_last_five,
@@ -99,8 +98,6 @@ class TestMab:
             atol=1e-4,
             msg="MAB lower band last 5 values mismatch"
         )
-
-
 
 
     def test_mab_default_candles(self, test_data):
@@ -155,10 +152,6 @@ class TestMab:
         slow_period = 50
 
         upper, middle, lower = ta_indicators.mab(close, fast_period=fast_period, slow_period=slow_period)
-
-
-
-
 
 
         warmup_last_nan = max(fast_period, slow_period) + fast_period - 2
@@ -229,16 +222,10 @@ class TestMab:
         assert len(batch_lower) == len(stream_lower)
 
 
-
-
         real_values_start = max(10, 50) + 10 - 1
 
 
-
-
         for i in range(real_values_start, len(batch_upper)):
-
-
 
 
             tol = 2e-1
@@ -419,7 +406,6 @@ class TestMab:
             slow_ma_type="ema"
         )
         assert len(upper_mixed) == len(close)
-
 
 
         for i in range(100, 110):

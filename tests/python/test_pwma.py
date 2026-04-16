@@ -41,7 +41,6 @@ def test_pwma_accuracy():
     assert len(result) == len(close)
 
 
-
     assert_close(
         result[-5:],
         expected['last_5_values'],
@@ -105,7 +104,6 @@ def test_pwma_nan_handling():
     result = pwma(close, 5)
 
     assert len(result) == len(close)
-
 
 
     first_valid = np.where(~np.isnan(close))[0][0]
@@ -409,7 +407,6 @@ def test_pwma_batch_single_parameter():
 
 
     default_row = result['values'][0]
-
 
 
     assert_close(

@@ -1,6 +1,3 @@
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -82,7 +79,6 @@ extern "C" __global__ void supersmoother_batch_f32(const float* __restrict__ pri
     row_out[warm + 1] = y_im1;
 
 
-
 #pragma unroll 1
     for (int idx = warm + 2; idx < series_len; ++idx) {
         const float x_i    = prices[idx];
@@ -95,21 +91,6 @@ extern "C" __global__ void supersmoother_batch_f32(const float* __restrict__ pri
         y_im1 = yi;
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 extern "C" __global__ void supersmoother_batch_warp_scan_f32(const float* __restrict__ prices,
@@ -195,7 +176,6 @@ extern "C" __global__ void supersmoother_batch_warp_scan_f32(const float* __rest
             const float x1 = prices[t - 1];
             u = c * (x0 + x1);
         }
-
 
 
         float p00 = valid ? m00 : 1.0f;

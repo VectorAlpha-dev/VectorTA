@@ -1,22 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -30,8 +11,6 @@
 #endif
 
 
-
-
 __device__ __forceinline__ void kahan_add(float x, float &sum, float &c) {
     float y = x - c;
     float t = sum + y;
@@ -42,8 +21,6 @@ __device__ __forceinline__ void kahan_add_sub(float add, float sub, float &sum, 
     kahan_add(add, sum, c);
     kahan_add(-sub, sum, c);
 }
-
-
 
 
 static __device__ __forceinline__ float acosc_median(const float* __restrict__ high,
@@ -66,9 +43,6 @@ static __device__ __forceinline__ float acosc_ao_at(const float* __restrict__ hi
         if (rel >= 38 && k < 5) sum5 += med;
     }
     if (rel < 38) {
-
-
-
 
 
         if (rel == 34) {
@@ -157,7 +131,6 @@ static __device__ __forceinline__ void acosc_ao_chain_fast(const float* __restri
     sum5 += med - acosc_median(high, low, t - 5);
     ao0 = sum5 * INV5 - sum34 * INV34;
 }
-
 
 
 extern "C" __global__ __launch_bounds__(256, 4)
@@ -315,11 +288,6 @@ void acosc_many_series_one_param_f32(const float* __restrict__ high_tm,
 }
 
 
-
-
-
-
-
 extern "C" __global__
 void acosc_many_series_one_param_f32_warp(const float* __restrict__ high_tm,
                                           const float* __restrict__ low_tm,
@@ -335,7 +303,6 @@ void acosc_many_series_one_param_f32_warp(const float* __restrict__ high_tm,
 
     const int stride = num_series;
     int fv = first_valids[s]; if (fv < 0) fv = 0;
-
 
 
     for (int t = 0; t < series_len; ++t) {

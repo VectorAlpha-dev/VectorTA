@@ -49,7 +49,6 @@ class TestAd:
         assert len(result) == len(close)
 
 
-
         assert_close(
             result[-5:],
             expected['last_5_values'],

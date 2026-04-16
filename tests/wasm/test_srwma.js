@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -115,7 +114,6 @@ test('SRWMA NaN handling', () => {
             assert(!isNaN(result[i]), `Found unexpected NaN at index ${i}`);
         }
     }
-
 
 
     for (let i = 0; i < 15; i++) {

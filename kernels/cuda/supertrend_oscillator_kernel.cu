@@ -57,7 +57,7 @@ __device__ inline bool valid_bar(double high, double low, double source) {
 __device__ inline double clamp_unit(double value) {
     return value < -1.0 ? -1.0 : (value > 1.0 ? 1.0 : value);
 }
-}  // namespace
+}
 
 extern "C" __global__ void supertrend_oscillator_batch_f64(
     const double* high,

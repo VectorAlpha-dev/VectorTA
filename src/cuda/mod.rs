@@ -51,9 +51,9 @@ pub mod bandpass_wrapper;
 #[cfg(feature = "cuda")]
 pub mod bench;
 #[cfg(feature = "cuda")]
-pub mod chande_wrapper;
-#[cfg(feature = "cuda")]
 pub mod candle_strength_oscillator_wrapper;
+#[cfg(feature = "cuda")]
+pub mod chande_wrapper;
 #[cfg(feature = "cuda")]
 pub mod cvi_wrapper;
 #[cfg(feature = "cuda")]
@@ -103,9 +103,9 @@ pub mod goertzel_cycle_composite_wave_wrapper;
 #[cfg(feature = "cuda")]
 pub mod hypertrend_wrapper;
 #[cfg(feature = "cuda")]
-pub mod ict_propulsion_block_wrapper;
-#[cfg(feature = "cuda")]
 pub mod ichimoku_oscillator_wrapper;
+#[cfg(feature = "cuda")]
+pub mod ict_propulsion_block_wrapper;
 #[cfg(feature = "cuda")]
 pub mod impulse_macd_wrapper;
 #[cfg(feature = "cuda")]
@@ -167,11 +167,11 @@ pub mod supertrend_oscillator_wrapper;
 #[cfg(feature = "cuda")]
 pub mod supertrend_recovery_wrapper;
 #[cfg(feature = "cuda")]
+pub mod vdubus_divergence_wave_pattern_generator_wrapper;
+#[cfg(feature = "cuda")]
 pub mod velocity_acceleration_convergence_divergence_indicator_wrapper;
 #[cfg(feature = "cuda")]
 pub mod volume_weighted_stochastic_rsi_wrapper;
-#[cfg(feature = "cuda")]
-pub mod vdubus_divergence_wave_pattern_generator_wrapper;
 #[cfg(feature = "cuda")]
 pub mod vwap_deviation_oscillator_wrapper;
 #[cfg(feature = "cuda")]
@@ -240,11 +240,11 @@ pub use bandpass_wrapper::{CudaBandpass, CudaBandpassBatchResult, DeviceArrayF32
 #[cfg(feature = "cuda")]
 pub use bench::{CudaBenchScenario, CudaBenchState};
 #[cfg(feature = "cuda")]
-pub use chande_wrapper::CudaChande;
-#[cfg(feature = "cuda")]
 pub use candle_strength_oscillator_wrapper::{
     CudaCandleStrengthOscillator, CudaCandleStrengthOscillatorError,
 };
+#[cfg(feature = "cuda")]
+pub use chande_wrapper::CudaChande;
 #[cfg(feature = "cuda")]
 pub use cvi_wrapper::{CudaCvi, CudaCviError};
 #[cfg(feature = "cuda")]
@@ -318,9 +318,9 @@ pub use goertzel_cycle_composite_wave_wrapper::{
 #[cfg(feature = "cuda")]
 pub use hypertrend_wrapper::{CudaHyperTrend, CudaHyperTrendError};
 #[cfg(feature = "cuda")]
-pub use ict_propulsion_block_wrapper::{CudaIctPropulsionBlock, CudaIctPropulsionBlockError};
-#[cfg(feature = "cuda")]
 pub use ichimoku_oscillator_wrapper::{CudaIchimokuOscillator, CudaIchimokuOscillatorError};
+#[cfg(feature = "cuda")]
+pub use ict_propulsion_block_wrapper::{CudaIctPropulsionBlock, CudaIctPropulsionBlockError};
 #[cfg(feature = "cuda")]
 pub use impulse_macd_wrapper::{CudaImpulseMacd, CudaImpulseMacdError};
 #[cfg(feature = "cuda")]
@@ -414,6 +414,10 @@ pub use supertrend_oscillator_wrapper::{CudaSupertrendOscillator, CudaSupertrend
 #[cfg(feature = "cuda")]
 pub use supertrend_recovery_wrapper::{CudaSuperTrendRecovery, CudaSuperTrendRecoveryError};
 #[cfg(feature = "cuda")]
+pub use vdubus_divergence_wave_pattern_generator_wrapper::{
+    CudaVdubusDivergenceWavePatternGenerator, CudaVdubusDivergenceWavePatternGeneratorError,
+};
+#[cfg(feature = "cuda")]
 pub use velocity_acceleration_convergence_divergence_indicator_wrapper::{
     CudaVelocityAccelerationConvergenceDivergenceIndicator,
     CudaVelocityAccelerationConvergenceDivergenceIndicatorError,
@@ -421,10 +425,6 @@ pub use velocity_acceleration_convergence_divergence_indicator_wrapper::{
 #[cfg(feature = "cuda")]
 pub use volume_weighted_stochastic_rsi_wrapper::{
     CudaVolumeWeightedStochasticRsi, CudaVolumeWeightedStochasticRsiError,
-};
-#[cfg(feature = "cuda")]
-pub use vdubus_divergence_wave_pattern_generator_wrapper::{
-    CudaVdubusDivergenceWavePatternGenerator, CudaVdubusDivergenceWavePatternGeneratorError,
 };
 #[cfg(feature = "cuda")]
 pub use vwap_deviation_oscillator_wrapper::{
@@ -557,9 +557,9 @@ pub mod ehlers_fm_demodulator_wrapper;
 #[cfg(feature = "cuda")]
 pub mod ehlers_simple_cycle_indicator_wrapper;
 #[cfg(feature = "cuda")]
-pub mod emd_wrapper;
-#[cfg(feature = "cuda")]
 pub mod emd_trend_wrapper;
+#[cfg(feature = "cuda")]
+pub mod emd_wrapper;
 #[cfg(feature = "cuda")]
 pub mod exponential_trend_wrapper;
 #[cfg(feature = "cuda")]
@@ -585,9 +585,9 @@ pub mod gopalakrishnan_range_index_wrapper;
 #[cfg(feature = "cuda")]
 pub mod grover_llorens_cycle_oscillator_wrapper;
 #[cfg(feature = "cuda")]
-pub mod halftrend_wrapper;
-#[cfg(feature = "cuda")]
 pub mod half_causal_estimator_wrapper;
+#[cfg(feature = "cuda")]
+pub mod halftrend_wrapper;
 #[cfg(feature = "cuda")]
 pub mod hema_trend_levels_wrapper;
 #[cfg(feature = "cuda")]
@@ -679,9 +679,9 @@ pub mod rank_correlation_index_wrapper;
 #[cfg(feature = "cuda")]
 pub mod regression_slope_oscillator_wrapper;
 #[cfg(feature = "cuda")]
-pub mod reversal_signals_wrapper;
-#[cfg(feature = "cuda")]
 pub mod relative_strength_index_wave_indicator_wrapper;
+#[cfg(feature = "cuda")]
+pub mod reversal_signals_wrapper;
 #[cfg(feature = "cuda")]
 pub mod rogers_satchell_volatility_wrapper;
 #[cfg(feature = "cuda")]
@@ -735,9 +735,9 @@ pub mod volatility_quality_index_wrapper;
 #[cfg(feature = "cuda")]
 pub mod volatility_ratio_adaptive_rsx_wrapper;
 #[cfg(feature = "cuda")]
-pub mod volume_weighted_relative_strength_index_wrapper;
-#[cfg(feature = "cuda")]
 pub mod volume_energy_reservoirs_wrapper;
+#[cfg(feature = "cuda")]
+pub mod volume_weighted_relative_strength_index_wrapper;
 #[cfg(feature = "cuda")]
 pub mod volume_weighted_rsi_wrapper;
 #[cfg(feature = "cuda")]
@@ -802,9 +802,9 @@ pub use ehlers_simple_cycle_indicator_wrapper::{
     CudaEhlersSimpleCycleIndicator, CudaEhlersSimpleCycleIndicatorError,
 };
 #[cfg(feature = "cuda")]
-pub use emd_wrapper::{CudaEmd, CudaEmdBatchResult, CudaEmdError, DeviceArrayF32Triple};
-#[cfg(feature = "cuda")]
 pub use emd_trend_wrapper::{CudaEmdTrend, CudaEmdTrendError};
+#[cfg(feature = "cuda")]
+pub use emd_wrapper::{CudaEmd, CudaEmdBatchResult, CudaEmdError, DeviceArrayF32Triple};
 #[cfg(feature = "cuda")]
 pub use exponential_trend_wrapper::{CudaExponentialTrend, CudaExponentialTrendError};
 #[cfg(feature = "cuda")]
@@ -993,11 +993,11 @@ pub use regression_slope_oscillator_wrapper::{
     CudaRegressionSlopeOscillator, CudaRegressionSlopeOscillatorError,
 };
 #[cfg(feature = "cuda")]
-pub use reversal_signals_wrapper::{CudaReversalSignals, CudaReversalSignalsError};
-#[cfg(feature = "cuda")]
 pub use relative_strength_index_wave_indicator_wrapper::{
     CudaRelativeStrengthIndexWaveIndicator, CudaRelativeStrengthIndexWaveIndicatorError,
 };
+#[cfg(feature = "cuda")]
+pub use reversal_signals_wrapper::{CudaReversalSignals, CudaReversalSignalsError};
 #[cfg(feature = "cuda")]
 pub use rogers_satchell_volatility_wrapper::{
     CudaRogersSatchellBatchResult, CudaRogersSatchellManySeriesResult,
@@ -1065,12 +1065,12 @@ pub use volatility_ratio_adaptive_rsx_wrapper::{
     CudaVolatilityRatioAdaptiveRsx, CudaVolatilityRatioAdaptiveRsxError,
 };
 #[cfg(feature = "cuda")]
-pub use volume_weighted_relative_strength_index_wrapper::{
-    CudaVolumeWeightedRelativeStrengthIndex, CudaVolumeWeightedRelativeStrengthIndexError,
-};
-#[cfg(feature = "cuda")]
 pub use volume_energy_reservoirs_wrapper::{
     CudaVolumeEnergyReservoirs, CudaVolumeEnergyReservoirsError,
+};
+#[cfg(feature = "cuda")]
+pub use volume_weighted_relative_strength_index_wrapper::{
+    CudaVolumeWeightedRelativeStrengthIndex, CudaVolumeWeightedRelativeStrengthIndexError,
 };
 #[cfg(feature = "cuda")]
 pub use volume_weighted_rsi_wrapper::{CudaVolumeWeightedRsi, CudaVolumeWeightedRsiError};
@@ -1101,9 +1101,9 @@ pub use damiani_volatmeter_wrapper::{CudaDamianiError, CudaDamianiVolatmeter};
 #[cfg(feature = "cuda")]
 pub use efi_wrapper::{CudaEfi, CudaEfiError};
 #[cfg(feature = "cuda")]
-pub use halftrend_wrapper::{CudaHalftrend, CudaHalftrendError};
-#[cfg(feature = "cuda")]
 pub use half_causal_estimator_wrapper::{CudaHalfCausalEstimator, CudaHalfCausalEstimatorError};
+#[cfg(feature = "cuda")]
+pub use halftrend_wrapper::{CudaHalftrend, CudaHalftrendError};
 #[cfg(feature = "cuda")]
 pub use hema_trend_levels_wrapper::{CudaHemaTrendLevels, CudaHemaTrendLevelsError};
 #[cfg(feature = "cuda")]

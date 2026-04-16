@@ -521,7 +521,6 @@ test('UMA - streaming vs batch comparison', () => {
         'Batch and stream should produce same length');
 
 
-
     const batchValid = batchResult.values.filter(v => !isNaN(v));
     const streamValid = streamResults.filter(v => !isNaN(v));
 

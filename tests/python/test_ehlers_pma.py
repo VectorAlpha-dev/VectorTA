@@ -142,7 +142,6 @@ class TestEhlersPma:
         stream_trigger = np.array(stream_trigger)
 
 
-
         for i in range(17, len(close)):
             if not np.isnan(batch_predict[i]) and not np.isnan(stream_predict[i]):
                 np.testing.assert_allclose(

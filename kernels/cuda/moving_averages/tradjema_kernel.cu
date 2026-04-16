@@ -1,6 +1,3 @@
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -51,11 +48,6 @@ __device__ __forceinline__ int add_wrap(int head, int add, int n) {
 }
 
 
-
-
-
-
-
 extern "C" __global__
 void tradjema_batch_f32(const float* __restrict__ high,
                         const float* __restrict__ low,
@@ -95,7 +87,6 @@ void tradjema_batch_f32(const float* __restrict__ high,
 
 
     if (warm >= series_len || threadIdx.x != 0) return;
-
 
 
     extern __shared__ __align__(16) unsigned char smem[];
@@ -183,10 +174,6 @@ void tradjema_batch_f32(const float* __restrict__ high,
 }
 
 
-
-
-
-
 extern "C" __global__
 void tradjema_many_series_one_param_time_major_f32(
     const float* __restrict__ high_tm,
@@ -228,7 +215,6 @@ void tradjema_many_series_one_param_time_major_f32(
     auto at = [num_series](const float* buf, int row, int col) {
         return buf[row * num_series + col];
     };
-
 
 
     extern __shared__ __align__(16) unsigned char smem[];

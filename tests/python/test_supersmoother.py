@@ -105,8 +105,6 @@ class TestSuperSmoother:
         assert len(second_result) == len(first_result)
 
 
-
-
     def test_supersmoother_nan_handling(self, test_data):
         """Test SuperSmoother handles NaN values correctly - mirrors check_supersmoother_nan_handling"""
         close = test_data['close']
@@ -147,11 +145,6 @@ class TestSuperSmoother:
 
 
         assert len(batch_result) == len(stream_values)
-
-
-
-
-
 
 
         valid_count = np.sum(~np.isnan(stream_values))
@@ -250,12 +243,6 @@ class TestSuperSmoother:
 
         period = 3
         result = ta_indicators.supersmoother(data, period)
-
-
-
-
-
-
 
 
         for i in range(5):

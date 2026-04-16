@@ -1,22 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 
@@ -84,8 +65,6 @@ extern "C" __global__ void macz_build_prefix_single_f32(
         }
     }
 }
-
-
 
 
 extern "C" __global__ void macz_batch_macz_tmp_f32(
@@ -262,7 +241,6 @@ extern "C" __global__ void macz_batch_hist_from_macz_f32(
 }
 
 
-
 extern "C" __global__ void macz_batch_f32(
 
     const float* __restrict__ close,
@@ -414,7 +392,6 @@ extern "C" __global__ void macz_batch_f32(
         }
 
         macz_tmp[row_off + t] = macz_val;
-
 
 
         if (t >= warm_hist) {

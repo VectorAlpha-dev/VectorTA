@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -29,7 +28,6 @@ test.before(async () => {
 
         wasm = await import(importPath);
     } catch (error) {
-
 
 
         try {

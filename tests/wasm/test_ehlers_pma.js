@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -155,7 +154,6 @@ test('Ehlers PMA NaN handling', () => {
     }
 
 
-
     for (let i = 0; i < 13; i++) {
         assert(isNaN(predict[i]), `Expected NaN in predict warmup at index ${i}`);
     }
@@ -235,7 +233,6 @@ test('Ehlers PMA crossover detection', () => {
 test('Ehlers PMA with NaN in middle of data', () => {
 
 
-
     const data = new Float64Array(30);
     for (let i = 0; i < data.length; i++) {
         data[i] = 100.0 + i;
@@ -250,14 +247,9 @@ test('Ehlers PMA with NaN in middle of data', () => {
     const predict = result.values.slice(0, data.length);
 
 
-
-
-
-
     for (let i = 0; i < 15; i++) {
         assert(isNaN(predict[i]), `Expected NaN at index ${i} during warmup/affected period`);
     }
-
 
 
     let hasValidAfterNaN = false;

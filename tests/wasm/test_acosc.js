@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -79,8 +78,6 @@ test('ACOSC accuracy', async () => {
         0.1,
         "ACOSC change last 5 values mismatch"
     );
-
-
 
 
 });

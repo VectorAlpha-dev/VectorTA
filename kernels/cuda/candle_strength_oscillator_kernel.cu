@@ -246,7 +246,7 @@ struct DonchianState {
     }
 };
 
-}  // namespace
+}
 
 extern "C" __global__ void candle_strength_oscillator_batch_f64(
     const double* __restrict__ open,

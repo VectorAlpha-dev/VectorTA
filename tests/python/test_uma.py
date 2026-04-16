@@ -169,7 +169,6 @@ class TestUma:
         assert len(batch_result) == len(stream_values)
 
 
-
         batch_valid = batch_result[~np.isnan(batch_result)]
         stream_valid = stream_values[~np.isnan(stream_values)]
 
@@ -390,8 +389,6 @@ class TestUma:
         valid_without = result_no_vol[~np.isnan(result_no_vol)]
 
         if len(valid_with) > 0 and len(valid_without) > 0:
-
-
 
 
             diff = abs(valid_with[-1] - valid_without[-1])

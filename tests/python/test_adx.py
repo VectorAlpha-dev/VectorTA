@@ -52,7 +52,6 @@ class TestAdx:
         assert len(result) == len(close)
 
 
-
         assert_close(
             result[-5:],
             expected['last_5_values'],
@@ -192,7 +191,6 @@ class TestAdx:
         expected = EXPECTED_OUTPUTS['adx']['last_5_values']
 
 
-
         assert_close(
             default_row[-5:],
             expected,
@@ -253,7 +251,6 @@ class TestAdx:
         assert len(result) == len(close)
 
 
-
         assert np.all(np.isnan(result[:5])), "Expected NaN where input has NaN"
 
     def test_adx_batch_empty_input(self):
@@ -287,9 +284,6 @@ class TestAdx:
         period = 14
 
         result = ta_indicators.adx(high, low, close, period=period)
-
-
-
 
 
         warmup_period = 2 * period - 1

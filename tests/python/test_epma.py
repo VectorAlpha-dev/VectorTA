@@ -97,7 +97,6 @@ class TestEpma:
         )
 
 
-
         batch2 = ti.epma_batch(close[:200], (5, 11, 3), (1, 3, 2))
         rows = len(batch2['periods'])
         assert batch2['values'].shape[0] == rows

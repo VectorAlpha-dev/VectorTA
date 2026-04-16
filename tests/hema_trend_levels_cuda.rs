@@ -66,8 +66,14 @@ fn hema_trend_levels_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::
         slow_length: (30, 34, 4),
     };
 
-    let cpu =
-        hema_trend_levels_batch_with_kernel(&open, &high, &low, &close, &sweep, Kernel::ScalarBatch)?;
+    let cpu = hema_trend_levels_batch_with_kernel(
+        &open,
+        &high,
+        &low,
+        &close,
+        &sweep,
+        Kernel::ScalarBatch,
+    )?;
     let cuda = CudaHemaTrendLevels::new(0)?;
     let result = cuda.batch_dev(&open, &high, &low, &close, &sweep)?;
 
@@ -109,20 +115,36 @@ fn hema_trend_levels_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::
         .buf
         .copy_to(&mut got_bearish_crossunder)?;
     result.outputs.box_offset.buf.copy_to(&mut got_box_offset)?;
-    result.outputs.bull_box_top.buf.copy_to(&mut got_bull_box_top)?;
+    result
+        .outputs
+        .bull_box_top
+        .buf
+        .copy_to(&mut got_bull_box_top)?;
     result
         .outputs
         .bull_box_bottom
         .buf
         .copy_to(&mut got_bull_box_bottom)?;
-    result.outputs.bear_box_top.buf.copy_to(&mut got_bear_box_top)?;
+    result
+        .outputs
+        .bear_box_top
+        .buf
+        .copy_to(&mut got_bear_box_top)?;
     result
         .outputs
         .bear_box_bottom
         .buf
         .copy_to(&mut got_bear_box_bottom)?;
-    result.outputs.bullish_test.buf.copy_to(&mut got_bullish_test)?;
-    result.outputs.bearish_test.buf.copy_to(&mut got_bearish_test)?;
+    result
+        .outputs
+        .bullish_test
+        .buf
+        .copy_to(&mut got_bullish_test)?;
+    result
+        .outputs
+        .bearish_test
+        .buf
+        .copy_to(&mut got_bearish_test)?;
     result
         .outputs
         .bullish_test_level
@@ -166,7 +188,11 @@ fn hema_trend_levels_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::
             got_bullish_crossover[idx]
         );
         assert!(
-            approx_eq(cpu.bearish_crossunder[idx], got_bearish_crossunder[idx], 1e-6),
+            approx_eq(
+                cpu.bearish_crossunder[idx],
+                got_bearish_crossunder[idx],
+                1e-6
+            ),
             "bearish_crossunder mismatch at {idx}: cpu={} cuda={}",
             cpu.bearish_crossunder[idx],
             got_bearish_crossunder[idx]
@@ -214,13 +240,21 @@ fn hema_trend_levels_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::
             got_bearish_test[idx]
         );
         assert!(
-            approx_eq(cpu.bullish_test_level[idx], got_bullish_test_level[idx], 1e-6),
+            approx_eq(
+                cpu.bullish_test_level[idx],
+                got_bullish_test_level[idx],
+                1e-6
+            ),
             "bullish_test_level mismatch at {idx}: cpu={} cuda={}",
             cpu.bullish_test_level[idx],
             got_bullish_test_level[idx]
         );
         assert!(
-            approx_eq(cpu.bearish_test_level[idx], got_bearish_test_level[idx], 1e-6),
+            approx_eq(
+                cpu.bearish_test_level[idx],
+                got_bearish_test_level[idx],
+                1e-6
+            ),
             "bearish_test_level mismatch at {idx}: cpu={} cuda={}",
             cpu.bearish_test_level[idx],
             got_bearish_test_level[idx]

@@ -1,15 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -18,7 +6,6 @@
 #include <math.h>
 #include <float.h>
 #include <stdint.h>
-
 
 
 static __forceinline__ __device__ float dvdiqqe_tick_volume(
@@ -31,7 +18,6 @@ static __forceinline__ __device__ float dvdiqqe_tick_volume(
     const float tv = (tick > 0.0f) ? fabsf(tickrng) / tick : 0.0f;
     return tv > 0.0f ? tv : 0.0f;
 }
-
 
 
 static __forceinline__ __device__ float select_volume(
@@ -251,7 +237,6 @@ void dvdiqqe_batch_f32(
         cent_row[i] = qnan;
     }
 }
-
 
 
 extern "C" __global__

@@ -106,8 +106,6 @@ class TestZlema:
         assert len(second_result) == len(first_result)
 
 
-
-
         for idx, val in enumerate(second_result[34:], start=34):
             assert np.isfinite(val), f"NaN found at index {idx}"
 

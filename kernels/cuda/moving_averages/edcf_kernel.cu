@@ -1,17 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -88,8 +74,6 @@ void edcf_compute_dist_f32(const float* __restrict__ prices,
 }
 
 
-
-
 template<int TILE>
 __device__ __forceinline__ void edcf_compute_dist_rolling_tiled_f32(const float* __restrict__ prices,
                                                     int len,
@@ -123,7 +107,6 @@ __device__ __forceinline__ void edcf_compute_dist_rolling_tiled_f32(const float*
 
 
     if (threadIdx.x == 0) {
-
 
 
         dsf sum1 = ds_set(0.f);
@@ -235,12 +218,6 @@ void edcf_apply_weights_f32(const float* __restrict__ prices,
         out_row[j] = (den != 0.0f) ? (num / den) : NAN;
     }
 }
-
-
-
-
-
-
 
 
 template<int TILE>
@@ -369,10 +346,6 @@ extern "C" __global__ void edcf_apply_weights_tiled_f32_tile512(const float* __r
 }
 
 
-
-
-
-
 extern "C" __global__
 void edcf_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                     const int* __restrict__ first_valids,
@@ -460,12 +433,6 @@ void edcf_many_series_one_param_f32(const float* __restrict__ prices_tm,
 }
 
 
-
-
-
-
-
-
 template<int TX, int TY>
 __device__ __forceinline__ void edcf_ms1p_tiled_f32_impl(const float* __restrict__ prices_tm,
                                                          const int* __restrict__ first_valids,
@@ -524,7 +491,6 @@ __device__ __forceinline__ void edcf_ms1p_tiled_f32_impl(const float* __restrict
         int k = d_start + u;
 
 
-
         const int start = first_valid + period;
         if (k < start) {
             sh_dist[u] = 0.f;
@@ -554,7 +520,6 @@ __device__ __forceinline__ void edcf_ms1p_tiled_f32_impl(const float* __restrict
         sh_dist[u] = sum_h + sum_c;
     }
     __syncthreads();
-
 
 
     if (threadIdx.x == 0) {

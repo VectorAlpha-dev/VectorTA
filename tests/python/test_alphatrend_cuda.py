@@ -125,4 +125,3 @@ class TestAlphaTrendCuda:
 
         assert_close(k1_gpu, k1_cpu, rtol=2e-3, atol=2e-5, msg="AlphaTrend many-series k1 mismatch")
         assert_close(k2_gpu, k2_cpu, rtol=2e-3, atol=2e-5, msg="AlphaTrend many-series k2 mismatch")
-

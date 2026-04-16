@@ -49,7 +49,6 @@ class TestNama:
         assert len(result) == len(close)
 
 
-
         expected_last_five = np.array([
             59248.42400839,
             59226.18226649,
@@ -65,8 +64,6 @@ class TestNama:
                     msg="NAMA last 5 values mismatch")
 
 
-
-
     def test_nama_default_candles(self, test_data):
         """Test NAMA with default parameters - mirrors check_nama_default_candles"""
         close = test_data['close']
@@ -74,7 +71,6 @@ class TestNama:
 
         result = ta_indicators.nama(close, 30)
         assert len(result) == len(close)
-
 
 
         for i in range(29):
@@ -143,8 +139,6 @@ class TestNama:
 
         assert np.isnan(result[0])
         assert np.isnan(result[1])
-
-
 
 
         for i in range(4):
@@ -278,8 +272,6 @@ class TestNama:
         result_close = ta_indicators.nama(close, period=30)
 
 
-
-
         assert len(result_close) == len(close)
 
 
@@ -302,7 +294,6 @@ class TestNama:
         constant = np.full(50, 100.0)
         result_const = ta_indicators.nama(constant, period=10)
         assert len(result_const) == 50
-
 
 
         for i in range(9, 50):

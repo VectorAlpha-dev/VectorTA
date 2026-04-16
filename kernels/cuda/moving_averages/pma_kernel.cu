@@ -1,14 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -68,7 +57,6 @@ struct lwma7_recur_f32 {
     }
 
     __device__ __forceinline__ float value() const { return __fmul_rn(s2, 1.f / 28.f); }
-
 
 
     __device__ __forceinline__ void seed_from7(const float x[7]) {
@@ -214,7 +202,6 @@ extern "C" __global__ void pma_batch_f32(const float* __restrict__ prices,
                                           float* __restrict__ out_trigger) {
     pma_batch_core(prices, series_len, n_combos, first_valid, out_predict, out_trigger);
 }
-
 
 
 extern "C" __global__ void pma_batch_tiled_f32_tile128(

@@ -1863,9 +1863,6 @@ mod tests {
 				}
 
 
-
-
-
 				if alpha >= 0.05 && data.len() > warmup_end + 20 {
 
 					let mut same_direction_count = 0;
@@ -1888,8 +1885,6 @@ mod tests {
 							}
 						}
 					}
-
-
 
 
 					if total_movements > 10 && frozen_periods < (data.len() - warmup_end) / 2 {

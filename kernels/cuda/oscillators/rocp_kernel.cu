@@ -1,19 +1,9 @@
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
 
 #include <cuda_runtime.h>
 #include <math.h>
-
-
 
 
 #ifndef ROCP_QNAN
@@ -23,15 +13,6 @@ __device__ __forceinline__ float rocp_qnan() {
 }
 #define ROCP_QNAN rocp_qnan()
 #endif
-
-
-
-
-
-
-
-
-
 
 
 extern "C" __global__
@@ -103,13 +84,6 @@ void rocp_batch_f32(const float* __restrict__ data,
 }
 
 
-
-
-
-
-
-
-
 extern "C" __global__
 void rocp_many_series_one_param_f32(const float* __restrict__ data_tm,
                                     const int* __restrict__ firsts,
@@ -144,4 +118,3 @@ void rocp_many_series_one_param_f32(const float* __restrict__ data_tm,
         out[t * cols + s] = (c - p) / p;
     }
 }
-

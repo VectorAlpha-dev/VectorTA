@@ -1,26 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -30,20 +7,14 @@
 #include <stdint.h>
 
 
-
 #ifdef ALMA_USE_CUB_REDUCE
   #include <cub/cub.cuh>
 #endif
 
 
-
 #ifndef ALMA_UNROLL
   #define ALMA_UNROLL 4
 #endif
-
-
-
-
 
 
 #ifndef ALMA_ASSUME
@@ -68,7 +39,6 @@ __device__ __forceinline__ float alma_warp_sum(float v) {
   v += __shfl_down_sync(m, v,  1);
   return v;
 }
-
 
 
 #ifdef ALMA_USE_CUB_REDUCE
@@ -124,7 +94,6 @@ float alma_dot(const float* __restrict__ x,
 }
 
 
-
 __device__ __forceinline__
 void alma_dot2_shared(const float* __restrict__ buf, int b,
                       const float* __restrict__ w, int n,
@@ -170,7 +139,6 @@ float alma_dot_stride(const float* __restrict__ x,
 }
 
 
-
 __device__ __forceinline__
 void alma_compute_weights_and_invnorm(int period, float m, float s2,
                                       float* __restrict__ weights,
@@ -190,7 +158,6 @@ void alma_compute_weights_and_invnorm(int period, float m, float s2,
   }
   __syncthreads();
 }
-
 
 
 extern "C" __global__
@@ -245,7 +212,6 @@ void alma_batch_f32_onthefly(const float* __restrict__ prices,
     t += stride;
   }
 }
-
 
 
 extern "C" __global__
@@ -324,13 +290,6 @@ void alma_batch_f32_tm(const float* __restrict__ prices,
     t += stride;
   }
 }
-
-
-
-
-
-
-
 
 
 template<int TILE>
@@ -554,7 +513,6 @@ extern "C" __global__ void NAME(                                                
 DEFINE_ALMA_BATCH_TILED_PRECOMP_TM(alma_batch_tiled_f32_tile128_tm, 128)
 DEFINE_ALMA_BATCH_TILED_PRECOMP_TM(alma_batch_tiled_f32_tile256_tm, 256)
 DEFINE_ALMA_BATCH_TILED_PRECOMP_TM(alma_batch_tiled_f32_tile512_tm, 512)
-
 
 
 template<int TILE_OUT>
@@ -1044,11 +1002,6 @@ extern "C" __global__ void NAME(                                                
 DEFINE_ALMA_BATCH_TILED_PRECOMP_4X_TM(alma_batch_tiled_f32_4x_tile512_tm, 512)
 
 
-
-
-
-
-
 extern "C" __global__
 void alma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
                                      const float* __restrict__ weights,
@@ -1088,7 +1041,6 @@ void alma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
 }
 
 
-
 extern "C" __global__
 void alma_precompute_weights_f32(const int*   __restrict__ periods,
                                  const float* __restrict__ offsets,
@@ -1116,7 +1068,6 @@ void alma_precompute_weights_f32(const int*   __restrict__ periods,
   }
   if (threadIdx.x == 0) inv_norms[combo] = 1.0f;
 }
-
 
 
 template<int TX, int TY>

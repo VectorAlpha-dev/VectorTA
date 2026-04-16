@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -458,7 +457,6 @@ test('AD SIMD128 consistency', () => {
         }
 
 
-
         if (testCase.size > 10) {
             let hasVariation = false;
             for (let i = 1; i < result.length; i++) {
@@ -471,7 +469,6 @@ test('AD SIMD128 consistency', () => {
         }
     }
 });
-
 
 
 test.after(() => {

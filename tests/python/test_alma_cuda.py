@@ -119,7 +119,6 @@ class TestAlmaCuda:
             handle.__dlpack__(dl_device=(kdl, wrong_dev), copy=True)
 
 
-
     def test_alma_cuda_many_series_one_param_matches_cpu(self, test_data):
 
         T = 1024

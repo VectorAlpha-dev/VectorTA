@@ -1,11 +1,3 @@
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math_constants.h>
 
@@ -119,9 +111,6 @@ extern "C" __global__ void pivot_extract_output_rows_f32(
 }
 
 
-
-
-
 extern "C" __global__
 void pivot_batch_f32(
     const float* __restrict__ high,
@@ -193,9 +182,6 @@ void pivot_batch_f32(
 }
 
 
-
-
-
 extern "C" __global__
 void pivot_many_series_one_param_time_major_f32(
     const float* __restrict__ high_tm,
@@ -243,4 +229,3 @@ void pivot_many_series_one_param_time_major_f32(
         out_tm[(8 * rows + t) * cols + s] = s4;
     }
 }
-

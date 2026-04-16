@@ -111,4 +111,3 @@ class TestPivotCuda:
         assert gpu.shape == (9 * rows, cols)
         gpu_pp = gpu[4 * rows : 5 * rows, :]
         np.testing.assert_allclose(gpu_pp, cpu_pp, rtol=5e-4, atol=5e-6)
-

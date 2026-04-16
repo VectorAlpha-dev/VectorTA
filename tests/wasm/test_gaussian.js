@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -152,4 +151,3 @@ test('Gaussian zero-copy API (alloc/into/free)', () => {
     wasm.gaussian_free(ptr, data.length);
   }
 });
-

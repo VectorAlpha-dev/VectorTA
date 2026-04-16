@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -61,7 +60,6 @@ test('JSA accuracy', async () => {
         1e-5,
         "JSA last 5 values mismatch"
     );
-
 
 
 });
@@ -407,7 +405,6 @@ test('JSA large period', () => {
     const expected = (data[99] + data[0]) * 0.5;
     assertClose(result[99], expected, 1e-9, "Last value mismatch");
 });
-
 
 
 test('JSA zero-copy API', () => {

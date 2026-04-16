@@ -1,23 +1,8 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 #include <stdint.h>
 
 __device__ __forceinline__ float qnan32() { return __int_as_float(0x7fffffff); }
-
 
 
 extern "C" __global__ void rsmk_momentum_f32(
@@ -50,7 +35,6 @@ extern "C" __global__ void rsmk_momentum_f32(
         mom_out[i] = outv;
     }
 }
-
 
 
 extern "C" __global__ void rsmk_apply_mom_single_row_ema_ema_f32(
@@ -212,7 +196,6 @@ extern "C" __global__ void rsmk_apply_mom_single_row_ema_ema_classic_f32(
         out_signal[i] = (float)ema_sig;
     }
 }
-
 
 
 extern "C" __global__ void rsmk_many_series_one_param_time_major_ema_ema_f32(

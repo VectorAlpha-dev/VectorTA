@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -372,7 +371,6 @@ test('VWAP zero volume', () => {
     assert.strictEqual(result.length, prices.length, 'Output length should match input');
 
 
-
     let nonNanCount = 0;
     for (let i = 0; i < result.length; i++) {
         if (!isNaN(result[i])) {
@@ -416,9 +414,6 @@ test('VWAP volume weighting', () => {
     const volumes = [1.0, 2.0, 3.0];
 
     const result = wasm.vwap_js(timestamps, volumes, prices, "1d");
-
-
-
 
 
     const expected = [100.0, 500.0/3.0, 1400.0/6.0];

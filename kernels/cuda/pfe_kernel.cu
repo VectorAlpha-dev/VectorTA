@@ -1,16 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -18,9 +5,6 @@
 #include <cuda_runtime.h>
 #include <math_constants.h>
 #include <math.h>
-
-
-
 
 
 static __device__ __forceinline__ void two_sumf(float a, float b, float &s, float &e) {
@@ -60,7 +44,6 @@ void pfe_prepare_data_f32(const float* __restrict__ data,
         out[i] = data[i];
     }
 }
-
 
 
 extern "C" __global__
@@ -139,10 +122,6 @@ void pfe_batch_f32(const float* __restrict__ data,
 }
 
 
-
-
-
-
 extern "C" __global__
 void pfe_batch_prefix_f32(const float* __restrict__ data,
                           const double* __restrict__ prefix,
@@ -194,7 +173,6 @@ void pfe_batch_prefix_f32(const float* __restrict__ data,
         out[row_off + t] = ema;
     }
 }
-
 
 
 extern "C" __global__
@@ -252,13 +230,6 @@ void pfe_many_series_one_param_time_major_f32(const float* __restrict__ data_tm,
         ++oldest;
     }
 }
-
-
-
-
-
-
-
 
 
 extern "C" __global__

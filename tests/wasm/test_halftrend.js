@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -100,7 +99,6 @@ test('HALFTREND accuracy', async () => {
             `Trend mismatch at index ${idx}`
         );
     });
-
 
 
 });

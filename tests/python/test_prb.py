@@ -66,8 +66,6 @@ class TestPrb:
                 assert values[i] > lower_band[i], f"Main should be > lower band at index {i}"
 
 
-
-
                 band_width = upper_band[i] - values[i]
                 assert band_width > 0, f"Band width should be positive at index {i}"
 
@@ -455,7 +453,6 @@ class TestPrb:
 
         values, upper_band, lower_band = result
         assert len(values) == len(data)
-
 
 
         non_nan_values = values[~np.isnan(values)]

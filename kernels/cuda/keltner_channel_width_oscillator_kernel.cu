@@ -111,7 +111,7 @@ __device__ inline double update_seeded_rma(
     *value = fma(alpha, input - *value, *value);
     return *value;
 }
-}  // namespace
+}
 
 extern "C" __global__ void keltner_channel_width_oscillator_batch_f64(
     const double* high,

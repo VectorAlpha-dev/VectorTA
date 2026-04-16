@@ -74,4 +74,3 @@ class TestEfiCuda:
         gpu_tm = cp.asnumpy(cp.asarray(handle))
         assert gpu_tm.shape == prices_tm.shape
         assert_close(gpu_tm, cpu_tm, rtol=1e-4, atol=1e-5, msg="CUDA EFI many-series mismatch")
-

@@ -95,4 +95,3 @@ class TestPrbCuda:
         assert_close(g_m, cpu_m, rtol=1e-2, atol=1e-3)
         assert_close(g_u, cpu_u, rtol=1e-2, atol=1e-3)
         assert_close(g_l, cpu_l, rtol=1e-2, atol=1e-3)
-

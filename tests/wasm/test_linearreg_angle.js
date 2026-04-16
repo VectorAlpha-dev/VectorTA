@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -69,7 +68,6 @@ test('Linear Regression Angle accuracy', () => {
         1e-5,
         'Linear Regression Angle last 5 values mismatch'
     );
-
 
 
 });

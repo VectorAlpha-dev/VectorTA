@@ -1,11 +1,3 @@
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -67,19 +59,6 @@ void decycler_batch_f32(const float* __restrict__ prices,
         }
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 extern "C" __global__
@@ -147,7 +126,6 @@ void decycler_batch_warp_scan_f32(const float* __restrict__ prices,
             const float x2 = prices[t - 2];
             u = c * (x - 2.0f * x1 + x2);
         }
-
 
 
         float p00 = valid ? m00 : 1.0f;

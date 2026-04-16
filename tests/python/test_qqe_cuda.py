@@ -96,4 +96,3 @@ class TestQqeCuda:
 
         assert_close(gpu_fast, cpu_fast, rtol=5e-5, atol=1e-5, msg="QQE FAST many-series CUDA vs CPU mismatch")
         assert_close(gpu_slow, cpu_slow, rtol=5e-5, atol=1e-5, msg="QQE SLOW many-series CUDA vs CPU mismatch")
-

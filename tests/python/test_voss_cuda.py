@@ -74,4 +74,3 @@ def test_voss_cuda_many_series_one_param_shapes_and_basic_check():
     f_tm = cp.asnumpy(cp.asarray(handle_f))
     assert v_tm.shape == (rows, cols)
     assert f_tm.shape == (rows, cols)
-

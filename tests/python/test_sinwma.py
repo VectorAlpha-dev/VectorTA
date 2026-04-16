@@ -395,7 +395,6 @@ def test_sinwma_formula_verification():
     assert np.all(np.isfinite(result[period - 1:]))
 
 
-
     assert not np.allclose(result[period:], result[period], rtol=1e-9)
 
 

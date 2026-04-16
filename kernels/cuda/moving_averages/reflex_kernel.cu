@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -30,8 +21,6 @@ static __device__ __forceinline__ float reflex_out_if_valid(double ms, double my
     }
     return 0.0f;
 }
-
-
 
 
 extern "C" __global__
@@ -137,8 +126,6 @@ void reflex_batch_f32(const float* __restrict__ prices,
 }
 
 
-
-
 extern "C" __global__
 void reflex_batch_f32_precomp(const float* __restrict__ prices,
                               const int*   __restrict__ periods,
@@ -220,8 +207,6 @@ void reflex_batch_f32_precomp(const float* __restrict__ prices,
         }
     }
 }
-
-
 
 
 extern "C" __global__

@@ -68,9 +68,6 @@ class TestAroon:
         )
 
 
-
-
-
     def test_aroon_default_candles(self, test_data):
         """Test Aroon with default parameters - mirrors check_aroon_default_candles"""
         high = test_data['high']
@@ -315,7 +312,6 @@ class TestAroon:
         auto_up, auto_down = result_auto
         assert len(auto_up) == 100
         assert len(auto_down) == 100
-
 
 
         mask_up = ~(np.isnan(scalar_up) | np.isnan(auto_up))

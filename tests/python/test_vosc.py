@@ -48,7 +48,6 @@ class TestVosc:
         assert len(result) == len(volume), "VOSC length mismatch"
 
 
-
         for i, expected in enumerate(expected_last_five):
             assert_close(result[-(5-i)], expected, rtol=0, atol=1e-1)
 

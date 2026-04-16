@@ -1,11 +1,3 @@
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -25,7 +17,6 @@
 #ifndef KAMA_PREFETCH_DIST
 #define KAMA_PREFETCH_DIST 64
 #endif
-
 
 
 static constexpr float SC_MUL = 0.6667f;
@@ -310,10 +301,6 @@ void ehlers_kama_multi_series_one_param_f32(const float* __restrict__ prices_tm,
 }
 
 
-
-
-
-
 extern "C" __global__
 void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_tm,
                                                int period,
@@ -337,14 +324,10 @@ void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_
     if (warm >= series_len) return;
 
 
-
-
     extern __shared__ float s_ring[];
 
 
-
     const int rb_len = period - 1;
-
 
 
     const int MAX_TILE_SERIES = 128;

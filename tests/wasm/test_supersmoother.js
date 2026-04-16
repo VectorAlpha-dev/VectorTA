@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -125,7 +124,6 @@ test('SuperSmoother reinput', () => {
 
     const secondResult = wasm.supersmoother_js(firstResult, 10);
     assert.strictEqual(secondResult.length, firstResult.length);
-
 
 
 });
@@ -263,12 +261,6 @@ test('SuperSmoother leading NaNs', () => {
 
     const period = 3;
     const result = wasm.supersmoother_js(data, period);
-
-
-
-
-
-
 
 
     for (let i = 0; i < 5; i++) {

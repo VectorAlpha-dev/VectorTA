@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -150,7 +149,6 @@ test('VI NaN handling', () => {
     const result = wasm.vi_js(high, low, close, 14);
     assert.strictEqual(result.plus.length, high.length);
     assert.strictEqual(result.minus.length, high.length);
-
 
 
     assert(isNaN(result.plus[0]), 'First plus value should be NaN');

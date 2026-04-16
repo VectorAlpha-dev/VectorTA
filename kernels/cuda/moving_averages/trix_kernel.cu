@@ -1,15 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -53,9 +41,6 @@ void trix_build_logs_f32(const float* __restrict__ prices,
         }
     }
 }
-
-
-
 
 
 extern "C" __global__
@@ -139,14 +124,6 @@ void trix_batch_f32(const float* __restrict__ logs,
         ema3_prev = ema3;
     }
 }
-
-
-
-
-
-
-
-
 
 
 extern "C" __global__
@@ -278,9 +255,6 @@ void trix_batch_warp_scan_f32(const float* __restrict__ logs,
 }
 
 
-
-
-
 extern "C" __global__
 void trix_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                     int period,
@@ -363,4 +337,3 @@ void trix_many_series_one_param_f32(const float* __restrict__ prices_tm,
         ema3_prev = ema3;
     }
 }
-

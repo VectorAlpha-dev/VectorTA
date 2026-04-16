@@ -1,33 +1,11 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
 
 
-
-
-
 #ifndef HMA_ASSUME_OUT_PREFILLED
 #define HMA_ASSUME_OUT_PREFILLED 0
 #endif
-
-
 
 
 #ifndef HMA_RING_IN_SHARED
@@ -103,7 +81,6 @@ void hma_batch_f32(const float* __restrict__ prices,
         }
 
 
-
         int warmup_end = first_valid + period + sqrt_len - 2;
         if (warmup_end > series_len) warmup_end = series_len;
         for (int i = 0; i < warmup_end; ++i) { out[base + i] = HMA_NAN; }
@@ -139,7 +116,6 @@ void hma_batch_f32(const float* __restrict__ prices,
 #else
         float* ring = x_buf + combo * max_sqrt_len;
 #endif
-
 
 
         for (int j = 0; j < tail_len; ++j) {

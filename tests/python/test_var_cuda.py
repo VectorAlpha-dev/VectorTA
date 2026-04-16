@@ -81,4 +81,3 @@ class TestVarCuda:
         gpu_tm = cp.asnumpy(cp.asarray(handle))
         assert gpu_tm.shape == (T, N)
         assert_close(gpu_tm, cpu_tm, rtol=5e-4, atol=1e-5, msg="VAR CUDA many-series vs CPU mismatch")
-

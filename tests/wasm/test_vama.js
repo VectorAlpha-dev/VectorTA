@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -210,4 +209,3 @@ test('VAMA batch multiple parameters', () => {
 test.after(() => {
     console.log('VAMA WASM tests completed');
 });
-

@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -246,7 +245,6 @@ test('TRIX with NaN handling', () => {
     assert.equal(result.length, closePrices.length);
 
 
-
     const validBeforeNaN = result.slice(80, 100).filter(v => !isNaN(v));
     assert(validBeforeNaN.length > 0, 'Should have valid values before first NaN');
 
@@ -399,9 +397,6 @@ test('TRIX with mixed NaN patterns', () => {
 
     const result = wasm.trix_js(closePrices, 18);
     assert.equal(result.length, closePrices.length, 'Length should match');
-
-
-
 
 
     const warmup = 3 * (18 - 1) + 1;

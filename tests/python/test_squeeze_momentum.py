@@ -280,8 +280,6 @@ class TestSqueezeMomentum:
         )
 
 
-
-
         compare_with_rust('squeeze_momentum', momentum, 'hlc', {
             'length_bb': 20,
             'mult_bb': 2.0,

@@ -1,15 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -345,7 +333,6 @@ void scatter_rows_f32(const float* __restrict__ src,
 }
 
 
-
 static __device__ __forceinline__ void rvi_compute_series(
     const float* __restrict__ prices,
     int len,
@@ -574,19 +561,6 @@ void rvi_many_series_one_param_f32(const float* __restrict__ prices_tm,
         out_tm[t * cols + s] = NAN;
     }
     if (warm >= rows) return;
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
     const bool use_sma = (matype == 0) && (ma_len <= 1024);

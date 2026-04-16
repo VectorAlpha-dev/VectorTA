@@ -1,23 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -105,7 +85,6 @@ extern "C" __global__ void natr_tr_from_hlc_f32(
 }
 
 
-
 extern "C" __global__ void natr_make_inv_close100(
     const float* __restrict__ close, int len, float* __restrict__ inv_close100)
 {
@@ -114,16 +93,6 @@ extern "C" __global__ void natr_make_inv_close100(
         inv_close100[t] = safe_scale_100_over_close(close[t]);
     }
 }
-
-
-
-
-
-
-
-
-
-
 
 
 extern "C" __global__ void natr_batch_f32(
@@ -194,7 +163,6 @@ extern "C" __global__ void natr_batch_f32(
 }
 
 
-
 extern "C" __global__ void natr_batch_f32_with_inv(
     const float* __restrict__ tr,
     const float* __restrict__ inv_close100,
@@ -255,13 +223,6 @@ extern "C" __global__ void natr_batch_f32_with_inv(
         out[base + t] = (scale == scale) ? static_cast<float>(atr * static_cast<double>(scale)) : dev_nan();
     }
 }
-
-
-
-
-
-
-
 
 
 extern "C" __global__ void natr_batch_warp_io_f32(
@@ -442,8 +403,6 @@ extern "C" __global__ void natr_batch_warp_io_f32_with_inv(
         __syncwarp(mask);
     }
 }
-
-
 
 
 extern "C" __global__ void natr_many_series_one_param_f32(

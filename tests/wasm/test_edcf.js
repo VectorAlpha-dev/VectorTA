@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -404,9 +403,6 @@ test('EDCF batch performance test', () => {
     console.log(`  EDCF Avg Batch time: ${avgBatchTime.toFixed(3)}ms, Avg Single calls time: ${avgSingleTime.toFixed(3)}ms`);
 
 
-
-
-
     const isComparable = avgBatchTime <= avgSingleTime * 3 ||
                          avgBatchTime - avgSingleTime <= 2.0;
 
@@ -417,7 +413,6 @@ test('EDCF batch performance test', () => {
 test('EDCF batch volatility analysis scenario', () => {
 
     const close = new Float64Array(testData.close.slice(0, 300));
-
 
 
     const shortTermBatch = wasm.edcf_batch_js(close, 10, 20, 2);
@@ -487,13 +482,11 @@ test('EDCF warmup period verification', () => {
 test('EDCF constant data', () => {
 
 
-
     const constant = new Float64Array(50);
     constant.fill(100.0);
 
     const result = wasm.edcf_js(constant, 5);
     assert.strictEqual(result.length, constant.length);
-
 
 
     console.log('  Note: EDCF constant data handling has known issues with uninitialized memory');
@@ -631,7 +624,6 @@ test('EDCF batch zero-copy API', () => {
         wasm.edcf_free(outPtr, len * numPeriods);
     }
 });
-
 
 
 test.after(() => {

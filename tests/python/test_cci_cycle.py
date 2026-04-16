@@ -62,8 +62,6 @@ class TestCci_Cycle:
         )
 
 
-
-
     def test_cci_cycle_default_candles(self, test_data):
         """Test CCI_CYCLE with default parameters - mirrors check_cci_cycle_default_candles"""
         close = test_data['close']
@@ -113,7 +111,6 @@ class TestCci_Cycle:
         assert nan_count >= len(data) - 5, f"Expected mostly NaN when factor is NaN, got {nan_count}/{len(data)} NaN values"
 
 
-
         result = ta_indicators.cci_cycle(data, 5, -0.5)
         assert len(result) == len(data)
 
@@ -134,7 +131,6 @@ class TestCci_Cycle:
 
         result = ta_indicators.cci_cycle(close, 10, 0.5)
         assert len(result) == len(close)
-
 
 
         initial_nans = 0
@@ -177,7 +173,6 @@ class TestCci_Cycle:
 
 
             assert len(batch_result) == len(stream_values)
-
 
 
             if not np.all(np.isnan(stream_values)):

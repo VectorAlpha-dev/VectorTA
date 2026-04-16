@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 
@@ -54,11 +45,6 @@ void dx_build_terms_f64(const float* __restrict__ high,
         tr[i] = fmax(fmax(tr1, tr2), tr3);
     }
 }
-
-
-
-
-
 
 
 extern "C" __global__
@@ -240,10 +226,6 @@ void dx_many_series_one_param_time_major_f32(
         prev_h = ch; prev_l = cl; prev_c = cc;
     }
 }
-
-
-
-
 
 
 struct dsf32 { float hi, lo; };

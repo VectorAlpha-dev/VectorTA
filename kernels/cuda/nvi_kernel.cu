@@ -1,8 +1,3 @@
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math_constants.h>
 
@@ -63,7 +58,6 @@ extern "C" __global__ void nvi_batch_f32(
     float* __restrict__ out)
 {
     if (len <= 0) return;
-
 
 
     if (blockIdx.x != 0) return;
@@ -166,4 +160,3 @@ extern "C" __global__ void nvi_many_series_one_param_f32(
         }
     }
 }
-

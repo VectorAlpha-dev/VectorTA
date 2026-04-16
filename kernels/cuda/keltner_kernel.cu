@@ -1,9 +1,3 @@
-
-
-
-
-
-
 #include <cuda_runtime.h>
 
 #ifndef __CUDACC_RTC__
@@ -15,9 +9,6 @@ static __device__ __forceinline__ float fast_nan() {
 
 static __device__ __forceinline__ float fast_nan() { return nanf(""); }
 #endif
-
-
-
 
 
 extern "C" __global__ __launch_bounds__(256, 2)
@@ -120,13 +111,6 @@ void keltner_batch_f32(
         outL[t] = fmaf(neg_mult, a, mid);
     }
 }
-
-
-
-
-
-
-
 
 
 extern "C" __global__ __launch_bounds__(256, 2)

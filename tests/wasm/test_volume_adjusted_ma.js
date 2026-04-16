@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -71,7 +70,6 @@ test('VolumeAdjustedMa accuracy', async () => {
         1e-6,
         "VolumeAdjustedMa last 5 values mismatch"
     );
-
 
 
 });
@@ -434,7 +432,6 @@ test('VolumeAdjustedMa batch full parameter sweep', () => {
         for (let i = 0; i < length - 1; i++) {
             assert(isNaN(rowData[i]), `Expected NaN at warmup index ${i} for length ${length}`);
         }
-
 
 
         for (let i = length; i < 50; i++) {

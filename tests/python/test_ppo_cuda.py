@@ -71,4 +71,3 @@ class TestPpoCuda:
         gpu_tm = cp.asnumpy(cp.asarray(handle))
         assert gpu_tm.shape == data_tm.shape
         assert_close(gpu_tm, cpu_tm, rtol=3e-3, atol=3e-3, msg="CUDA PPO EMA many-series mismatch")
-

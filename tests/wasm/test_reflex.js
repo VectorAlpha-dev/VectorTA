@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -291,8 +290,6 @@ test('Reflex edge cases', () => {
     for (let i = 0; i < 20; i++) {
         assert.strictEqual(constantResult[i], 0.0, `Expected zero at index ${i} during warmup`);
     }
-
-
 
 
     const oscillatingData = new Float64Array(100);

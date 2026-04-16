@@ -1525,8 +1525,6 @@ mod tests {
 				}
 
 
-
-
 				let warmup = period - 1;
 				for i in 0..warmup {
 					prop_assert!(
@@ -1613,7 +1611,6 @@ mod tests {
 				}
 
 
-
 				if period <= 14 && out.len() > 50 {
 
 					let trend_base = close[0];
@@ -1650,7 +1647,6 @@ mod tests {
 				}
 
 
-
 				if period <= 14 && out.len() > 50 {
 
 					let range_base = close[0];
@@ -1682,7 +1678,6 @@ mod tests {
 						let avg_dx = stable_dx.iter()
 							.filter(|v| !v.is_nan())
 							.sum::<f64>() / stable_dx.len() as f64;
-
 
 
 						prop_assert!(

@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -190,7 +189,6 @@ test('AO in trending market', () => {
     const result = wasm.ao_js(high, low, 5, 34);
 
 
-
     for (let i = result.length - 10; i < result.length; i++) {
         assert.ok(result[i] > 0, `AO should be positive in uptrend at index ${i}`);
     }
@@ -268,7 +266,6 @@ test('AO batch with invalid combinations', () => {
         5, 15, 5,
         10, 12, 2
     );
-
 
 
     const expectedRows = 3;
@@ -353,7 +350,6 @@ test('AO real-world conditions', () => {
     assert.strictEqual(result.length, high.length);
 
 
-
     const validValues = Array.from(result.slice(validStart));
     assert.ok(validValues.some(v => v > 0), 'Should have some positive values');
     assert.ok(validValues.some(v => v < 0), 'Should have some negative values');
@@ -368,7 +364,6 @@ test('AO comparison with Rust', () => {
         expected.defaultParams.short_period,
         expected.defaultParams.long_period
     );
-
 
 
 });

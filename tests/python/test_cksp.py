@@ -88,10 +88,6 @@ class TestCksp:
         )
 
 
-
-
-
-
     def test_cksp_default_candles(self, test_data):
         """Test CKSP with default parameters - mirrors check_cksp_default_candles"""
 
@@ -151,9 +147,6 @@ class TestCksp:
 
         with pytest.raises(ValueError, match="Invalid param"):
             ta_indicators.cksp(high, low, close, p=10, x=float('nan'), q=9)
-
-
-
 
 
         with pytest.raises(ValueError, match="Invalid param"):
@@ -344,7 +337,6 @@ class TestCksp:
         assert len(result['p']) == 18
         assert len(result['x']) == 18
         assert len(result['q']) == 18
-
 
 
         assert result['p'][0] == 5

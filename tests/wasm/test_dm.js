@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -168,9 +167,6 @@ test('DM NaN handling', () => {
 
     const plus = result.values.slice(0, result.cols);
     const minus = result.values.slice(result.cols, 2 * result.cols);
-
-
-
 
 
     assertAllNaN(plus.slice(0, 13), "Expected NaN in warmup period for plus");

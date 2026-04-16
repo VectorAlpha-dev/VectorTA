@@ -1,16 +1,4 @@
-﻿
-
-
-
-
-
-
-
-
-
-
-
-#ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
+﻿#ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
 
@@ -23,7 +11,6 @@
 #endif
 
 
-
 #ifndef MSW_CHUNK_PER_THREAD
 #define MSW_CHUNK_PER_THREAD 8
 #endif
@@ -31,8 +18,6 @@
 
 static __device__ __constant__ float MSW_TWO_PI_F    = 6.28318530717958647692f;
 static __device__ __constant__ float MSW_SQRT_HALF_F = 0.70710678118654752440f;
-
-
 
 
 static __device__ __forceinline__ float msw_phase_from_rp_ip_eps(float rp, float ip, float eps) {
@@ -48,7 +33,6 @@ static __device__ __forceinline__ float msw_phase_from_rp_ip_eps(float rp, float
     if (phase > CUDART_PI_F * 2.0f) phase -= CUDART_PI_F * 2.0f;
     return phase;
 }
-
 
 
 static __device__ __forceinline__ void
@@ -70,8 +54,6 @@ msw_build_weights_stride(float* __restrict__ cosw,
     for (int j = lane; j < period; j += blockDim.x) {
         sinw[j] = s0;
         cosw[j] = c0;
-
-
 
 
         float s_old = s0, c_old = c0;
@@ -158,7 +140,6 @@ static __device__ __forceinline__ float msw_phase_batch_from_dr_di(double dr, do
 }
 
 
-
 static __device__ __forceinline__ void
 msw_dot_window_rotate(const float* __restrict__ tile,
                       float c_step, float s_step,
@@ -223,7 +204,6 @@ msw_rotate_f64(double c_step, double s_step, double &rp, double &ip)
 }
 
 
-
 extern "C" __global__
 void msw_batch_f32(const float* __restrict__ prices,
                    const int*   __restrict__ periods,
@@ -254,7 +234,6 @@ void msw_batch_f32(const float* __restrict__ prices,
             out[base_lead + t] = NAN;
         }
     }
-
 
 
     extern __shared__ unsigned char shmem_raw[];
@@ -379,7 +358,6 @@ void msw_batch_single_output_f32(const float* __restrict__ prices,
         __syncthreads();
     }
 }
-
 
 
 extern "C" __global__

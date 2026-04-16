@@ -1,17 +1,7 @@
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 #include <math_constants.h>
 #include <stdint.h>
-
 
 
 __device__ __forceinline__ float mfi_elem(float h, float l, float v, bool ok) {
@@ -50,11 +40,6 @@ extern "C" __global__ void marketefi_kernel_f32(const float* __restrict__ high,
         }
     }
 }
-
-
-
-
-
 
 
 #ifndef MKT_T_TILE
@@ -170,4 +155,3 @@ extern "C" __global__ void marketefi_many_series_one_param_f32(
         }
     }
 }
-

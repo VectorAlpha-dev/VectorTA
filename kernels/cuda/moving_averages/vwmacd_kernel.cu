@@ -1,15 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 
@@ -49,7 +37,6 @@ extern "C" __global__ void vwmacd_build_prefix_one_series_f64(
         }
     }
 }
-
 
 
 extern "C" __global__ void vwmacd_batch_f32(
@@ -154,7 +141,6 @@ extern "C" __global__ void vwmacd_batch_f32(
 }
 
 
-
 extern "C" __global__ void vwmacd_many_series_one_param_time_major_f32(
     const double* __restrict__ pv_prefix_tm,
     const double* __restrict__ vol_prefix_tm,
@@ -251,4 +237,3 @@ extern "C" __global__ void vwmacd_many_series_one_param_time_major_f32(
         out_hist_tm[idx] = (!isnan(m) && !isnan(s)) ? (m - s) : f32_nan();
     }
 }
-

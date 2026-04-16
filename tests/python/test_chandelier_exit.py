@@ -58,7 +58,6 @@ class TestChandelierExit:
         assert len(short_stop) == len(close)
 
 
-
         expected_indices = [15386, 15387, 15388, 15389, 15390]
 
         if len(short_stop) > max(expected_indices):
@@ -309,7 +308,6 @@ class TestChandelierExit:
         )
 
 
-
         assert result['values'].shape[0] == 8
         assert result['values'].shape[1] == 50
         assert len(result['periods']) == 4
@@ -347,7 +345,6 @@ class TestChandelierExit:
 
         assert all(np.isnan(long_stop[:21]))
         assert all(np.isnan(short_stop[:21]))
-
 
 
         has_valid = False

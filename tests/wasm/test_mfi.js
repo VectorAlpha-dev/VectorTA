@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -210,8 +209,6 @@ test('MFI with NaN input', () => {
     const period = 14;
     const result = wasm.mfi_js(typicalPrice, volume, period);
     assert.strictEqual(result.length, n);
-
-
 
 
     for (let i = 0; i < period - 1; i++) {

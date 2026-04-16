@@ -172,8 +172,6 @@ class TestEhlersEcema:
         assert np.all(np.isnan(first_result[:warmup_period])), "First pass should have NaN in warmup"
 
 
-
-
         second_warmup = warmup_period + warmup_period
         assert np.all(np.isnan(second_result[:second_warmup])), "Second pass should have extended warmup"
 
@@ -236,7 +234,6 @@ class TestEhlersEcema:
         assert len(result['gain_limits']) == expected['batch_combinations']
 
 
-
         test_params = [
             (15, 40),
             (20, 50),
@@ -246,7 +243,6 @@ class TestEhlersEcema:
         for length, gain_limit in test_params:
 
             single_result = ta_indicators.ehlers_ecema(close, length, gain_limit)
-
 
 
             length_idx = (length - 15) // 5
@@ -259,7 +255,6 @@ class TestEhlersEcema:
 
 
             batch_row = result['values'][row_idx]
-
 
 
             single_valid_mask = ~np.isnan(single_result)
@@ -304,7 +299,6 @@ class TestEhlersEcema:
         )
 
         batch_row = result['values'][0]
-
 
 
         single_valid_mask = ~np.isnan(single_result)
@@ -355,7 +349,6 @@ class TestEhlersEcema:
         for i in range(warmup_period):
             assert np.isnan(stream_results[i]), f"Expected NaN during warmup at index {i}"
             assert np.isnan(batch_result[i]), f"Expected batch NaN during warmup at index {i}"
-
 
 
         for i in range(warmup_period, len(data)):

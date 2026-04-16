@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -383,10 +382,6 @@ test('ZLEMA batch metadata validation', () => {
     assert.strictEqual(result.combos[2].period, 20);
 
 
-
-
-
-
     for (let combo = 0; combo < result.combos.length; combo++) {
         const period = result.combos[combo].period;
         const rowStart = combo * 50;
@@ -419,7 +414,6 @@ test('ZLEMA SIMD128 consistency', () => {
 
 
         assert.strictEqual(result.length, data.length);
-
 
 
         const warmupEnd = Math.min(testCase.period, result.length);
@@ -512,7 +506,6 @@ test('ZLEMA zero-copy with large dataset', () => {
 
 
         const memView2 = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
-
 
 
         for (let i = 0; i < 13; i++) {

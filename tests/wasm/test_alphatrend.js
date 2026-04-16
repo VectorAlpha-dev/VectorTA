@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -341,8 +340,6 @@ test('AlphaTrend batch processing', () => {
     const volume = new Float64Array(testData.volume.slice(0, size));
 
 
-
-
     const singleResult = wasm.alphatrend_batch(
         open, high, low, close, volume,
         1.0, 1.0, 0,
@@ -351,7 +348,6 @@ test('AlphaTrend batch processing', () => {
     );
 
     assert.ok(singleResult.values, 'Batch result should have values');
-
 
 
     assert.strictEqual(singleResult.rows, 2, 'Should have 2 rows for single combo (K1 and K2)');
@@ -367,7 +363,6 @@ test('AlphaTrend batch processing', () => {
         7, 21, 7,
         false
     );
-
 
 
     const expectedRows = 24;

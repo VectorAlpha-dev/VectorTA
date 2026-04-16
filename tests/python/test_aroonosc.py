@@ -119,23 +119,11 @@ def test_aroonosc_streaming():
     assert len(stream_results) == len(batch_result)
 
 
-
-
-
-
     warmup = 14
     assert all(np.isnan(v) for v in stream_results[:warmup]), \
         "Stream should return NaN during warmup"
     assert any(not np.isnan(v) for v in stream_results[warmup:]), \
         "Stream should produce values after warmup"
-
-
-
-
-
-
-
-
 
 
 def test_aroonosc_batch_single_params():

@@ -266,10 +266,6 @@ test.describe('LPC WASM Tests', () => {
         );
 
 
-
-
-
-
         if (result.filter.length > 240) {
             for (let i = 240; i < result.filter.length; i++) {
                 assert(!isNaN(result.filter[i]), `Found unexpected NaN in filter at index ${i}`);

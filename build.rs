@@ -1,5 +1,5 @@
-use std::env;
 use std::collections::HashSet;
+use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 

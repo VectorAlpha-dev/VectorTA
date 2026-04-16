@@ -2251,7 +2251,6 @@ mod tests {
 				let VlmaOutput { values: ref_out } = vlma_with_kernel(&input, Kernel::Scalar).unwrap();
 
 
-
 				let first_valid = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
 				let expected_warmup = first_valid + max_period - 1;
 
@@ -2326,7 +2325,6 @@ mod tests {
 				}
 
 
-
 				if data.len() >= max_period * 2 {
 					let stable_end = data.len();
 					let stable_start = stable_end - max_period;
@@ -2361,7 +2359,6 @@ mod tests {
 							/ input_segment.len() as f64;
 
 
-
 						if input_var > 1e-18 {
 							let output_mean: f64 =
 								valid_outputs.iter().sum::<f64>() / valid_outputs.len() as f64;
@@ -2380,7 +2377,6 @@ mod tests {
 						}
 					}
 				}
-
 
 
 				if data.len() >= max_period * 3 {
@@ -2490,7 +2486,6 @@ mod tests {
 						);
 					}
 				}
-
 
 
 				let is_increasing = data.windows(2).all(|w| w[1] >= w[0]);

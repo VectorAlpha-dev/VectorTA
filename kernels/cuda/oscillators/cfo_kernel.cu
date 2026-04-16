@@ -1,15 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 
@@ -43,8 +31,6 @@ extern "C" __global__ void cfo_build_prefixes_serial_f64(
         prefix_weighted[i + 1] = acc_w;
     }
 }
-
-
 
 
 extern "C" __global__ void cfo_batch_f32(
@@ -109,9 +95,6 @@ extern "C" __global__ void cfo_batch_f32(
 }
 
 
-
-
-
 extern "C" __global__ void cfo_many_series_one_param_time_major_f32(
     const float* __restrict__ data_tm,
     const double* __restrict__ prefix_sum_tm,
@@ -138,7 +121,6 @@ extern "C" __global__ void cfo_many_series_one_param_time_major_f32(
     const double sx2 = (double)(period * (period + 1) * (2 * period + 1)) / 6.0;
     const double inv_denom = 1.0 / (n * sx2 - sx * sx);
     const double half_nm1 = 0.5 * (n - 1.0);
-
 
 
     if (blockIdx.x == 0 && threadIdx.x == 0) {

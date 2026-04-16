@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -175,7 +174,6 @@ test('CoRa Wave without smoothing', () => {
 
     assert.strictEqual(resultSmooth.length, close.length);
     assert.strictEqual(resultRaw.length, close.length);
-
 
 
     let foundDifference = false;
@@ -457,7 +455,6 @@ test('CoRa Wave zero-copy with large dataset', () => {
         const memView2 = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
 
 
-
         for (let i = 0; i < 22; i++) {
             assert(isNaN(memView2[i]), `Expected NaN at warmup index ${i}`);
         }
@@ -541,7 +538,6 @@ test('CoRa Wave SIMD128 consistency', () => {
 
 
         assert.strictEqual(result.length, data.length);
-
 
 
         const smoothPeriod = Math.max(1, Math.round(Math.sqrt(testCase.period)));

@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -425,8 +424,6 @@ test('Fisher constant price', () => {
 
     const result = wasm.fisher_js(high, low, 5);
     const fisher = result.values.slice(0, 20);
-
-
 
 
     for (let i = 4; i < 20; i++) {

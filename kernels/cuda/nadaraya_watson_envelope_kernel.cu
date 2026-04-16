@@ -1,4 +1,3 @@
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -19,8 +18,6 @@
 #endif
 
 __device__ __forceinline__ float qnan_f32() { return __int_as_float(0x7fffffff); }
-
-
 
 
 __device__ __forceinline__ void kbn_acc(float &sum, float &c, float x) {
@@ -74,10 +71,6 @@ __device__ __forceinline__ float block_reduce_kbn(float sum, float c, float *sme
 }
 
 
-
-
-
-
 extern "C" __global__
 void nadaraya_watson_envelope_batch_f32(const float* __restrict__ data,
                                         const float* __restrict__ weights_flat,
@@ -117,10 +110,6 @@ void nadaraya_watson_envelope_batch_f32(const float* __restrict__ data,
     if (warm_total >= series_len) return;
 
 
-
-
-
-
     extern __shared__ float s[];
     float *s_w    = s;
     float *s_x    = s_w + max_lookback;
@@ -148,7 +137,6 @@ void nadaraya_watson_envelope_batch_f32(const float* __restrict__ data,
     int   mae_filled = 0;
     float mae_sum    = 0.0f;
     int   mae_nan_ct = 0;
-
 
 
     for (int t0 = warm_out; t0 < series_len; t0 += TILE_T)
@@ -250,10 +238,6 @@ void nadaraya_watson_envelope_batch_f32(const float* __restrict__ data,
 }
 
 
-
-
-
-
 extern "C" __global__
 void nadaraya_watson_envelope_many_series_one_param_f32(const float* __restrict__ data_tm,
                                                         const float* __restrict__ weights,
@@ -342,4 +326,3 @@ void nadaraya_watson_envelope_many_series_one_param_f32(const float* __restrict_
         }
     }
 }
-

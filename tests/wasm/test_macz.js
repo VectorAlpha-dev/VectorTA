@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import { loadTestData, EXPECTED_OUTPUTS, assertArrayClose, assertClose } from './test_utils.js';
@@ -467,7 +466,6 @@ test.describe('MAC-Z WASM Binding Tests', () => {
         const close = testData.close;
         const volume = testData.volume || new Float64Array(close.length).fill(1000.0);
         const params = EXPECTED_OUTPUTS.macz.defaultParams;
-
 
 
         const result = wasm.macz_js(

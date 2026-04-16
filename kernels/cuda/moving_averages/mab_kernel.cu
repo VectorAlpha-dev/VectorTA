@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 #include <stdint.h>
@@ -50,9 +41,6 @@ extern "C" __global__ void mab_build_prefix_single_f32(
         pref_nan[i + 1] = acc_nan;
     }
 }
-
-
-
 
 
 extern "C" __global__ void mab_batch_from_prefix_sma_f32(
@@ -130,7 +118,6 @@ extern "C" __global__ void mab_batch_from_prefix_sma_f32(
 }
 
 
-
 extern "C" __global__ void mab_dev_from_ma_f32(
     const float* __restrict__ fast,
     const float* __restrict__ slow,
@@ -143,8 +130,6 @@ extern "C" __global__ void mab_dev_from_ma_f32(
     if (len <= 0 || fast_period <= 0) return;
 
     const int first_output = first_valid + max(fast_period, 0) + fast_period - 1;
-
-
 
 
     for (int t = 0; t < min(first_output, len); ++t) {
@@ -169,7 +154,6 @@ extern "C" __global__ void mab_dev_from_ma_f32(
         dev_out[i] = (float)sqrt(sumsq / (double)fast_period);
     }
 }
-
 
 
 extern "C" __global__ void mab_apply_dev_shared_ma_batch_f32(

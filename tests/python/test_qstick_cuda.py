@@ -86,4 +86,3 @@ class TestQstickCuda:
 
         assert gpu_tm.shape == open_tm.shape
         assert_close(gpu_tm, cpu_tm, rtol=1e-5, atol=1e-6, msg="CUDA QStick many-series mismatch")
-

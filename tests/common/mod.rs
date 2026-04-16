@@ -1,4 +1,3 @@
-
 use vector_ta::utilities::data_loader::{read_candles_from_csv, Candles};
 use std::error::Error;
 

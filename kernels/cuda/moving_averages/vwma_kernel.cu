@@ -1,17 +1,9 @@
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
 
 #include <cuda_runtime.h>
 #include <math.h>
-
 
 
 #ifndef LDG
@@ -147,7 +139,6 @@ void vwma_multi_series_one_param_f32(const double* __restrict__ pv_prefix_tm,
 }
 
 
-
 extern "C" __global__
 void vwma_multi_series_one_param_tm_coalesced_f32(const double* __restrict__ pv_prefix_tm,
                                                   const double* __restrict__ vol_prefix_tm,
@@ -160,7 +151,6 @@ void vwma_multi_series_one_param_tm_coalesced_f32(const double* __restrict__ pv_
 
     const int series_idx = blockIdx.y * blockDim.x + threadIdx.x;
     if (series_idx >= num_series) return;
-
 
 
     const int warm = first_valids[series_idx] + period - 1;

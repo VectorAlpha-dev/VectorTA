@@ -113,7 +113,6 @@ class TestSmma:
         assert len(second_result) == len(first_result)
 
 
-
         assert np.std(second_result[~np.isnan(second_result)]) < np.std(first_result[~np.isnan(first_result)]), \
             "Second pass should produce smoother results"
 
@@ -127,7 +126,6 @@ class TestSmma:
 
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
-
 
 
         assert np.all(np.isnan(result[:6])), "Expected NaN in warmup period (indices 0-5)"
@@ -203,7 +201,6 @@ class TestSmma:
         period = 10
 
         result = ta_indicators.smma(close, period=period)
-
 
 
         assert np.all(np.isnan(result[:period-1])), f"Expected NaN in first {period-1} values"
@@ -307,8 +304,6 @@ class TestSmma:
         period = 3
 
         result = ta_indicators.smma(data, period=period)
-
-
 
 
         assert np.all(np.isnan(result[:5])), "Expected NaN through index 4"

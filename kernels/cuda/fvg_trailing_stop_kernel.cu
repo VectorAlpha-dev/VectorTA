@@ -1,10 +1,3 @@
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -76,7 +69,6 @@ __device__ __forceinline__ float compact_and_avg_bear_f32_comp(float* buf, int& 
 }
 
 
-
 template <int MAXW, bool USE_SHMEM>
 struct RingAvg;
 
@@ -113,7 +105,6 @@ struct RingAvg<MAXW, true> {
     }
     __device__ __forceinline__ float avg() const { if (count < w || bad > 0) return CUDART_NAN_F; return acc.total() / (float)w; }
 };
-
 
 
 template <int MAXL>
@@ -772,7 +763,6 @@ extern "C" __global__ void fvg_trailing_stop_many_series_one_param_f32(
         int bull_bs = (!isnan(bull_avg)) ? 1 : ((last_bull_non_na >= 0) ? min(max(t - last_bull_non_na, 1), w) : 1);
         int bear_bs = (!isnan(bear_avg)) ? 1 : ((last_bear_non_na >= 0) ? min(max(t - last_bear_non_na, 1), w) : 1);
         float bull_sma = isnan(bull_avg) ? sma_last_bs_over_close(close_tm + s, t, bull_bs) : CUDART_NAN_F;
-
 
 
         if (isnan(bull_avg)) {

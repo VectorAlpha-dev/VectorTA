@@ -2661,7 +2661,6 @@ mod tests {
                 )*
 
 
-
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                 $(
                     #[test]

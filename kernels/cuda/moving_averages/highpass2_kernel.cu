@@ -1,10 +1,3 @@
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -33,7 +26,6 @@ void highpass2_batch_f32(const float* __restrict__ prices,
 
 
     for (int combo = tid; combo < n_combos; combo += blockDim.x * gridDim.x) {
-
 
 
         const int   period     = periods[combo];
@@ -123,21 +115,6 @@ void highpass2_batch_f32(const float* __restrict__ prices,
 }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 extern "C" __global__
 void highpass2_batch_warp_scan_f32(const float* __restrict__ prices,
                                    const int*   __restrict__ periods,
@@ -214,7 +191,6 @@ void highpass2_batch_warp_scan_f32(const float* __restrict__ prices,
 
             u = fmaf(c, x2, fmaf(cm2, x1, c * x0));
         }
-
 
 
         float p00 = valid ? m00 : 1.0f;

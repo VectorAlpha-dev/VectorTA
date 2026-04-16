@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -147,8 +146,6 @@ test('WMA NaN handling', () => {
             assert(!isNaN(result[i]), `Found unexpected NaN at index ${i}`);
         }
     }
-
-
 
 
     assertAllNaN(result.slice(0, 13), "Expected NaN in warmup period (indices 0-12)");
@@ -303,7 +300,6 @@ test('WMA batch edge cases', () => {
 
     assert.strictEqual(largeBatch.length, 10);
 });
-
 
 
 test.after(() => {

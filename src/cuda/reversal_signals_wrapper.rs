@@ -184,9 +184,9 @@ fn expand_usize_range(
         if current >= end {
             break;
         }
-        let next = current.checked_add(step).ok_or_else(|| {
-            CudaReversalSignalsError::InvalidInput("range step overflow".into())
-        })?;
+        let next = current
+            .checked_add(step)
+            .ok_or_else(|| CudaReversalSignalsError::InvalidInput("range step overflow".into()))?;
         if next <= current {
             break;
         }
@@ -334,7 +334,11 @@ impl CudaReversalSignals {
         volume: &[f64],
         sweep: &ReversalSignalsBatchRange,
     ) -> Result<CudaReversalSignalsBatchResult, CudaReversalSignalsError> {
-        if open.is_empty() || high.is_empty() || low.is_empty() || close.is_empty() || volume.is_empty()
+        if open.is_empty()
+            || high.is_empty()
+            || low.is_empty()
+            || close.is_empty()
+            || volume.is_empty()
         {
             return Err(CudaReversalSignalsError::InvalidInput("empty input".into()));
         }
@@ -353,22 +357,24 @@ impl CudaReversalSignals {
             )));
         }
 
-        let trend_ma_kind = parse_trend_ma_kind(
-            if sweep.trend_ma_type.is_empty() {
-                DEFAULT_TREND_MA_TYPE
-            } else {
-                sweep.trend_ma_type.as_str()
-            },
-        )?;
+        let trend_ma_kind = parse_trend_ma_kind(if sweep.trend_ma_type.is_empty() {
+            DEFAULT_TREND_MA_TYPE
+        } else {
+            sweep.trend_ma_type.as_str()
+        })?;
         let use_volume_confirmation = sweep.use_volume_confirmation;
         let combos = expand_grid_checked(sweep)?;
         if combos.is_empty() {
-            return Err(CudaReversalSignalsError::InvalidInput("empty parameter grid".into()));
+            return Err(CudaReversalSignalsError::InvalidInput(
+                "empty parameter grid".into(),
+            ));
         }
 
         let max_run = longest_valid_run(open, high, low, close, volume);
         if max_run == 0 {
-            return Err(CudaReversalSignalsError::InvalidInput("all values are NaN".into()));
+            return Err(CudaReversalSignalsError::InvalidInput(
+                "all values are NaN".into(),
+            ));
         }
 
         let rows = combos.len();
@@ -415,20 +421,16 @@ impl CudaReversalSignals {
             })?);
         }
 
-        let output_elems = rows.checked_mul(cols).ok_or_else(|| {
-            CudaReversalSignalsError::InvalidInput("rows*cols overflow".into())
-        })?;
+        let output_elems = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaReversalSignalsError::InvalidInput("rows*cols overflow".into()))?;
         let input_bytes = cols
             .checked_mul(std::mem::size_of::<f64>())
             .and_then(|value| value.checked_mul(5))
-            .ok_or_else(|| {
-                CudaReversalSignalsError::InvalidInput("input bytes overflow".into())
-            })?;
+            .ok_or_else(|| CudaReversalSignalsError::InvalidInput("input bytes overflow".into()))?;
         let param_bytes = rows
             .checked_mul(std::mem::size_of::<i32>() * 4)
-            .ok_or_else(|| {
-                CudaReversalSignalsError::InvalidInput("param bytes overflow".into())
-            })?;
+            .ok_or_else(|| CudaReversalSignalsError::InvalidInput("param bytes overflow".into()))?;
         let output_bytes = output_elems
             .checked_mul(std::mem::size_of::<f64>())
             .and_then(|value| value.checked_mul(4))
@@ -474,7 +476,8 @@ impl CudaReversalSignals {
         let d_trend_ma_periods = DeviceBuffer::from_slice(&trend_ma_periods)?;
         let d_ma_steps = DeviceBuffer::from_slice(&ma_steps)?;
         let d_ma_price = unsafe { DeviceBuffer::<f64>::uninitialized(rows * max_trend_ma_period)? };
-        let d_ma_volume = unsafe { DeviceBuffer::<f64>::uninitialized(rows * max_trend_ma_period)? };
+        let d_ma_volume =
+            unsafe { DeviceBuffer::<f64>::uninitialized(rows * max_trend_ma_period)? };
         let d_volume_sma = unsafe { DeviceBuffer::<f64>::uninitialized(rows * VOLUME_SMA_PERIOD)? };
         let d_low_idx = unsafe { DeviceBuffer::<i32>::uninitialized(rows * max_lookback)? };
         let d_low_val = unsafe { DeviceBuffer::<f64>::uninitialized(rows * max_lookback)? };

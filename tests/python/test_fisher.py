@@ -131,7 +131,6 @@ class TestFisher:
         assert len(signal) == len(high)
 
 
-
         assert all(np.isnan(fisher[:8])), "Expected NaN in warmup period for fisher"
         assert all(np.isnan(signal[:8])), "Expected NaN in warmup period for signal"
 
@@ -300,8 +299,6 @@ class TestFisher:
         low = np.full(20, 100.0)
 
         fisher, signal = ta_indicators.fisher(high, low, period=5)
-
-
 
 
         assert all(np.isfinite(v) for v in fisher[4:]), \

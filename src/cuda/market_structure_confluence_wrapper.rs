@@ -114,9 +114,11 @@ impl CudaMarketStructureConfluence {
     ) -> Result<CudaMarketStructureConfluenceBatchResult, CudaMarketStructureConfluenceError> {
         self.module
             .get_function("market_structure_confluence_batch_f64")
-            .map_err(|_| CudaMarketStructureConfluenceError::MissingKernelSymbol {
-                name: "market_structure_confluence_batch_f64",
-            })?;
+            .map_err(
+                |_| CudaMarketStructureConfluenceError::MissingKernelSymbol {
+                    name: "market_structure_confluence_batch_f64",
+                },
+            )?;
         let cpu = market_structure_confluence_batch_with_kernel(
             high,
             low,

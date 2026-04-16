@@ -185,8 +185,6 @@ class TestDma:
         assert np.all(np.isnan(result[:warmup])), f"Expected NaN in warmup period (first {warmup} values)"
 
 
-
-
     def test_dma_batch_default_params(self, test_data):
         """Test DMA batch processing with default parameters only"""
         close = test_data['close']
@@ -294,7 +292,6 @@ class TestDma:
         assert len(result) == len(input_data)
 
 
-
         last_10 = result[-10:]
         valid_values = last_10[~np.isnan(last_10)]
 
@@ -306,8 +303,6 @@ class TestDma:
                 rtol=0.01,
                 msg="DMA should converge to constant input value"
             )
-
-
 
 
     def test_dma_batch_edge_cases(self):

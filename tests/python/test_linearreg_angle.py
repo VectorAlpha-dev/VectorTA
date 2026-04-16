@@ -303,8 +303,6 @@ class TestLinearregAngle:
             ta_indicators.linearreg_angle_batch(empty, period_range=(5, 5, 0))
 
 
-
-
     def test_linearreg_angle_batch_warmup_validation(self, test_data):
         """Test batch warmup periods for different parameters"""
         close = test_data['close'][:50]

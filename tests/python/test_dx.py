@@ -62,7 +62,6 @@ class TestDx:
         assert len(result) == len(close)
 
 
-
         assert np.any(np.isnan(result[:13])), "Expected NaN in warmup period"
 
 

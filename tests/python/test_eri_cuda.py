@@ -119,4 +119,3 @@ class TestEriCuda:
         assert bear_gpu.shape == (T, N)
         assert_close(bull_gpu, bull_cpu, rtol=1e-4, atol=1e-5, msg="ERI bull: CUDA many-series vs CPU mismatch")
         assert_close(bear_gpu, bear_cpu, rtol=1e-4, atol=1e-5, msg="ERI bear: CUDA many-series vs CPU mismatch")
-

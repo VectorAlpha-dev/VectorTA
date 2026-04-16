@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -274,8 +273,6 @@ test('FWMA batch performance', () => {
 
     assertArrayClose(batchResult, singleResults, 1e-9, 'Batch vs single results');
 });
-
-
 
 
 function hasWasmMemory() {

@@ -50,7 +50,6 @@ class TestTtmTrend:
         assert len(result) == len(close)
 
 
-
         expected_last_five = [True, False, False, False, False]
         actual_last_five = [v == 1.0 for v in result[-5:]]
         assert actual_last_five == expected_last_five, f"Expected {expected_last_five}, got {actual_last_five}"
@@ -208,7 +207,6 @@ class TestTtmTrend:
         result_scalar = ta.ttm_trend(hl2, close, period=5, kernel="scalar")
 
 
-
         assert np.allclose(result_auto, result_scalar, equal_nan=True)
 
     def test_ttm_trend_batch_with_kernel(self, test_data):
@@ -233,7 +231,6 @@ class TestTtmTrend:
             period_range=(5, 10, 5),
             kernel="scalar"
         )
-
 
 
         assert np.allclose(result_auto['values'], result_scalar['values'], equal_nan=True)

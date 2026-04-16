@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -19,7 +10,6 @@
 #ifndef WMA_MAX_PERIOD
 #define WMA_MAX_PERIOD 8192
 #endif
-
 
 
 __constant__ __align__(16) float C_WMA_RAMP[WMA_MAX_PERIOD];

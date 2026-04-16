@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -118,8 +117,6 @@ test('VAMA edge cases', () => {
     const result = wasm.vama_js(data, 2, 2, false, 1, 5);
 
     assert.strictEqual(result.length, data.length, 'Output length should match input');
-
-
 
 
     const warmup = Math.max(2, 2) - 1;

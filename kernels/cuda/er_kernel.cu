@@ -1,15 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 #include <stdint.h>
@@ -112,7 +100,6 @@ extern "C" __global__ void er_batch_prefix_f32(
 }
 
 
-
 extern "C" __global__ void er_batch_f32(
     const float* __restrict__ data,
     int len,
@@ -171,7 +158,6 @@ extern "C" __global__ void er_batch_f32(
         ++start;
     }
 }
-
 
 
 extern "C" __global__ void er_many_series_one_param_time_major_f32(

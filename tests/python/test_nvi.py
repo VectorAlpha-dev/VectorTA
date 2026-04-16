@@ -232,11 +232,9 @@ class TestNvi:
         assert len(first_result) == len(close)
 
 
-
         constant_volume = np.full_like(first_result, 1000000.0)
         second_result = ta_indicators.nvi(first_result, constant_volume)
         assert len(second_result) == len(first_result)
-
 
 
         first_valid = None

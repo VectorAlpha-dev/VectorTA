@@ -1,18 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -21,9 +6,6 @@
 #include <math.h>
 
 __device__ __forceinline__ float dev_nan() { return __int_as_float(0x7fffffff); }
-
-
-
 
 
 struct twof { float hi, lo; };
@@ -123,7 +105,6 @@ extern "C" __global__ void deviation_build_prefix_f32(
 }
 
 
-
 extern "C" __global__ void deviation_batch_f32(
     const float2* __restrict__ prefix_sum,
     const float2* __restrict__ prefix_sum_sq,
@@ -182,9 +163,6 @@ extern "C" __global__ void deviation_batch_f32(
         t += stride;
     }
 }
-
-
-
 
 
 extern "C" __global__ void deviation_many_series_one_param_f32(

@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -138,7 +137,6 @@ test('DevStop NaN handling', () => {
             assert(!isNaN(result[i]), `Found unexpected NaN at index ${i}`);
         }
     }
-
 
 
     const expectedWarmup = 39;

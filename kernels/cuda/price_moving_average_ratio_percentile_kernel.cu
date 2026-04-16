@@ -333,7 +333,7 @@ __device__ bool update_ma_value(
             return false;
     }
 }
-}  // namespace
+}
 
 extern "C" __global__ void price_moving_average_ratio_percentile_batch_f64(
     const double* price,

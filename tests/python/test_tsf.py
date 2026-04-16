@@ -102,7 +102,6 @@ class TestTsf:
         assert len(result) == len(close)
 
 
-
         assert np.isnan(result[0])
 
     def test_tsf_streaming(self, test_data):
@@ -120,7 +119,6 @@ class TestTsf:
         for value in close:
             result = stream.update(value)
             stream_result.append(result if result is not None else np.nan)
-
 
 
         for i, (b, s) in enumerate(zip(batch_result, stream_result)):

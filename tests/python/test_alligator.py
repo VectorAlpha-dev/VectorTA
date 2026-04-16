@@ -56,7 +56,6 @@ class TestAlligator:
         assert len(result['lips']) == len(hl2)
 
 
-
         assert_close(
             result['jaw'][-5:],
             expected_last_five_jaw,
@@ -201,10 +200,6 @@ class TestAlligator:
 
 
         assert len(batch_result['jaw']) == len(stream_jaw)
-
-
-
-
 
 
         assert len(stream_jaw) == len(hl2)

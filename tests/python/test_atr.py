@@ -30,7 +30,6 @@ class TestAtr:
         assert result.shape == close.shape
 
 
-
         assert_close(
             result[-5:],
             expected['last_5_values'],
@@ -112,7 +111,6 @@ class TestAtr:
         assert result.shape == close.shape
 
 
-
     def test_atr_kernel_selection(self, test_data):
         """Test ATR with different kernel selections."""
         high = test_data['high']
@@ -161,7 +159,6 @@ class TestAtr:
         first_result = vector_ta.atr(high, low, close, 14)
 
 
-
         second_result = vector_ta.atr(first_result, first_result, first_result, 5)
 
         assert isinstance(second_result, np.ndarray)
@@ -194,7 +191,6 @@ class TestAtr:
         close = base_prices
 
         result = vector_ta.atr(high, low, close, 14)
-
 
 
         last_quarter = result[-25:]

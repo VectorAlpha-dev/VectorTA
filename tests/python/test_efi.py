@@ -86,7 +86,6 @@ class TestEfi:
         assert np.isnan(result[0])
 
 
-
         non_nan_start = next((i for i, v in enumerate(result) if not np.isnan(v)), None)
         assert non_nan_start is not None, "All values are NaN"
 

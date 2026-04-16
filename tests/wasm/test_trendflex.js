@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -327,7 +326,6 @@ test('trendflex_zero_copy_basic', () => {
         wasm.trendflex_into(ptr, ptr, data.length, period);
 
 
-
         const updatedMemView = new Float64Array(wasm.__wasm.memory.buffer, ptr, data.length);
 
 
@@ -422,7 +420,6 @@ test('trendflex_batch_into', () => {
         wasm.trendflex_free(out_ptr, total_size);
     }
 });
-
 
 
 test('trendflex_zero_copy_large_dataset', () => {

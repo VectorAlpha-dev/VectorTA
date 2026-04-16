@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -103,7 +102,6 @@ test('SAMA default candles', () => {
 
     const result = wasm.sama_js(close, 200, 14, 6);
     assert.strictEqual(result.length, close.length);
-
 
 
     assertNoNaN(result.slice(0, 200), "Should have valid values from start");
@@ -376,7 +374,6 @@ test('SAMA batch full parameter sweep', () => {
         const length = batchResult.combos[combo].length;
         const rowStart = combo * 60;
         const rowData = batchResult.values.slice(rowStart, rowStart + 60);
-
 
 
         for (let i = 0; i < length; i++) {

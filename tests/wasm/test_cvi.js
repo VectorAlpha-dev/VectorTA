@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -69,7 +68,6 @@ test('CVI accuracy', async () => {
         1e-8,
         "CVI last 5 values mismatch"
     );
-
 
 
 });

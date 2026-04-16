@@ -66,8 +66,6 @@ class TestDamianiVolatmeter:
         )
 
 
-
-
     def test_damiani_accuracy_candles_stream(self, test_data):
         """Candles-based accuracy: stream across OHLC and compare last-5 to Rust references.
 
@@ -209,9 +207,6 @@ class TestDamianiVolatmeter:
         vol_expected, anti_expected = ta_indicators.damiani(close, 13, 20, 40, 100, 1.4)
 
 
-
-
-
     def test_damiani_batch(self, test_data):
         """Test Damiani Volatmeter batch processing - mirrors check_batch_default_row"""
         close = test_data['close']
@@ -241,12 +236,6 @@ class TestDamianiVolatmeter:
         assert anti_values.shape[1] == len(close)
 
 
-
-
-
-
-
-
         expected_rows = 28 * 21
         assert vol_values.shape[0] == expected_rows
         assert anti_values.shape[0] == expected_rows
@@ -270,7 +259,6 @@ class TestDamianiVolatmeter:
 
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.damiani(data, vis_atr=13, vis_std=20, sed_atr=40, sed_std=0, threshold=1.4)
-
 
 
         vol, anti = ta_indicators.damiani(data, vis_atr=2, vis_std=2, sed_atr=2, sed_std=2, threshold=np.nan)
@@ -371,8 +359,6 @@ class TestDamianiVolatmeter:
         assert len(stream2_anti) == 200
 
 
-
-
         first_valid1 = 99
         assert np.all(np.isnan(stream1_vol[:first_valid1])), "Stream1 vol should be NaN during warmup"
         assert np.all(np.isnan(stream1_anti[:first_valid1])), "Stream1 anti should be NaN during warmup"
@@ -380,13 +366,11 @@ class TestDamianiVolatmeter:
         assert not np.isnan(stream1_anti[first_valid1]), f"Stream1 anti should not be NaN at index {first_valid1}"
 
 
-
         first_valid2 = 49
         assert np.all(np.isnan(stream2_vol[:first_valid2])), "Stream2 vol should be NaN during warmup"
         assert np.all(np.isnan(stream2_anti[:first_valid2])), "Stream2 anti should be NaN during warmup"
         assert not np.isnan(stream2_vol[first_valid2]), f"Stream2 vol should not be NaN at index {first_valid2}"
         assert not np.isnan(stream2_anti[first_valid2]), f"Stream2 anti should not be NaN at index {first_valid2}"
-
 
 
         assert abs(stream1_vol[150] - stream2_vol[150]) > 0.01, "Streams with different params should produce different vol"
@@ -454,20 +438,14 @@ class TestDamianiVolatmeter:
         assert len(anti) == len(close)
 
 
-
-
         for i in range(50, 60):
             if i < len(vol):
                 assert np.isnan(vol[i]) or np.isnan(anti[i]), f"Expected NaN at injected position {i}"
 
 
-
         nan_window = 100
         affected_start = max(0, 150 - nan_window)
         affected_end = min(len(vol), 150 + nan_window)
-
-
-
 
 
     def test_damiani_different_thresholds(self, test_data):

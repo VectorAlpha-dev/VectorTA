@@ -148,7 +148,7 @@ struct WeightedSmaDevice {
     }
 };
 
-}  // namespace
+}
 
 extern "C" __global__ void cyberpunk_value_trend_analyzer_batch_f64(
     const double* __restrict__ open,

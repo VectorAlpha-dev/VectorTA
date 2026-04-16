@@ -84,7 +84,7 @@ __device__ inline bool pine_crossunder(
 ) {
     return prev_a >= prev_b && curr_a < curr_b;
 }
-}  // namespace
+}
 
 extern "C" __global__ void adaptive_bounds_rsi_batch_f64(
     const double* __restrict__ data,

@@ -66,8 +66,6 @@ class TestTradjema:
         assert not np.isnan(result[warmup]), f"Expected valid value at index {warmup}"
 
 
-
-
     def test_tradjema_default_candles(self, test_data):
         """Test TRADJEMA with default parameters - mirrors check_tradjema_default_candles"""
         high = test_data['high']
@@ -443,7 +441,6 @@ class TestTradjema:
         result = ta_indicators.tradjema(data, data, data, length=3, mult=10.0)
 
         assert len(result) == len(data), "Output length should match input length"
-
 
 
         assert result is not None, "Expected valid output with partial NaN data"

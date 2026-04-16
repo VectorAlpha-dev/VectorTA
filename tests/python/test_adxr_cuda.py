@@ -90,4 +90,3 @@ class TestAdxrCuda:
 
         assert gpu_tm.shape == cpu_tm.shape
         assert_close(gpu_tm, cpu_tm, rtol=2e-1, atol=2e-1, msg="CUDA ADXR ms1p mismatch")
-

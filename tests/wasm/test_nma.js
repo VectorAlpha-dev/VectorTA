@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -270,7 +269,6 @@ test('NMA batch with unified API', () => {
 test('NMA batch error handling', () => {
 
 
-
     const allNaN = new Float64Array(100).fill(NaN);
     assert.throws(() => {
         wasm.nma_batch_js(allNaN, 20, 40, 10);
@@ -342,7 +340,6 @@ test('NMA different periods', () => {
 });
 
 test('NMA edge cases', () => {
-
 
 
     const data = new Float64Array(100);

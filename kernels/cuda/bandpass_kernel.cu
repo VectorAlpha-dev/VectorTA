@@ -1,9 +1,3 @@
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -16,7 +10,6 @@
 static __forceinline__ __device__ bool is_finite_f32(float x) {
     return !isnan(x) && !isinf(x);
 }
-
 
 
 static __forceinline__ __device__ void hpf_coeffs_from_period_f32(int period,
@@ -34,9 +27,6 @@ static __forceinline__ __device__ void hpf_coeffs_from_period_f32(int period,
     oma_out = 1.0f - alpha;
     ok = true;
 }
-
-
-
 
 
 extern "C" __global__ __launch_bounds__(256, 2)
@@ -114,7 +104,6 @@ void bandpass_batch_from_hp_f32(
             const float him2 = hp_row[i - 2];
 
 
-
             float y = __fmaf_rn(d, y_im2, __fmaf_rn(c, y_im1, a * (hi - him2)));
 
             if (bp_row) bp_row[i] = y;
@@ -159,9 +148,6 @@ void bandpass_batch_from_hp_f32(
         }
     }
 }
-
-
-
 
 
 extern "C" __global__ __launch_bounds__(256, 2)
@@ -259,4 +245,3 @@ void bandpass_many_series_one_param_time_major_from_hp_f32(
         }
     }
 }
-

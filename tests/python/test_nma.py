@@ -138,9 +138,6 @@ class TestNma:
         assert len(batch_result) == len(stream_values)
 
 
-
-
-
         first_valid = np.where(~np.isnan(close))[0][0] if np.any(~np.isnan(close)) else 0
         warmup = first_valid + period
 
@@ -329,7 +326,6 @@ class TestNma:
         period = 3
 
         result = nma(data, period)
-
 
 
         assert len(result) == len(data)

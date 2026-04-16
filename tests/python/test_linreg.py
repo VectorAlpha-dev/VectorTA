@@ -103,9 +103,6 @@ def test_linreg_reinput():
     assert len(second_result) == len(first_result)
 
 
-
-
-
     for i in range(24, len(second_result)):
         assert np.isfinite(second_result[i]), f"Unexpected NaN at index {i}"
 
@@ -124,7 +121,6 @@ def test_linreg_nan_handling():
 
     first_valid = next((i for i, x in enumerate(result) if not np.isnan(x)), None)
     assert first_valid == expected['warmup_period'], f"Expected warmup at {expected['warmup_period']}, got {first_valid}"
-
 
 
     if len(result) > 240:
@@ -278,7 +274,6 @@ def test_linreg_edge_cases():
     assert len(result) == len(data)
 
 
-
     assert_close(result[-1], 10.0, atol=1e-9, msg="Perfect linear regression failed")
 
 
@@ -308,7 +303,6 @@ def test_linreg_single_value():
 def test_linreg_two_values():
     """Test LinReg with two values input"""
     data = np.array([1.0, 2.0], dtype=np.float64)
-
 
 
     result = linreg(data, 1)
@@ -374,7 +368,6 @@ def test_linreg_slope_calculation():
 
     data = np.array([2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0], dtype=np.float64)
     result = linreg(data, 4)
-
 
 
     assert_close(result[-1], 16.0, atol=1e-9, msg="Slope calculation failed")

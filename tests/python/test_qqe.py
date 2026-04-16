@@ -43,7 +43,6 @@ class TestQqe:
         assert len(slow) == len(close)
 
 
-
         assert_close(
             fast[-5:],
             expected['last_5_fast'],
@@ -128,7 +127,6 @@ class TestQqe:
         data = np.array([10.0, 20.0, 30.0, 40.0, 50.0] * 10)
 
 
-
         try:
             fast, slow = vector_ta.qqe(data, rsi_period=14, smoothing_factor=5, fast_factor=0.001)
             assert len(fast) == len(data)
@@ -168,9 +166,6 @@ class TestQqe:
         )
         assert len(fast2) == len(fast1)
         assert len(slow2) == len(slow1)
-
-
-
 
 
         warmup_first = 17
@@ -253,10 +248,6 @@ class TestQqe:
         assert len(batch_slow) == len(stream_slow)
 
 
-
-
-
-
         has_valid_fast = False
         has_valid_slow = False
 
@@ -305,7 +296,6 @@ class TestQqe:
 
         fast_row = result['fast'][0]
         slow_row = result['slow'][0]
-
 
 
         assert_close(
@@ -375,7 +365,6 @@ class TestQqe:
         )
 
 
-
         assert not np.array_equal(fast[-10:], fast_default[-10:])
         assert not np.array_equal(slow[-10:], slow_default[-10:])
 
@@ -397,7 +386,6 @@ class TestQqe:
 
         assert np.isnan(fast[0])
         assert np.isnan(slow[0])
-
 
 
         expected_warmup = 3 + EXPECTED_OUTPUTS['qqe']['warmup_period']
@@ -546,7 +534,6 @@ class TestQqe:
 
 
         warmup = 17
-
 
 
         if len(fast) > warmup + 10:

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Test cases for SuperSmoother 3-Pole indicator Python bindings."""
 
 import unittest
@@ -41,7 +40,6 @@ class TestSuperSmoother3Pole(unittest.TestCase):
         self.assertEqual(len(result), len(self.close_prices))
 
 
-
         assert_close(
             result[-5:],
             expected['last_5_values'],
@@ -49,7 +47,6 @@ class TestSuperSmoother3Pole(unittest.TestCase):
             atol=1e-8,
             msg="SuperSmoother3Pole last 5 values mismatch"
         )
-
 
 
         compare_with_rust('supersmoother_3_pole', result, 'close', expected['default_params'], rtol=0, atol=1e-8)
@@ -138,7 +135,6 @@ class TestSuperSmoother3Pole(unittest.TestCase):
         np.testing.assert_array_equal(periods['periods'], [10, 15, 20])
 
 
-
         for i, period in enumerate([10, 15, 20]):
             row = periods['values'][i]
 
@@ -155,7 +151,6 @@ class TestSuperSmoother3Pole(unittest.TestCase):
             self.assertFalse(np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period")
 
 
-
         for i in range(min(3, len(result))):
             self.assertFalse(np.isnan(result[i]), f"Value at index {i} should not be NaN")
 
@@ -166,11 +161,6 @@ class TestSuperSmoother3Pole(unittest.TestCase):
         period = 3
 
         result = ta_indicators.supersmoother_3_pole(data, period=period)
-
-
-
-
-
 
 
         self.assertTrue(np.all(np.isnan(result[:5])),
@@ -226,7 +216,6 @@ class TestSuperSmoother3Pole(unittest.TestCase):
         small_data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         result = ta_indicators.supersmoother_3_pole(small_data, period=2)
         self.assertEqual(len(result), len(small_data))
-
 
 
         np.testing.assert_almost_equal(result[0], 1.0)

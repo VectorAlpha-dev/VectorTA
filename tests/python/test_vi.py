@@ -129,7 +129,6 @@ class TestVI:
         assert len(result['minus']) == len(high)
 
 
-
         assert np.isnan(result['plus'][0]), 'First plus value should be NaN'
         assert np.isnan(result['minus'][0]), 'First minus value should be NaN'
 
@@ -199,7 +198,6 @@ class TestVI:
 
 
         assert results[0] is None
-
 
 
         none_count = sum(1 for r in results if r is None)

@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -134,7 +133,6 @@ test('SMMA reinput', () => {
     assert.strictEqual(secondResult.length, firstResult.length);
 
 
-
     const calcStdDev = (arr) => {
         const validValues = arr.filter(v => !isNaN(v));
         const mean = validValues.reduce((a, b) => a + b, 0) / validValues.length;
@@ -159,7 +157,6 @@ test('SMMA NaN handling', () => {
             assert(!isNaN(result[i]), `Found unexpected NaN at index ${i}`);
         }
     }
-
 
 
     assertAllNaN(result.slice(0, 6), "Expected NaN in warmup period (indices 0-5)");
@@ -294,7 +291,6 @@ test('SMMA warmup period', () => {
     const result = wasm.smma(close, period);
 
 
-
     assertAllNaN(result.slice(0, period - 1), `Expected NaN in first ${period - 1} values`);
 
 
@@ -329,7 +325,6 @@ test('SMMA batch zero step', () => {
     assert.strictEqual(metadata.length, 1);
     assert.strictEqual(metadata[0], 7);
 });
-
 
 
 test('SMMA fast API basic', () => {
@@ -538,8 +533,6 @@ test('SMMA leading NaNs', () => {
     const period = 3;
 
     const result = wasm.smma(data, period);
-
-
 
 
     assertAllNaN(result.slice(0, 5), "Expected NaN through index 4");

@@ -1,25 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -40,14 +18,12 @@ static __device__ __forceinline__ float qnan32() {
 }
 
 
-
 static __device__ __forceinline__ bool is_nan(float x) { return !(x == x); }
 
 static __device__ __forceinline__ int next_pow2(int x) {
     x = x - 1; x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16;
     return x + 1;
 }
-
 
 
 static __device__ __forceinline__ void cx_nan_last(float &a, float &b, bool up) {
@@ -68,8 +44,6 @@ static __device__ __forceinline__ void cx_nan_last(float &a, float &b, bool up) 
     }
     if (up) { a = lo; b = hi; } else { a = hi; b = lo; }
 }
-
-
 
 
 static __device__ void bitonic_sort_shared_nan_last(float* buf, int size) {
@@ -270,10 +244,6 @@ void percentile_nearest_rank_many_series_one_param_time_major_f32(
         i += 1;
     }
 }
-
-
-
-
 
 
 extern "C" __global__

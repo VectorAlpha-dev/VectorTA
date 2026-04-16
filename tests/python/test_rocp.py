@@ -98,7 +98,6 @@ class TestRocp:
         assert len(result) == len(close)
 
 
-
         if len(result) > 240:
             for i, val in enumerate(result[240:]):
                 assert not np.isnan(val), f"Found unexpected NaN at index {240 + i}"

@@ -305,7 +305,7 @@ __device__ void compute_run_abs(
     }
 }
 
-}  // namespace
+}
 
 extern "C" __global__ void zig_zag_channels_batch_f64(
     const double* __restrict__ open,

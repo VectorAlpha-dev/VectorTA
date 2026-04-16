@@ -111,4 +111,3 @@ class TestAsoCuda:
         assert ge.shape == (rows, cols)
         assert_close(gb, cpu_b, rtol=2e-3, atol=2e-3, msg="ASO CUDA many-series bulls mismatch")
         assert_close(ge, cpu_e, rtol=2e-3, atol=2e-3, msg="ASO CUDA many-series bears mismatch")
-

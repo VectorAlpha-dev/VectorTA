@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -17,8 +8,6 @@
 #ifndef TRENDFLEX_NAN
 #define TRENDFLEX_NAN (__int_as_float(0x7fffffff))
 #endif
-
-
 
 
 #ifndef TRENDFLEX_ASSUME_OUT_PREFILLED

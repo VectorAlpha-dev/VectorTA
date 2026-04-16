@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -32,8 +23,6 @@ __device__ __forceinline__ void kahan_add(float &sum, float &comp, float x){
     comp = (t - sum) - y;
     sum = t;
 }
-
-
 
 
 __device__ __forceinline__ float2 ff_two_sum(float a, float b){
@@ -149,14 +138,6 @@ void damiani_select_output_rows_f32(const float* __restrict__ packed,
 }
 
 
-
-
-
-
-
-
-
-
 extern "C" __global__
 void damiani_volatmeter_batch_f32(const float* __restrict__ prices,
                                   int series_len,
@@ -259,11 +240,6 @@ void damiani_volatmeter_batch_f32(const float* __restrict__ prices,
         }
     }
 }
-
-
-
-
-
 
 
 extern "C" __global__

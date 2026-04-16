@@ -42,7 +42,7 @@ __device__ inline double compute_forward_backward_value(
     }
     return num / den * 50.0 + 50.0;
 }
-}  // namespace
+}
 
 extern "C" __global__ void forward_backward_exponential_oscillator_batch_f64(
     const double* __restrict__ data,

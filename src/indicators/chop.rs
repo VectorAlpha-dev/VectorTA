@@ -1806,7 +1806,6 @@ mod tests {
 								if !y.is_nan() {
 
 
-
 									let normalized_bound = scalar * 1.5;
 									prop_assert!(
 										y >= -normalized_bound && y <= normalized_bound,
@@ -1952,7 +1951,6 @@ mod tests {
 						if !seg1_values.is_empty() && !seg2_values.is_empty() {
 							let seg1_avg = seg1_values.iter().sum::<f64>() / seg1_values.len() as f64;
 							let seg2_avg = seg2_values.iter().sum::<f64>() / seg2_values.len() as f64;
-
 
 
 							if market_type == 4 && seg1_avg.abs() > 1e-6 && seg2_avg.abs() > 1e-6 {

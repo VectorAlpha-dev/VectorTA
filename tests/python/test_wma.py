@@ -120,8 +120,6 @@ class TestWma:
             assert not np.any(np.isnan(result[50:])), "Found unexpected NaN after warmup period"
 
 
-
-
         assert np.all(np.isnan(result[:13])), "Expected NaN in warmup period (indices 0-12)"
         assert not np.isnan(result[13]), "Expected first valid value at index 13"
 

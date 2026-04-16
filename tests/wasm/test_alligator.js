@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -225,7 +224,6 @@ test('Alligator batch single parameter set', () => {
     const singleResult = wasm.alligator_js(hl2Array, 13, 8, 8, 5, 5, 3);
 
 
-
     assert.strictEqual(batchResult.length, singleResult.length);
 
 
@@ -315,7 +313,6 @@ test('Alligator batch metadata', () => {
         5, 5, 0,
         3, 3, 0
     );
-
 
 
     assert.strictEqual(metadata.length, 4 * 6);

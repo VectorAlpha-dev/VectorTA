@@ -145,7 +145,6 @@ class TestTrima:
         assert len(result) == len(close)
 
 
-
         warmup = 240
         if len(result) > warmup:
             valid_values = result[warmup:]

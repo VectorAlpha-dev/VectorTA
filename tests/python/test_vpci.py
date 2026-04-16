@@ -67,7 +67,6 @@ class TestVpci:
         )
 
 
-
         compare_with_rust('vpci', {'vpci': vpci, 'vpcis': vpcis}, 'close', expected['default_params'])
 
     def test_vpci_default_params(self, test_data):

@@ -60,8 +60,6 @@ class TestHwma:
         )
 
 
-
-
     def test_hwma_default_candles(self, test_data):
         """Test HWMA with default parameters - mirrors check_hwma_default_candles"""
         close = test_data['close']
@@ -69,8 +67,6 @@ class TestHwma:
 
         result = ta_indicators.hwma(close, 0.2, 0.1, 0.1)
         assert len(result) == len(close)
-
-
 
 
     def test_hwma_invalid_na(self):

@@ -1,9 +1,3 @@
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -16,7 +10,6 @@
 
 #define TEMA_WARPS_PER_BLOCK 4
 #endif
-
 
 
 #ifndef TEMA_QNAN_U32
@@ -37,10 +30,6 @@ static __device__ __forceinline__ float warp_broadcast0(float v) {
     unsigned m = __activemask();
     return __shfl_sync(m, v, 0);
 }
-
-
-
-
 
 
 extern "C" __global__
@@ -234,9 +223,6 @@ void tema_batch_f32(const float* __restrict__ prices,
         ema3_prev = __shfl_sync(mask, ema3, last_lane);
     }
 }
-
-
-
 
 
 extern "C" __global__

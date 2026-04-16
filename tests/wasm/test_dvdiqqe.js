@@ -428,8 +428,6 @@ test('DVDIQQE volume types', () => {
     assert.ok(tickMatchesNoVol, 'Tick volume should match no-volume behavior');
 
 
-
-
 });
 
 test('DVDIQQE PineScript reference validation', () => {
@@ -443,7 +441,4 @@ test('DVDIQQE PineScript reference validation', () => {
     assert.ok(expected.pinescriptCenter, 'Should have PineScript Center reference values');
 
 
-
 });
-
-

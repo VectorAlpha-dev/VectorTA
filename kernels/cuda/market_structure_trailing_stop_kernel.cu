@@ -46,7 +46,7 @@ __device__ inline bool is_pivot_low(
     }
     return true;
 }
-}  // namespace
+}
 
 extern "C" __global__ void market_structure_trailing_stop_batch_f64(
     const double* open,

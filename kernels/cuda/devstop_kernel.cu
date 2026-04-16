@@ -1,21 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -115,9 +97,6 @@ extern "C" __global__ void devstop_build_range_prefixes_f32(
 }
 
 
-
-
-
 extern "C" __global__ void devstop_batch_grouped_f32(
     const float* __restrict__ high,
     const float* __restrict__ low,
@@ -200,7 +179,6 @@ extern "C" __global__ void devstop_batch_grouped_f32(
         }
 
 
-
         if (isnan(base)) { base = is_long ? -INFINITY : INFINITY; }
         base_ring[slot] = base;
         {
@@ -241,10 +219,6 @@ extern "C" __global__ void devstop_batch_grouped_f32(
         slot = wrap_inc(slot, cap);
     }
 }
-
-
-
-
 
 
 extern "C" __global__ void devstop_many_series_one_param_f32(

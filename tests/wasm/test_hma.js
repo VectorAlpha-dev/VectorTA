@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -62,7 +61,6 @@ test('HMA accuracy', async () => {
         1e-3,
         "HMA last 5 values mismatch"
     );
-
 
 
 });
@@ -277,7 +275,6 @@ test('HMA small periods', () => {
     assert.strictEqual(result.length, data.length);
 
 
-
     assert(isNaN(result[0]));
     assert(!isNaN(result[1]));
 });
@@ -310,7 +307,6 @@ test('HMA batch edge cases', () => {
 });
 
 test('HMA consistency across periods', () => {
-
 
 
     const close = new Float64Array(testData.close.slice(0, 200));
@@ -367,7 +363,6 @@ test('HMA with specific data patterns', () => {
     const linearResult = wasm.hma_js(linearData, 5);
     assert.strictEqual(linearResult.length, linearData.length);
 });
-
 
 
 test('HMA zero-copy API basic', () => {

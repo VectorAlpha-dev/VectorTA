@@ -1,23 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -247,9 +227,6 @@ extern "C" __global__ void squeeze_momentum_batch_f32(
         }
     }
 }
-
-
-
 
 
 #ifndef SMI_QNAN_F

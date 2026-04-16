@@ -1,38 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -44,11 +9,6 @@
 
 __device__ __forceinline__ int rb_inc(int idx, int cap) { return (idx + 1) >= cap ? 0 : idx + 1; }
 __device__ __forceinline__ int rb_dec(int idx, int cap) { return (idx == 0) ? (cap - 1) : (idx - 1); }
-
-
-
-
-
 
 
 extern "C" __global__
@@ -75,11 +35,6 @@ void tr_from_hlc_f32(const float* __restrict__ high,
         }
     }
 }
-
-
-
-
-
 
 
 template<bool UsePrecomputedTR>
@@ -137,7 +92,6 @@ __device__ void cksp_core_row(const float* __restrict__ high,
         const float hi = high[i];
         const float lo = low[i];
         const float tr = UsePrecomputedTR ? tr_opt[i] : (hi - lo);
-
 
 
         float y = tr - c_tr;
@@ -311,8 +265,6 @@ void cksp_batch_f32(const float* __restrict__ high,
          out_long + base, out_short + base
     );
 }
-
-
 
 
 extern "C" __global__
@@ -526,4 +478,3 @@ void cksp_many_series_one_param_f32(const float* __restrict__ high_tm,
         }
     }
 }
-

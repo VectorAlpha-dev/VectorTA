@@ -1,11 +1,3 @@
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -17,11 +9,9 @@
 namespace { __device__ inline bool is_finitef(float x) { return !isnan(x) && !isinf(x); } }
 
 
-
 #ifndef CCI_RING_MAX
 #define CCI_RING_MAX 128
 #endif
-
 
 
 __device__ inline void scan_minmax_ring(const float* __restrict__ ring,

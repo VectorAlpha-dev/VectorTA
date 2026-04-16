@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -170,7 +169,6 @@ test('KELTNER invalid multiplier', () => {
 
     const zeroResult = wasm.keltner(data, data, data, data, 2, 0.0, "ema");
     assert.equal(zeroResult.values.length, 3 * data.length);
-
 
 
     try {

@@ -1,15 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -23,9 +11,6 @@
 static __device__ __forceinline__ float qnan() {
     return __int_as_float(0x7fffffff);
 }
-
-
-
 
 
 extern "C" __global__
@@ -101,9 +86,6 @@ void mfi_batch_f32(const float* __restrict__ typical,
         out[row_off + t] = (tot <= 1e-14f) ? 0.0f : (100.0f * (pos0 / tot));
     }
 }
-
-
-
 
 
 extern "C" __global__
@@ -191,10 +173,6 @@ void mfi_many_series_one_param_f32(const float* __restrict__ typical_tm,
         out_tm[t * stride + s] = (tot <= 1e-14f) ? 0.0f : (100.0f * (ds_to_f(pos_sum) / tot));
     }
 }
-
-
-
-
 
 
 extern "C" __global__

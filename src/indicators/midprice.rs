@@ -1936,9 +1936,6 @@ mod tests {
 					);
 
 
-
-
-
 					if period == 1 {
 						prop_assert!(
 							y >= lows[i] - tolerance && y <= highs[i] + tolerance,
@@ -1946,8 +1943,6 @@ mod tests {
 							y, lows[i], highs[i], i
 						);
 					}
-
-
 
 
 					if i > warmup_end && window_high.len() > 1 && window_low.len() > 1 {

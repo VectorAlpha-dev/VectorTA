@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -86,7 +85,6 @@ test('Damiani Volatmeter accuracy (close-only binding path)', async () => {
         1e-2,
         "Damiani Volatmeter anti last 5 values mismatch"
     );
-
 
 
 });
@@ -225,7 +223,6 @@ test('Damiani Volatmeter fast API (into)', () => {
             inPtr, volPtr, antiPtr, len,
             13, 20, 40, 100, 1.4
         );
-
 
 
         const volView = new Float64Array(wasm.__wasm.memory.buffer, volPtr, len);
@@ -377,12 +374,6 @@ test('Damiani Volatmeter batch processing', () => {
     assert(result.anti);
     assert(result.combos);
     assert.strictEqual(result.cols, close.length);
-
-
-
-
-
-
 
 
     const expectedRows = 28 * 21;
@@ -757,11 +748,6 @@ test('Damiani Volatmeter partial NaN handling', () => {
     assert.strictEqual(anti.length, close.length);
 
 
-
-
-
-
-
     for (let i = 50; i < 60; i++) {
 
         assert(isNaN(vol[i]), `Vol should be NaN at index ${i} (direct NaN input)`);
@@ -769,24 +755,11 @@ test('Damiani Volatmeter partial NaN handling', () => {
     }
 
 
-
-
-
-
-
     for (let i = 60; i < 100; i++) {
 
         assert(isNaN(vol[i]), `Vol should be NaN at index ${i} due to NaN in window`);
         assert(isNaN(anti[i]), `Anti should be NaN at index ${i} due to NaN in window`);
     }
-
-
-
-
-
-
-
-
 
 
     let nanAt150 = isNaN(vol[150]);
@@ -826,7 +799,6 @@ test('Damiani Volatmeter invalid parameters', () => {
     assert.throws(() => {
         wasm.damiani_volatmeter_js(data, 13, 20, 40, 0, 1.4);
     }, /Invalid period/);
-
 
 
     const nanResult = wasm.damiani_volatmeter_js(data, 2, 2, 2, 2, NaN);

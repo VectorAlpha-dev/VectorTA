@@ -1,13 +1,3 @@
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -96,7 +86,6 @@ static __forceinline__ __device__ dsf ds_max_float(dsf a, float x) {
 }
 
 
-
 static __forceinline__ __device__ void warp_broadcast_hilo(
     const float* __restrict__ high,
     const float* __restrict__ low,
@@ -116,13 +105,6 @@ static __forceinline__ __device__ void warp_broadcast_hilo(
     hi_out = __shfl_sync(mask, hi_lane, leader_lane);
     lo_out = __shfl_sync(mask, lo_lane, leader_lane);
 }
-
-
-
-
-
-
-
 
 
 extern "C" __global__ void sar_batch_f32(
@@ -257,13 +239,6 @@ extern "C" __global__ void sar_batch_f32(
 }
 
 
-
-
-
-
-
-
-
 extern "C" __global__ void sar_many_series_one_param_time_major_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
@@ -350,4 +325,3 @@ extern "C" __global__ void sar_many_series_one_param_time_major_f32(
         high_prev = hi;
     }
 }
-

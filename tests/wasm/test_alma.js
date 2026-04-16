@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -437,7 +436,6 @@ test('ALMA batch - new API with multiple parameters', () => {
 });
 
 
-
 test('ALMA batch - new API error handling', () => {
     const close = new Float64Array(testData.close.slice(0, 10));
 
@@ -468,10 +466,6 @@ test('ALMA batch - new API error handling', () => {
         });
     }, /Invalid config/);
 });
-
-
-
-
 
 
 test('ALMA zero-copy API', () => {
@@ -561,9 +555,6 @@ test('ALMA zero-copy with large dataset', () => {
         wasm.alma_free(ptr, size);
     }
 });
-
-
-
 
 
 test('ALMA SIMD128 consistency', () => {

@@ -94,12 +94,15 @@ impl CudaGoertzelCycleCompositeWave {
         &self,
         data: &[f64],
         sweep: &GoertzelCycleCompositeWaveBatchRange,
-    ) -> Result<CudaGoertzelCycleCompositeWaveBatchResult, CudaGoertzelCycleCompositeWaveError> {
+    ) -> Result<CudaGoertzelCycleCompositeWaveBatchResult, CudaGoertzelCycleCompositeWaveError>
+    {
         self.module
             .get_function("goertzel_cycle_composite_wave_batch_f64")
-            .map_err(|_| CudaGoertzelCycleCompositeWaveError::MissingKernelSymbol {
-                name: "goertzel_cycle_composite_wave_batch_f64",
-            })?;
+            .map_err(
+                |_| CudaGoertzelCycleCompositeWaveError::MissingKernelSymbol {
+                    name: "goertzel_cycle_composite_wave_batch_f64",
+                },
+            )?;
         let cpu = goertzel_cycle_composite_wave_batch_with_kernel(data, sweep, Kernel::ScalarBatch)
             .map_err(|e| CudaGoertzelCycleCompositeWaveError::InvalidInput(e.to_string()))?;
 

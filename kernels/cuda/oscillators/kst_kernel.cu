@@ -1,9 +1,3 @@
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -12,14 +6,9 @@
 #include <math.h>
 
 
-
-
-
-
 static __device__ __forceinline__ float kst_qnan() {
   return __int_as_float(0x7fffffff);
 }
-
 
 
 struct CompSum {
@@ -36,8 +25,6 @@ struct CompSum {
 };
 
 
-
-
 __device__ __forceinline__ float kst_safe_roc(float curr, float prev) {
   if (prev != 0.0f && isfinite(curr) && isfinite(prev)) {
     const float inv100_prev = 100.0f / prev;
@@ -45,8 +32,6 @@ __device__ __forceinline__ float kst_safe_roc(float curr, float prev) {
   }
   return 0.0f;
 }
-
-
 
 
 extern "C" __global__
@@ -141,7 +126,6 @@ void kst_batch_f32(const float* __restrict__ prices,
         line_row[i] = k;
 
 
-
         ssum.add(k);
 
 
@@ -156,8 +140,6 @@ void kst_batch_f32(const float* __restrict__ prices,
     }
   }
 }
-
-
 
 
 extern "C" __global__

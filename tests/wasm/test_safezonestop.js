@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -309,7 +308,6 @@ test('SafeZoneStop reinput', () => {
 
     const secondResult = wasm.safezonestop_js(firstResult, firstResult, 22, 2.5, 3, "long");
     assert.strictEqual(secondResult.length, firstResult.length);
-
 
 
     let hasDifference = false;

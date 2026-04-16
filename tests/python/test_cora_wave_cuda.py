@@ -99,4 +99,3 @@ class TestCoraWaveCuda:
             atol=1e-4,
             msg="CoRa Wave CUDA many-series vs CPU mismatch",
         )
-

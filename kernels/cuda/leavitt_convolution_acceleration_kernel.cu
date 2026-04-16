@@ -192,7 +192,7 @@ __device__ inline void bump_source_history(
     *have_src1 = true;
 }
 
-}  // namespace
+}
 
 extern "C" __global__ void leavitt_convolution_acceleration_batch_f64(
     const double* __restrict__ data,

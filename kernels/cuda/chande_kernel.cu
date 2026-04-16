@@ -1,16 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -258,16 +245,6 @@ void chande_many_series_one_param_f32(const float* __restrict__ high_tm,
 }
 
 
-
-
-
-
-
-
-
-
-
-
 static __forceinline__ __device__ float tr_from_hlpc(
     float hi, float lo, float pc, int t, int first_valid)
 {
@@ -279,7 +256,6 @@ static __forceinline__ __device__ float tr_from_hlpc(
     if (lc > tr) tr = lc;
     return tr;
 }
-
 
 
 static __forceinline__ __device__ void dq_push_monotone(
@@ -319,12 +295,6 @@ static __forceinline__ __device__ float dq_front_value(
 {
     return val_buf[head & mask];
 }
-
-
-
-
-
-
 
 
 extern "C" __global__

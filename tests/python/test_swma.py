@@ -45,7 +45,6 @@ class TestSwma:
         assert len(result) == len(close)
 
 
-
         assert_close(
             result[-5:],
             expected['last_5_values'],
@@ -281,21 +280,6 @@ class TestSwma:
         period = 5
 
         result = swma(data, period)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
         assert abs(result[15] - 1/9) < 1e-10

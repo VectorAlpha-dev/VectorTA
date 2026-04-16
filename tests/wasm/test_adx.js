@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -179,7 +178,6 @@ test('ADX leading NaN values', () => {
 
     const result = wasm.adx_js(high, low, close, 14);
     assert.strictEqual(result.length, close.length);
-
 
 
     assertAllNaN(result.slice(0, 5), "Expected NaN where input has NaN");
@@ -503,9 +501,6 @@ test('ADX warmup behavior', () => {
     const result = wasm.adx_js(high, low, close, period);
 
 
-
-
-
     const warmupPeriod = 2 * period - 1;
 
 
@@ -527,7 +522,6 @@ test('ADX warmup behavior', () => {
         }
     }
 });
-
 
 
 test.after(() => {

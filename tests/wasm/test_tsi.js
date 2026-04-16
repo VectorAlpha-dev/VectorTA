@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -134,7 +133,6 @@ test('TSI NaN handling', () => {
         const afterWarmup = result.slice(240);
         assertNoNaN(afterWarmup, "Found unexpected NaN after warmup period");
     }
-
 
 
     const warmup = 25 + 13;

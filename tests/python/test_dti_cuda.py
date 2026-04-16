@@ -98,4 +98,3 @@ class TestDtiCuda:
 
         assert gpu_tm.shape == cpu_tm.shape
         assert_close(gpu_tm, cpu_tm, rtol=1e-4, atol=1e-4, msg="CUDA DTI many-series mismatch")
-

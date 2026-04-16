@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -176,7 +175,6 @@ test('StdDev batch single parameter set', () => {
     const singleResult = wasm.stddev_js(close, 5, 1.0);
 
     assert.strictEqual(batchResult.values.length, singleResult.length);
-
 
 
     assertArrayClose(batchResult.values, singleResult, 1e-5, "Batch vs single mismatch");

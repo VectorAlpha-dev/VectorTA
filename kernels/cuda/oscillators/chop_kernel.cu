@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -35,7 +26,6 @@ void kbn_update(float delta, float& sum_hi, float& sum_lo) {
     sum_hi = t;
     sum_lo += c;
 }
-
 
 
 extern "C" __global__ void chop_batch_f32(
@@ -228,7 +218,6 @@ extern "C" __global__ void chop_batch_f32(
 }
 
 
-
 extern "C" __global__ void chop_many_series_one_param_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
@@ -298,4 +287,3 @@ extern "C" __global__ void chop_many_series_one_param_f32(
         out_tm[(size_t)r * cols + s] = y;
     }
 }
-

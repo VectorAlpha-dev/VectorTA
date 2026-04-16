@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -300,7 +299,6 @@ test('EHMA with real market data', () => {
     for (const [period, result] of Object.entries(results)) {
         assert.strictEqual(result.length, close.length,
             `Period ${period}: Result length mismatch`);
-
 
 
         let validCount = 0;

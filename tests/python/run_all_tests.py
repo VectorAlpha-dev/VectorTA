@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Run all Python binding tests - equivalent to 'cargo test --features nightly-avx'
 Usage:

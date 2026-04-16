@@ -120,7 +120,6 @@ class TestPma:
         assert len(trigger) == len(close)
 
 
-
         first_valid = next((i for i, x in enumerate(close) if not np.isnan(x)), 0)
         expected_warmup = first_valid + 6
 
@@ -145,8 +144,6 @@ class TestPma:
         predict, trigger = ta_indicators.pma(mixed_data)
         assert len(predict) == len(mixed_data)
         assert len(trigger) == len(mixed_data)
-
-
 
 
         for i in range(len(mixed_data)):
@@ -230,7 +227,6 @@ class TestPma:
 
         for i in range(6):
             assert results[i] is None, f"Expected None during warmup at index {i}"
-
 
 
         for i in range(6, len(test_values)):

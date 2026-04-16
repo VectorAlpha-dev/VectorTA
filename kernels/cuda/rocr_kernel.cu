@@ -1,14 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 
 #ifndef ROCR_NAN
@@ -17,7 +6,6 @@
 
 
 static __device__ __forceinline__ bool rocr_isnan(float x) { return x != x; }
-
 
 
 extern "C" __global__ void rocr_prepare_inv_f32(
@@ -33,7 +21,6 @@ extern "C" __global__ void rocr_prepare_inv_f32(
         i += stride;
     }
 }
-
 
 
 extern "C" __global__ void rocr_batch_f32(
@@ -151,10 +138,6 @@ extern "C" __global__ void rocr_batch_f32(
 }
 
 
-
-
-
-
 extern "C" __global__ void rocr_many_series_one_param_f32(
     const float* __restrict__ data_tm,
     int period,
@@ -220,4 +203,3 @@ extern "C" __global__ void rocr_many_series_one_param_f32(
         }
     }
 }
-

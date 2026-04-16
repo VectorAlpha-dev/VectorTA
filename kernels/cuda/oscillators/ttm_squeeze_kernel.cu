@@ -1,18 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -33,7 +18,6 @@
 #endif
 
 static __device__ __forceinline__ bool is_finite_f(float x) { return isfinite(x); }
-
 
 
 struct NeumaierSumF {
@@ -424,8 +408,6 @@ extern "C" __global__ void ttm_squeeze_many_series_one_param_f32(
     DequeI dq_min(dq_min_buf, L);
 
 
-
-
     bool seed_ok = true;
 
     for (int j = fv; j < fv + L && j < series_len; ++j) {
@@ -571,4 +553,3 @@ extern "C" __global__ void ttm_squeeze_many_series_one_param_f32(
         }
     }
 }
-

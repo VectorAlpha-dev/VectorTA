@@ -62,4 +62,3 @@ class TestDecOscCuda:
         handle = ti.dec_osc_cuda_many_series_one_param_dev(data_tm.astype(np.float32).ravel(), N, T, p, k)
         gpu_tm = cp.asnumpy(cp.asarray(handle)).reshape(T, N)
         assert_close(gpu_tm, cpu_tm, rtol=3e-3, atol=1e-4, msg="CUDA many-series vs CPU mismatch")
-

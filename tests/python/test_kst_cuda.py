@@ -84,4 +84,3 @@ def test_kst_cuda_many_series_one_param_matches_cpu():
     tol = 1.2e-3
     np.testing.assert_allclose(gpu_line, line_cpu, rtol=0, atol=tol, equal_nan=True)
     np.testing.assert_allclose(gpu_sig,  sig_cpu,  rtol=0, atol=tol, equal_nan=True)
-

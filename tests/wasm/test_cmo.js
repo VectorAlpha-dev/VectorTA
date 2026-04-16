@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -22,7 +21,6 @@ let wasm;
 let testData;
 
 test.before(async () => {
-
 
 
     const pkgPath = path.join(__dirname, '../../pkg/vector_ta.js');

@@ -114,4 +114,3 @@ class TestKeltnerCuda:
         assert_close(mid_gpu, mid_cpu, rtol=1e-4, atol=2e-3, msg="middle TM mismatch")
         assert_close(up_gpu, up_cpu, rtol=1e-4, atol=2e-3, msg="upper TM mismatch")
         assert_close(low_gpu, low_cpu, rtol=1e-4, atol=2e-3, msg="lower TM mismatch")
-

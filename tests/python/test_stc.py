@@ -231,7 +231,6 @@ class TestStc:
         assert len(result_auto) == len(close)
 
 
-
         assert_close(
             result_scalar[~np.isnan(result_scalar)],
             result_auto[~np.isnan(result_auto)],

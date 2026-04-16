@@ -1,11 +1,3 @@
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -19,8 +11,6 @@ static __device__ __forceinline__ float qnan_f() { return __int_as_float(0x7ffff
 static __device__ __forceinline__ int clamp_int(int x, int lo, int hi) {
     return x < lo ? lo : (x > hi ? hi : x);
 }
-
-
 
 
 extern "C" __global__
@@ -66,8 +56,6 @@ void hwma_batch_f32(const float* __restrict__ prices,
         f = f_new; v = v_new; a = a_new;
     }
 }
-
-
 
 
 extern "C" __global__ __launch_bounds__(256, 2)

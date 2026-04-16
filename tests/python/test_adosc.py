@@ -166,7 +166,6 @@ class TestAdosc:
         assert len(result) == len(close)
 
 
-
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after index 240"
 
@@ -254,8 +253,6 @@ class TestAdosc:
         assert 'longs' in result
 
 
-
-
         valid_count = sum(1 for s in [2, 3, 4, 5] for l in [8, 10, 12] if s < l)
         assert result['values'].shape[0] == valid_count
         assert result['values'].shape[1] == len(close)
@@ -287,7 +284,6 @@ class TestAdosc:
 
         result = ta_indicators.adosc(high, low, close, volume, short_period=3, long_period=5)
         assert len(result) == len(close)
-
 
 
         assert_close(result, np.zeros_like(result), rtol=1e-9, msg="ADOSC with constant price should be 0")

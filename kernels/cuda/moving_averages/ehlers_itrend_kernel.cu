@@ -1,14 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -16,7 +5,6 @@
 #include <cuda_runtime.h>
 #include <math.h>
 #include <math_constants.h>
-
 
 
 #ifndef M_PI
@@ -160,7 +148,6 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
 
         int dcp = __float2int_rn(sp_val);
         dcp = clampT(dcp, 1, max_dc);
-
 
 
         float old = pfx[pidx];

@@ -101,7 +101,6 @@ class TestSrwma:
             assert not np.any(np.isnan(result[50:])), "Found unexpected NaN after warmup period"
 
 
-
         assert np.all(np.isnan(result[:15])), "Expected NaN in warmup period (first period+1 values)"
 
     def test_srwma_streaming(self, test_data):
@@ -176,7 +175,6 @@ class TestSrwma:
     def test_srwma_period_less_than_2(self):
         """Test SRWMA with period < 2"""
         data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
-
 
 
         with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):

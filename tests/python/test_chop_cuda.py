@@ -60,4 +60,3 @@ class TestChopCuda:
         mask = ~np.isnan(cpu_values)
         assert_close(gpu[mask], cpu_values[mask], rtol=1e-4, atol=5e-3,
                      msg="CUDA CHOP mismatch vs CPU baseline")
-

@@ -1,14 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -20,7 +9,6 @@
 #ifndef ZLEMA_NAN
 #define ZLEMA_NAN (__int_as_float(0x7fffffff))
 #endif
-
 
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 350)
@@ -83,7 +71,6 @@ void zlema_batch_f32(const float* __restrict__ prices,
         }
 
 
-
         last_ema = fmaf(alpha, (val - last_ema), last_ema);
 
         if (t >= warm) {
@@ -91,15 +78,6 @@ void zlema_batch_f32(const float* __restrict__ prices,
         }
     }
 }
-
-
-
-
-
-
-
-
-
 
 
 extern "C" __global__
@@ -183,7 +161,6 @@ void zlema_batch_warp_scan_f32(const float* __restrict__ prices,
         }
 
 
-
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float A_prev = __shfl_up_sync(mask, A, offset);
             const float B_prev = __shfl_up_sync(mask, B, offset);
@@ -205,11 +182,6 @@ void zlema_batch_warp_scan_f32(const float* __restrict__ prices,
         prev = __shfl_sync(mask, y, last_lane);
     }
 }
-
-
-
-
-
 
 
 #ifndef ZLEMA_BATCH_TILE
@@ -269,7 +241,6 @@ void zlema_batch_f32_tiled_f32(const float* __restrict__ prices,
         const int t_end = load_end;
 
 
-
         for (int t = tile_start; t < t_end; ++t) {
             const float cur = s_prices[t - load_start];
             float val;
@@ -288,7 +259,6 @@ void zlema_batch_f32_tiled_f32(const float* __restrict__ prices,
         __syncthreads();
     }
 }
-
 
 
 extern "C" __global__

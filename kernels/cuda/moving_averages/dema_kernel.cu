@@ -1,16 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -19,20 +6,14 @@
 #include <math.h>
 
 
-
-
 #ifndef USE_DEMA_COMPENSATION
 #define USE_DEMA_COMPENSATION 0
 #endif
 
 
-
 #ifndef DEMA_INIT_NANS_IN_KERNEL
 #define DEMA_INIT_NANS_IN_KERNEL 1
 #endif
-
-
-
 
 
 extern "C" __global__
@@ -113,11 +94,6 @@ void dema_batch_f32(const float* __restrict__ prices,
 }
 
 
-
-
-
-
-
 extern "C" __global__
 void dema_many_series_one_param_time_major_f32(
     const float* __restrict__ prices_tm,
@@ -155,7 +131,6 @@ void dema_many_series_one_param_time_major_f32(
     if (fv >= series_len) {
         return;
     }
-
 
 
     bool  started = false;

@@ -105,4 +105,3 @@ class TestModGodModeCuda:
         assert_close(wt, wt_cpu, rtol=8e-3, atol=1e-3, msg='wt TM mismatch')
         assert_close(sig, sig_cpu, rtol=8e-3, atol=1e-3, msg='sig TM mismatch')
         assert_close(hist, hist_cpu, rtol=8e-3, atol=1e-3, msg='hist TM mismatch')
-

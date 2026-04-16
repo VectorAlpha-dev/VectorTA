@@ -255,8 +255,6 @@ class TestReflex:
         assert np.all(result[:20] == 0.0)
 
 
-
-
         data = np.array([10.0, 20.0, 10.0, 20.0] * 25)
         result = ta_indicators.reflex(data, 20)
         assert len(result) == len(data)
@@ -306,7 +304,6 @@ class TestReflex:
 
 
         assert np.all(np.isfinite(result[period:]))
-
 
 
         unique_values = np.unique(result[period:])

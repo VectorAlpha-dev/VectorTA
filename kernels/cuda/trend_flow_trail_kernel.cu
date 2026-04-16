@@ -298,7 +298,7 @@ __device__ inline bool crossunder_pair(
         isfinite(left) && isfinite(right) && prev_left >= prev_right && left < right;
 }
 
-}  // namespace
+}
 
 extern "C" __global__ void trend_flow_trail_batch_f64(
     const double* __restrict__ open,

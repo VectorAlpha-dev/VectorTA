@@ -1652,8 +1652,6 @@ mod tests {
 				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(data.len());
 
 
-
-
 				for i in 0..first_valid.min(out.len()) {
 					prop_assert!(
 						out[i].is_nan(),
@@ -1752,7 +1750,6 @@ mod tests {
 							};
 
 
-
 							let abs_diff = (out[i] - ref_out[i]).abs();
 							let rel_diff = if ref_out[i].abs() > 1e-10 {
 								abs_diff / ref_out[i].abs()
@@ -1768,7 +1765,6 @@ mod tests {
 						}
 					}
 				}
-
 
 
 				let warmup_estimate = first_valid + period;
@@ -1859,8 +1855,6 @@ mod tests {
 						if count > 0 {
 							high_power_responsiveness /= count as f64;
 							low_power_responsiveness /= count as f64;
-
-
 
 
 							if low_power_responsiveness > high_power_responsiveness * 1.5 {

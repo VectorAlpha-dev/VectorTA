@@ -320,7 +320,7 @@ __device__ double wma_update(
     return sum / denominator;
 }
 
-}  // namespace
+}
 
 extern "C" __global__ void half_causal_estimator_batch_f64(
     const double* __restrict__ data,

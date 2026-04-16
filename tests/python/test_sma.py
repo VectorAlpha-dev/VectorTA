@@ -92,7 +92,6 @@ def test_sma_reinput():
     assert len(second_result) == len(first_result)
 
 
-
     first_valid_in_first = np.where(~np.isnan(first_result))[0][0]
     warmup = first_valid_in_first + 14 - 1
     assert np.all(np.isfinite(second_result[warmup:]))
@@ -106,7 +105,6 @@ def test_sma_nan_handling():
     result = sma(close, 9)
 
     assert len(result) == len(close)
-
 
 
     first_valid = np.where(~np.isnan(close))[0][0]
@@ -357,9 +355,6 @@ def test_sma_formula_verification():
 
 
     assert len(result) == len(data)
-
-
-
 
 
     assert_close(result[2], 2.0, atol=1e-9)

@@ -47,7 +47,6 @@ class TestAcosc:
         assert len(change) == len(high)
 
 
-
         assert_close(
             osc[-5:],
             expected['last_5_osc'],
@@ -55,7 +54,6 @@ class TestAcosc:
             atol=1e-1,
             msg="ACOSC osc last 5 values mismatch"
         )
-
 
 
         assert_close(
@@ -233,7 +231,6 @@ class TestAcosc:
         osc_row = result['osc'][0]
         change_row = result['change'][0]
         expected = EXPECTED_OUTPUTS['acosc']
-
 
 
         assert_close(

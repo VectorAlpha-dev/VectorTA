@@ -1,16 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -156,10 +143,6 @@ void ehma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
         t += stride;
     }
 }
-
-
-
-
 
 
 __device__ __forceinline__ size_t ehma_align_up(size_t x, size_t a) {
@@ -333,11 +316,6 @@ DEFINE_EHMA_BATCH_TILED_PRECOMP_2X(ehma_batch_tiled_f32_2x_tile256, 256)
 DEFINE_EHMA_BATCH_TILED_PRECOMP_2X(ehma_batch_tiled_f32_2x_tile512, 512)
 
 
-
-
-
-
-
 template<int TILE>
 struct EhmaBatchTiledPrecomputed2X_Async {
     static __device__ __forceinline__
@@ -452,8 +430,6 @@ DEFINE_EHMA_BATCH_TILED_PRECOMP_2X_ASYNC(ehma_batch_tiled_f32_2x_tile256_async, 
 DEFINE_EHMA_BATCH_TILED_PRECOMP_2X_ASYNC(ehma_batch_tiled_f32_2x_tile512_async, 512)
 
 
-
-
 __device__ __forceinline__
 float ehma_dot_stride_uncomp(const float* __restrict__ x, int stride,
                              const float* __restrict__ w, int n) {
@@ -564,8 +540,6 @@ extern "C" __global__ void NAME(                                                
 
 DEFINE_EHMA_MS1P_TILED(ehma_ms1p_tiled_f32_tx128_ty2, 128, 2)
 DEFINE_EHMA_MS1P_TILED(ehma_ms1p_tiled_f32_tx128_ty4, 128, 4)
-
-
 
 
 template<int TX, int TY>

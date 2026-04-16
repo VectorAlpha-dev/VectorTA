@@ -117,4 +117,3 @@ class TestNamaCuda:
             atol=1e-5,
             msg="NAMA CUDA many-series mismatch",
         )
-

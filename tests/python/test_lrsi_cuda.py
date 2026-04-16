@@ -76,4 +76,3 @@ class TestLrsiCuda:
         gpu_tm = cp.asnumpy(cp.asarray(handle))
         assert gpu_tm.shape == cpu_tm.shape
         assert_close(gpu_tm, cpu_tm, rtol=1e-5, atol=1e-5, msg="LRSI CUDA many-series vs CPU mismatch")
-

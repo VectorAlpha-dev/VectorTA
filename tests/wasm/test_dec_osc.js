@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -70,8 +69,6 @@ test('DEC_OSC accuracy', async () => {
         1e-7,
         "DEC_OSC last 5 values mismatch"
     );
-
-
 
 
 });
@@ -318,7 +315,6 @@ test('DEC_OSC batch metadata from result', () => {
 test('DEC_OSC edge cases', () => {
 
 
-
     const sameValues = new Float64Array(100).fill(50.0);
     const result1 = wasm.dec_osc_js(sameValues, 10, 1.0);
     assert.strictEqual(result1.length, sameValues.length);
@@ -558,7 +554,6 @@ test('DEC_OSC SIMD128 consistency', () => {
             sumAfterWarmup += result[i];
             countAfterWarmup++;
         }
-
 
 
         if (countAfterWarmup > 0) {

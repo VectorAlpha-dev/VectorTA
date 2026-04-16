@@ -1,14 +1,5 @@
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
-
 
 
 __device__ __forceinline__ float qnan_f32() { return __int_as_float(0x7fc00000); }
@@ -32,9 +23,6 @@ extern "C" __global__ void fill_nan_f32(float* out, size_t n) {
         out[idx] = nanv;
     }
 }
-
-
-
 
 
 extern "C" __global__
@@ -286,4 +274,3 @@ void adx_many_series_one_param_time_major_f32(
         }
     }
 }
-

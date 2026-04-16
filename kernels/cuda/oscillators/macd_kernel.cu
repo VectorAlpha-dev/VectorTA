@@ -1,20 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -35,9 +18,6 @@ __device__ __forceinline__ int imin(int a, int b) { return a < b ? a : b; }
 __device__ __forceinline__ int imax(int a, int b) { return a > b ? a : b; }
 
 
-
-
-
 __device__ __forceinline__ void warp_inclusive_scan_affine(float &A, float &B, unsigned lane, unsigned mask) {
 #pragma unroll
     for (int offset = 1; offset < 32; offset <<= 1) {
@@ -51,9 +31,6 @@ __device__ __forceinline__ void warp_inclusive_scan_affine(float &A, float &B, u
         }
     }
 }
-
-
-
 
 
 extern "C" __global__
@@ -253,9 +230,6 @@ void macd_batch_f32(const float* __restrict__ prices,
         }
     }
 }
-
-
-
 
 
 extern "C" __global__

@@ -120,4 +120,3 @@ class TestMaczCuda:
         )
         gpu_tm = cp.asnumpy(cp.asarray(handle)).reshape(rows, cols)
         assert_close(gpu_tm, cpu_f32, rtol=5e-4, atol=7e-4, msg="CUDA MAC-Z TM mismatch")
-

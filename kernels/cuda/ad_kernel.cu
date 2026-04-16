@@ -1,10 +1,3 @@
-
-
-
-
-
-
-
 #ifndef AD_ACCUM_MODE
 #define AD_ACCUM_MODE 2
 #endif
@@ -26,9 +19,6 @@
 #else
   #define AD_DIV(x,y) ((x)/(y))
 #endif
-
-
-
 
 
 __device__ __forceinline__ float ad_mfv_f32(float h, float l, float c, float v)
@@ -74,7 +64,6 @@ struct TwoSum32 {
 };
 
 
-
 extern "C" __global__ void ad_series_f32(
     const float* __restrict__ high,
     const float* __restrict__ low,
@@ -95,7 +84,6 @@ extern "C" __global__ void ad_series_f32(
     float* __restrict__ o       = out    + offset;
 
 
-
     double sum = 0.0;
     for (int i = 0; i < len; ++i) {
         double hl = (double)h[i] - (double)l[i];
@@ -107,9 +95,6 @@ extern "C" __global__ void ad_series_f32(
         o[i] = (float)sum;
     }
 }
-
-
-
 
 
 extern "C" __global__ void ad_many_series_one_param_time_major_f32(
@@ -160,4 +145,3 @@ extern "C" __global__ void ad_many_series_one_param_time_major_f32(
     }
 #endif
 }
-

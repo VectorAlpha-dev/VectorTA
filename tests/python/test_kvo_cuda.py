@@ -102,4 +102,3 @@ class TestKvoCuda:
         )
         gpu_tm = cp.asnumpy(cp.asarray(handle)).reshape(T, N)
         assert_close(gpu_tm, cpu_tm, rtol=5e-3, atol=5e-4, msg="KVO CUDA many-series vs CPU mismatch")
-

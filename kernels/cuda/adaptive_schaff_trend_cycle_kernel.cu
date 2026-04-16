@@ -175,7 +175,7 @@ __device__ inline bool rolling_minmax_update(
     return true;
 }
 
-}  // namespace
+}
 
 extern "C" __global__ void adaptive_schaff_trend_cycle_batch_f64(
     const double* __restrict__ high,

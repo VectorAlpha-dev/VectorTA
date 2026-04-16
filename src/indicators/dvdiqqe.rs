@@ -4138,7 +4138,6 @@ mod tests {
                         prop_assert_eq!(output.center_line.len(), len);
 
 
-
                         let expected_warmup = 25;
                         for i in 0..expected_warmup.min(len) {
 

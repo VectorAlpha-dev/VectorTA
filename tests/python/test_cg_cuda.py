@@ -104,4 +104,3 @@ class TestCgCuda:
 
         assert gpu.shape == tm.shape
         assert_close(gpu, cpu, rtol=1e-4, atol=1e-4, msg="CG CUDA many-series mismatch")
-

@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -117,7 +116,6 @@ test('SMA reinput', () => {
     assert.strictEqual(secondResult.length, firstResult.length);
 
 
-
     let firstValid = 0;
     for (let i = 0; i < close.length; i++) {
         if (!isNaN(close[i])) {
@@ -146,7 +144,6 @@ test('SMA NaN handling', () => {
     const result = wasm.sma(close, 9);
 
     assert.strictEqual(result.length, close.length);
-
 
 
     let firstValid = 0;
@@ -189,7 +186,6 @@ test('SMA batch', () => {
     const batch_first = batch_result.slice(0, close.length);
 
 
-
     let firstValid = 0;
     for (let i = 0; i < close.length; i++) {
         if (!isNaN(close[i])) {
@@ -214,7 +210,6 @@ test('SMA different periods', () => {
     for (const period of testPeriods) {
         const result = wasm.sma(close, period);
         assert.strictEqual(result.length, close.length);
-
 
 
         let firstValid = 0;
@@ -265,7 +260,6 @@ test('SMA batch performance', () => {
 });
 
 test('SMA edge cases', () => {
-
 
 
     const data = new Float64Array(100);
@@ -421,9 +415,6 @@ test('SMA formula verification', () => {
 
 
     assert.strictEqual(result.length, data.length);
-
-
-
 
 
     assertClose(result[2], 2.0, 1e-9, 'SMA[2] should be 2.0');
@@ -933,7 +924,6 @@ test('SMA batch JS memory efficiency', () => {
 
     assert.strictEqual(result.periods.length, 20);
     assert.strictEqual(result.values.length, 20 * data.length);
-
 
 
     console.log(`Batch memory usage: ${(memUsed / 1024 / 1024).toFixed(2)} MB`);

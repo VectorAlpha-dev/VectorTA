@@ -236,7 +236,6 @@ class TestOtto:
         assert len(second_lott) == len(first_hott)
 
 
-
         third_hott, third_lott = ta_indicators.otto(
             data,
             ott_period=params['ott_period'],
@@ -329,7 +328,6 @@ class TestOtto:
         stream_lott = np.array(stream_lott)
 
 
-
         if len(stream_hott) >= 10:
             for i in range(-10, 0):
                 if not np.isnan(stream_hott[i]) and not np.isnan(batch_hott[i]):
@@ -380,15 +378,11 @@ class TestOtto:
         lott_row = result['lott'][0]
 
 
-
-
-
         valid_hott = hott_row[~np.isnan(hott_row)]
         valid_lott = lott_row[~np.isnan(lott_row)]
 
         assert len(valid_hott) > 0, "Batch HOTT should have valid values"
         assert len(valid_lott) > 0, "Batch LOTT should have valid values"
-
 
 
         assert np.all((valid_hott >= 0.0) & (valid_hott <= 1.0)), \
@@ -468,7 +462,6 @@ class TestOtto:
             correcting_constant=params['correcting_constant'],
             ma_type=params['ma_type']
         )
-
 
 
         warmup = EXPECTED_OUTPUTS['otto']['warmup_period']

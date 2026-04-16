@@ -213,11 +213,7 @@ class TestNatr:
         assert np.all(np.isnan(result[:13]))
 
 
-
-
         assert np.isnan(result[13])
-
-
 
 
     def test_natr_handles_zero_close(self):

@@ -101,4 +101,3 @@ class TestStcCuda:
             atol=2e-3,
             msg="STC CUDA many-series vs CPU mismatch",
         )
-

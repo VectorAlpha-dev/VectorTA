@@ -62,4 +62,3 @@ class TestDeviationCuda:
         assert_close(
             gpu, cpu["values"], rtol=5e-4, atol=5e-4, msg="Deviation CUDA vs CPU mismatch"
         )
-

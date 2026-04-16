@@ -85,4 +85,3 @@ class TestCmoCuda:
             atol=1e-5,
             msg="CUDA CMO many-series mismatch",
         )
-

@@ -1,20 +1,8 @@
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 
 
 __device__ __forceinline__ float f32_nan() { return __int_as_float(0x7fffffff); }
-
-
 
 
 extern "C" __global__ void fosc_batch_f32(
@@ -90,8 +78,6 @@ extern "C" __global__ void fosc_batch_f32(
 
         const int old_idx = t + 1 - period;
         const float oldv = data[old_idx];
-
-
 
 
         sum_xy = xy_plus - y_plus;
@@ -173,4 +159,3 @@ extern "C" __global__ void fosc_many_series_one_param_time_major_f32(
         sum_y = y_plus - oldv;
     }
 }
-

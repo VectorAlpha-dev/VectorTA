@@ -49,7 +49,6 @@ class TestAlphaTrend:
         assert len(k2) == len(close)
 
 
-
         assert_close(
             k1[-5:],
             expected['k1_last_5_values'],
@@ -57,7 +56,6 @@ class TestAlphaTrend:
             atol=1e-6,
             msg="AlphaTrend K1 last 5 values mismatch"
         )
-
 
 
         assert_close(
@@ -180,7 +178,6 @@ class TestAlphaTrend:
                 stream_k2.append(np.nan)
 
 
-
         if all(np.isnan(stream_k1)):
 
             pass
@@ -245,7 +242,6 @@ class TestAlphaTrend:
             open_data, high, low, close, volume,
             coeff=1.0, period=14, no_volume=True
         )
-
 
 
         valid_idx = ~(np.isnan(k1_mfi) | np.isnan(k1_rsi))
@@ -374,8 +370,6 @@ class TestAlphaTrend:
 
         assert len(k1) == len(close)
         assert len(k2) == len(close)
-
-
 
 
         for idx in nan_indices:

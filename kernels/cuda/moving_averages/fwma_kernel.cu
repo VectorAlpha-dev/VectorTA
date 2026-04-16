@@ -1,10 +1,3 @@
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -16,12 +9,6 @@
 
 #define FWMA_TILE_T 256
 #endif
-
-
-
-
-
-
 
 
 extern "C" __global__
@@ -66,7 +53,6 @@ void fwma_batch_f32(const float* __restrict__ prices,
     }
 
 
-
     const int load_base = tile_t0 - period + 1;
     const int load_len  = (tile_t1 - tile_t0) + period - 1;
 
@@ -94,10 +80,6 @@ void fwma_batch_f32(const float* __restrict__ prices,
         }
     }
 }
-
-
-
-
 
 
 #ifndef FWMA_TIME_STEPS_PER_BLOCK

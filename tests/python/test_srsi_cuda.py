@@ -75,4 +75,3 @@ class TestSrsiCuda:
         assert gk.shape == cpu_k.shape and gd.shape == cpu_d.shape
         assert_close(gk, cpu_k, rtol=1e-3, atol=5e-3, msg="SRSI K CUDA TM vs CPU mismatch")
         assert_close(gd, cpu_d, rtol=1e-3, atol=5e-3, msg="SRSI D CUDA TM vs CPU mismatch")
-

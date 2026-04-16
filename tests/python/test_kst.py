@@ -169,10 +169,6 @@ class TestKst:
         close = np.array(test_data['close'])
 
 
-
-
-
-
         first_valid = next((i for i, v in enumerate(close) if not np.isnan(v)), 0)
         valid_close = close[first_valid:]
 
@@ -207,15 +203,6 @@ class TestKst:
 
 
         assert_close(line_results, batch_line, rtol=1e-10)
-
-
-
-
-
-
-
-
-
 
 
         valid_lines = sum(1 for v in line_results if not np.isnan(v))
@@ -319,7 +306,6 @@ class TestKst:
         """Test KST with edge case inputs"""
 
 
-
         min_data = np.random.rand(53)
         line, signal = ta_indicators.kst(
             min_data,
@@ -329,7 +315,6 @@ class TestKst:
         )
         assert len(line) == len(min_data)
         assert len(signal) == len(min_data)
-
 
 
         assert np.isnan(line[0])
@@ -398,8 +383,6 @@ class TestKst:
         assert len(second_line) == len(first_line)
 
 
-
-
         warmup_first = 44
         warmup_second = warmup_first + 44
 
@@ -430,7 +413,6 @@ class TestKst:
         assert len(signal) == len(close_with_nan)
 
 
-
         expected_warmup = 44 + 20
 
 
@@ -451,7 +433,6 @@ class TestKst:
             roc_period1=10, roc_period2=15, roc_period3=20, roc_period4=30,
             signal_period=9
         )
-
 
 
         expected_warmup = 44

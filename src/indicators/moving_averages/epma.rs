@@ -1387,7 +1387,6 @@ mod tests {
 				}
 
 
-
 				if warmup < out.len() && data[warmup].is_finite() {
 
 					let p1 = period - 1;
@@ -1407,7 +1406,6 @@ mod tests {
 						);
 					}
 				}
-
 
 
 				let p1 = period - 1;
@@ -1452,8 +1450,6 @@ mod tests {
 				}
 
 
-
-
 				if period == 2 && offset == 0 && warmup < data.len() {
 
 					for i in warmup..data.len() {
@@ -1470,7 +1466,6 @@ mod tests {
 						}
 					}
 				}
-
 
 
 				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && data.iter().any(|x| x.is_finite() && x.abs() > 1e-10) {
@@ -1496,7 +1491,6 @@ mod tests {
 						}
 					}
 				}
-
 
 
 				for i in (warmup.saturating_add(1))..data.len() {
@@ -1535,7 +1529,6 @@ mod tests {
 						rel_error
 					);
 				}
-
 
 
 				if warmup + 5 < data.len() {
@@ -1594,8 +1587,6 @@ mod tests {
 						}
 					}
 				}
-
-
 
 
 				if offset == period - 1 && warmup < data.len() && weight_sum.abs() > 1e-10 {

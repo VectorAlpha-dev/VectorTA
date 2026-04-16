@@ -1,18 +1,5 @@
-
-
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
-
 
 
 #ifndef M_PI
@@ -22,7 +9,6 @@
 #ifndef LRA_NAN_F
 #define LRA_NAN_F (__int_as_float(0x7fffffff))
 #endif
-
 
 
 static __device__ __forceinline__ int tm_idx(int row, int num_series, int series) {
@@ -149,19 +135,6 @@ extern "C" __global__ void linearreg_angle_build_prefixes_f32(
 }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 extern "C" __global__ void linearreg_angle_batch_f32(
     const float*   __restrict__ prices,
     const float2*  __restrict__ prefix_sum2,
@@ -214,7 +187,6 @@ extern "C" __global__ void linearreg_angle_batch_f32(
         t += stride;
     }
 }
-
 
 
 extern "C" __global__ void linearreg_angle_many_series_one_param_f32(

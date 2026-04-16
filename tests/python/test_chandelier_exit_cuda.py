@@ -99,4 +99,3 @@ class TestChandelierExitCuda:
 
         assert_close(long_tm, cpu_long, rtol=5e-4, atol=1e-5, msg="CE CUDA many-series long vs CPU")
         assert_close(short_tm, cpu_short, rtol=5e-4, atol=1e-5, msg="CE CUDA many-series short vs CPU")
-

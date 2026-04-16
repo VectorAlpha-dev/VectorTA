@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -166,9 +165,6 @@ test('NET_MYRSI nan handling', () => {
     assert.strictEqual(result.length, dataWithNaN.length);
 
 
-
-
-
     let hasValidBefore = false;
     for (let i = 0; i < 15 && i < result.length; i++) {
         if (!isNaN(result[i])) {
@@ -215,14 +211,12 @@ test('NET_MYRSI warmup nans', () => {
     const result = wasm.net_myrsi_js(close, period);
 
 
-
     const warmup = first_valid + period - 1;
 
 
     for (let i = 0; i < warmup; i++) {
         assert(isNaN(result[i]), `Expected NaN at index ${i} (warmup period)`);
     }
-
 
 
     const actual_start = first_valid + period;
@@ -306,8 +300,3 @@ test('NET_MYRSI different periods', () => {
     assert(Math.abs(last10 - last14) > 1e-10, 'Results should differ for different periods');
     assert(Math.abs(last14 - last20) > 1e-10, 'Results should differ for different periods');
 });
-
-
-
-
-

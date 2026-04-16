@@ -1,8 +1,3 @@
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 #include <math_constants.h>
@@ -34,7 +29,6 @@ extern "C" __global__ void wclprice_batch_f32(const float* __restrict__ high,
 }
 
 
-
 extern "C" __global__ void wclprice_many_series_one_param_time_major_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
@@ -61,4 +55,3 @@ extern "C" __global__ void wclprice_many_series_one_param_time_major_f32(
         out_tm[idx] = c * 0.5f + (h + l) * 0.25f;
     }
 }
-

@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -45,11 +44,6 @@ test('PVI accuracy', () => {
     const result = wasm.pvi_js(close, volume, initialValue);
     assert.strictEqual(result.length, close.length);
     assertClose(result[0], 1000.0, 1e-6, 'PVI initial value mismatch');
-
-
-
-
-
 
 
 });

@@ -54,8 +54,6 @@ class TestEhlersKama:
         )
 
 
-
-
     def test_ehlers_kama_default(self, test_data):
         """Test Ehlers KAMA with default parameters - mirrors test_ehlers_kama_default_candles"""
         close = test_data['close']
@@ -132,7 +130,6 @@ class TestEhlersKama:
 
         assert np.isnan(result[0])
         assert np.isnan(result[1])
-
 
 
         for i in range(6):

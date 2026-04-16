@@ -1490,11 +1490,9 @@ mod tests {
 				let is_constant_volume = volumes.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
 
 
-
 				for i in warmup_end..prices.len() {
 					let y = out[i];
 					let r = ref_out[i];
-
 
 
 					let window_start = if i >= period - 1 { i + 1 - period } else { 0 };
@@ -1521,9 +1519,6 @@ mod tests {
 					} else if !has_valid_volume {
 
 
-
-
-
 						let numerator: f64 = window_prices.iter()
 							.zip(window_volumes.iter())
 							.map(|(p, v)| p * v)
@@ -1537,9 +1532,6 @@ mod tests {
 								i, y
 							);
 						} else {
-
-
-
 
 
 							if y.is_finite() {
@@ -1620,7 +1612,6 @@ mod tests {
 						);
 					}
 				}
-
 
 
 				if volumes.iter().all(|&v| v > 0.0 && v.is_finite()) {

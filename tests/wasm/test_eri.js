@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -66,7 +65,6 @@ test('ERI accuracy', () => {
         -336.44414601621975,
         -925.5235537281915,
     ];
-
 
 
     assertArrayClose(
@@ -158,8 +156,6 @@ test('ERI warmup period verification', () => {
     assert(!isNaN(bear[period - 1]), `Expected value at index ${period - 1}`);
 
 
-
-
     const highWithNaN = new Float64Array(high);
     const lowWithNaN = new Float64Array(low);
     const closeWithNaN = new Float64Array(close);
@@ -248,7 +244,6 @@ test('ERI batch processing', () => {
     assert.strictEqual(result.values.length, result.rows * result.cols, 'Values length should be rows * cols');
 
 
-
     const bullRows = numParams;
     const bearRows = numParams;
     const bullValues = result.values.slice(0, bullRows * result.cols);
@@ -301,9 +296,6 @@ test('ERI batch with different MA types', () => {
         };
 
         const batchResult = wasm.eri_batch(high, low, close, config);
-
-
-
 
 
         const singleResult = wasm.eri_js(high, low, close, 13, maType);

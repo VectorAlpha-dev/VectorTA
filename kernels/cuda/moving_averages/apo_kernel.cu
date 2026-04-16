@@ -1,13 +1,3 @@
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -181,4 +171,3 @@ void apo_many_series_one_param_f32(const float* __restrict__ prices_tm,
         out_tm[t * stride + series_idx] = se - le;
     }
 }
-

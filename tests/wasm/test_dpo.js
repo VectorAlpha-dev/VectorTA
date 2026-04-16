@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -113,7 +112,6 @@ test('DPO nan handling', () => {
 
     const result = wasm.dpo_js(close, 5);
     assert.strictEqual(result.length, close.length);
-
 
 
     if (result.length > 20) {

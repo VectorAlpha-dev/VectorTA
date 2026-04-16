@@ -53,7 +53,7 @@ __device__ inline double intraday_push_bb(
     const double variance = fmax(*bb_sumsq / n - mean * mean, 0.0);
     return sqrt(variance);
 }
-}  // namespace
+}
 
 extern "C" __global__ void intraday_momentum_index_batch_f64(
     const double* __restrict__ open,

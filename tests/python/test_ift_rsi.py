@@ -251,8 +251,6 @@ class TestIftRsiStream:
         )
 
 
-
-
         warmup = expected['warmup_period']
 
 
@@ -323,8 +321,6 @@ class TestIftRsiStream:
 
     def test_ift_rsi_nan_injection(self, test_data):
         """Test IFT RSI handles NaN injection correctly"""
-
-
 
 
         close = np.array([100.0 + i for i in range(50)])

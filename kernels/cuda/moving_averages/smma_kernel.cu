@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -66,7 +57,6 @@ void smma_batch_f32(const float* __restrict__ prices,
     const float nan_f = __int_as_float(0x7fffffff);
 
 
-
     float prev = 0.0f;
     const bool needs_first = (combo < n_combos) && valid && (warm < series_len);
 
@@ -85,7 +75,6 @@ void smma_batch_f32(const float* __restrict__ prices,
         if (needs_first && k < period) sum += p_k;
     }
     if (needs_first) prev = sum * alpha;
-
 
 
     const int leader_all = 0;
@@ -113,11 +102,6 @@ void smma_batch_f32(const float* __restrict__ prices,
 
     }
 }
-
-
-
-
-
 
 
 extern "C" __global__

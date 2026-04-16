@@ -71,7 +71,7 @@ __device__ inline double queue_current(const double* values, int size) {
     return size > 0 ? values[0] : NAN;
 }
 
-}  // namespace
+}
 
 extern "C" __global__ void reversal_signals_batch_f64(
     const double* __restrict__ open,

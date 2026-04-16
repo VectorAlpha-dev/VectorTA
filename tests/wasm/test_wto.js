@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -57,7 +56,6 @@ test('WTO accuracy', () => {
     assert.strictEqual(wt1.length, close.length);
     assert.strictEqual(wt2.length, close.length);
     assert.strictEqual(hist.length, close.length);
-
 
 
     const last5Wt1 = wt1.slice(-5);

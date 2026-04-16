@@ -71,7 +71,7 @@ __device__ inline int back_index(int cap, int head, int count, int offset) {
     }
     return idx;
 }
-}  // namespace
+}
 
 extern "C" __global__ void range_oscillator_batch_f64(
     const double* high,

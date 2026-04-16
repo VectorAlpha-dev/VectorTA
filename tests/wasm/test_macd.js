@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -192,7 +191,6 @@ test('MACD fast API (in-place)', () => {
         memView.set(close);
 
 
-
         wasm.macd_into(
             in_ptr,
             macd_ptr,
@@ -201,7 +199,6 @@ test('MACD fast API (in-place)', () => {
             len,
             12, 26, 9, "ema"
         );
-
 
 
         const memory2 = wasm.__wasm.memory;
@@ -251,7 +248,6 @@ test('MACD fast API aliasing detection', () => {
         buffer.set(close);
 
 
-
         wasm.macd_into(
             buffer_ptr,
             buffer_ptr,
@@ -260,7 +256,6 @@ test('MACD fast API aliasing detection', () => {
             len,
             12, 26, 9, "ema"
         );
-
 
 
         const memory2 = wasm.__wasm.memory;
@@ -349,7 +344,6 @@ test('MACD batch multiple parameters', () => {
     assert.strictEqual(batchResult.fast_periods.length, 27);
     assert.strictEqual(batchResult.slow_periods.length, 27);
     assert.strictEqual(batchResult.signal_periods.length, 27);
-
 
 
     const macd_block_size = 27 * 50;
@@ -465,7 +459,6 @@ test('MACD batch edge cases', () => {
 
 
     assert.strictEqual(batchResult.rows, 9);
-
 
 
     const firstRowMacd = batchResult.values.slice(0, 50);

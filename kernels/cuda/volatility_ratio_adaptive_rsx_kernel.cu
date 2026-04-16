@@ -80,7 +80,7 @@ __device__ inline void push_window_sum(
         *sum += value;
     }
 }
-}  // namespace
+}
 
 extern "C" __global__ void volatility_ratio_adaptive_rsx_batch_f64(
     const double* __restrict__ data,

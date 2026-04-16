@@ -281,7 +281,7 @@ __device__ inline bool finalize_di(bool has_bp, double bp, bool has_sp, double s
     return true;
 }
 
-}  // namespace
+}
 
 extern "C" __global__ void demand_index_batch_f64(
     const double* __restrict__ high,

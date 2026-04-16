@@ -159,7 +159,6 @@ class TestCoppock:
         batch_values = batch_result['values'][0]
 
 
-
         np.testing.assert_allclose(batch_values, single_result, rtol=0.0, atol=1e-9)
 
     def test_coppock_batch_multiple_params(self, test_data):
@@ -231,7 +230,6 @@ class TestCoppock:
         ma = 10
 
         result = ta_indicators.coppock(close, short, long, ma)
-
 
 
         expected_warmup = max(short, long) + (ma - 1)

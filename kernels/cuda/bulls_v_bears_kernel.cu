@@ -11,7 +11,7 @@ constexpr int METHOD_RAW = 1;
 __device__ inline bool finite3(double a, double b, double c) {
     return isfinite(a) && isfinite(b) && isfinite(c);
 }
-}  // namespace
+}
 
 extern "C" __global__ void bulls_v_bears_batch_f64(
     const double* high,

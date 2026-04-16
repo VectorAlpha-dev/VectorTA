@@ -133,7 +133,7 @@ struct RollingStdevState {
     }
 };
 
-}  // namespace
+}
 
 extern "C" __global__ void fibonacci_entry_bands_batch_f64(
     const double* __restrict__ open,

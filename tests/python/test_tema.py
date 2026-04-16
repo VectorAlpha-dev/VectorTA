@@ -36,8 +36,6 @@ class TestTema:
         np.testing.assert_allclose(result_auto, result_scalar, rtol=1e-10)
 
 
-
-
     def test_invalid_kernel(self):
         """Test error handling for invalid kernel"""
         data = np.random.random(100)
@@ -88,7 +86,6 @@ class TestTema:
         result = tema(data, period)
 
 
-
         assert np.isnan(result[0:5]).all()
         assert not np.isnan(result[5:]).any()
 
@@ -121,7 +118,6 @@ class TestTema:
             stream_results.append(result if result is not None else np.nan)
 
         stream_results = np.array(stream_results)
-
 
 
         np.testing.assert_allclose(
@@ -166,7 +162,6 @@ class TestTema:
 
 
         np.testing.assert_allclose(result_auto['values'], result_scalar['values'], rtol=1e-10)
-
 
 
     def test_batch_invalid_kernel(self):

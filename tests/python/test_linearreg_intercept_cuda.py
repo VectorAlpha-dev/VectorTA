@@ -96,4 +96,3 @@ class TestLinregInterceptCuda:
             atol=3e-3,
             msg="CUDA LINEARREG_INTERCEPT many-series mismatch vs CPU baseline",
         )
-

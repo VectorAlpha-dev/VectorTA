@@ -1,14 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -52,12 +41,6 @@ extern "C" __global__ void ao_build_prefix_dsf_serial_f32(
         prefix_ds[i + 1] = make_float2(acc.hi, acc.lo);
     }
 }
-
-
-
-
-
-
 
 
 extern "C" __global__ void ao_batch_f32(const float2* __restrict__ prefix_ds,

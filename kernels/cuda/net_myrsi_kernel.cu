@@ -1,16 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -33,10 +20,6 @@ static __device__ __forceinline__ float qnan32() { return __int_as_float(0x7ffff
 #ifndef NET_MYRSI_MAX_PERIOD
 #define NET_MYRSI_MAX_PERIOD 2048
 #endif
-
-
-
-
 
 
 static __device__ __forceinline__ int warp_reduce_sum_i32(int v) {
@@ -85,7 +68,6 @@ void net_myrsi_batch_f32_warp_dbl(const float* __restrict__ prices,
     const int warm = first_valid + period - 1;
     for (int i = lane; i < warm; i += 32) out_row[i] = qnan32();
     if (lane == 0) out_row[warm] = (period > 1) ? 0.0f : qnan32();
-
 
 
     extern __shared__ double smem_dbl[];
@@ -186,8 +168,6 @@ void net_myrsi_batch_f32_warp_dbl(const float* __restrict__ prices,
         }
     }
 }
-
-
 
 
 extern "C" __global__
@@ -537,7 +517,6 @@ void net_myrsi_many_series_one_param_time_major_f32(
     const int warm = fv + period - 1;
     for (int t = 0; t < warm; ++t) col_out[t * cols] = qnan32();
     col_out[warm * cols] = (period > 1) ? 0.0f : qnan32();
-
 
 
     double cu = 0.0, cd = 0.0;

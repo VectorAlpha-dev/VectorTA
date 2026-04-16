@@ -1,17 +1,9 @@
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
 
 #include <cuda_runtime.h>
 #include <math.h>
-
 
 
 #ifndef WTO_UTILS_H
@@ -21,7 +13,6 @@
 static __device__ __forceinline__ float wto_nan() {
     return __int_as_float(0x7fc00000u);
 }
-
 
 
 struct fpair {
@@ -40,7 +31,6 @@ struct fpair {
 };
 
 
-
 static __device__ __forceinline__ float bcast_price(const float* __restrict__ prices, int t) {
     unsigned mask   = __activemask();
     int      leader = __ffs(mask) - 1;
@@ -53,14 +43,12 @@ static __device__ __forceinline__ float bcast_price(const float* __restrict__ pr
 #endif
 
 
-
 __device__ inline void fill_nan(float* ptr, int len) {
     const float nanv = wto_nan();
     for (int i = 0; i < len; ++i) {
         ptr[i] = nanv;
     }
 }
-
 
 
 extern "C" __global__

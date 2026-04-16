@@ -85,7 +85,6 @@ class TestKdj:
         ]
 
 
-
         assert_close(k[-5:], expected_k, rtol=0.0, atol=1e-4, msg="KDJ K last 5 values mismatch")
         assert_close(d[-5:], expected_d, rtol=0.0, atol=1e-4, msg="KDJ D last 5 values mismatch")
         assert_close(j[-5:], expected_j, rtol=0.0, atol=1e-4, msg="KDJ J last 5 values mismatch")
@@ -254,15 +253,11 @@ class TestKdj:
         assert len(j) == len(close)
 
 
-
         assert np.any(~np.isnan(k[12:15])), "Should have valid values before NaN gap"
 
 
         assert not np.isnan(k[15]), "K may remain valid at NaN gap due to smoothing"
         assert 0.0 <= k[15] <= 100.0
-
-
-
 
 
     def test_kdj_nan_handling(self, test_data):
@@ -316,7 +311,6 @@ class TestKdj:
             slow_d_period=3,
             slow_d_ma_type="sma"
         )
-
 
 
         values = []

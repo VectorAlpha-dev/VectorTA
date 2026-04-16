@@ -99,15 +99,11 @@ class TestJsa:
         assert len(result) == len(close_with_nans)
 
 
-
-
-
         expected_warmup_end = 30
 
 
         for i in range(expected_warmup_end):
             assert np.isnan(result[i]), f"Expected NaN at index {i} during warmup"
-
 
 
         if expected_warmup_end < len(result):
@@ -204,7 +200,6 @@ class TestJsa:
         for price in close:
             result = stream.update(price)
             stream_results.append(result if result is not None else np.nan)
-
 
 
         for i in range(period):

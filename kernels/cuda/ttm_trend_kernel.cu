@@ -1,22 +1,9 @@
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
 
 #include <cuda_runtime.h>
 #include <stdint.h>
-
-
-
-
 
 
 __device__ __forceinline__ void two_sum(float a, float b, float &s, float &e) {
@@ -44,21 +31,6 @@ __device__ __forceinline__ float2 ff2_scale(const float2 a, const float s) {
     two_sum(hi, err, rhi, rlo);
     return make_float2(rhi, rlo);
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 #ifndef TTM_TILE_TIME
@@ -180,13 +152,6 @@ void ttm_trend_batch_prefix_ff2_tiled(
 }
 
 
-
-
-
-
-
-
-
 extern "C" __global__
 void ttm_trend_many_series_one_param_time_major_f32(
     const float* __restrict__ source_tm,
@@ -244,4 +209,3 @@ void ttm_trend_many_series_one_param_time_major_f32(
             (close_tm[(size_t)t * stride + series] > avg) ? 1.0f : 0.0f;
     }
 }
-

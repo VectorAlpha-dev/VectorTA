@@ -91,4 +91,3 @@ class TestReverseRsiCuda:
 
         assert gpu_tm.shape == data_tm.shape
         assert_close(gpu_tm, cpu_tm, rtol=8e-4, atol=8e-4, msg="CUDA ReverseRSI many-series mismatch")
-

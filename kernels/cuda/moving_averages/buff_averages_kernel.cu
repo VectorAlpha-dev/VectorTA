@@ -1,29 +1,5 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
-
 
 
 #ifndef BA_ENABLE_L2_PREFETCH
@@ -178,7 +154,6 @@ extern "C" __global__ void buff_averages_batch_prefix_f32(
 }
 
 
-
 template<int TILE>
 __device__ __forceinline__ void buff_averages_batch_prefix_tiled_f32_impl(
     const float* __restrict__ prefix_pv,
@@ -284,12 +259,6 @@ extern "C" __global__ void buff_averages_batch_prefix_tiled_f32_tile512(
         prefix_pv, prefix_vv, len, first_valid,
         fast_periods, slow_periods, n_combos, fast_out, slow_out);
 }
-
-
-
-
-
-
 
 
 extern "C" __global__ void buff_averages_many_series_one_param_f32(
@@ -415,7 +384,6 @@ extern "C" __global__ void buff_averages_many_series_one_param_tiled2d_f32_tx128
 }
 
 
-
 template<int SX, int TY>
 __device__ __forceinline__ void buff_averages_many_series_one_param_tiled2d_swizzled_f32(
     const float* __restrict__ pv_prefix_tm,
@@ -493,7 +461,6 @@ extern "C" __global__ void buff_averages_many_series_one_param_tiled2d_f32_sx128
         pv_prefix_tm, vv_prefix_tm, fast_period, slow_period,
         num_series, series_len, first_valids, fast_out_tm, slow_out_tm);
 }
-
 
 
 extern "C" __global__ void buff_averages_batch_prefix_exp2_f32(

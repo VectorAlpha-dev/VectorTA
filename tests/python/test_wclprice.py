@@ -154,7 +154,6 @@ class TestWclprice:
         assert 'sigmas' in batch_result
 
 
-
         batch_values = batch_result['values'].flatten() if batch_result['values'].ndim > 1 else batch_result['values']
         assert len(batch_values) == 100
 

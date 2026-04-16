@@ -121,4 +121,3 @@ class TestStochCuda:
 
         assert_close(k, ref_k, rtol=1e-3, atol=1e-2, msg="Stoch K TM mismatch")
         assert_close(d, ref_d, rtol=1e-3, atol=1e-2, msg="Stoch D TM mismatch")
-

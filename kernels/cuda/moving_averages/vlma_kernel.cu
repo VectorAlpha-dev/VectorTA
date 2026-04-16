@@ -1,22 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 
@@ -56,15 +37,6 @@ extern "C" __global__ void vlma_build_prefixes_f32(
         prefix_nan[t + 1] = nan_count;
     }
 }
-
-
-
-
-
-
-
-
-
 
 
 extern "C" __global__ void vlma_batch_sma_std_prefix_f32(
@@ -159,12 +131,6 @@ extern "C" __global__ void vlma_batch_sma_std_prefix_f32(
         out[base + i] = last_val;
     }
 }
-
-
-
-
-
-
 
 
 extern "C" __global__ void vlma_many_series_one_param_f32(
@@ -281,4 +247,3 @@ extern "C" __global__ void vlma_many_series_one_param_f32(
         }
     }
 }
-

@@ -1,20 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 
@@ -45,7 +28,6 @@ extern "C" __global__ void dpo_build_prefix_ds_f32(
         prefix_sum_ds[i + 1] = make_float2(hi, lo);
     }
 }
-
 
 
 extern "C" __global__ void dpo_batch_f32(
@@ -94,8 +76,6 @@ extern "C" __global__ void dpo_batch_f32(
         t += stride;
     }
 }
-
-
 
 
 extern "C" __global__ void dpo_many_series_one_param_time_major_f32(

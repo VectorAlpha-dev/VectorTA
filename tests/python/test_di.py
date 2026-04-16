@@ -40,7 +40,6 @@ class TestDi:
         assert len(minus_di) == len(test_data['close'])
 
 
-
         assert_close(
             plus_di[-5:],
             expected['plus_last_5_values'],

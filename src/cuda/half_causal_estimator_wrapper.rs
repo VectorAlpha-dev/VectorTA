@@ -148,9 +148,7 @@ fn axis_usize(
 }
 
 #[inline]
-fn axis_f64(
-    (start, end, step): (f64, f64, f64),
-) -> Result<Vec<f64>, CudaHalfCausalEstimatorError> {
+fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, CudaHalfCausalEstimatorError> {
     if !start.is_finite() || !end.is_finite() || !step.is_finite() {
         return Err(CudaHalfCausalEstimatorError::InvalidInput(format!(
             "invalid range: start={start}, end={end}, step={step}"
@@ -344,7 +342,9 @@ fn build_kernel(params: ResolvedHalfCausalParams) -> Vec<f64> {
         let index = i as f64;
         let centered = index - center;
         let weight = match params.kernel_type {
-            HalfCausalEstimatorKernelType::Gaussian => gaussian_kernel(centered, params.kernel_width),
+            HalfCausalEstimatorKernelType::Gaussian => {
+                gaussian_kernel(centered, params.kernel_width)
+            }
             HalfCausalEstimatorKernelType::Epanechnikov => {
                 epanechnikov_kernel(centered, params.kernel_width)
             }
@@ -469,15 +469,19 @@ impl CudaHalfCausalEstimator {
         sweep: &HalfCausalEstimatorBatchRange,
     ) -> Result<CudaHalfCausalEstimatorBatchResult, CudaHalfCausalEstimatorError> {
         if data.is_empty() {
-            return Err(CudaHalfCausalEstimatorError::InvalidInput("empty input".into()));
+            return Err(CudaHalfCausalEstimatorError::InvalidInput(
+                "empty input".into(),
+            ));
         }
         if first_finite(data) >= data.len() {
-            return Err(CudaHalfCausalEstimatorError::InvalidInput("all values are NaN".into()));
+            return Err(CudaHalfCausalEstimatorError::InvalidInput(
+                "all values are NaN".into(),
+            ));
         }
 
-        let slots_per_day = sweep
-            .slots_per_day
-            .ok_or_else(|| CudaHalfCausalEstimatorError::InvalidInput("missing slots_per_day".into()))?;
+        let slots_per_day = sweep.slots_per_day.ok_or_else(|| {
+            CudaHalfCausalEstimatorError::InvalidInput("missing slots_per_day".into())
+        })?;
         let combos = expand_grid_checked(sweep)?;
         let rows = combos.len();
         let cols = data.len();
@@ -505,8 +509,10 @@ impl CudaHalfCausalEstimator {
         let slots_per_days: Vec<i32> = resolved.iter().map(|p| p.slots_per_day as i32).collect();
         let data_periods: Vec<i32> = resolved.iter().map(|p| p.data_period as i32).collect();
         let filter_lengths: Vec<i32> = resolved.iter().map(|p| p.filter_length as i32).collect();
-        let real_filter_lengths: Vec<i32> =
-            resolved.iter().map(|p| p.real_filter_length as i32).collect();
+        let real_filter_lengths: Vec<i32> = resolved
+            .iter()
+            .map(|p| p.real_filter_length as i32)
+            .collect();
         let window_sizes: Vec<i32> = resolved.iter().map(|p| p.window_size as i32).collect();
         let maximum_confidence_adjust_factors: Vec<f64> = resolved
             .iter()
@@ -597,12 +603,10 @@ impl CudaHalfCausalEstimator {
         let d_confidence_adjusts = DeviceBuffer::from_slice(&confidence_adjusts)?;
         let d_wma_lengths = DeviceBuffer::from_slice(&wma_lengths)?;
         let d_kernel_matrix = DeviceBuffer::from_slice(&kernel_matrix)?;
-        let mut d_future_values =
-            unsafe { DeviceBuffer::<f64>::uninitialized(rows * future_cap)? };
+        let mut d_future_values = unsafe { DeviceBuffer::<f64>::uninitialized(rows * future_cap)? };
         let mut d_future_weights =
             unsafe { DeviceBuffer::<f64>::uninitialized(rows * future_cap)? };
-        let mut d_wma_history =
-            unsafe { DeviceBuffer::<f64>::uninitialized(rows * wma_cap)? };
+        let mut d_wma_history = unsafe { DeviceBuffer::<f64>::uninitialized(rows * wma_cap)? };
         let mut d_estimate = unsafe { DeviceBuffer::<f64>::uninitialized(output_elems)? };
         let mut d_expected_value = unsafe { DeviceBuffer::<f64>::uninitialized(output_elems)? };
 
@@ -612,8 +616,8 @@ impl CudaHalfCausalEstimator {
             .map_err(|_| CudaHalfCausalEstimatorError::MissingKernelSymbol {
                 name: "half_causal_estimator_batch_f64",
             })?;
-        let grid_x = ((rows as u32) + HALF_CAUSAL_ESTIMATOR_BLOCK_X - 1)
-            / HALF_CAUSAL_ESTIMATOR_BLOCK_X;
+        let grid_x =
+            ((rows as u32) + HALF_CAUSAL_ESTIMATOR_BLOCK_X - 1) / HALF_CAUSAL_ESTIMATOR_BLOCK_X;
         let grid = GridSize::x(grid_x.max(1));
         let block = BlockSize::x(HALF_CAUSAL_ESTIMATOR_BLOCK_X);
         self.validate_launch(grid, block)?;

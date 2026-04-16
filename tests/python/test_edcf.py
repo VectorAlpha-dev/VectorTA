@@ -149,7 +149,6 @@ class TestEdcf:
         stream_values = np.array(stream_values)
 
 
-
         assert len(stream_values) == len(close)
 
 
@@ -299,7 +298,6 @@ class TestEdcf:
         row1 = result['values'][0]
 
 
-
         assert not np.isnan(row1[12]) and np.isfinite(row1[12]), \
             "Expected valid value after warmup for period=5"
 
@@ -347,7 +345,6 @@ class TestEdcf:
         close[60] = np.nan
 
 
-
         try:
             result = ta_indicators.edcf(close, period=5)
             assert len(result) == len(close)
@@ -363,9 +360,6 @@ class TestEdcf:
         """Test EDCF with constant data - special case"""
 
 
-
-
-
         constant = np.full(50, 100.0)
 
         result = ta_indicators.edcf(constant, period=5)
@@ -373,8 +367,6 @@ class TestEdcf:
 
 
         warmup = 2 * 5
-
-
 
 
         if len(result) > warmup:

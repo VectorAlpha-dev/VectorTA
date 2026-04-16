@@ -1,18 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -124,8 +109,6 @@ extern "C" __global__ void stochf_batch_f32(
     __syncthreads();
 
 
-
-
     if (mt == 0) {
         if (fd == 1) {
 
@@ -148,7 +131,6 @@ extern "C" __global__ void stochf_batch_f32(
 
     }
 }
-
 
 
 extern "C" __global__ void stochf_many_series_one_param_f32(

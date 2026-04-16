@@ -1,17 +1,6 @@
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 #include "ds_float2.cuh"
-
-
-
 
 
 #ifndef ZSCORE_COMBO_TILE
@@ -31,7 +20,6 @@ __device__ __forceinline__ dsf load_dsf_f2(const float2* __restrict__ p, int idx
 __device__ __forceinline__ double ds_to_f64(dsf v) {
     return (double)v.hi + (double)v.lo;
 }
-
 
 
 extern "C" __global__ void zscore_sma_prefix_f32ds(
@@ -400,11 +388,6 @@ extern "C" __global__ void zscore_ema_prefix_f32(
 }
 
 
-
-
-
-
-
 extern "C" __global__ void zscore_many_series_one_param_f32(
     const float* __restrict__ data_tm,
     const int* __restrict__ first_valids,
@@ -496,4 +479,3 @@ extern "C" __global__ void zscore_many_series_one_param_f32(
         }
     }
 }
-

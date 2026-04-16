@@ -1,13 +1,3 @@
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -39,10 +29,6 @@
 #endif
 
 
-
-
-
-
 extern "C" __global__
 void vpwma_batch_f32(const float* __restrict__ prices,
                      const int*   __restrict__ periods,
@@ -54,7 +40,6 @@ void vpwma_batch_f32(const float* __restrict__ prices,
                      int first_valid,
                      int n_combos,
                      float* __restrict__ out) {
-
 
 
     const bool cta_per_combo = (gridDim.x == (unsigned)n_combos);
@@ -109,8 +94,6 @@ void vpwma_batch_f32(const float* __restrict__ prices,
                 __syncthreads();
 
 
-
-
             for (int out_i = threadIdx.x; out_i < tile_w; out_i += blockDim.x) {
                 float acc = 0.0f;
                 const int x_base = out_i + (win_len - 1);
@@ -157,11 +140,6 @@ void vpwma_batch_f32(const float* __restrict__ prices,
         }
     }
 }
-
-
-
-
-
 
 
 extern "C" __global__

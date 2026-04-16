@@ -358,7 +358,6 @@ class TestModGodMode:
         )
 
 
-
         synthetic_high = wavetrend + 0.5
         synthetic_low = wavetrend - 0.5
 

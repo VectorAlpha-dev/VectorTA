@@ -220,6 +220,5 @@ class TestFwma:
         result = ta_indicators.fwma(data, period)
 
 
-
         expected = (1*1 + 2*1 + 3*2 + 4*3 + 5*5) / 12
         assert np.isclose(result[-1], expected, rtol=1e-9)

@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -229,7 +228,6 @@ test('MWDX batch performance', () => {
 test('MWDX edge cases', () => {
 
 
-
     const data = new Float64Array(100);
     for (let i = 0; i < 100; i++) {
         data[i] = i + 1;
@@ -366,15 +364,6 @@ test('MWDX NaN prefix', () => {
 
     const result = wasm.mwdx_js(data, 0.2);
     assert.strictEqual(result.length, data.length);
-
-
-
-
-
-
-
-
-
 
 
     assert(isNaN(result[0]), 'Expected NaN at index 0');

@@ -1,23 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math_constants.h>
 
@@ -71,7 +51,6 @@ __device__ __forceinline__ FPair warp_inclusive_scan(FPair v, unsigned mask) {
 }
 
 
-
 template<int NUM_WARPS>
 __device__ __forceinline__
 FPair block_exclusive_offset(FPair thread_total, FPair* warp_buf) {
@@ -99,8 +78,6 @@ FPair block_exclusive_offset(FPair thread_total, FPair* warp_buf) {
     FPair excl_intra = fp_sub_pair(incl, thread_total);
     return fp_add_pair(warp_off, excl_intra);
 }
-
-
 
 
 extern "C" __global__
@@ -143,8 +120,6 @@ void obv_batch_f32_pass1_tilescan(
     for (int j = 0; j < ITEMS; ++j) {
         int i = tile_beg + j * blockDim.x + tid;
         float inc = 0.0f;
-
-
 
 
         float ci = 0.0f;
@@ -340,4 +315,3 @@ extern "C" __global__ void obv_many_series_one_param_time_major_f32(
         prev_close = c;
     }
 }
-

@@ -56,9 +56,6 @@ class TestCoraWave:
         )
 
 
-
-
-
     def test_cora_wave_default_candles(self, test_data):
         """Test CoRa Wave with default parameters - mirrors check_cora_wave_default_candles"""
         close = test_data['close']
@@ -153,7 +150,6 @@ class TestCoraWave:
 
         assert len(result_smooth) == len(close)
         assert len(result_raw) == len(close)
-
 
 
         valid_idx = ~np.isnan(result_smooth) & ~np.isnan(result_raw)
@@ -281,8 +277,6 @@ class TestCoraWave:
             r_multi_range=batch_range['r_multi_range'],
             smooth=batch_range['smooth']
         )
-
-
 
 
         assert result['values'].shape[0] == 9

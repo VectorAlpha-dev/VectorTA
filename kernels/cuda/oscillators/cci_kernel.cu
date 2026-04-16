@@ -1,19 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -27,8 +11,6 @@
 #ifndef UNLIKELY
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
-
-
 
 
 __inline__ __device__ float warp_reduce_sum(float v) {
@@ -66,20 +48,14 @@ __inline__ __device__ void kahan_add(float x, float &sum, float &c) {
 }
 
 
-
-
 #ifndef CCI_SMEM_MAX
 #define CCI_SMEM_MAX 2048
 #endif
 
 
-
 #ifndef USE_CCI_SMEM_OPT
 #define USE_CCI_SMEM_OPT 1
 #endif
-
-
-
 
 
 extern "C" __global__ void cci_batch_f32(const float* __restrict__ prices,
@@ -220,9 +196,6 @@ extern "C" __global__ void cci_batch_f32(const float* __restrict__ prices,
 }
 
 
-
-
-
 extern "C" __global__ void cci_many_series_one_param_f32(
     const float* __restrict__ prices_tm,
     const int*   __restrict__ first_valids,
@@ -296,4 +269,3 @@ extern "C" __global__ void cci_many_series_one_param_f32(
         dst += num_series;
     }
 }
-

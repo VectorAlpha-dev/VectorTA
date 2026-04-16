@@ -46,7 +46,7 @@ struct AtrState {
 __device__ inline double true_range(double high, double low, double prev_close) {
     return fmax(high - low, fmax(fabs(high - prev_close), fabs(low - prev_close)));
 }
-}  // namespace
+}
 
 extern "C" __global__ void supertrend_recovery_batch_f64(
     const double* high,

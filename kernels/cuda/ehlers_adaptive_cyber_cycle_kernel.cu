@@ -23,7 +23,7 @@ __device__ inline double median3(double a, double b, double c) {
     }
     return (a + b + c) - fmin(a, fmin(b, c)) - fmax(a, fmax(b, c));
 }
-}  // namespace
+}
 
 extern "C" __global__ void ehlers_adaptive_cyber_cycle_batch_f64(
     const double* __restrict__ data,

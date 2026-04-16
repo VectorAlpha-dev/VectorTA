@@ -1,11 +1,3 @@
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -178,15 +170,6 @@ void sama_many_series_one_param_f32(const float* __restrict__ prices_tm,
 }
 
 
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -202,7 +185,6 @@ static __device__ __forceinline__ float ldgf(const float* p) {
 #endif
 }
 #endif
-
 
 
 static __device__ __forceinline__ int clamp_start(int t, int length) {
@@ -259,7 +241,6 @@ void push_min_idx(const float* base, int*& q, int& back, int& size, const int ca
     if (back == cap) back = 0;
     ++size;
 }
-
 
 
 extern "C" __global__
@@ -390,7 +371,6 @@ void sama_batch_f32_opt(const float* __restrict__ prices,
         out[row_offset + t] = prev;
     }
 }
-
 
 
 extern "C" __global__

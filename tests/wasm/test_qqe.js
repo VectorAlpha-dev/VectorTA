@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -178,7 +177,6 @@ test('QQE extreme fast factor', () => {
     const data = new Float64Array(Array(50).fill(0).map((_, i) => 10.0 + i));
 
 
-
     try {
         const result = wasm.qqe_js(data, 14, 5, 0.001);
         assert.strictEqual(result.values.length, data.length * 2);
@@ -303,7 +301,6 @@ test('QQE reinput', () => {
 
     assert.strictEqual(secondFast.length, firstFast.length);
     assert.strictEqual(secondSlow.length, firstFast.length);
-
 
 
     const warmupFirst = 17;

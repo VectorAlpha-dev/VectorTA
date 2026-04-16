@@ -70,4 +70,3 @@ class TestChandeCuda:
 
             assert_close(gpu[row], cpu, rtol=1e-6, atol=1e-3,
                          msg=f"Chande CUDA batch mismatch (p={p}, m={m})")
-

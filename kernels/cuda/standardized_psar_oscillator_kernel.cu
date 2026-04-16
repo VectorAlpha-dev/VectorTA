@@ -193,7 +193,7 @@ struct PsarState {
         return next_sar;
     }
 };
-}  // namespace
+}
 
 extern "C" __global__ void standardized_psar_oscillator_batch_f64(
     const double* high,

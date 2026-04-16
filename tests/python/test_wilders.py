@@ -46,7 +46,6 @@ class TestWilders:
         assert len(result) == len(close)
 
 
-
         assert_close(
             result[-5:],
             expected['last_5_values'],
@@ -165,7 +164,6 @@ class TestWilders:
 
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['wilders']['last_5_values']
-
 
 
         assert_close(

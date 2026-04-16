@@ -58,9 +58,6 @@ class TestMaaq:
         )
 
 
-
-
-
     def test_maaq_zero_period(self):
         """Test MAAQ fails with zero period - mirrors check_maaq_zero_period"""
         input_data = np.array([10.0, 20.0, 30.0], dtype=np.float64)
@@ -123,7 +120,6 @@ class TestMaaq:
         assert len(second_result) == len(first_result)
 
 
-
         for i in range(40, len(second_result)):
             assert np.isfinite(second_result[i]), f"Unexpected NaN at index {i}"
 
@@ -145,7 +141,6 @@ class TestMaaq:
 
         for i in range(period - 1):
             assert np.isnan(result[i]), f"Expected NaN at warmup index {i}, got {result[i]}"
-
 
 
         if len(result) > 240:
@@ -177,8 +172,6 @@ class TestMaaq:
         assert batch_result['values'].shape[1] == len(close)
 
 
-
-
         assert batch_result['values'].shape == (4, len(close))
 
 
@@ -208,9 +201,6 @@ class TestMaaq:
         assert batch_result['values'].shape == (12, len(close))
 
 
-
-
-
     def test_maaq_batch_2d(self, test_data):
         """Test MAAQ batch computation with 2D output"""
         close = np.array(test_data['close'], dtype=np.float64)
@@ -235,7 +225,6 @@ class TestMaaq:
 
 
         assert batch_result['values'].shape == (4, len(close))
-
 
 
         assert batch_result['values'].shape == (4, len(close))
@@ -265,7 +254,6 @@ class TestMaaq:
 
 
         assert len(batch_result) == len(stream_results)
-
 
 
         for i in range(period, len(batch_result)):
@@ -313,7 +301,6 @@ class TestMaaq:
 
 
         assert batch_result['values'].shape == (9, len(close))
-
 
 
         assert batch_result['values'].shape == (9, len(close))
@@ -484,14 +471,10 @@ class TestMaaq:
         result = maaq_batch(data, (5, 15, 5), (2, 2, 0), (10, 10, 0))
 
 
-
-
         for i, period in enumerate(result['periods']):
             row = result['values'][i]
 
             assert len(row) == len(data)
-
-
 
 
     def test_maaq_stream_reset(self):
@@ -512,7 +495,6 @@ class TestMaaq:
             results.append(result if result is not None else np.nan)
 
 
-
         assert len(results) == 20
 
 
@@ -522,7 +504,6 @@ class TestMaaq:
     def test_maaq_single_data_point(self):
         """Test MAAQ with single data point and period=1"""
         data = np.array([42.0], dtype=np.float64)
-
 
 
         with pytest.raises(BaseException):

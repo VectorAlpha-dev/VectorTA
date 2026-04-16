@@ -1,10 +1,3 @@
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 
@@ -279,9 +272,6 @@ __global__ void prb_batch_f32(
         out_lo[out_idx]   = reg - ndev * stdev;
     }
 }
-
-
-
 
 
 __global__ void prb_batch_chunked_f32(

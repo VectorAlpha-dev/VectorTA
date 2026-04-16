@@ -67,8 +67,13 @@ fn market_structure_confluence_cuda_matches_cpu() -> Result<(), Box<dyn std::err
         vol_mult: (1.5, 2.0, 0.5),
         ..MarketStructureConfluenceBatchRange::default()
     };
-    let cpu =
-        market_structure_confluence_batch_with_kernel(&high, &low, &close, &sweep, Kernel::ScalarBatch)?;
+    let cpu = market_structure_confluence_batch_with_kernel(
+        &high,
+        &low,
+        &close,
+        &sweep,
+        Kernel::ScalarBatch,
+    )?;
     let cuda = CudaMarketStructureConfluence::new(0)?;
     let result = cuda.batch_dev(&high, &low, &close, &sweep)?;
 
@@ -78,7 +83,10 @@ fn market_structure_confluence_cuda_matches_cpu() -> Result<(), Box<dyn std::err
     assert_device_matches(&cpu.basis, &result.outputs.basis.buf)?;
     assert_device_matches(&cpu.upper_band, &result.outputs.upper_band.buf)?;
     assert_device_matches(&cpu.lower_band, &result.outputs.lower_band.buf)?;
-    assert_device_matches(&cpu.structure_direction, &result.outputs.structure_direction.buf)?;
+    assert_device_matches(
+        &cpu.structure_direction,
+        &result.outputs.structure_direction.buf,
+    )?;
     assert_device_matches(&cpu.bullish_arrow, &result.outputs.bullish_arrow.buf)?;
     assert_device_matches(&cpu.bearish_arrow, &result.outputs.bearish_arrow.buf)?;
     assert_device_matches(&cpu.bullish_change, &result.outputs.bullish_change.buf)?;

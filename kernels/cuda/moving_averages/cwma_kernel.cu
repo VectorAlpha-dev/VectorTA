@@ -1,19 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -45,7 +29,6 @@
      namespace cg = cooperative_groups;
 #  endif
 #endif
-
 
 
 #ifndef CWMA_ASSUME
@@ -114,7 +97,6 @@ float cwma_dot(const float* __restrict__ x,
 }
 
 
-
 __device__ __forceinline__
 void cwma_dot2_shared(const float* __restrict__ buf, int b,
                       const float* __restrict__ w, int n,
@@ -149,7 +131,6 @@ void cwma_dot2_shared(const float* __restrict__ buf, int b,
   s0_out = s0; s1_out = s1;
 #endif
 }
-
 
 
 extern "C" __global__
@@ -213,7 +194,6 @@ void cwma_batch_f32(const float* __restrict__ prices,
         t += stride;
     }
 }
-
 
 
 template<int TILE>
@@ -292,7 +272,6 @@ struct CwmaBatchTiledPrecomputed1x {
     out[out_idx] = __fmul_rn(acc, inv_norms[combo]);
   }
 };
-
 
 
 template<int TILE>
@@ -407,7 +386,6 @@ DEFINE_CWMA_BATCH_TILED_1X(cwma_batch_tiled_f32_tile128, 128)
 DEFINE_CWMA_BATCH_TILED_1X(cwma_batch_tiled_f32_tile256, 256)
 DEFINE_CWMA_BATCH_TILED_2X(cwma_batch_tiled_f32_2x_tile128, 128)
 DEFINE_CWMA_BATCH_TILED_2X(cwma_batch_tiled_f32_2x_tile256, 256)
-
 
 
 template<int TILE, int STAGES >
@@ -556,7 +534,6 @@ DEFINE_CWMA_BATCH_TILED_2X_ASYNC(cwma_batch_tiled_async_f32_2x_tile128, 128)
 DEFINE_CWMA_BATCH_TILED_2X_ASYNC(cwma_batch_tiled_async_f32_2x_tile256, 256)
 
 
-
 extern "C" __global__
 void cwma_multi_series_one_param_time_major_f32(
     const float* __restrict__ prices_tm,
@@ -618,7 +595,6 @@ void cwma_multi_series_one_param_time_major_f32(
 }
 
 
-
 template<int TX, int TY>
 __device__ __forceinline__
 void cwma_ms1p_tiled_core(const float* __restrict__ prices_tm,
@@ -647,7 +623,6 @@ void cwma_ms1p_tiled_core(const float* __restrict__ prices_tm,
   constexpr int PAD = (CWMA_PAD_2D && (32 % TY_ == 0)) ? 1 : 0;
   const int STRIDE = TY_ + PAD;
   float* tile = reinterpret_cast<float*>(shraw + off);
-
 
 
   for (int i = threadIdx.y * blockDim.x + threadIdx.x; i < wlen; i += blockDim.x * blockDim.y) {
@@ -735,7 +710,6 @@ DEFINE_CWMA_MS1P_TILED(cwma_ms1p_tiled_f32_tx128_ty2, 128, 2)
 DEFINE_CWMA_MS1P_TILED(cwma_ms1p_tiled_f32_tx128_ty4, 128, 4)
 
 
-
 extern "C" __global__
 void cwma_precompute_weights_f32(const int* __restrict__ periods,
                                  int n_combos,
@@ -782,7 +756,6 @@ void cwma_precompute_weights_f32(const int* __restrict__ periods,
     inv_norms[combo] = 1.0f;
   }
 }
-
 
 
 extern "C" __global__

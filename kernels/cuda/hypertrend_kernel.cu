@@ -29,7 +29,7 @@ __device__ inline double true_range(double high, double low, double prev_close) 
     return high - low;
 }
 
-}  // namespace
+}
 
 extern "C" __global__ void hypertrend_batch_f64(
     const double* __restrict__ high,

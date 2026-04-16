@@ -67,8 +67,15 @@ fn trend_flow_trail_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::E
         mfi_length: (12, 14, 2),
     };
 
-    let cpu =
-        trend_flow_trail_batch_with_kernel(&open, &high, &low, &close, &volume, &sweep, Kernel::ScalarBatch)?;
+    let cpu = trend_flow_trail_batch_with_kernel(
+        &open,
+        &high,
+        &low,
+        &close,
+        &volume,
+        &sweep,
+        Kernel::ScalarBatch,
+    )?;
     let cuda = CudaTrendFlowTrail::new(0)?;
     let result = cuda.batch_dev(&open, &high, &low, &close, &volume, &sweep)?;
 
@@ -98,7 +105,11 @@ fn trend_flow_trail_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::E
     let mut got_mfi_above_90 = vec![0.0f64; result.outputs.mfi_above_90.len()];
     let mut got_mfi_below_10 = vec![0.0f64; result.outputs.mfi_below_10.len()];
 
-    result.outputs.alpha_trail.buf.copy_to(&mut got_alpha_trail)?;
+    result
+        .outputs
+        .alpha_trail
+        .buf
+        .copy_to(&mut got_alpha_trail)?;
     result
         .outputs
         .alpha_trail_bullish
@@ -173,16 +184,26 @@ fn trend_flow_trail_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::E
             cpu.alpha_trail[idx],
             got_alpha_trail[idx]
         );
-        assert!(approx_eq(
+        assert!(
+            approx_eq(
+                cpu.alpha_trail_bullish[idx],
+                got_alpha_trail_bullish[idx],
+                1e-6
+            ),
+            "alpha_trail_bullish mismatch at row={row} col={col}: cpu={} cuda={}",
             cpu.alpha_trail_bullish[idx],
-            got_alpha_trail_bullish[idx],
-            1e-6
-        ), "alpha_trail_bullish mismatch at row={row} col={col}: cpu={} cuda={}", cpu.alpha_trail_bullish[idx], got_alpha_trail_bullish[idx]);
-        assert!(approx_eq(
+            got_alpha_trail_bullish[idx]
+        );
+        assert!(
+            approx_eq(
+                cpu.alpha_trail_bearish[idx],
+                got_alpha_trail_bearish[idx],
+                1e-6
+            ),
+            "alpha_trail_bearish mismatch at row={row} col={col}: cpu={} cuda={}",
             cpu.alpha_trail_bearish[idx],
-            got_alpha_trail_bearish[idx],
-            1e-6
-        ), "alpha_trail_bearish mismatch at row={row} col={col}: cpu={} cuda={}", cpu.alpha_trail_bearish[idx], got_alpha_trail_bearish[idx]);
+            got_alpha_trail_bearish[idx]
+        );
         assert!(
             approx_eq(cpu.alpha_dir[idx], got_alpha_dir[idx], 1e-6),
             "alpha_dir mismatch at row={row} col={col}: cpu={} cuda={}",
@@ -207,47 +228,74 @@ fn trend_flow_trail_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::E
             cpu.tp_lower[idx],
             got_tp_lower[idx]
         );
-        assert!(approx_eq(
+        assert!(
+            approx_eq(
+                cpu.alpha_trail_bullish_switch[idx],
+                got_alpha_trail_bullish_switch[idx],
+                1e-6
+            ),
+            "alpha_trail_bullish_switch mismatch at row={row} col={col}: cpu={} cuda={}",
             cpu.alpha_trail_bullish_switch[idx],
-            got_alpha_trail_bullish_switch[idx],
-            1e-6
-        ), "alpha_trail_bullish_switch mismatch at row={row} col={col}: cpu={} cuda={}", cpu.alpha_trail_bullish_switch[idx], got_alpha_trail_bullish_switch[idx]);
-        assert!(approx_eq(
+            got_alpha_trail_bullish_switch[idx]
+        );
+        assert!(
+            approx_eq(
+                cpu.alpha_trail_bearish_switch[idx],
+                got_alpha_trail_bearish_switch[idx],
+                1e-6
+            ),
+            "alpha_trail_bearish_switch mismatch at row={row} col={col}: cpu={} cuda={}",
             cpu.alpha_trail_bearish_switch[idx],
-            got_alpha_trail_bearish_switch[idx],
-            1e-6
-        ), "alpha_trail_bearish_switch mismatch at row={row} col={col}: cpu={} cuda={}", cpu.alpha_trail_bearish_switch[idx], got_alpha_trail_bearish_switch[idx]);
-        assert!(approx_eq(
+            got_alpha_trail_bearish_switch[idx]
+        );
+        assert!(
+            approx_eq(cpu.mfi_overbought[idx], got_mfi_overbought[idx], 1e-6),
+            "mfi_overbought mismatch at row={row} col={col}: cpu={} cuda={}",
             cpu.mfi_overbought[idx],
-            got_mfi_overbought[idx],
-            1e-6
-        ), "mfi_overbought mismatch at row={row} col={col}: cpu={} cuda={}", cpu.mfi_overbought[idx], got_mfi_overbought[idx]);
+            got_mfi_overbought[idx]
+        );
         assert!(
             approx_eq(cpu.mfi_oversold[idx], got_mfi_oversold[idx], 1e-6),
             "mfi_oversold mismatch at row={row} col={col}: cpu={} cuda={}",
             cpu.mfi_oversold[idx],
             got_mfi_oversold[idx]
         );
-        assert!(approx_eq(
+        assert!(
+            approx_eq(cpu.mfi_cross_up_mid[idx], got_mfi_cross_up_mid[idx], 1e-6),
+            "mfi_cross_up_mid mismatch at row={row} col={col}: cpu={} cuda={}",
             cpu.mfi_cross_up_mid[idx],
-            got_mfi_cross_up_mid[idx],
-            1e-6
-        ), "mfi_cross_up_mid mismatch at row={row} col={col}: cpu={} cuda={}", cpu.mfi_cross_up_mid[idx], got_mfi_cross_up_mid[idx]);
-        assert!(approx_eq(
+            got_mfi_cross_up_mid[idx]
+        );
+        assert!(
+            approx_eq(
+                cpu.mfi_cross_down_mid[idx],
+                got_mfi_cross_down_mid[idx],
+                1e-6
+            ),
+            "mfi_cross_down_mid mismatch at row={row} col={col}: cpu={} cuda={}",
             cpu.mfi_cross_down_mid[idx],
-            got_mfi_cross_down_mid[idx],
-            1e-6
-        ), "mfi_cross_down_mid mismatch at row={row} col={col}: cpu={} cuda={}", cpu.mfi_cross_down_mid[idx], got_mfi_cross_down_mid[idx]);
-        assert!(approx_eq(
+            got_mfi_cross_down_mid[idx]
+        );
+        assert!(
+            approx_eq(
+                cpu.price_cross_alpha_trail_up[idx],
+                got_price_cross_alpha_trail_up[idx],
+                1e-6
+            ),
+            "price_cross_alpha_trail_up mismatch at row={row} col={col}: cpu={} cuda={}",
             cpu.price_cross_alpha_trail_up[idx],
-            got_price_cross_alpha_trail_up[idx],
-            1e-6
-        ), "price_cross_alpha_trail_up mismatch at row={row} col={col}: cpu={} cuda={}", cpu.price_cross_alpha_trail_up[idx], got_price_cross_alpha_trail_up[idx]);
-        assert!(approx_eq(
+            got_price_cross_alpha_trail_up[idx]
+        );
+        assert!(
+            approx_eq(
+                cpu.price_cross_alpha_trail_down[idx],
+                got_price_cross_alpha_trail_down[idx],
+                1e-6
+            ),
+            "price_cross_alpha_trail_down mismatch at row={row} col={col}: cpu={} cuda={}",
             cpu.price_cross_alpha_trail_down[idx],
-            got_price_cross_alpha_trail_down[idx],
-            1e-6
-        ), "price_cross_alpha_trail_down mismatch at row={row} col={col}: cpu={} cuda={}", cpu.price_cross_alpha_trail_down[idx], got_price_cross_alpha_trail_down[idx]);
+            got_price_cross_alpha_trail_down[idx]
+        );
         assert!(
             approx_eq(cpu.mfi_above_90[idx], got_mfi_above_90[idx], 1e-6),
             "mfi_above_90 mismatch at row={row} col={col}: cpu={} cuda={}",

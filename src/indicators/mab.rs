@@ -2896,7 +2896,6 @@ mod tests {
 				}
 
 
-
 				let first_valid_output = warmup_period + fast_period - 1;
 				if first_valid_output < data.len() {
 					for i in first_valid_output..data.len() {
@@ -2962,7 +2961,6 @@ mod tests {
 				}
 
 
-
 				for i in first_valid_output..data.len() {
 					let upper = result.upperband[i];
 					let middle = result.middleband[i];
@@ -2987,7 +2985,6 @@ mod tests {
 				}
 
 
-
 				use crate::indicators::sma::{sma, SmaInput, SmaParams};
 				use crate::indicators::ema::{ema, EmaInput, EmaParams};
 
@@ -3010,7 +3007,6 @@ mod tests {
 						);
 					}
 				}
-
 
 
 				for i in first_valid_output..data.len() {
@@ -3042,7 +3038,6 @@ mod tests {
 						let range_span = data_range.1 - data_range.0;
 
 
-
 						if range_span > 0.0 {
 							prop_assert!(
 								upper_spread <= range_span * devup * 10.0,
@@ -3057,7 +3052,6 @@ mod tests {
 						}
 					}
 				}
-
 
 
 				let invalid_params = vec![
@@ -3089,8 +3083,6 @@ mod tests {
 				}
 
 
-
-
 				if fast_period == slow_period && data.len() > first_valid_output {
 
 					let equal_params = MabParams {
@@ -3103,7 +3095,6 @@ mod tests {
 					};
 					let equal_input = MabInput::from_slice(&data, equal_params);
 					let equal_result = mab_with_kernel(&equal_input, kernel).unwrap();
-
 
 
 					if params.fast_ma_type == params.slow_ma_type {

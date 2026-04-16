@@ -352,7 +352,7 @@ __device__ bool probability_from_slice(
     *out = 100.0 * static_cast<double>(hits) / static_cast<double>(resolution);
     return true;
 }
-}  // namespace
+}
 
 extern "C" __global__ void moving_average_cross_probability_batch_f64(
     const double* data,

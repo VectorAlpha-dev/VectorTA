@@ -84,4 +84,3 @@ class TestDecyclerCuda:
 
         assert gpu_tm.shape == data_tm.shape
         assert_close(gpu_tm, cpu_tm, rtol=2e-5, atol=2e-5, msg="CUDA many-series vs CPU mismatch")
-

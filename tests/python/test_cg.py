@@ -114,7 +114,6 @@ class TestCg:
             assert found_valid, f"All CG values from index {check_idx} onward are NaN."
 
 
-
         assert np.all(np.isnan(result[:10])), "Expected NaN in warmup period"
 
     def test_cg_streaming(self, test_data):
@@ -218,7 +217,6 @@ class TestCg:
         assert len(result_auto) == len(close)
 
 
-
         assert_close(
             result_scalar,
             result_auto,
@@ -232,7 +230,6 @@ class TestCg:
         period = 10
 
         result = ta_indicators.cg(close, period=period)
-
 
 
         assert np.all(np.isnan(result[:period])), f"Expected NaN in first {period} values"
@@ -293,10 +290,7 @@ class TestCg:
         assert len(result) == len(close)
 
 
-
-
         assert np.all(np.isnan(result[:10]))
-
 
 
         has_non_nan_after_injection = False

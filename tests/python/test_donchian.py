@@ -44,7 +44,6 @@ class TestDonchian:
         assert np.isnan(lower[1])
 
 
-
         assert upper[2] == 15.0
         assert lower[2] == 8.0
         assert middle[2] == (15.0 + 8.0) / 2
@@ -64,7 +63,6 @@ class TestDonchian:
         assert len(upper) == len(high)
         assert len(middle) == len(high)
         assert len(lower) == len(high)
-
 
 
         assert_close(
@@ -88,8 +86,6 @@ class TestDonchian:
             atol=1e-1,
             msg="Donchian lower band last 5 values mismatch"
         )
-
-
 
 
         try:
@@ -184,8 +180,6 @@ class TestDonchian:
 
         upper2, middle2, lower2 = ta.donchian(middle1, middle1, 20)
         assert len(upper2) == len(middle1)
-
-
 
 
         assert_close(

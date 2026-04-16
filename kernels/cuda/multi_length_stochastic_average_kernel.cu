@@ -169,7 +169,7 @@ struct SmoothingState {
         return lsma.update(value, out);
     }
 };
-}  // namespace
+}
 
 extern "C" __global__ void multi_length_stochastic_average_batch_f64(
     const double* __restrict__ data,

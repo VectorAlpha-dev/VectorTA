@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 #include <stdint.h>
@@ -21,9 +12,6 @@ __device__ __forceinline__ float eri_qnan() {
 
     return nanf("");
 }
-
-
-
 
 
 extern "C" __global__ void eri_batch_f32(
@@ -51,10 +39,6 @@ extern "C" __global__ void eri_batch_f32(
         }
     }
 }
-
-
-
-
 
 
 extern "C" __global__ void eri_many_series_one_param_time_major_f32(
@@ -101,11 +85,6 @@ extern "C" __global__ void eri_many_series_one_param_time_major_f32(
         }
     }
 }
-
-
-
-
-
 
 
 extern "C" __global__ void eri_one_series_many_params_time_major_f32(
@@ -208,10 +187,6 @@ extern "C" __global__ void eri_one_series_many_params_time_major_f32(
 }
 
 
-
-
-
-
 extern "C" __global__ void transpose_rm_to_tm_32x32_pad_f32(
     const float* __restrict__ in,
     int R, int C,
@@ -235,4 +210,3 @@ extern "C" __global__ void transpose_rm_to_tm_32x32_pad_f32(
         out[c1 * R + r1] = tile[threadIdx.x][threadIdx.y];
     }
 }
-

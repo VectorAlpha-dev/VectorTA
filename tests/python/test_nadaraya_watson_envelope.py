@@ -44,7 +44,6 @@ class TestNadarayaWatsonEnvelope:
         assert len(lower) == len(close)
 
 
-
         assert_close(
             upper[-5:],
             expected_upper,
@@ -128,7 +127,6 @@ class TestNadarayaWatsonEnvelope:
         """Test NWE with very small dataset - mirrors check_nwe_very_small_dataset"""
 
 
-
         single_point = np.array([42.0])
 
         with pytest.raises(ValueError, match="Not enough valid data"):
@@ -162,8 +160,6 @@ class TestNadarayaWatsonEnvelope:
         assert len(upper2) == len(close)
 
 
-
-
         warmup = lookback - 1 + 498
         if warmup < len(close):
             assert not np.allclose(upper1[warmup:], upper2[warmup:], equal_nan=True)
@@ -175,7 +171,6 @@ class TestNadarayaWatsonEnvelope:
         upper4, lower4 = ta_indicators.nadaraya_watson_envelope(
             close, bandwidth=8.0, multiplier=5.0, lookback=lookback
         )
-
 
 
         found_wider = False
@@ -198,7 +193,6 @@ class TestNadarayaWatsonEnvelope:
         upper, lower = ta_indicators.nadaraya_watson_envelope(
             data, bandwidth=8.0, multiplier=3.0, lookback=500
         )
-
 
 
         WARMUP = 499 + 498

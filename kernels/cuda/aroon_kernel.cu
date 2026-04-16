@@ -1,13 +1,3 @@
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -18,8 +8,6 @@
 static __forceinline__ __device__ bool both_finite(float h, float l) {
     return isfinite(h) && isfinite(l);
 }
-
-
 
 
 extern "C" __global__
@@ -153,8 +141,6 @@ void aroon_batch_f32(const float* __restrict__ high,
         }
     }
 }
-
-
 
 
 extern "C" __global__

@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -141,7 +140,6 @@ test.describe('SWMA (Symmetric Weighted Moving Average)', () => {
         const result = wasm.swma_js(data, period);
 
 
-
         for (let i = 0; i < 4; i++) {
             assert(isNaN(result[i]), `Index ${i} should be NaN`);
         }
@@ -205,13 +203,6 @@ test.describe('SWMA (Symmetric Weighted Moving Average)', () => {
         const period = 5;
 
         const result = wasm.swma_js(data, period);
-
-
-
-
-
-
-
 
 
         assertClose(result[15], 1/9, 1e-10, 'Weight at position 4');

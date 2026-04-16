@@ -72,7 +72,6 @@ class TestDTI:
         result = ta.dti(high, low, r=14, s=10, u=5)
 
 
-
         assert np.isnan(result[0])
 
         assert not np.all(np.isnan(result[2:]))
@@ -182,7 +181,6 @@ class TestDTI:
             s_range=(8, 12, 2),
             u_range=(4, 6, 1)
         )
-
 
 
         assert result['values'].shape == (27, len(high))

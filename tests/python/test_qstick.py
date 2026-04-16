@@ -105,7 +105,6 @@ class TestQstick:
         assert results[5] is not None
 
 
-
         diffs = [close - open for open, close in test_data[:5]]
         expected = sum(diffs) / 5
         assert_close(results[4], expected, 1e-10)

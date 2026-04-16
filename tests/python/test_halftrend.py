@@ -86,15 +86,6 @@ class TestHalfTrend:
             )
 
 
-
-
-
-
-
-
-
-
-
     def test_halftrend_dict_api(self, test_data):
         """Test new dict-based API returns correct structure."""
         high = test_data['high'][:100]
@@ -549,13 +540,11 @@ class TestHalfTrend:
         assert len(ht1) == len(high)
 
 
-
         ht2, tr2, ah2, al2, bs2, ss2 = ta_indicators.halftrend_tuple(
             ht1, ht1, ht1,
             amplitude=2, channel_deviation=2.0, atr_period=100
         )
         assert len(ht2) == len(ht1)
-
 
 
         differences = 0
@@ -585,8 +574,6 @@ class TestHalfTrend:
         )
 
         assert len(halftrend) == len(high)
-
-
 
 
         warmup = 20

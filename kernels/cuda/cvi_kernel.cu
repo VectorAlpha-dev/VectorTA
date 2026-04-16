@@ -1,23 +1,8 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 
 
-
 __device__ __forceinline__ int ceil_div(int a, int b) { return (a + b - 1) / b; }
-
 
 
 extern "C" __global__
@@ -119,7 +104,6 @@ void cvi_batch_from_range_f32(const float* __restrict__ range,
 }
 
 
-
 extern "C" __global__
 void cvi_many_series_one_param_f32(const float* __restrict__ high_tm,
                                    const float* __restrict__ low_tm,
@@ -174,7 +158,6 @@ void cvi_many_series_one_param_f32(const float* __restrict__ high_tm,
 }
 
 
-
 extern "C" __global__
 void range_from_high_low_f32(const float* __restrict__ high,
                              const float* __restrict__ low,
@@ -188,4 +171,3 @@ void range_from_high_low_f32(const float* __restrict__ high,
         range[t] = high[t] - low[t];
     }
 }
-

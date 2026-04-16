@@ -74,7 +74,7 @@ struct RmaState {
         return NAN;
     }
 };
-}  // namespace
+}
 
 extern "C" __global__ void trend_follower_batch_f64(
     const double* high,

@@ -63,8 +63,6 @@ class TestBop:
         )
 
 
-
-
     def test_bop_default_candles(self, test_data):
         """Test BOP with default parameters - mirrors check_bop_default_candles"""
         open_data = test_data['open']
@@ -309,7 +307,6 @@ class TestBop:
 
 
         assert np.all(np.isnan(result[:nan_period])), "Expected NaN for leading NaN inputs"
-
 
 
         expected_value = 0.25

@@ -119,7 +119,7 @@ __device__ inline bool finite_ohlc(double open, double high, double low, double 
     return isfinite(open) && isfinite(high) && isfinite(low) && isfinite(close);
 }
 
-}  // namespace
+}
 
 extern "C" __global__ void hema_trend_levels_batch_f64(
     const double* __restrict__ open,

@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -193,7 +192,6 @@ test('MSW mixed NaN input', () => {
     assert(isNaN(lead[1]));
 
 
-
     for (let i = 4; i < sine.length; i++) {
         assert(!isNaN(sine[i]), `Unexpected NaN in sine at index ${i}`);
         assert(!isNaN(lead[i]), `Unexpected NaN in lead at index ${i}`);
@@ -228,16 +226,6 @@ test('MSW simple predictable pattern', () => {
                `Lead value ${lead[i]} at index ${i} is out of range [-1, 1]`);
     }
 });
-
-
-
-
-
-
-
-
-
-
 
 
 test('MSW SIMD128 consistency', () => {

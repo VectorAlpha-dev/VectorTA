@@ -87,4 +87,3 @@ class TestVidyaCuda:
 
         assert gpu_tm.shape == data_tm.shape
         assert_close(gpu_tm, cpu_tm, rtol=1e-5, atol=1e-6, msg="CUDA many-series vs CPU mismatch")
-

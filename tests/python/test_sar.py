@@ -89,7 +89,6 @@ class TestSar:
         low = np.array([1.0, 2.0])
 
 
-
         try:
             result = ta_indicators.sar(high, low)
 

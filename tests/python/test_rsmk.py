@@ -215,12 +215,6 @@ class TestRsmk:
         assert len(signal) == len(close)
 
 
-
-
-
-
-
-
         if len(indicator) > 111:
 
             assert not np.any(np.isnan(signal[150:])), "Found unexpected NaN in signal after warmup period"
@@ -360,7 +354,6 @@ class TestRsmk:
         """Test RSMK handles zeros in compare data properly"""
         main = np.array([10.0, 11.0, 12.0, 13.0, 14.0, 15.0])
         compare = np.array([10.0, 0.0, 12.0, 0.0, 14.0, 15.0])
-
 
 
         indicator, signal = ta_indicators.rsmk(

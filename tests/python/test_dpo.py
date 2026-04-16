@@ -59,9 +59,6 @@ class TestDpo:
         )
 
 
-
-
-
         compare_with_rust('dpo', result, 'close', {'period': 5}, rtol=1e-10, atol=2e-11)
 
     def test_dpo_default_candles(self, test_data):
@@ -111,7 +108,6 @@ class TestDpo:
 
         result = ta_indicators.dpo(close, period=5)
         assert len(result) == len(close)
-
 
 
         if len(result) > 20:

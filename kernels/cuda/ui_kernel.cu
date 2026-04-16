@@ -1,10 +1,3 @@
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 #include <math_constants.h>
@@ -13,10 +6,6 @@
 #ifndef WARP_SIZE
 #define WARP_SIZE 32
 #endif
-
-
-
-
 
 
 static __forceinline__ __device__ void neumaier_add(float y, float &sum, float &c) {
@@ -34,9 +23,6 @@ static __forceinline__ __device__ void kahan_add(float y, float &sum, float &c) 
 }
 
 
-
-
-
 extern "C" __global__ void ui_single_series_f32(
     const float* __restrict__ prices,
     int series_len,
@@ -46,8 +32,6 @@ extern "C" __global__ void ui_single_series_f32(
 {
     if (series_len <= 0 || period <= 0) return;
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
-
-
 
 
     extern __shared__ __align__(16) unsigned char shraw[];
@@ -154,7 +138,6 @@ extern "C" __global__ void ui_scale_rows_from_base_f32(
 }
 
 
-
 extern "C" __global__ void ui_many_series_one_param_time_major_f32(
     const float* __restrict__ prices_tm,
     const int*   __restrict__ first_valids,
@@ -237,7 +220,6 @@ extern "C" __global__ void ui_many_series_one_param_time_major_f32(
 }
 
 
-
 extern "C" __global__ void ui_one_series_many_params_f32(
     const float* __restrict__ prices,
     int series_len,
@@ -253,8 +235,6 @@ extern "C" __global__ void ui_one_series_many_params_f32(
     const int warps_per_block = blockDim.x / WARP_SIZE;
     int param_id = blockIdx.x * warps_per_block + warp;
     if (param_id >= n_params) return;
-
-
 
 
     extern __shared__ __align__(16) unsigned char shraw[];

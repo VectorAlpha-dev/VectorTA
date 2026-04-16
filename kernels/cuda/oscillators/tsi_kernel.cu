@@ -1,17 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -33,7 +19,6 @@ static __device__ __forceinline__ void ema_seed(EmaKahan& s, float seed) {
     s.y = seed;
     s.c = 0.0f;
 }
-
 
 
 static __device__ __forceinline__ void ema_update(EmaKahan& s, float a, float x) {
@@ -276,8 +261,6 @@ void tsi_one_series_many_params_tm_f32(const float* __restrict__ mom,
         }
     }
 }
-
-
 
 
 extern "C" __global__

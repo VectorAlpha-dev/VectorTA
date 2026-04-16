@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -48,11 +47,6 @@ test('EMV basic calculation', () => {
     assert.strictEqual(result.length, 4);
     assert(isNaN(result[0]));
     assert(!isNaN(result[1]));
-
-
-
-
-
 
 
     assertClose(result[1], 5.0, 0.01, "EMV calculation at index 1");

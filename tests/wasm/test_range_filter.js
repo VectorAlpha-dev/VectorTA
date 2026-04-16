@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -199,7 +198,6 @@ test('RANGE_FILTER NaN handling', () => {
     const close = new Float64Array(testData.close);
 
     const result = wasm.range_filter_js(close);
-
 
 
     if (result.filter.length > 50) {

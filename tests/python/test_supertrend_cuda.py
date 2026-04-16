@@ -107,4 +107,3 @@ class TestSupertrendCuda:
 
         assert_close(trend_tm, trend_cpu, rtol=1e-4, atol=2e-3, msg="trend TM mismatch")
         assert_close(changed_tm, changed_cpu, rtol=1e-6, atol=1e-7, msg="changed TM mismatch")
-

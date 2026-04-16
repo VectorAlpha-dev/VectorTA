@@ -1,16 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -80,8 +67,6 @@ __device__ inline double pick_src(const float* prices, int idx, bool confirmed) 
     int source_idx = confirmed && idx > 0 ? idx - 1 : idx;
     return static_cast<double>(prices[source_idx]);
 }
-
-
 
 
 __device__ __forceinline__ int quantize_to_0p1_tie_down_i(double gstar_times10, int gain_limit_times10) {
@@ -271,8 +256,6 @@ void ehlers_ecema_batch_f32(const float* __restrict__ prices,
         prev_ec = ec; has_prev = true;
     }
 }
-
-
 
 
 extern "C" __global__

@@ -53,7 +53,6 @@ class TestVwma:
         assert len(result) == len(close)
 
 
-
         assert_close(
             result[-5:],
             expected['last_5_values'],
@@ -137,8 +136,6 @@ class TestVwma:
         assert len(second_result) == len(first_result)
 
 
-
-
         expected_warmup = 28
         for i in range(expected_warmup, len(second_result)):
             assert not np.isnan(second_result[i]), f"Unexpected NaN at index {i}"
@@ -210,7 +207,6 @@ class TestVwma:
         expected = EXPECTED_OUTPUTS['vwma']['last_5_values']
 
 
-
         assert_close(
             default_row[-5:],
             expected,
@@ -244,7 +240,6 @@ class TestVwma:
         assert len(result) == len(prices)
 
 
-
         assert not np.isnan(result[2])
 
     def test_vwma_partial_nan_data(self, test_data):
@@ -257,14 +252,11 @@ class TestVwma:
         volume[100:110] = np.nan
 
 
-
         result = ta_indicators.vwma(close, volume, 20)
         assert len(result) == len(close)
 
 
         assert np.all(np.isnan(result[:19])), "Expected NaN in warmup period"
-
-
 
 
     def test_vwma_warmup_period(self, test_data):
@@ -274,7 +266,6 @@ class TestVwma:
         period = 20
 
         result = ta_indicators.vwma(close, volume, period)
-
 
 
         assert np.all(np.isnan(result[:19])), "First 19 values should be NaN"

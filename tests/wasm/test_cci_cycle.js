@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -166,7 +165,6 @@ test('CCI_CYCLE NaN handling', () => {
 
     const result = wasm.cci_cycle_js(close, 10, 0.5);
     assert.strictEqual(result.length, close.length);
-
 
 
     let initialNans = 0;

@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -528,7 +527,6 @@ test('KVO warmup period verification', () => {
     }
 
     const result = wasm.kvo_js(high, low, close, volume, 2, 5);
-
 
 
     assert(isNaN(result[0]), 'First value should be NaN during warmup');

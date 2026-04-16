@@ -49,7 +49,6 @@ class TestMass:
         assert len(result) == len(high)
 
 
-
         assert_close(
             result[-5:],
             expected['last_5_values'],

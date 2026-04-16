@@ -1,4 +1,3 @@
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -139,8 +138,6 @@ extern "C" __global__ void lpc_build_dom_cycle_f32_serial(
 }
 
 
-
-
 extern "C" __global__ void lpc_batch_f32_v2(
     const float* __restrict__ high,
     const float* __restrict__ low,
@@ -264,8 +261,6 @@ extern "C" __global__ void lpc_batch_f32_v2(
 }
 
 
-
-
 extern "C" __global__ void lpc_batch_f32(
     const float* __restrict__ high,
     const float* __restrict__ low,
@@ -378,9 +373,6 @@ extern "C" __global__ void lpc_batch_f32(
         }
     }
 }
-
-
-
 
 
 extern "C" __global__ void lpc_many_series_one_param_time_major_f32(

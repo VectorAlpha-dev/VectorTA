@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -117,7 +116,6 @@ test('OBV fast API (in-place)', () => {
 
 
         wasm.obv_into(closePtr, volumePtr, outPtr, len);
-
 
 
         const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);

@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -241,7 +240,6 @@ test('CHOP with custom parameters', () => {
     }
     assert.ok(differentCount > 0, "Custom parameters should produce different results");
 });
-
 
 
 test('CHOP fast API (in-place)', () => {
@@ -598,7 +596,6 @@ test('CHOP NaN input handling', () => {
     const result = wasm.chop_js(high, low, close, 14, 100.0, 1);
 
     assert.strictEqual(result.length, close.length);
-
 
 
     const validFromIndex = 30;

@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -36,9 +35,6 @@ test.before(async () => {
 });
 
 
-
-
-
 test('MEDPRICE default params', () => {
 
     const high = new Float64Array(testData.high);
@@ -70,7 +66,6 @@ test('MEDPRICE accuracy', () => {
 });
 
 test('MEDPRICE formula verification', () => {
-
 
 
     const high = new Float64Array([100.0, 200.0, 300.0, 400.0, 500.0]);
@@ -111,9 +106,6 @@ test('MEDPRICE no warmup period', () => {
 });
 
 
-
-
-
 test('MEDPRICE empty data', () => {
 
     const high = new Float64Array([]);
@@ -145,9 +137,6 @@ test('MEDPRICE all values NaN', () => {
 });
 
 
-
-
-
 test('MEDPRICE NaN handling basic', () => {
 
     const high = new Float64Array([NaN, 100.0, 110.0]);
@@ -175,7 +164,6 @@ test('MEDPRICE late NaN handling', () => {
 });
 
 test('MEDPRICE NaN patterns', () => {
-
 
 
     const highAlt = new Float64Array([100.0, NaN, 120.0, NaN, 140.0]);
@@ -218,11 +206,7 @@ test('MEDPRICE partial NaN', () => {
 });
 
 
-
-
-
 test('MEDPRICE boundary values', () => {
-
 
 
     const highLarge = new Float64Array([1e10, 1e11, 1e12]);
@@ -279,9 +263,6 @@ test('MEDPRICE identical values', () => {
 });
 
 
-
-
-
 test('MEDPRICE batch - single parameter combination', () => {
 
     const high = new Float64Array(testData.high.slice(0, 100));
@@ -325,7 +306,6 @@ test('MEDPRICE batch - no config', () => {
 test('MEDPRICE batch - error handling', () => {
 
 
-
     assert.throws(() => {
         wasm.medprice_batch(new Float64Array([]), new Float64Array([]), null);
     }, /empty/i, "Should throw on empty data");
@@ -339,9 +319,6 @@ test('MEDPRICE batch - error handling', () => {
         );
     }, /different|length/i, "Should throw on different lengths");
 });
-
-
-
 
 
 test('MEDPRICE zero-copy basic', () => {
@@ -495,9 +472,6 @@ test('MEDPRICE zero-copy edge cases', () => {
 });
 
 
-
-
-
 test('MEDPRICE zero-copy memory management', () => {
 
     const sizes = [100, 1000, 10000];
@@ -544,9 +518,6 @@ test('MEDPRICE memory stress test', () => {
         }
     }
 });
-
-
-
 
 
 test('MEDPRICE large dataset', () => {

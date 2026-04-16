@@ -257,9 +257,7 @@ impl CudaHemaTrendLevels {
         sweep: &HemaTrendLevelsBatchRange,
     ) -> Result<CudaHemaTrendLevelsBatchResult, CudaHemaTrendLevelsError> {
         if open.is_empty() || high.is_empty() || low.is_empty() || close.is_empty() {
-            return Err(CudaHemaTrendLevelsError::InvalidInput(
-                "empty input".into(),
-            ));
+            return Err(CudaHemaTrendLevelsError::InvalidInput("empty input".into()));
         }
         if open.len() != high.len() || open.len() != low.len() || open.len() != close.len() {
             return Err(CudaHemaTrendLevelsError::InvalidInput(format!(
@@ -288,21 +286,17 @@ impl CudaHemaTrendLevels {
             .map(|params| params.slow_length.unwrap_or(DEFAULT_SLOW_LENGTH) as i32)
             .collect();
 
-        let output_elems = rows.checked_mul(cols).ok_or_else(|| {
-            CudaHemaTrendLevelsError::InvalidInput("rows*cols overflow".into())
-        })?;
+        let output_elems = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaHemaTrendLevelsError::InvalidInput("rows*cols overflow".into()))?;
         let input_bytes = cols
             .checked_mul(std::mem::size_of::<f64>())
             .and_then(|v| v.checked_mul(4))
-            .ok_or_else(|| {
-                CudaHemaTrendLevelsError::InvalidInput("input bytes overflow".into())
-            })?;
+            .ok_or_else(|| CudaHemaTrendLevelsError::InvalidInput("input bytes overflow".into()))?;
         let param_bytes = rows
             .checked_mul(std::mem::size_of::<i32>())
             .and_then(|v| v.checked_mul(2))
-            .ok_or_else(|| {
-                CudaHemaTrendLevelsError::InvalidInput("param bytes overflow".into())
-            })?;
+            .ok_or_else(|| CudaHemaTrendLevelsError::InvalidInput("param bytes overflow".into()))?;
         let output_bytes = output_elems
             .checked_mul(std::mem::size_of::<f64>())
             .and_then(|v| v.checked_mul(15))
@@ -336,10 +330,8 @@ impl CudaHemaTrendLevels {
         let mut d_bear_box_bottom = unsafe { DeviceBuffer::<f64>::uninitialized(output_elems)? };
         let mut d_bullish_test = unsafe { DeviceBuffer::<f64>::uninitialized(output_elems)? };
         let mut d_bearish_test = unsafe { DeviceBuffer::<f64>::uninitialized(output_elems)? };
-        let mut d_bullish_test_level =
-            unsafe { DeviceBuffer::<f64>::uninitialized(output_elems)? };
-        let mut d_bearish_test_level =
-            unsafe { DeviceBuffer::<f64>::uninitialized(output_elems)? };
+        let mut d_bullish_test_level = unsafe { DeviceBuffer::<f64>::uninitialized(output_elems)? };
+        let mut d_bearish_test_level = unsafe { DeviceBuffer::<f64>::uninitialized(output_elems)? };
 
         let func = self
             .module

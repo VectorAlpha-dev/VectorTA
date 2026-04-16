@@ -19,7 +19,7 @@ __device__ inline Coefficients coefficients(int period) {
     out.c1 = 1.0 - out.c2 - out.c3;
     return out;
 }
-}  // namespace
+}
 
 extern "C" __global__ void ehlers_fm_demodulator_batch_f64(
     const double* __restrict__ open,

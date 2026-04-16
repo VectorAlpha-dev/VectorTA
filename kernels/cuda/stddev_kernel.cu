@@ -1,11 +1,3 @@
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -13,9 +5,6 @@
 #include <cuda_runtime.h>
 #include <math.h>
 #include <stdint.h>
-
-
-
 
 
 struct ds {
@@ -27,7 +16,6 @@ struct ds {
 __device__ __forceinline__ ds ds_from_f(float x) { return ds(x, 0.f); }
 __device__ __forceinline__ float ds_to_f(ds a)  { return a.hi + a.lo; }
 __device__ __forceinline__ ds ds_neg(ds a)      { return ds(-a.hi, -a.lo); }
-
 
 
 __device__ __forceinline__ ds ds_from_d(double x) {
@@ -67,11 +55,6 @@ __device__ __forceinline__ ds ds_scale(ds a, float s) {
 }
 
 __device__ __forceinline__ ds ds_square(ds a) { return ds_mul(a, a); }
-
-
-
-
-
 
 
 #ifndef STDDEV_COMBO_TILE
@@ -199,9 +182,6 @@ extern "C" __global__ void stddev_batch_f32(
         t += stride;
     }
 }
-
-
-
 
 
 extern "C" __global__ void stddev_many_series_one_param_f32(

@@ -1,11 +1,3 @@
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math_constants.h>
 
@@ -66,8 +58,6 @@ __global__ void kaufmanstop_many_series_one_param_time_major_f32(
     const float* __restrict__ base_tm = base_is_low ? low_tm : high_tm;
 
 
-
-
     if (gridDim.y == 1 && blockDim.y == 1) {
 
         const int total = rows * cols;
@@ -104,8 +94,6 @@ __global__ void kaufmanstop_many_series_one_param_time_major_f32(
         }
     }
 }
-
-
 
 
 __global__ void kaufmanstop_one_series_many_params_time_major_f32(
@@ -149,4 +137,3 @@ __global__ void kaufmanstop_one_series_many_params_time_major_f32(
 }
 
 }
-

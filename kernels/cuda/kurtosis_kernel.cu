@@ -1,9 +1,3 @@
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -11,10 +5,6 @@
 #include <cuda_runtime.h>
 #include <math.h>
 #include <stdint.h>
-
-
-
-
 
 
 struct __align__(8) dsf { float hi, lo; };
@@ -74,9 +64,6 @@ __device__ __forceinline__ dsf ld_ds(const float2* __restrict__ p, int idx) {
 
 
 __device__ __forceinline__ float qnan_f32() { return __int_as_float(0x7fffffff); }
-
-
-
 
 
 extern "C" __global__ void kurtosis_build_prefix_f32(
@@ -203,8 +190,6 @@ extern "C" __global__ void kurtosis_batch_f32(
         t += stride;
     }
 }
-
-
 
 
 extern "C" __global__ void kurtosis_many_series_one_param_f32(
@@ -343,6 +328,3 @@ extern "C" __global__ void kurtosis_many_series_one_param_f32(
         }
     }
 }
-
-
-

@@ -252,7 +252,8 @@ fn compute_average_series(
     avg_kind: AvgKind,
     length: usize,
 ) -> Result<Vec<f64>, CudaEmdTrendError> {
-    ma_with_kernel(avg_id(avg_kind), MaData::Slice(src), length, Kernel::Scalar).map_err(map_ma_error)
+    ma_with_kernel(avg_id(avg_kind), MaData::Slice(src), length, Kernel::Scalar)
+        .map_err(map_ma_error)
 }
 
 #[inline]
@@ -379,12 +380,20 @@ impl CudaEmdTrend {
         let combos = expand_grid_emd_trend(sweep, source, avg_type)
             .map_err(|err| CudaEmdTrendError::InvalidInput(err.to_string()))?;
         if combos.is_empty() {
-            return Err(CudaEmdTrendError::InvalidInput("empty parameter grid".into()));
+            return Err(CudaEmdTrendError::InvalidInput(
+                "empty parameter grid".into(),
+            ));
         }
 
         let mut src = Vec::with_capacity(close.len());
         for i in 0..close.len() {
-            src.push(source_value(source_kind, open[i], high[i], low[i], close[i]));
+            src.push(source_value(
+                source_kind,
+                open[i],
+                high[i],
+                low[i],
+                close[i],
+            ));
         }
         let max_run = longest_valid_run(&src);
         if max_run == 0 {

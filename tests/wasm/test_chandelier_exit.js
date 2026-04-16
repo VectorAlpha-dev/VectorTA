@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -333,7 +332,6 @@ test('chandelier_exit batch multiple parameters', () => {
         mult_range: [2.0, 3.0, 1.0],
         use_close: true
     });
-
 
 
     assert.strictEqual(batchResult.rows, 8);

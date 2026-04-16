@@ -1,16 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -42,8 +29,6 @@ __device__ __forceinline__ void kahan_add(float& sum, float y, float& c) {
     c = (t - sum) - z;
     sum = t;
 }
-
-
 
 
 extern "C" __global__
@@ -136,8 +121,6 @@ void efi_batch_f32(const float* __restrict__ prices,
         out[base + t] = prev;
     }
 }
-
-
 
 
 extern "C" __global__
@@ -251,7 +234,6 @@ void efi_many_series_one_param_f32(const float* __restrict__ prices_tm,
         out_tm[t * stride + s] = prev;
     }
 }
-
 
 
 extern "C" __global__

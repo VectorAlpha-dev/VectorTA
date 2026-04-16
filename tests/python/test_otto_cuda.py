@@ -114,4 +114,3 @@ class TestOttoCuda:
 
         assert_close(gpu_hott, cpu_hott, rtol=3e-3, atol=3e-4, msg="OTTO HOTT TM mismatch")
         assert_close(gpu_lott, cpu_lott, rtol=3e-3, atol=3e-4, msg="OTTO LOTT TM mismatch")
-

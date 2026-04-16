@@ -1,7 +1,3 @@
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -146,7 +142,6 @@ extern "C" __global__ void vpci_batch_f32(
         const int idx_short_prev = i - short_p;
 
 
-
         dsf c_cur  = load_dsf_f2(pfx_c,  i);
         dsf v_cur  = load_dsf_f2(pfx_v,  i);
         dsf cv_cur = load_dsf_f2(pfx_cv, i);
@@ -210,7 +205,6 @@ extern "C" __global__ void vpci_batch_f32(
         }
     }
 }
-
 
 
 extern "C" __global__ void vpci_many_series_one_param_f32(
@@ -301,4 +295,3 @@ extern "C" __global__ void vpci_many_series_one_param_f32(
                           : nan_f32();
     }
 }
-

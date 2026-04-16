@@ -110,7 +110,6 @@ class TestLinearRegIntercept:
         result = ta_indicators.linearreg_intercept(data, period=period)
 
 
-
         warmup = period - 1
         for i in range(warmup + 5, warmup + 10):
             window_start = i - period + 1
@@ -125,7 +124,6 @@ class TestLinearRegIntercept:
         result = ta_indicators.linearreg_intercept(close, period=14)
 
         assert len(result) == len(close)
-
 
 
         non_nan_start = next((i for i, val in enumerate(close) if not np.isnan(val)), 0)

@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -39,7 +38,6 @@ test.before(async () => {
 test('Ehlers ITrend partial params', () => {
 
     const close = new Float64Array(testData.close);
-
 
 
     const result = wasm.ehlers_itrend_js(close, 12, 50);
@@ -146,9 +144,6 @@ test('Ehlers ITrend reinput', () => {
         params.maxDcPeriod
     );
     assert.strictEqual(secondResult.length, firstResult.length);
-
-
-
 
 
     if (secondResult.length > 30) {
@@ -599,7 +594,6 @@ test('Ehlers ITrend batch comprehensive parameter sweep', () => {
         );
     }
 });
-
 
 
 test.after(() => {

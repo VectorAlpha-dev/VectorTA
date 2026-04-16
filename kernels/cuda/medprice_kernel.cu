@@ -1,6 +1,3 @@
-
-
-
 #include <cuda_runtime.h>
 #include <stdint.h>
 #include <math.h>
@@ -21,8 +18,6 @@ static __device__ __forceinline__ float medprice_scalar(float h, float l) {
     const float s = h + l;
     return __isnanf(s) ? CUDART_NAN_F : 0.5f * s;
 }
-
-
 
 
 extern "C" __global__ __launch_bounds__(256, 2)
@@ -83,9 +78,6 @@ void medprice_kernel_f32(const float* __restrict__ high,
         }
     }
 }
-
-
-
 
 
 extern "C" __global__ __launch_bounds__(256, 2)
@@ -158,9 +150,6 @@ void medprice_batch_f32(const float* __restrict__ high,
         }
     }
 }
-
-
-
 
 
 extern "C" __global__ __launch_bounds__(256, 2)

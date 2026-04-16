@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -73,8 +72,6 @@ test('PFE accuracy', async () => {
     }
 
 
-
-
 });
 
 test('PFE default candles', () => {
@@ -143,7 +140,6 @@ test('PFE reinput', () => {
 
     const secondResult = wasm.pfe_js(firstResult, 10, 5);
     assert.strictEqual(secondResult.length, firstResult.length);
-
 
 
     let firstNonNaN = -1;

@@ -1,13 +1,3 @@
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -15,9 +5,6 @@
 #include <cuda_runtime.h>
 #include <math.h>
 #include <stdint.h>
-
-
-
 
 
 static __device__ __forceinline__ float ld_ro(const float* p) {
@@ -32,8 +19,6 @@ static __device__ __forceinline__ float ld_ro(const float* p) {
 static __device__ __forceinline__ float qNaNf() {
     return __uint_as_float(0x7fc00000u);
 }
-
-
 
 
 struct fpair { float hi, lo; };
@@ -73,10 +58,6 @@ static __device__ __forceinline__ fpair ds_madd(float beta, const fpair &x, floa
 static __device__ __forceinline__ float ds_val(const fpair &x) {
     return x.hi + x.lo;
 }
-
-
-
-
 
 
 static __device__ __forceinline__ void qqe_compute_series_f32(
@@ -196,12 +177,6 @@ static __device__ __forceinline__ void qqe_compute_series_f32(
 }
 
 
-
-
-
-
-
-
 extern "C" __global__ void qqe_batch_f32(
     const float* __restrict__ prices,
     const int*   __restrict__ rsi_periods,
@@ -240,11 +215,6 @@ extern "C" __global__ void qqe_batch_f32(
         qqe_compute_series_f32(prices, series_len, first_valid, rsi_p, ema_p, fast_k, out_fast, out_slow);
     }
 }
-
-
-
-
-
 
 
 extern "C" __global__ void qqe_extract_output_rows_f32(

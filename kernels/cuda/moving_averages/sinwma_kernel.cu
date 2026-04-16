@@ -1,9 +1,3 @@
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -15,7 +9,6 @@
 #ifndef SINWMA_BLOCK_X
 #define SINWMA_BLOCK_X 256
 #endif
-
 
 
 static __device__ __forceinline__ float sinwma_inv_norm(int period) {
@@ -30,7 +23,6 @@ static __device__ __forceinline__ float sinwma_inv_norm(int period) {
 }
 
 
-
 static __device__ __forceinline__
 void compute_weights_pre_normalized(float* __restrict__ weights, int period) {
     const float theta = CUDART_PI_F / (float(period) + 1.0f);
@@ -40,7 +32,6 @@ void compute_weights_pre_normalized(float* __restrict__ weights, int period) {
         weights[i] = sinf(angle) * inv_norm;
     }
 }
-
 
 
 extern "C" __global__
@@ -112,7 +103,6 @@ void sinwma_batch_f32(const float* __restrict__ prices,
         }
     }
 }
-
 
 
 extern "C" __global__

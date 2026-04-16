@@ -127,14 +127,6 @@ test('Bollinger Bands - very small dataset should fail', () => {
 });
 
 
-
-
-
-
-
-
-
-
 test('Bollinger Bands - empty data should fail', () => {
     const empty = new Float64Array([]);
 

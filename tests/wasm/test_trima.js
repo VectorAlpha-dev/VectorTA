@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -221,7 +220,6 @@ test('trima_candles_with_nan', () => {
 
     const result = wasm.trima_js(dataWithNaN, 30);
     assert.equal(result.length, dataWithNaN.length);
-
 
 
     let firstValidIdx = 3;

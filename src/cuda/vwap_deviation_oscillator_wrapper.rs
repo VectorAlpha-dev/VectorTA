@@ -342,7 +342,9 @@ impl CudaVwapDeviationOscillator {
             .zip(low.iter())
             .zip(close.iter())
             .zip(volume.iter())
-            .any(|(((h, l), c), v)| h.is_finite() || l.is_finite() || c.is_finite() || v.is_finite())
+            .any(|(((h, l), c), v)| {
+                h.is_finite() || l.is_finite() || c.is_finite() || v.is_finite()
+            })
         {
             return Err(CudaVwapDeviationOscillatorError::InvalidInput(
                 "all values are NaN".into(),
@@ -393,7 +395,9 @@ impl CudaVwapDeviationOscillator {
     fn row_config(
         combo: &VwapDeviationOscillatorParams,
     ) -> Result<RowConfig, CudaVwapDeviationOscillatorError> {
-        let session_mode = combo.session_mode.unwrap_or(VwapDeviationSessionMode::RollingBars);
+        let session_mode = combo
+            .session_mode
+            .unwrap_or(VwapDeviationSessionMode::RollingBars);
         let rolling_period = combo.rolling_period.unwrap_or(DEFAULT_ROLLING_PERIOD);
         let rolling_days = combo.rolling_days.unwrap_or(DEFAULT_ROLLING_DAYS);
         let use_close = combo.use_close.unwrap_or(false);
@@ -435,9 +439,7 @@ impl CudaVwapDeviationOscillator {
         }
 
         let (mode, window, guard) = match deviation_mode {
-            VwapDeviationMode::Absolute => {
-                (DeviationModeKind::Absolute, abs_vol_lookback, 1.0)
-            }
+            VwapDeviationMode::Absolute => (DeviationModeKind::Absolute, abs_vol_lookback, 1.0),
             VwapDeviationMode::Percent => {
                 (DeviationModeKind::Percent, pct_vol_lookback, pct_min_sigma)
             }

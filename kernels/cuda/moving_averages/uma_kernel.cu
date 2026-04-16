@@ -1,9 +1,3 @@
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -18,11 +12,9 @@
 #endif
 
 
-
 #ifndef UMA_SHARED_LOG2_MAX
 #define UMA_SHARED_LOG2_MAX 512
 #endif
-
 
 
 #ifndef UMA_LOG2_TABLE_SIZE
@@ -61,11 +53,7 @@ static __device__ __forceinline__ float warp_reduce_sum(float v, unsigned mask) 
 }
 
 
-
 static __device__ __forceinline__ float uma_weight_pow(int base, float p) {
-
-
-
 
 
     const float l2 = __log2f((float)base);
@@ -115,12 +103,6 @@ static __device__ __forceinline__ float compute_rsi(
 }
 
 
-
-
-
-
-
-
 static __device__ __forceinline__ float compute_rsi_last_warp(
     const float* __restrict__ data, int start, int end, int period,
     int lane, int lanes, unsigned mask) {
@@ -163,7 +145,6 @@ static __device__ __forceinline__ float compute_rsi_last_warp(
         const float denom0 = avg_up0 + avg_dn0;
         return (denom0 == 0.0f) ? 50.0f : (100.0f * avg_up0 / denom0);
     }
-
 
 
     const float log2_beta = __log2f(beta);
@@ -322,7 +303,6 @@ void uma_batch_f32(const float* __restrict__ prices,
                 var = fmaxf(var, 0.0f);
 
 
-
                 if (isfinite(var) && isfinite(mean)) {
                     const float diff = price_now - mean;
                     const float diff2 = diff * diff;
@@ -416,7 +396,6 @@ void uma_batch_f32(const float* __restrict__ prices,
             const int window_end = i + 1;
             mf = compute_rsi_last_warp(prices, window_start_rsi, window_end, len_r, lane, lanes, mask);
         }
-
 
 
         const float mf_scaled = fmaf(mf, 2.0f, -100.0f);
@@ -716,4 +695,3 @@ void uma_many_series_one_param_f32(const float* __restrict__ prices_tm,
         }
     }
 }
-

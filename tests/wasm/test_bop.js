@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -59,8 +58,6 @@ test('BOP partial params', () => {
 });
 
 test('BOP accuracy', async () => {
-
-
 
 
     const open = new Float64Array(testData.open);
@@ -248,7 +245,6 @@ test('BOP extreme values', () => {
     const close = new Float64Array([150.0, 1500.0, 15.0]);
 
     const result = wasm.bop_js(open, high, low, close);
-
 
 
     const expected = [
@@ -504,7 +500,6 @@ test('BOP with NaN in middle', () => {
     }
 
 
-
     if (!isNaN(result[99])) {
         assertClose(result[99], 0.25, 1e-10, "Value before NaN region");
     }
@@ -545,7 +540,6 @@ test('BOP with leading NaN', () => {
     for (let i = 0; i < nanPeriod; i++) {
         assert(isNaN(result[i]), `Expected NaN at index ${i}`);
     }
-
 
 
     const expectedValue = 0.25;

@@ -41,11 +41,6 @@ class TestEmv:
         assert not np.isnan(result[1])
 
 
-
-
-
-
-
         assert_close(result[1], 5.0, rtol=0.01)
 
     def test_emv_accuracy(self, test_data):

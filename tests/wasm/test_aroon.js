@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -79,8 +78,6 @@ test('Aroon accuracy', async () => {
         1e-2,
         "Aroon down last 5 values mismatch"
     );
-
-
 
 
 });
@@ -500,7 +497,6 @@ test('Aroon batch - new API error handling', () => {
         });
     }, /Invalid config/);
 });
-
 
 
 test.after(() => {

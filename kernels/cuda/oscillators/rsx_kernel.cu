@@ -1,14 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -22,8 +11,6 @@ static __device__ __forceinline__ float clamp_0_100(float x) {
     x = fmaxf(x, 0.0f);
     return x;
 }
-
-
 
 
 extern "C" __global__
@@ -59,10 +46,6 @@ void transpose_tm_to_rm_f32(const float* __restrict__ in_tm,
         }
     }
 }
-
-
-
-
 
 
 extern "C" __global__
@@ -159,10 +142,6 @@ void rsx_batch_tm_f32(const float* __restrict__ prices,
         out_tm[(size_t)t * (size_t)n_combos + combo] = y;
     }
 }
-
-
-
-
 
 
 extern "C" __global__
@@ -262,7 +241,6 @@ void rsx_batch_f32(const float* __restrict__ prices,
 }
 
 
-
 extern "C" __global__
 void rsx_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                    const int*   __restrict__ first_valids,
@@ -348,4 +326,3 @@ void rsx_many_series_one_param_f32(const float* __restrict__ prices_tm,
         out_tm[t * cols + s] = y;
     }
 }
-

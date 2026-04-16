@@ -15,7 +15,7 @@ __device__ inline bool valid_breadth_pair(double advancing, double declining) {
     double total = advancing + declining;
     return isfinite(total) && fabs(total) > EPSILON;
 }
-}  // namespace
+}
 
 extern "C" __global__ void decisionpoint_breadth_swenlin_trading_oscillator_batch_f64(
     const double* __restrict__ advancing,

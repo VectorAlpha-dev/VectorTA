@@ -79,8 +79,6 @@ describe('VWMACD WASM', () => {
             assert(isNaN(hist[0]));
 
 
-
-
             assert(!isNaN(macd[30]));
             assert(!isNaN(signal[34]));
             assert(!isNaN(hist[34]));

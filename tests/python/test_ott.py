@@ -41,7 +41,6 @@ class TestOtt:
         assert len(result) == len(close)
 
 
-
         assert_close(
             result[-5:],
             expected['last_5_values'],
@@ -63,8 +62,6 @@ class TestOtt:
             ma_type=expected['default_params']['ma_type']
         )
         assert len(result) == len(close)
-
-
 
 
         assert not any(np.isnan(result)), "Should not have NaN values with VAR period=2"
@@ -190,8 +187,6 @@ class TestOtt:
                 results[ma_type] = result
 
 
-
-
                 first_valid = next((i for i, val in enumerate(result) if not np.isnan(val)), len(result))
 
                 if ma_type not in ["VAR", "EMA", "WWMA"]:
@@ -205,7 +200,6 @@ class TestOtt:
 
             except Exception as e:
                 pytest.fail(f"Failed to calculate OTT with MA type {ma_type}: {str(e)}")
-
 
 
         start_idx = period + 10
@@ -252,7 +246,6 @@ class TestOtt:
         assert len(result) == len(close)
 
 
-
         assert not np.any(np.isnan(result)), "Should not have NaN values with VAR period=2"
 
     def test_ott_reinput(self, test_data):
@@ -280,7 +273,6 @@ class TestOtt:
             ma_type=params['ma_type']
         )
         assert len(second_result) == len(first_result)
-
 
 
         assert_close(
@@ -314,8 +306,6 @@ class TestOtt:
 
 
         assert len(batch_result) == len(stream_values)
-
-
 
 
         start_comparison = 100
@@ -377,7 +367,6 @@ class TestOtt:
 
         assert result['values'].shape[0] == 3
         assert result['values'].shape[1] == 100
-
 
 
         periods = [20, 25, 30]

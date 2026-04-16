@@ -77,4 +77,3 @@ class TestTsiCuda:
         gpu_tm = cp.asnumpy(cp.asarray(handle))
         assert gpu_tm.shape == data_tm.shape
         assert_close(gpu_tm, cpu_tm, rtol=2e-3, atol=2e-4, msg="TSI CUDA many-series vs CPU mismatch")
-

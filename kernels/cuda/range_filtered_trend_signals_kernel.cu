@@ -203,7 +203,7 @@ struct SuperTrendState {
     }
 };
 
-}  // namespace
+}
 
 extern "C" __global__ void range_filtered_trend_signals_batch_f64(
     const double* __restrict__ high,

@@ -92,4 +92,3 @@ class TestFisherCuda:
         g_sig = g_sig.reshape(rows, cols)
         assert_close(g_fish, cpu_fish, rtol=1e-4, atol=1e-5, msg="Fisher many-series mismatch")
         assert_close(g_sig, cpu_sig, rtol=1e-4, atol=1e-5, msg="Signal many-series mismatch")
-

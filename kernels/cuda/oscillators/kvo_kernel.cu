@@ -1,18 +1,8 @@
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 
 
-
-
 __device__ __forceinline__ float f32_nan() { return __int_as_float(0x7fffffff); }
-
 
 
 __device__ __forceinline__ void two_sum(float a, float b, float &s, float &e) {
@@ -53,7 +43,6 @@ __device__ __forceinline__ void ema_update_f2(f2 &ema, float x, float alpha)
     y_lo += p_lo;
     quick_two_sum(y_hi, y_lo, ema.hi, ema.lo);
 }
-
 
 
 __device__ __forceinline__ float rcp_nr(float c)
@@ -114,15 +103,6 @@ extern "C" __global__ void kvo_build_vf_f32(
         prev_dm = dm;
     }
 }
-
-
-
-
-
-
-
-
-
 
 
 __device__ __forceinline__ void warp_inclusive_scan_affine(float &A, float &B, unsigned lane, unsigned mask) {
@@ -208,10 +188,6 @@ extern "C" __global__ void kvo_batch_f32(
         }
     }
 }
-
-
-
-
 
 
 extern "C" __global__ void kvo_many_series_one_param_time_major_f32(

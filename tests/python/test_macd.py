@@ -135,8 +135,6 @@ class TestMacd:
             result = stream.update(value)
 
 
-
-
         assert result is None
 
 

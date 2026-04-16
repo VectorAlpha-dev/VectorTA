@@ -71,4 +71,3 @@ class TestVoscCuda:
 
         assert gpu_tm.shape == v_tm.shape
         assert_close(gpu_tm, cpu_tm, rtol=1e-4, atol=1e-5, msg="CUDA VOSC many-series mismatch")
-

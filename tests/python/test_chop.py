@@ -314,7 +314,5 @@ class TestChop:
             ta_indicators.chop(high, low, close, period=14, scalar=100.0, drift=1, kernel="invalid")
 
 
-
-
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

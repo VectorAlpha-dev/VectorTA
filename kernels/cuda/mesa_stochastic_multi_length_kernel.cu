@@ -122,7 +122,7 @@ struct RollingSmaState {
         return NAN;
     }
 };
-}  // namespace
+}
 
 extern "C" __global__ void mesa_stochastic_multi_length_batch_f64(
     const double* __restrict__ source,

@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -27,7 +18,6 @@ static __device__ __forceinline__ float qnan() {
 
     return __int_as_float(0x7fffffff);
 }
-
 
 
 static __device__ __forceinline__ void prefetch_L2(const void* p) {
@@ -73,7 +63,6 @@ void mwdx_batch_f32(const float* __restrict__ prices,
     for (int idx = threadIdx.x; idx < first_valid; idx += blockDim.x) {
         out[row_offset + idx] = qnan();
     }
-
 
 
     if (threadIdx.x == 0) {
@@ -136,8 +125,6 @@ void mwdx_many_series_one_param_f32(const float* __restrict__ prices_tm,
         }
     }
 }
-
-
 
 
 template<int TX, int TY>

@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -90,8 +89,6 @@ test('MAMA accuracy', async () => {
         assert(isFinite(mama[i]), `MAMA NaN at index ${i}`);
         assert(isFinite(fama[i]), `FAMA NaN at index ${i}`);
     }
-
-
 
 
     const mamaLast5 = mama.slice(-5);
@@ -261,7 +258,6 @@ test('MAMA batch', () => {
     assert.strictEqual(batch_result.fama.length, 9 * close.length);
 
 
-
 });
 
 test('MAMA different params', () => {
@@ -324,8 +320,6 @@ test('MAMA batch performance', () => {
     console.log(`Batch time: ${batchTime.toFixed(2)}ms, Single time: ${singleTime.toFixed(2)}ms`);
 
 
-
-
     const rows = batchResult.rows;
     const cols = close.length;
     if (!(Array.isArray(batchResult.combos) && batchResult.combos.length === rows)) {
@@ -337,7 +331,6 @@ test('MAMA batch performance', () => {
 });
 
 test('MAMA edge cases', () => {
-
 
 
     const data = new Float64Array(100);
@@ -410,7 +403,6 @@ test('MAMA warmup period calculation', () => {
 
     const result = wasm.mama(close, 0.5, 0.05);
     const { mama, fama } = splitMamaResult(result, close.length);
-
 
 
     for (let i = 0; i < 10; i++) {
@@ -647,7 +639,6 @@ test('MAMA FAMA relationship', () => {
 
     const result = wasm.mama(close, 0.5, 0.05);
     const { mama, fama } = splitMamaResult(result, close.length);
-
 
 
     let mamaMean = 0, famaMean = 0;

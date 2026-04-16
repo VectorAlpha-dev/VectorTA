@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -164,7 +163,6 @@ test('Decycler partial NaN input', () => {
     assert.strictEqual(result.length, data.length);
 
 
-
 });
 
 test('Decycler edge case k values', () => {
@@ -185,7 +183,6 @@ test('Decycler edge case k values', () => {
 
     const resultLarge = wasm.decycler_js(data, 10, 10.0);
     assert.strictEqual(resultLarge.length, data.length);
-
 
 
     const warmupEnd = 2;
@@ -316,7 +313,6 @@ test('Decycler batch multiple parameters', () => {
     }
 
 
-
     const rowIdx = 3;
     const rowStart = rowIdx * 50;
     const rowEnd = rowStart + 50;
@@ -338,8 +334,6 @@ test('Decycler batch invalid parameters', () => {
             k_range: [0.707, 0.707, 0]
         });
     }, /invalid.*period|empty.*grid|invalid.*range|not enough valid data/i);
-
-
 
 
     assert.throws(() => {
@@ -458,7 +452,6 @@ test('Decycler zero-copy separate buffers', () => {
 test('Decycler zero-copy error handling', () => {
 
 
-
     assert.throws(() => {
         wasm.decycler_into(0, 0, 10, 125, 0.707);
     }, /null pointer|invalid memory/i);
@@ -557,7 +550,6 @@ test('Decycler SIMD kernel consistency', () => {
 
 
     const autoResult = wasm.decycler_js(data, hp_period, k);
-
 
 
     assert.strictEqual(autoResult.length, data.length);

@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -145,7 +144,6 @@ test('UI different scalars', () => {
 
     const result2 = wasm.ui_js(close, 14, 200.0);
     assert.strictEqual(result2.length, close.length);
-
 
 
     const resultDefault = wasm.ui_js(close, 14, 100.0);
@@ -388,7 +386,6 @@ test('UI batch fast API', () => {
 
     const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, size);
     inView.set(data);
-
 
 
     const outSize = 6 * size;

@@ -82,4 +82,3 @@ class TestStddevCuda:
         gpu_tm = cp.asnumpy(cp.asarray(handle)).reshape((T, N))
 
         assert_close(gpu_tm, cpu_tm, rtol=1e-3, atol=1e-3, msg="CUDA stddev many-series mismatch")
-

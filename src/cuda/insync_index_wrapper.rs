@@ -102,15 +102,9 @@ impl CudaInsyncIndex {
             .map_err(|_| CudaInsyncIndexError::MissingKernelSymbol {
                 name: "insync_index_batch_f64",
             })?;
-        let cpu = insync_index_batch_with_kernel(
-            high,
-            low,
-            close,
-            volume,
-            sweep,
-            Kernel::ScalarBatch,
-        )
-        .map_err(|e| CudaInsyncIndexError::InvalidInput(e.to_string()))?;
+        let cpu =
+            insync_index_batch_with_kernel(high, low, close, volume, sweep, Kernel::ScalarBatch)
+                .map_err(|e| CudaInsyncIndexError::InvalidInput(e.to_string()))?;
 
         Ok(CudaInsyncIndexBatchResult {
             outputs: InsyncIndexDeviceOutputs {

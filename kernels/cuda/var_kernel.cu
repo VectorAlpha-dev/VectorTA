@@ -1,7 +1,3 @@
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -39,10 +35,6 @@ __device__ __forceinline__ df32 df_sub(df32 a, df32 b) {
     float t2 = e - (t1 - s);
     return {t1, t2};
 }
-
-
-
-
 
 
 #ifndef VAR_COMBO_TILE
@@ -173,9 +165,6 @@ extern "C" __global__ void var_batch_f32(
         t += stride;
     }
 }
-
-
-
 
 
 extern "C" __global__ void var_many_series_one_param_f32(

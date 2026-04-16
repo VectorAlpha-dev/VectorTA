@@ -103,4 +103,3 @@ class TestAdoscCuda:
 
         assert gpu_tm.shape == cpu_tm.shape
         assert_close(gpu_tm, cpu_tm, rtol=2e-3, atol=1e-5, msg="ADOSC CUDA TM vs CPU mismatch")
-

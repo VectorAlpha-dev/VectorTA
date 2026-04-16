@@ -115,7 +115,7 @@ struct WmaState {
         return weighted_sum / denom;
     }
 };
-}  // namespace
+}
 
 extern "C" __global__ void relative_strength_index_wave_indicator_batch_f64(
     const double* __restrict__ source,

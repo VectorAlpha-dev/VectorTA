@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -128,8 +127,6 @@ test('MINMAX basic slices', () => {
     assert.strictEqual(result.last_max.length, 8);
 
 
-
-
     assert(!isNaN(result.is_min[2]), 'Should have found a minimum at index 2');
     assert(!isNaN(result.is_max[2]), 'Should have found a maximum at index 2');
 });
@@ -160,7 +157,6 @@ test('MINMAX batch processing - improved validation', () => {
 
         for (let comboIdx = 0; comboIdx < result.combos.length; comboIdx++) {
             const order = result.combos[comboIdx].order || 3;
-
 
 
             const batchIsMin = result.values.slice(

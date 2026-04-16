@@ -1,14 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -20,8 +9,6 @@
 #ifndef WARP_SIZE
 #define WARP_SIZE 32
 #endif
-
-
 
 
 __device__ __forceinline__
@@ -49,7 +36,6 @@ void warp_argmaxmin_earliest(float &max_v, int &max_i, float &min_v, int &min_i,
         if (nv < min_v || (nv == min_v && ni < min_i)) { min_v = nv; min_i = ni; }
     }
 }
-
 
 
 extern "C" __global__
@@ -105,7 +91,6 @@ void aroonosc_batch_f32(const float* __restrict__ high,
         int   min_i = start;
 
 
-
         for (int j = start + lane; j <= t; j += WARP_SIZE) {
             const float h = high[j];
             const float l = low[j];
@@ -124,8 +109,6 @@ void aroonosc_batch_f32(const float* __restrict__ high,
         }
     }
 }
-
-
 
 
 extern "C" __global__
@@ -182,4 +165,3 @@ void aroonosc_many_series_one_param_f32(const float* __restrict__ high_tm,
         out_tm[t * stride + s] = v;
     }
 }
-

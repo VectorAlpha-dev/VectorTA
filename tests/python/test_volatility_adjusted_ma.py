@@ -114,8 +114,6 @@ class TestVama:
         assert len(result) == len(data), "Output length should match input"
 
 
-
-
         warmup = max(2, 2) - 1
         if warmup > 0:
             assert np.all(np.isnan(result[:warmup])), f"Expected NaN in warmup [0:{warmup})"
@@ -268,7 +266,6 @@ class TestVama:
         assert len(result['base_periods']) == 1
         assert len(result['vol_periods']) == 1
         assert result['values'].shape == (1, len(close))
-
 
 
         batch_row = result['values'][0]

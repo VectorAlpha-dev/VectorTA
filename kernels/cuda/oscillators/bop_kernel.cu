@@ -1,8 +1,3 @@
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -103,7 +98,6 @@ extern "C" __global__ void bop_many_series_one_param_f32(
     float*       pd = out_tm   + (size_t)fv * num_series + s;
 
 
-
     #pragma unroll 4
     for (int t = fv; t < series_len; ++t) {
         const float v = bop_core(*po, *ph, *pl, *pc);
@@ -112,4 +106,3 @@ extern "C" __global__ void bop_many_series_one_param_f32(
         po += num_series; ph += num_series; pl += num_series; pc += num_series; pd += num_series;
     }
 }
-

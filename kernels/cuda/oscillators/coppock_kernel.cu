@@ -1,11 +1,3 @@
-
-
-
-
-
-
-
-
 #ifndef CUDA_COPPOCK_F32_H_
 #define CUDA_COPPOCK_F32_H_
 
@@ -13,7 +5,6 @@
 #include <cuda_runtime.h>
 
 #define XNAN __int_as_float(0x7fffffff)
-
 
 
 __device__ __forceinline__ bool any_nan3(float a, float b, float c) {
@@ -51,8 +42,6 @@ extern "C" __global__ void coppock_build_inverse_f32(
     if (idx >= len) return;
     inv[idx] = 1.0f / price[idx];
 }
-
-
 
 
 extern "C" __global__ void coppock_batch_f32(
@@ -195,11 +184,6 @@ extern "C" __global__ void coppock_batch_f32(
 }
 
 
-
-
-
-
-
 extern "C" __global__ void coppock_batch_time_parallel_f32(
     const float* __restrict__ price,
     const float* __restrict__ inv,
@@ -260,8 +244,6 @@ extern "C" __global__ void coppock_batch_time_parallel_f32(
         t += stride;
     }
 }
-
-
 
 
 extern "C" __global__ void coppock_many_series_one_param_f32(

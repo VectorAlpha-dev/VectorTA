@@ -1,19 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -63,7 +47,6 @@ extern "C" __global__ void reverse_rsi_batch_f32(
 #if __CUDA_ARCH__ >= 800
 
 
-
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     const bool active = (combo < n_combos);
 
@@ -109,12 +92,7 @@ extern "C" __global__ void reverse_rsi_batch_f32(
     }
 
 
-
-
     constexpr int TILE = 256;
-
-
-
 
 
     extern __shared__ float smem[];
@@ -260,7 +238,6 @@ extern "C" __global__ void reverse_rsi_batch_f32(
     const float rs_coeff  = n_minus_1 * rs_target;
 
 
-
     for (int i = 0; i < warm_idx; ++i) out_row[i] = RRSI_NAN;
 
     float sum_up = 0.f, c_up = 0.f;
@@ -307,7 +284,6 @@ extern "C" __global__ void reverse_rsi_batch_f32(
 }
 
 
-
 extern "C" __global__ void reverse_rsi_many_series_one_param_f32(
     const float* __restrict__ prices_tm,
     const int*   __restrict__ first_valids,
@@ -342,7 +318,6 @@ extern "C" __global__ void reverse_rsi_many_series_one_param_f32(
         float* o = out_tm + series;
         for (int r = 0; r < warm_idx; ++r, o += num_series) *o = RRSI_NAN;
     }
-
 
 
     const float nf = static_cast<float>(rsi_length);
@@ -400,4 +375,3 @@ extern "C" __global__ void reverse_rsi_many_series_one_param_f32(
         prevd = cf;
     }
 }
-

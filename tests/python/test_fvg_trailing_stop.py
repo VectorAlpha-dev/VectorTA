@@ -38,8 +38,6 @@ class TestFvgTrailingStop:
         )
 
 
-
-
         expected_lower = [55643.00, 55643.00, 55643.00, 55643.00, 55643.00]
         expected_lower_ts = [60223.33333333, 60223.33333333, 60223.33333333, 60223.33333333, 60223.33333333]
 
@@ -170,10 +168,6 @@ class TestFvgTrailingStop:
         expected_warmup = 2 + smoothing_length - 1
 
 
-
-
-
-
         first_non_nan = None
         for i in range(len(upper)):
             if not np.isnan(upper[i]) or not np.isnan(lower[i]) or \
@@ -295,7 +289,6 @@ class TestFvgTrailingStop:
             smoothing_length=9,
             reset_on_cross=False
         )
-
 
 
         np.testing.assert_array_almost_equal(result['values'][0], single_upper, decimal=8)

@@ -18,7 +18,7 @@ __device__ inline double ring_get3(const double* buf, int center, int off) {
     }
     return buf[idx];
 }
-}  // namespace
+}
 
 extern "C" __global__ void ehlers_simple_cycle_indicator_batch_f64(
     const double* __restrict__ data,

@@ -53,8 +53,6 @@ class TestHma:
         )
 
 
-
-
     def test_hma_default_candles(self, test_data):
         """Test HMA with default parameters - mirrors check_hma_default_candles"""
         close = test_data['close']
@@ -63,8 +61,6 @@ class TestHma:
 
         result = ta_indicators.hma(close, expected['default_params']['period'])
         assert len(result) == len(close)
-
-
 
 
     def test_hma_zero_period(self):
@@ -253,7 +249,6 @@ class TestHma:
     def test_hma_not_enough_valid_data(self):
         """Test HMA with insufficient valid data after NaN prefix"""
         data = np.array([np.nan, np.nan, 1.0, 2.0, 3.0])
-
 
 
         with pytest.raises(ValueError, match="Not enough valid data"):

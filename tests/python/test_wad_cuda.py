@@ -54,4 +54,3 @@ class TestWadCuda:
         handle = ti.wad_cuda_batch_dev(high.astype(np.float32), low.astype(np.float32), close.astype(np.float32))
         gpu_vals = cp.asnumpy(cp.asarray(handle)).reshape(cpu_vals.shape)
         assert_close(gpu_vals, cpu_vals, rtol=3e-4, atol=3e-4, msg="CUDA WAD mismatch")
-

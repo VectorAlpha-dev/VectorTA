@@ -103,4 +103,3 @@ class TestMacdCuda:
         assert_close(macd_gpu, macd_cpu, rtol=1e-4, atol=1e-5)
         assert_close(sig_gpu, sig_cpu, rtol=1e-4, atol=1e-5)
         assert_close(hist_gpu, hist_cpu, rtol=1e-4, atol=1e-5)
-

@@ -313,15 +313,6 @@ class TestMwdx:
         assert len(result) == len(data)
 
 
-
-
-
-
-
-
-
-
-
         assert np.isnan(result[0])
         assert np.isnan(result[1])
 

@@ -156,7 +156,6 @@ class TestKeltner:
         assert len(upper) == len(data)
 
 
-
         try:
             upper, middle, lower = ta_indicators.keltner(
                 data, data, data, data,
@@ -354,7 +353,6 @@ class TestKeltner:
         assert result['multipliers'][0] == 1.0
         assert result['periods'][-1] == 30
         assert result['multipliers'][-1] == 3.0
-
 
 
         single_upper, single_middle, single_lower = ta_indicators.keltner(

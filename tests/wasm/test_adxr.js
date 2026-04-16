@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -275,10 +274,6 @@ test('ADXR batch full parameter sweep', () => {
         const rowData = batchResult.slice(rowStart, rowStart + 50);
 
 
-
-
-
-
         let firstValidIndex = -1;
         for (let i = 0; i < 50; i++) {
             if (!isNaN(rowData[i])) {
@@ -464,7 +459,6 @@ test('ADXR batch - new API error handling', () => {
         });
     }, /Invalid config/);
 });
-
 
 
 test.after(() => {

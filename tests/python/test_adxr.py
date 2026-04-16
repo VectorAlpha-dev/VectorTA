@@ -58,8 +58,6 @@ class TestAdxr:
         )
 
 
-
-
         try:
             compare_with_rust('adxr', result, 'hlc', expected['default_params'])
         except AssertionError as e:
@@ -151,7 +149,6 @@ class TestAdxr:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
 
 
-
         expected_warmup = 2 * 14
         assert np.all(np.isnan(result[:expected_warmup])), "Expected NaN in warmup period"
 
@@ -177,9 +174,6 @@ class TestAdxr:
 
 
         assert len(batch_result) == len(stream_values)
-
-
-
 
 
     def test_adxr_batch(self, test_data):
@@ -264,7 +258,6 @@ class TestAdxr:
 
         result_auto = ta_indicators.adxr(high, low, close, period=14)
         assert len(result_auto) == 100
-
 
 
         mask = ~(np.isnan(result_scalar) | np.isnan(result_auto))

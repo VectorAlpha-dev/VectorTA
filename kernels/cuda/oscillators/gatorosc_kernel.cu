@@ -1,28 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -43,12 +18,9 @@ static __forceinline__ __device__ float fin_or_prev(float x, float prev) {
 }
 
 
-
 static __forceinline__ __device__ float ema_update_f32(float ema, float a, float x) {
     return fmaf(a, (x - ema), ema);
 }
-
-
 
 
 struct dsfloat { float hi, lo; };
@@ -97,7 +69,6 @@ static __forceinline__ __device__ void ema_update_ds(dsfloat &s, float a, float 
 #endif
 
 
-
 extern "C" __global__ void gatorosc_batch_f32(
     const float* __restrict__ data,
     const int    len,
@@ -139,7 +110,6 @@ extern "C" __global__ void gatorosc_batch_f32(
     float* __restrict__ lchn  = out_lower_change + (size_t)combo * len;
 
 
-
     const int lane = threadIdx.x & 31;
     if (threadIdx.x >= 32) return;
     const unsigned mask = 0xffffffffu;
@@ -155,7 +125,6 @@ extern "C" __global__ void gatorosc_batch_f32(
     float* tring = s + ring_len_max;
     float* lring = s + 2 * ring_len_max;
     const int rlen = ring_len_max;
-
 
 
     const int maxlen = max(jl, max(tl, ll));
@@ -237,8 +206,6 @@ extern "C" __global__ void gatorosc_batch_f32(
     }
 
 
-
-
     float seed = isfinite(data[first_valid]) ? data[first_valid] : 0.0f;
 
 
@@ -265,7 +232,6 @@ extern "C" __global__ void gatorosc_batch_f32(
 
     float prev_u = 0.0f;
     float prev_lo = 0.0f;
-
 
 
     int rbase = 0;
@@ -392,7 +358,6 @@ extern "C" __global__ void gatorosc_batch_f32(
         if (rbase == rlen) rbase = 0;
     }
 }
-
 
 
 extern "C" __global__ void gatorosc_many_series_one_param_f32(

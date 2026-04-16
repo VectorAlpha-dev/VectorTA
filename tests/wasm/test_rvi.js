@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -336,8 +335,6 @@ test('RVI streaming (not fully supported)', () => {
 
 
     const value = 100.0;
-
-
 
 
     assert.doesNotThrow(() => {

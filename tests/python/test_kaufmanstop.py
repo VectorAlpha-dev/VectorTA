@@ -49,8 +49,6 @@ class TestKaufmanstop:
         )
 
 
-
-
     def test_kaufmanstop_zero_period(self):
         """Test that kaufmanstop fails with zero period"""
         high = np.array([10.0, 20.0, 30.0])
@@ -368,7 +366,6 @@ class TestKaufmanstop:
 
 
         assert len(results) >= 1
-
 
 
         unique_results = []

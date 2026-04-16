@@ -1,20 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 
@@ -23,13 +6,9 @@
 #endif
 
 
-
-
 __device__ __forceinline__ float qnan() {
     return __int_as_float(0x7fc00000);
 }
-
-
 
 
 template <typename T>
@@ -81,7 +60,6 @@ struct CompSum {
 };
 
 
-
 struct CompEMA {
     float s;
     float c;
@@ -98,7 +76,6 @@ struct CompEMA {
     }
     __device__ __forceinline__ float value() const { return s + c; }
 };
-
 
 
 extern "C" __global__
@@ -183,7 +160,6 @@ void dm_batch_f32(const float* __restrict__ high,
         minus_row[i] = sminus.value();
     }
 }
-
 
 
 extern "C" __global__

@@ -29,7 +29,6 @@ class TestTilson:
         assert len(result) == len(close)
 
 
-
         assert_close(
             result[-5:],
             expected['last_5_values'],
@@ -37,7 +36,6 @@ class TestTilson:
             atol=1e-8,
             msg="Tilson last 5 values mismatch"
         )
-
 
 
         compare_with_rust('tilson', result, 'close', expected['default_params'], rtol=0.0, atol=1e-8)
@@ -165,7 +163,6 @@ class TestTilson:
         result = tilson(data, period, volume_factor)
 
 
-
         assert np.isnan(result[0:14]).all()
         assert not np.isnan(result[14:]).any()
 
@@ -211,8 +208,6 @@ class TestTilson:
 
 
         assert len(batch_result) == len(stream_values)
-
-
 
 
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
@@ -435,7 +430,6 @@ class TestTilson:
         vol_0 = np.std(np.diff(result_0[warmup:]))
         vol_5 = np.std(np.diff(result_5[warmup:]))
         vol_9 = np.std(np.diff(result_9[warmup:]))
-
 
 
         assert not np.allclose(result_0[warmup:], result_5[warmup:])

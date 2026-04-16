@@ -1,14 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -177,7 +166,6 @@ extern "C" __global__ void alphatrend_batch_f32(
 }
 
 
-
 extern "C" __global__ void alphatrend_many_series_one_param_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
@@ -270,7 +258,6 @@ extern "C" __global__ void alphatrend_many_series_one_param_f32(
         }
     }
 }
-
 
 
 extern "C" __global__ void atr_table_from_tr_f32(
@@ -434,4 +421,3 @@ extern "C" __global__ void alphatrend_batch_from_precomputed_f32(
         }
     }
 }
-

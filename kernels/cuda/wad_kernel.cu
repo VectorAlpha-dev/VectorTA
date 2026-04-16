@@ -1,24 +1,6 @@
-
-
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 #include <stdint.h>
-
-
-
-
-
-
 
 
 struct KBNAcc32 {
@@ -38,7 +20,6 @@ struct KBNAcc32 {
 };
 
 
-
 __device__ __forceinline__ float wad_step(float hi, float lo, float c, float pc) {
   const float trh = (pc > hi) ? pc : hi;
   const float trl = (pc < lo) ? pc : lo;
@@ -48,10 +29,6 @@ __device__ __forceinline__ float wad_step(float hi, float lo, float c, float pc)
   else if (c < pc)  ad = c - trh;
   return ad;
 }
-
-
-
-
 
 
 extern "C" __global__ void wad_batch_f32(
@@ -87,9 +64,6 @@ extern "C" __global__ void wad_batch_f32(
 }
 
 
-
-
-
 extern "C" __global__ void wad_many_series_one_param_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
@@ -120,9 +94,6 @@ extern "C" __global__ void wad_many_series_one_param_f32(
     }
   }
 }
-
-
-
 
 
 extern "C" __global__ void wad_series_f32(
@@ -156,14 +127,6 @@ extern "C" __global__ void wad_series_f32(
     }
   }
 }
-
-
-
-
-
-
-
-
 
 
 extern "C" __global__ void wad_compute_single_row_f32(

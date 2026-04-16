@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -387,7 +386,6 @@ test('PRB insufficient data', () => {
         'Should throw error for insufficient data'
     );
 });
-
 
 
 test('PRB reinput', () => {

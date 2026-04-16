@@ -61,7 +61,6 @@ class TestDm:
         assert len(minus) == len(low)
 
 
-
         assert_close(
             plus[-5:],
             expected_plus,
@@ -143,9 +142,6 @@ class TestDm:
         plus, minus = ta_indicators.dm(high, low, period=14)
         assert len(plus) == len(high)
         assert len(minus) == len(low)
-
-
-
 
 
         assert np.all(np.isnan(plus[:13])), "Expected NaN in warmup period for plus"
@@ -233,7 +229,6 @@ class TestDm:
             3025.796762053462,
             3493.668421906786,
         ]
-
 
 
         assert_close(

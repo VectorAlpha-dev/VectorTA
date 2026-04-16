@@ -60,4 +60,3 @@ def test_aroonosc_cuda_many_series_one_param_shapes():
     low = base - 0.5
     handle = ti.aroonosc_cuda_many_series_one_param_dev(high, low, 14, device_id=0)
     assert hasattr(handle, "__cuda_array_interface__")
-

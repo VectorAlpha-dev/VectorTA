@@ -1,19 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -31,7 +15,6 @@
 #ifndef UNLIKELY
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
-
 
 
 static __device__ __forceinline__ void two_diff_f32(float a, float b, float &s, float &e) {
@@ -120,7 +103,6 @@ extern "C" __global__ void emv_batch_f32(
 }
 
 
-
 extern "C" __global__ void emv_many_series_one_param_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
@@ -179,4 +161,3 @@ extern "C" __global__ void emv_many_series_one_param_f32(
         last_mid = current_mid;
     }
 }
-

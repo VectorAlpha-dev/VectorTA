@@ -1,6 +1,3 @@
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -101,11 +98,6 @@ void wilders_batch_f32(const float* __restrict__ prices,
 }
 
 
-
-
-
-
-
 extern "C" __global__
 void wilders_batch_warp_scan_f32(const float* __restrict__ prices,
                                  const int* __restrict__ periods,
@@ -181,11 +173,6 @@ void wilders_batch_warp_scan_f32(const float* __restrict__ prices,
         y_prev = __shfl_sync(mask, y, last_lane);
     }
 }
-
-
-
-
-
 
 
 extern "C" __global__

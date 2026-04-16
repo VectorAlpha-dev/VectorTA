@@ -88,7 +88,6 @@ class TestFosc:
         expected_warmup_end = first_valid + period - 1
 
 
-
         for i in range(min(expected_warmup_end, len(result))):
             assert np.isnan(result[i]), f"Expected NaN at warmup index {i} (first_valid={first_valid}, period={period})"
 
@@ -113,13 +112,9 @@ class TestFosc:
         first_valid_idx = 2
 
 
-
-
-
         min_warmup = first_valid_idx + period - 1
         for i in range(min_warmup):
             assert np.isnan(result[i]), f"Expected NaN at index {i} during minimum warmup"
-
 
 
         has_valid = any(not np.isnan(v) for v in result)
@@ -196,9 +191,6 @@ class TestFosc:
 
 
         assert len(batch_result) == len(stream_values), "Result lengths should match"
-
-
-
 
 
         stream_start = next((i for i, v in enumerate(stream_values) if not np.isnan(v)), len(stream_values))
@@ -356,7 +348,6 @@ class TestFosc:
         result = ta_indicators.fosc(constant_data, period=5)
 
 
-
         for i in range(6, len(result)):
             if not np.isnan(result[i]):
                 assert abs(result[i]) < 1e-6, f"FOSC should be ~0 for constant data at index {i}"
@@ -364,7 +355,6 @@ class TestFosc:
 
         linear_data = np.arange(1.0, 21.0)
         result = ta_indicators.fosc(linear_data, period=5)
-
 
 
         valid_values = [v for i, v in enumerate(result[5:], 5) if not np.isnan(v)]

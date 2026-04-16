@@ -1,10 +1,3 @@
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -63,7 +56,6 @@ extern "C" __global__ void dti_build_x_ax_f32(
     x[idx] = v;
     ax[idx] = fabsf(v);
 }
-
 
 
 extern "C" __global__ void dti_batch_f32(
@@ -125,7 +117,6 @@ extern "C" __global__ void dti_batch_f32(
         }
     }
 }
-
 
 
 extern "C" __global__ void dti_many_series_one_param_f32(

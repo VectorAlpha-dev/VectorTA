@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -379,7 +378,6 @@ test('FRAMA batch performance test', () => {
 
     console.log(`  FRAMA Batch time: ${batchTime}ms, Single calls time: ${singleTime}ms`);
 });
-
 
 
 test.after(() => {

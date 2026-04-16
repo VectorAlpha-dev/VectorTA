@@ -1,9 +1,3 @@
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -21,11 +15,6 @@ static __device__ __forceinline__ float clamp_rsi(float x) {
     x = fmaxf(0.0f, x);
     return x;
 }
-
-
-
-
-
 
 
 extern "C" __global__
@@ -131,7 +120,6 @@ void rsi_batch_f32(const float* __restrict__ prices,
         const unsigned invalid_mask = __ballot_sync(mask, (t < series_len) && (!ok));
 
 
-
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float A_prev  = __shfl_up_sync(mask, A, offset);
             const float Bg_prev = __shfl_up_sync(mask, Bg, offset);
@@ -184,9 +172,6 @@ void rsi_batch_f32(const float* __restrict__ prices,
         avg_l = __shfl_sync(mask, yl, last_lane);
     }
 }
-
-
-
 
 
 extern "C" __global__

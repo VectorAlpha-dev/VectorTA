@@ -86,13 +86,19 @@ fn ict_propulsion_block_cuda_matches_cpu() -> Result<(), Box<dyn std::error::Err
     assert_device_matches(&cpu.bullish_low, &result.outputs.bullish_low.buf)?;
     assert_device_matches(&cpu.bullish_kind, &result.outputs.bullish_kind.buf)?;
     assert_device_matches(&cpu.bullish_active, &result.outputs.bullish_active.buf)?;
-    assert_device_matches(&cpu.bullish_mitigated, &result.outputs.bullish_mitigated.buf)?;
+    assert_device_matches(
+        &cpu.bullish_mitigated,
+        &result.outputs.bullish_mitigated.buf,
+    )?;
     assert_device_matches(&cpu.bullish_new, &result.outputs.bullish_new.buf)?;
     assert_device_matches(&cpu.bearish_high, &result.outputs.bearish_high.buf)?;
     assert_device_matches(&cpu.bearish_low, &result.outputs.bearish_low.buf)?;
     assert_device_matches(&cpu.bearish_kind, &result.outputs.bearish_kind.buf)?;
     assert_device_matches(&cpu.bearish_active, &result.outputs.bearish_active.buf)?;
-    assert_device_matches(&cpu.bearish_mitigated, &result.outputs.bearish_mitigated.buf)?;
+    assert_device_matches(
+        &cpu.bearish_mitigated,
+        &result.outputs.bearish_mitigated.buf,
+    )?;
     assert_device_matches(&cpu.bearish_new, &result.outputs.bearish_new.buf)?;
     Ok(())
 }

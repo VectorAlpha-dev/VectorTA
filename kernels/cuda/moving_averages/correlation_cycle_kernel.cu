@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -19,11 +10,6 @@
 #endif
 
 __device__ __forceinline__ float sanitize_nan(float x) { return isnan(x) ? 0.f : x; }
-
-
-
-
-
 
 
 extern "C" __global__ void correlation_cycle_batch_f32_ria(
@@ -159,7 +145,6 @@ extern "C" __global__ void correlation_cycle_state_batch_f32(
         t += stride;
     }
 }
-
 
 
 extern "C" __global__ void correlation_cycle_many_series_one_param_f32_ria(

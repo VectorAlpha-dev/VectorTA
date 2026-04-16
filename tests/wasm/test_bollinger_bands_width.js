@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -287,7 +286,6 @@ test('BBW batch metadata', () => {
         1.5, 2.0, 0.5,
         2.0, 3.0, 1.0
     );
-
 
 
     assert.strictEqual(metadata.length, 8 * 3);

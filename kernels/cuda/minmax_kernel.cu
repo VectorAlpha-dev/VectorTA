@@ -1,18 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -185,11 +170,6 @@ void minmax_many_series_one_param_time_major_f32(const float* __restrict__ high_
 }
 
 
-
-
-
-
-
 #ifndef WARP_SIZE
 #define WARP_SIZE 32
 #endif
@@ -237,7 +217,6 @@ uint8_t rmq_min_u8(const uint8_t* __restrict__ st, int series_len, int l, int r)
     const uint8_t b = st[offset + r0];
     return min_u8(a, b);
 }
-
 
 
 extern "C" __global__
@@ -324,8 +303,6 @@ void minmax_batch_rmq_f32(const float* __restrict__ high,
         }
         return;
     }
-
-
 
 
     const unsigned ku = (unsigned)k;

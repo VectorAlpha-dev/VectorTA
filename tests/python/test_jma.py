@@ -49,7 +49,6 @@ class TestJma:
         assert len(result) == len(close)
 
 
-
         assert_close(
             result[-5:],
             expected['last_5_values'],
@@ -68,8 +67,6 @@ class TestJma:
 
         result = ta_indicators.jma(close, 7, 50.0, 2)
         assert len(result) == len(close)
-
-
 
 
     def test_jma_zero_period(self):
@@ -228,7 +225,6 @@ class TestJma:
             rtol=1e-9,
             err_msg="Batch first row mismatch"
         )
-
 
 
         for i in range(27):

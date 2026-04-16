@@ -65,7 +65,6 @@ class TestCci:
         assert len(result) == len(hlc3)
 
 
-
         assert_close(
             result[-5:],
             expected['last_5_values'],
@@ -134,7 +133,6 @@ class TestCci:
 
         second_result = ta_indicators.cci(first_result, period=14)
         assert len(second_result) == len(first_result)
-
 
 
         if len(second_result) > 28:
@@ -207,7 +205,6 @@ class TestCci:
 
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['cci']['last_5_values']
-
 
 
         assert_close(

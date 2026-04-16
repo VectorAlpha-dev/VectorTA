@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -54,7 +53,6 @@ test('MEAN_AD default params', () => {
     assert.strictEqual(result.length, testData.close.length, 'Output length mismatch');
 
 
-
     for (let i = 0; i < 8; i++) {
         assert(isNaN(result[i]), `Expected NaN at index ${i}`);
     }
@@ -105,7 +103,6 @@ test('MEAN_AD fast API', () => {
         const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, data.length);
 
         assertArrayClose(result, expected, 1e-10, 'Fast API mismatch');
-
 
 
         const memoryForReset = new Float64Array(wasm.__wasm.memory.buffer, inPtr, data.length);

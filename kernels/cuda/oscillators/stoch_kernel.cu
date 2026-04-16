@@ -1,18 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -81,7 +66,6 @@ void stoch_k_raw_from_hhll_f32(const float* __restrict__ close,
         }
     }
 }
-
 
 
 extern "C" __global__ __launch_bounds__(256, 2)
@@ -286,8 +270,6 @@ void pack_row_broadcast_rowmajor_f32(const float* __restrict__ src,
         }
     }
 }
-
-
 
 
 extern "C" __global__

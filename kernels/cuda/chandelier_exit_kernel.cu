@@ -1,10 +1,3 @@
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math_constants.h>
 
@@ -121,7 +114,6 @@ extern "C" __global__ void chandelier_exit_batch_f32(
                     }
                 }
             }
-
 
 
             const float x_max = use_close_flag ? c : h;
@@ -394,4 +386,3 @@ extern "C" __global__ void chandelier_exit_many_series_one_param_time_major_f32(
         }
     }
 }
-

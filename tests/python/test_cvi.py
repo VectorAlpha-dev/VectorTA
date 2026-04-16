@@ -61,8 +61,6 @@ class TestCvi:
         )
 
 
-
-
     def test_cvi_default_candles(self, test_data):
         """Test CVI with default parameters - mirrors check_cvi_input_with_default_candles"""
         high = test_data['high']
@@ -138,7 +136,6 @@ class TestCvi:
         batch_result = ta_indicators.cvi(high, low, period=period)
 
 
-
         stream = ta_indicators.CviStream(
             period=period,
             initial_high=high[0],
@@ -156,11 +153,6 @@ class TestCvi:
 
 
         assert len(batch_result) == len(stream_values)
-
-
-
-
-
 
 
         first_valid_stream = -1
@@ -183,8 +175,6 @@ class TestCvi:
 
         expected_batch_warmup = 2 * period - 1
         assert first_valid_batch == expected_batch_warmup, f"Batch warmup mismatch: {first_valid_batch} vs {expected_batch_warmup}"
-
-
 
 
     def test_cvi_batch_single_parameter(self, test_data):
@@ -261,9 +251,6 @@ class TestCvi:
             low,
             period_range=(5, 10, 5)
         )
-
-
-
 
 
         row1 = result['values'][0]

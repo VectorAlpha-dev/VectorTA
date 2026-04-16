@@ -1,15 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -67,7 +55,6 @@ __device__ inline float willr_close_only(const float* __restrict__ close,
     return 60.f * (close[idx] - hi) / rng + 80.f;
 }
 }
-
 
 
 extern "C" __global__ void mod_god_mode_batch_f32(
@@ -505,7 +492,6 @@ extern "C" __global__ void mod_god_mode_many_series_one_param_time_major_f32(
 }
 
 
-
 #ifndef MGM_RING_KCAP
 
 
@@ -617,7 +603,6 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
     p += sizeof(int) * cap * blockDim.x;
 
     int* dq_min_base = reinterpret_cast<int*>(p);
-
 
 
     float*       rsi_ring  = rsi_base     + tid * cap;
@@ -919,4 +904,3 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
 }
 
 }
-

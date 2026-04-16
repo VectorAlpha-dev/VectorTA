@@ -2,8 +2,7 @@
 
 use crate::indicators::vdubus_divergence_wave_pattern_generator::{
     vdubus_divergence_wave_pattern_generator_batch_with_kernel,
-    VdubusDivergenceWavePatternGeneratorBatchRange,
-    VdubusDivergenceWavePatternGeneratorParams,
+    VdubusDivergenceWavePatternGeneratorBatchRange, VdubusDivergenceWavePatternGeneratorParams,
 };
 use crate::utilities::enums::Kernel;
 use cust::context::Context;
@@ -109,15 +108,17 @@ impl CudaVdubusDivergenceWavePatternGenerator {
         low: &[f64],
         close: &[f64],
         sweep: &VdubusDivergenceWavePatternGeneratorBatchRange,
-    ) -> Result<CudaVdubusDivergenceWavePatternGeneratorBatchResult, CudaVdubusDivergenceWavePatternGeneratorError>
-    {
+    ) -> Result<
+        CudaVdubusDivergenceWavePatternGeneratorBatchResult,
+        CudaVdubusDivergenceWavePatternGeneratorError,
+    > {
         self.module
             .get_function("vdubus_divergence_wave_pattern_generator_batch_f64")
-            .map_err(|_| {
-                CudaVdubusDivergenceWavePatternGeneratorError::MissingKernelSymbol {
+            .map_err(
+                |_| CudaVdubusDivergenceWavePatternGeneratorError::MissingKernelSymbol {
                     name: "vdubus_divergence_wave_pattern_generator_batch_f64",
-                }
-            })?;
+                },
+            )?;
         let cpu = vdubus_divergence_wave_pattern_generator_batch_with_kernel(
             high,
             low,

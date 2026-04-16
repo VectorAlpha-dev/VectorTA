@@ -157,7 +157,6 @@ class TestHighPass2Pole:
         assert len(result) == len(close)
 
 
-
         for i in range(len(result)):
             assert not np.isnan(result[i]), f"Unexpected NaN at index {i}"
 
@@ -179,8 +178,6 @@ class TestHighPass2Pole:
             stream_results.append(result if result is not None else np.nan)
 
         stream_results = np.array(stream_results)
-
-
 
 
         assert len(stream_results) == len(batch_result)
@@ -309,7 +306,6 @@ class TestHighPass2Pole:
                 break
 
 
-
         assert first_valid == 3, f"First valid at {first_valid}, expected 3"
 
     def test_highpass2_different_k_values(self, test_data):
@@ -321,7 +317,6 @@ class TestHighPass2Pole:
         for k in [0.1, 0.3, 0.5, 0.707, 0.9]:
             result = ta_indicators.highpass_2_pole(close, period, k)
             assert len(result) == len(close)
-
 
 
             for i in range(len(result)):

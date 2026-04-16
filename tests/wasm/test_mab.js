@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -110,7 +109,6 @@ test('MAB accuracy', async () => {
     );
 
 
-
 });
 
 test('MAB default candles', () => {
@@ -177,10 +175,6 @@ test('MAB NaN handling', () => {
     const upper = result.slice(0, close.length);
     const middle = result.slice(close.length, close.length * 2);
     const lower = result.slice(close.length * 2);
-
-
-
-
 
 
     const warmupLastNaN = Math.max(fastPeriod, slowPeriod) + fastPeriod - 2;
@@ -358,7 +352,6 @@ test('MAB parameter boundaries', () => {
     const upperZero = resultZero.slice(0, close.length);
     const middleZero = resultZero.slice(close.length, close.length * 2);
     const lowerZero = resultZero.slice(close.length * 2);
-
 
 
     for (let i = 100; i < 110; i++) {

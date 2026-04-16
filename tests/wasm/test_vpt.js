@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -151,7 +150,6 @@ test('VPT in-place operation', () => {
 
 
     output.set(price);
-
 
 
     const vol_ptr = wasm.vpt_alloc(len);

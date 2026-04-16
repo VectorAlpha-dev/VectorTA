@@ -110,7 +110,11 @@ fn run_case(sweep: FibonacciEntryBandsBatchRange) -> Result<(), Box<dyn std::err
         .buf
         .copy_to(&mut got_tp_short_band)?;
     result.outputs.long_entry.buf.copy_to(&mut got_long_entry)?;
-    result.outputs.short_entry.buf.copy_to(&mut got_short_entry)?;
+    result
+        .outputs
+        .short_entry
+        .buf
+        .copy_to(&mut got_short_entry)?;
     result
         .outputs
         .rejection_long
@@ -121,8 +125,16 @@ fn run_case(sweep: FibonacciEntryBandsBatchRange) -> Result<(), Box<dyn std::err
         .rejection_short
         .buf
         .copy_to(&mut got_rejection_short)?;
-    result.outputs.long_bounce.buf.copy_to(&mut got_long_bounce)?;
-    result.outputs.short_bounce.buf.copy_to(&mut got_short_bounce)?;
+    result
+        .outputs
+        .long_bounce
+        .buf
+        .copy_to(&mut got_long_bounce)?;
+    result
+        .outputs
+        .short_bounce
+        .buf
+        .copy_to(&mut got_short_bounce)?;
 
     for idx in 0..cpu.basis.len() {
         assert!(approx_eq(cpu.basis[idx], got_basis[idx], 1e-6));
@@ -135,8 +147,16 @@ fn run_case(sweep: FibonacciEntryBandsBatchRange) -> Result<(), Box<dyn std::err
         assert!(approx_eq(cpu.lower_1000[idx], got_lower_1000[idx], 1e-6));
         assert!(approx_eq(cpu.lower_1618[idx], got_lower_1618[idx], 1e-6));
         assert!(approx_eq(cpu.lower_2618[idx], got_lower_2618[idx], 1e-6));
-        assert!(approx_eq(cpu.tp_long_band[idx], got_tp_long_band[idx], 1e-6));
-        assert!(approx_eq(cpu.tp_short_band[idx], got_tp_short_band[idx], 1e-6));
+        assert!(approx_eq(
+            cpu.tp_long_band[idx],
+            got_tp_long_band[idx],
+            1e-6
+        ));
+        assert!(approx_eq(
+            cpu.tp_short_band[idx],
+            got_tp_short_band[idx],
+            1e-6
+        ));
         assert!(approx_eq(cpu.long_entry[idx], got_long_entry[idx], 1e-6));
         assert!(approx_eq(cpu.short_entry[idx], got_short_entry[idx], 1e-6));
         assert!(approx_eq(
@@ -150,7 +170,11 @@ fn run_case(sweep: FibonacciEntryBandsBatchRange) -> Result<(), Box<dyn std::err
             1e-6
         ));
         assert!(approx_eq(cpu.long_bounce[idx], got_long_bounce[idx], 1e-6));
-        assert!(approx_eq(cpu.short_bounce[idx], got_short_bounce[idx], 1e-6));
+        assert!(approx_eq(
+            cpu.short_bounce[idx],
+            got_short_bounce[idx],
+            1e-6
+        ));
     }
 
     Ok(())

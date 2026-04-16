@@ -131,7 +131,6 @@ class TestSafeZoneStop:
         assert len(second_result) == len(first_result)
 
 
-
         valid_indices = np.where(~np.isnan(first_result) & ~np.isnan(second_result))[0]
         if len(valid_indices) > 0:
 
@@ -175,7 +174,6 @@ class TestSafeZoneStop:
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
-
 
 
             if i < 26:

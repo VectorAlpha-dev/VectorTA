@@ -1,12 +1,3 @@
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -265,9 +256,6 @@ void adxr_many_series_one_param_f32(const float* __restrict__ high_tm,
 }
 
 
-
-
-
 extern "C" __global__
 void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
                                          const float* __restrict__ low,
@@ -418,9 +406,6 @@ void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
         i_global = tile_end;
     }
 }
-
-
-
 
 
 extern "C" __global__

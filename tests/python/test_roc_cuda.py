@@ -68,4 +68,3 @@ class TestRocCuda:
 
         assert gpu_tm.shape == cpu_tm.shape
         assert_close(gpu_tm, cpu_tm, rtol=1e-3, atol=5e-4, msg="ROC CUDA TM vs CPU mismatch")
-

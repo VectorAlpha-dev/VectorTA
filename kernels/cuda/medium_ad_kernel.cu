@@ -1,17 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 #include <stdint.h>
@@ -19,7 +5,6 @@
 #ifndef MEDIUM_AD_MAX_PERIOD
 #define MEDIUM_AD_MAX_PERIOD 512
 #endif
-
 
 
 __device__ __forceinline__ float fabsf_fast(float x) {
@@ -32,7 +17,6 @@ __device__ __forceinline__ void two_sum_f32(float a, float b, float &s, float &e
     float z = s - a;
     err = (a - (s - z)) + (b - z);
 }
-
 
 
 __device__ __forceinline__ float avg2_compensated(float a, float b) {
@@ -52,7 +36,6 @@ __device__ __forceinline__ float median3f(float a, float b, float c) {
     (void)BC;
     return fmaxf(ab, bc);
 }
-
 
 
 __device__ __forceinline__ float nth_element_inplace(float* a, int n, int k) {
@@ -84,8 +67,6 @@ __device__ __forceinline__ float nth_element_inplace(float* a, int n, int k) {
     }
     return a[k];
 }
-
-
 
 
 __device__ __forceinline__ float median_from_window(const float* __restrict__ orig, int n, float* __restrict__ scratch) {
@@ -137,8 +118,6 @@ __device__ __forceinline__ float mad_period_2(float x0, float x1) {
 
     return 0.5f * fabsf_fast(x1 - x0);
 }
-
-
 
 
 extern "C" __global__ void medium_ad_batch_f32(
@@ -202,7 +181,6 @@ extern "C" __global__ void medium_ad_batch_f32(
 }
 
 
-
 extern "C" __global__ void medium_ad_many_series_one_param_f32(
     const float* __restrict__ data_tm,
     int cols,
@@ -263,4 +241,3 @@ extern "C" __global__ void medium_ad_many_series_one_param_f32(
         }
     }
 }
-

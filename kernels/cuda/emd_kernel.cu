@@ -1,9 +1,3 @@
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -196,7 +190,6 @@ extern "C" __global__ void emd_many_series_one_param_time_major_f32(
         ub_col[(size_t)t * cols] = EMD_NAN;
         lb_col[(size_t)t * cols] = EMD_NAN;
     }
-
 
 
     const float beta  = cospif(2.0f / (float)period);

@@ -1,8 +1,3 @@
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -105,7 +100,6 @@ void sqwma_batch_f32(const float* __restrict__ prices,
         out[base_out + t] = NAN;
     }
     if (warm >= series_len) return;
-
 
 
     const int tile_size = blockDim.x * OUT_PER_THREAD;

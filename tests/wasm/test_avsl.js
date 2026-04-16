@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -397,10 +396,6 @@ test('AVSL zero-copy in-place operation', () => {
 
 
         const resultView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, size);
-
-
-
-
 
 
         const warmupEnd = 50;

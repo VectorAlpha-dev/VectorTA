@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -79,7 +78,6 @@ test('TRADJEMA accuracy', async () => {
     assert(!isNaN(result[warmup]), `Expected valid value at index ${warmup}`);
 
 
-
     const checkIndices = [100, 500, 1000, 5000];
     for (const idx of checkIndices) {
         if (idx < result.length) {
@@ -94,7 +92,6 @@ test('TRADJEMA accuracy', async () => {
             );
         }
     }
-
 
 
     const windowSize = 100;
@@ -113,7 +110,6 @@ test('TRADJEMA accuracy', async () => {
             );
         }
     }
-
 
 
 });

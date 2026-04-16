@@ -1,19 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math_constants.h>
 
@@ -29,16 +13,12 @@
 #endif
 
 
-
-
-
 struct ds {
     float hi;
     float lo;
 };
 
 __device__ __forceinline__ ds ds_make(float hi, float lo) { ds r{hi, lo}; return r; }
-
 
 
 __device__ __forceinline__ ds ds_from_double(double d) {
@@ -140,7 +120,6 @@ extern "C" __global__ void vosc_batch_prefix_f32(
 }
 
 
-
 extern "C" __global__ void vosc_many_series_one_param_f32(
     const double* __restrict__ prefix_tm,
     int short_period,
@@ -182,8 +161,6 @@ extern "C" __global__ void vosc_many_series_one_param_f32(
         t += step;
     }
 }
-
-
 
 
 extern "C" __global__ void pack_double_to_float2(
@@ -293,4 +270,3 @@ extern "C" __global__ void vosc_many_series_one_param_f32_ds_tm_coalesced(
         s += step;
     }
 }
-

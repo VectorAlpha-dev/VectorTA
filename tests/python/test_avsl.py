@@ -331,8 +331,6 @@ class TestAvsl:
         volume[30:32] = np.nan
 
 
-
-
         try:
             result = vector_ta.avsl(close, low, volume)
             assert len(result) == len(close)

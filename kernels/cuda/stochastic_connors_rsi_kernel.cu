@@ -113,7 +113,7 @@ struct SmaState {
         return sum / static_cast<double>(period);
     }
 };
-}  // namespace
+}
 
 extern "C" __global__ void stochastic_connors_rsi_batch_f64(
     const double* __restrict__ data,

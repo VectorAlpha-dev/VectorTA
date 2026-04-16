@@ -75,4 +75,3 @@ class TestMomCuda:
         gpu_tm = cp.asnumpy(cp.asarray(handle))
         assert gpu_tm.shape == cpu_tm.shape
         assert_close(gpu_tm, cpu_tm, rtol=2e-4, atol=5e-6, msg="MOM CUDA TM vs CPU mismatch")
-

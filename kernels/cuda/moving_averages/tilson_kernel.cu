@@ -1,4 +1,3 @@
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -12,7 +11,6 @@
 #endif
 
 __device__ __forceinline__ float qnan_f32() { return __int_as_float(0x7fc00000); }
-
 
 
 extern "C" __global__
@@ -147,12 +145,6 @@ void tilson_batch_f32(const float* __restrict__ prices,
         ++out_idx;
     }
 }
-
-
-
-
-
-
 
 
 extern "C" __global__
@@ -414,7 +406,6 @@ void tilson_batch_warp_scan_f32(const float* __restrict__ prices,
         e6_prev = __shfl_sync(mask, e6, last_lane);
     }
 }
-
 
 
 extern "C" __global__

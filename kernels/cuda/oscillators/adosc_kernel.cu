@@ -1,22 +1,9 @@
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
 
 #include <cuda_runtime.h>
 #include <math.h>
-
 
 
 struct KahanF32 {
@@ -33,16 +20,12 @@ __device__ __forceinline__ void kahan_add(KahanF32& s, float x) {
 }
 
 
-
 __device__ __forceinline__ float mfm_from_hlc(float h, float l, float c) {
     const float hl = h - l;
     if (hl == 0.0f) return 0.0f;
     const float num = (c - l) - (h - c);
     return num / hl;
 }
-
-
-
 
 
 extern "C" __global__ void adosc_adl_f32(const float* __restrict__ high,
@@ -67,11 +50,6 @@ extern "C" __global__ void adosc_adl_f32(const float* __restrict__ high,
         adl_out[i] = acc.sum;
     }
 }
-
-
-
-
-
 
 
 extern "C" __global__ void adosc_batch_from_adl_f32(const float* __restrict__ adl,
@@ -129,7 +107,6 @@ extern "C" __global__ void adosc_batch_from_adl_f32(const float* __restrict__ ad
         }
 
 
-
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float As_prev = __shfl_up_sync(mask, As, offset);
             const float Bs_prev = __shfl_up_sync(mask, Bs, offset);
@@ -161,10 +138,6 @@ extern "C" __global__ void adosc_batch_from_adl_f32(const float* __restrict__ ad
         l_ema = __shfl_sync(mask, yl, last_lane);
     }
 }
-
-
-
-
 
 
 extern "C" __global__ void adosc_many_series_one_param_f32(
@@ -210,4 +183,3 @@ extern "C" __global__ void adosc_many_series_one_param_f32(
         }
     }
 }
-

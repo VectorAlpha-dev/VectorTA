@@ -66,8 +66,6 @@ test.describe('Tilson T3 Moving Average', () => {
         );
 
 
-
-
         await compareWithRust('tilson', result, 'close', expected.defaultParams, 1e-13);
     });
 
@@ -201,7 +199,6 @@ test.describe('Tilson T3 Moving Average', () => {
         const volumeFactor = 0.5;
 
         const result = wasm.tilson_js(data, period, volumeFactor);
-
 
 
         for (let i = 0; i < 14; i++) {

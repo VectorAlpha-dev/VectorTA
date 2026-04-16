@@ -53,7 +53,6 @@ class TestCwma:
         )
 
 
-
         compare_with_rust('cwma', result, 'close', expected['default_params'], rtol=5e-5, atol=1e-6)
 
     def test_cwma_default_candles(self, test_data):
@@ -223,9 +222,6 @@ class TestCwma:
 
         result = ta_indicators.cwma(close, period=14)
         assert len(result) == len(close)
-
-
-
 
 
     @pytest.mark.skip(reason="Known issue: batch implementation doesn't properly initialize NaN values")

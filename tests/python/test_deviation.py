@@ -26,7 +26,6 @@ class TestDeviation:
         return load_test_data()
 
 
-
     def test_deviation_accuracy(self, test_data):
         """Test DEVIATION matches expected values from Rust tests - mirrors check_deviation_accuracy"""
         close = test_data['close']
@@ -66,7 +65,6 @@ class TestDeviation:
 
         result = ta_indicators.deviation(close, 9, 0)
         assert len(result) == len(close)
-
 
 
     def test_deviation_mean_absolute(self, test_data):
@@ -120,7 +118,6 @@ class TestDeviation:
         assert not np.any(np.isnan(result[19:])), "Found unexpected NaN after warmup"
 
 
-
     def test_deviation_zero_period(self):
         """Test DEVIATION fails with zero period - mirrors check_deviation_zero_period"""
         input_data = np.array([10.0, 20.0, 30.0])
@@ -158,7 +155,6 @@ class TestDeviation:
             ta_indicators.deviation(data, period=2, devtype=4)
 
 
-
         with pytest.raises((ValueError, OverflowError), match="Invalid devtype|calculation error|can't convert"):
             ta_indicators.deviation(data, period=2, devtype=255)
 
@@ -168,7 +164,6 @@ class TestDeviation:
 
         with pytest.raises(ValueError, match="All values are NaN"):
             ta_indicators.deviation(all_nan, period=9, devtype=0)
-
 
 
     def test_deviation_nan_handling(self, test_data):
@@ -204,7 +199,6 @@ class TestDeviation:
         assert not np.isnan(result[7]), "Should recover after NaN leaves window"
         assert not np.isnan(result[8]), "Should have valid value at index 8"
         assert not np.isnan(result[9]), "Should have valid value at index 9"
-
 
 
     def test_deviation_streaming(self, test_data):
@@ -295,7 +289,6 @@ class TestDeviation:
         assert len(first_result) == len(close)
 
 
-
         valid_first = first_result[~np.isnan(first_result)]
         if len(valid_first) > 20:
             second_result = ta_indicators.deviation(valid_first, period=10, devtype=0)
@@ -303,7 +296,6 @@ class TestDeviation:
 
 
             assert not np.all(np.isnan(second_result)), "Second pass should have some valid values"
-
 
 
     def test_deviation_constant_values(self):

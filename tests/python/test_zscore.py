@@ -142,7 +142,6 @@ class TestZscore:
         close = test_data['close'][:100]
 
 
-
         ma_types_with_check_indices = [
             ("sma", 20),
             ("ema", 20),

@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -206,7 +205,6 @@ test('TTM Trend - accuracy check', () => {
     const result = wasm.ttm_trend_js(hl2, close, period);
 
 
-
     for (let i = period + 10; i < period + 15; i++) {
         let sum = 0;
         for (let j = i - period + 1; j <= i; j++) {
@@ -281,7 +279,6 @@ test('TTM Trend - reinput test', () => {
 
 
     const firstResult = wasm.ttm_trend_js(hl2, close, period);
-
 
 
     const secondResult = wasm.ttm_trend_js(firstResult, close, period);

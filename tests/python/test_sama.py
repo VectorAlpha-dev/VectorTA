@@ -88,7 +88,6 @@ class TestSama:
         assert len(result) == len(close)
 
 
-
         assert not np.all(np.isnan(result[:200])), "Should have computed values, not all NaN"
 
     def test_sama_zero_period(self):
@@ -175,7 +174,6 @@ class TestSama:
 
         result = ta_indicators.sama(close, length=50, maj_length=14, min_length=6)
         assert len(result) == len(close)
-
 
 
         first_valid = np.where(~np.isnan(close))[0]

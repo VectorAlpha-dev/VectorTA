@@ -265,7 +265,6 @@ class TestFrama:
         assert result['values'].shape == (2, 50)
 
 
-
         assert np.all(np.isnan(result['values'][0][:5]))
         assert not np.any(np.isnan(result['values'][0][5:]))
 

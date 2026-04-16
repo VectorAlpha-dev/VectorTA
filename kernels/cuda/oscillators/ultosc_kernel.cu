@@ -1,16 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
 extern "C" {
 
 #if __CUDACC_VER_MAJOR__ >= 10
@@ -115,16 +102,6 @@ __global__ void ultosc_build_prefix_sums_f32(
 }
 
 
-
-
-
-
-
-
-
-
-
-
 __global__ void ultosc_batch_f32(
     const float2* __restrict__ pcmtl,
     const float2* __restrict__ ptr,
@@ -188,15 +165,6 @@ __global__ void ultosc_batch_f32(
 }
 
 
-
-
-
-
-
-
-
-
-
 __global__ void ultosc_many_series_one_param_f32(
     const float2* __restrict__ pcmtl_tm,
     const float2* __restrict__ ptr_tm,
@@ -252,4 +220,3 @@ __global__ void ultosc_many_series_one_param_f32(
 }
 
 }
-

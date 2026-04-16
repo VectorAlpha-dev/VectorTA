@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -131,7 +130,6 @@ test('CORRELATION_CYCLE - Fast API aliasing test', () => {
             bufferPtr, bufferPtr, imagPtr, anglePtr, statePtr, len,
             expected.default_params.period, expected.default_params.threshold
         );
-
 
 
         const resultView = new Float64Array(wasm.__wasm.memory.buffer, bufferPtr, len);

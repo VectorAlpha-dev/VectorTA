@@ -183,11 +183,8 @@ class TestGaussian:
         assert np.all(np.isfinite(result_with_nan[:nan_start])), f"Expected finite values before NaN region"
 
 
-
         warmup_end = nan_end + period
         assert np.all(np.isnan(result_with_nan[nan_start:warmup_end])), f"Expected NaN values during and after NaN input"
-
-
 
 
     def test_gaussian_streaming(self, test_data):
@@ -261,7 +258,6 @@ class TestGaussian:
         for poles in [1, 2, 3, 4]:
             result = ta_indicators.gaussian(close, period, poles)
             assert len(result) == len(close)
-
 
 
             assert len(result) == len(close)

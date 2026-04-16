@@ -1,17 +1,6 @@
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 #include <math_constants.h>
-
 
 
 static __device__ __forceinline__ void kahan_add(float x, float &sum, float &c) {
@@ -20,8 +9,6 @@ static __device__ __forceinline__ void kahan_add(float x, float &sum, float &c) 
     c = (t - sum) - y;
     sum = t;
 }
-
-
 
 
 extern "C" __global__ void vpt_batch_f32(
@@ -90,9 +77,6 @@ extern "C" __global__ void vpt_batch_f32(
         prev_p = pt;
     }
 }
-
-
-
 
 
 extern "C" __global__ void vpt_many_series_one_param_f32(
@@ -169,4 +153,3 @@ extern "C" __global__ void vpt_many_series_one_param_f32(
         }
     }
 }
-

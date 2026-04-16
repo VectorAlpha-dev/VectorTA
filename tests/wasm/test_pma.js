@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -155,7 +154,6 @@ test('PMA NaN handling', () => {
 
     assert.strictEqual(predict.length, close.length);
     assert.strictEqual(trigger.length, close.length);
-
 
 
     let firstValid = 0;

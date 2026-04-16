@@ -1,25 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -37,7 +15,6 @@
 #ifndef UNLIKELY
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
-
 
 
 __device__ __forceinline__ float clampf(float x, float lo, float hi) {
@@ -59,7 +36,6 @@ extern "C" __global__ void fisher_build_hl2_f32(
 
 __device__ __forceinline__ int rb_dec(int x, int cap) { return (x == 0) ? (cap - 1) : (x - 1); }
 __device__ __forceinline__ int rb_inc(int x, int cap) { return (x + 1 == cap) ? 0 : (x + 1); }
-
 
 
 extern "C" __global__ void fisher_batch_f32(const float* __restrict__ hl,
@@ -121,7 +97,6 @@ extern "C" __global__ void fisher_batch_f32(const float* __restrict__ hl,
 
     for (int i = first_valid; i < series_len; ++i) {
         const float xi = hl[i];
-
 
 
         if (i >= warm) {

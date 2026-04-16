@@ -119,8 +119,6 @@ class TestEhlersITrend:
         assert len(second_result) == len(first_result)
 
 
-
-
         if len(second_result) > 24:
             assert_no_nan(second_result[24:], "Found unexpected NaN after double warmup")
 
@@ -170,7 +168,6 @@ class TestEhlersITrend:
         assert len(batch_result) == len(stream_result)
 
 
-
         for i in range(12, len(batch_result)):
             if not (np.isnan(batch_result[i]) and np.isnan(stream_result[i])):
                 assert abs(batch_result[i] - stream_result[i]) < 1e-7, \
@@ -199,8 +196,6 @@ class TestEhlersITrend:
 
 
         single_result = vector_ta.ehlers_itrend(self.close[:100], 12, 50)
-
-
 
 
         warmup_bars = params['warmup_bars']
@@ -241,7 +236,6 @@ class TestEhlersITrend:
             batch_row = batch_result['values'][idx]
 
 
-
             for i in range(warmup, len(single_result)):
                 if not np.isnan(single_result[i]) and not np.isnan(batch_row[i]):
                     assert abs(batch_row[i] - single_result[i]) < 1e-9, \
@@ -262,11 +256,6 @@ class TestEhlersITrend:
 
 
         assert batch_result['values'].shape == (2, 30)
-
-
-
-
-
 
 
         for i in range(10, 30):
@@ -319,7 +308,6 @@ class TestEhlersITrend:
 
 
         assert_all_nan(result[:12], msg="Expected NaN in warmup period")
-
 
 
         assert np.isnan(result[50]), "Expected NaN at index 50"

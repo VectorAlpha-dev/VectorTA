@@ -225,8 +225,6 @@ class TestApo:
         )
 
 
-
-
         assert batch_result['values'].shape[0] == 3
 
 

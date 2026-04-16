@@ -1,5 +1,3 @@
-
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -101,7 +99,6 @@ test('NWE with different parameters', () => {
 
     const result3 = wasm.nadaraya_watson_envelope(closeSlice, 8.0, 1.0, lookback);
     const result4 = wasm.nadaraya_watson_envelope(closeSlice, 8.0, 5.0, lookback);
-
 
 
     const warmup = lookback - 1 + 498;
@@ -258,7 +255,6 @@ test('NWE warmup period calculation - mirrors check_nwe_warmup_period', () => {
 
 
     const result = wasm.nadaraya_watson_envelope(data, 8.0, 3.0, 500);
-
 
 
     const WARMUP = 499 + 498;

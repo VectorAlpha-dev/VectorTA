@@ -1,13 +1,3 @@
-
-
-
-
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math.h>
 
@@ -61,7 +51,6 @@ extern "C" __global__ void bbw_sma_prefix_f32(
 }
 
 
-
 extern "C" __global__ void bbw_multi_series_one_param_tm_f32(
     const double* __restrict__ prefix_sum_tm,
     const double* __restrict__ prefix_sum_sq_tm,
@@ -102,14 +91,6 @@ extern "C" __global__ void bbw_multi_series_one_param_tm_f32(
         t += stride;
     }
 }
-
-
-
-
-
-
-
-
 
 
 #include <stdint.h>
@@ -358,10 +339,6 @@ extern "C" __global__ void bbw_multi_series_one_param_tm_ff_f32(
         t += stride;
     }
 }
-
-
-
-
 
 
 extern "C" __global__ void bbw_sma_streaming_f64(

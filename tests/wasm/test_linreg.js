@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -135,9 +134,6 @@ test('LinReg reinput', () => {
     assert.strictEqual(secondResult.length, firstResult.length);
 
 
-
-
-
     for (let i = 24; i < secondResult.length; i++) {
         assert(isFinite(secondResult[i]), `NaN found at index ${i}`);
     }
@@ -150,7 +146,6 @@ test('LinReg NaN handling', () => {
     const result = wasm.linreg_js(close, 14);
 
     assert.strictEqual(result.length, close.length);
-
 
 
     if (result.length > 240) {
@@ -210,7 +205,6 @@ test('LinReg different periods', () => {
         assert.strictEqual(result.length, close.length);
 
 
-
         for (let i = 0; i < period - 1; i++) {
             assert(isNaN(result[i]), `Expected NaN at index ${i} for period=${period}`);
         }
@@ -250,11 +244,9 @@ test('LinReg batch performance', () => {
 test('LinReg edge cases', () => {
 
 
-
     const data = new Float64Array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
     const result = wasm.linreg_js(data, 3);
     assert.strictEqual(result.length, data.length);
-
 
 
     assertClose(result[result.length - 1], 10.0, 1e-9, "Perfect linear regression failed");
@@ -283,7 +275,6 @@ test('LinReg single value', () => {
 test('LinReg two values', () => {
 
     const data = new Float64Array([1.0, 2.0]);
-
 
 
     const result = wasm.linreg_js(data, 1);
@@ -327,7 +318,6 @@ test('LinReg warmup period calculation', () => {
 
     for (const { period, expectedWarmup } of testCases) {
         const result = wasm.linreg_js(close, period);
-
 
 
         for (let i = 0; i < period - 1 && i < result.length; i++) {
@@ -378,7 +368,6 @@ test('LinReg slope calculation', () => {
     const result = wasm.linreg_js(data, 4);
 
 
-
     assertClose(result[result.length - 1], 16.0, 1e-9, "Slope calculation failed");
 });
 
@@ -391,9 +380,7 @@ test('LinReg streaming simulation', () => {
     const batchResult = wasm.linreg_js(close, period);
 
 
-
     assert.strictEqual(batchResult.length, close.length);
-
 
 
     for (let i = 0; i < period - 1; i++) {
@@ -425,7 +412,6 @@ test('LinReg large period', () => {
     assert(isFinite(result[98]), "Expected finite value at index 98");
     assert(isFinite(result[99]), "Expected finite value at last index");
 });
-
 
 
 test('LinReg zero-copy basic', () => {
@@ -551,7 +537,6 @@ test('LinReg zero-copy batch API', () => {
 });
 
 
-
 test('LinReg SIMD consistency', () => {
 
 
@@ -592,7 +577,6 @@ test('LinReg SIMD consistency', () => {
         assert(Math.abs(avgAfterWarmup) < 1000, `Average value ${avgAfterWarmup} seems unreasonable`);
     }
 });
-
 
 
 test('LinReg batch metadata validation', () => {

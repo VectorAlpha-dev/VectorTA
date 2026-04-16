@@ -1,9 +1,3 @@
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -20,7 +14,6 @@
 #ifndef UNLIKELY
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
-
 
 
 extern "C" __global__ void vi_build_prefix_f32(
@@ -172,7 +165,6 @@ extern "C" __global__ void vi_batch_f32(
 }
 
 
-
 extern "C" __global__ void vi_many_series_one_param_f32(
     const float* __restrict__ pfx_tr_tm,
     const float* __restrict__ pfx_vp_tm,
@@ -229,4 +221,3 @@ extern "C" __global__ void vi_many_series_one_param_f32(
         minus_tm[idx] = pfx_vm_tm[idx] * inv;
     }
 }
-

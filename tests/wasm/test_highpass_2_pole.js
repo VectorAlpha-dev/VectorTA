@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -71,7 +70,6 @@ test('HighPass2 accuracy', async () => {
     );
 
 
-
     await compareWithRust('highpass_2_pole', result, 'close', { period: 48, k: 0.707 }, 1e-12);
 });
 
@@ -81,7 +79,6 @@ test('HighPass2 default candles', async () => {
 
     const result = wasm.highpass_2_pole_js(close, 48, 0.707);
     assert.strictEqual(result.length, close.length);
-
 
 
     await compareWithRust('highpass_2_pole', result, 'close', { period: 48, k: 0.707 }, 1e-12);
@@ -172,7 +169,6 @@ test('HighPass2 NaN handling', () => {
     assert.strictEqual(result.length, close.length);
 
 
-
     for (let i = 0; i < result.length; i++) {
         assert(!isNaN(result[i]), `Unexpected NaN at index ${i}`);
     }
@@ -231,7 +227,6 @@ test('HighPass2 different k values', () => {
     for (const k of [0.1, 0.3, 0.5, 0.707, 0.9]) {
         const result = wasm.highpass_2_pole_js(close, period, k);
         assert.strictEqual(result.length, close.length);
-
 
 
         for (let i = 0; i < result.length; i++) {
@@ -341,8 +336,6 @@ test('HighPass2 zero-copy with large dataset', () => {
         const memView2 = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
 
 
-
-
         for (let i = 0; i < Math.min(100, size); i++) {
             assert(!isNaN(memView2[i]), `Unexpected NaN at index ${i}`);
         }
@@ -437,10 +430,6 @@ test('HighPass2 SIMD128 consistency', () => {
 
 
         assert.strictEqual(result.length, data.length);
-
-
-
-
 
 
         let sumAfterWarmup = 0;
@@ -556,10 +545,5 @@ test('HighPass2 first value handling', () => {
     }
 
 
-
     assert.strictEqual(firstValid, 3, `First valid at ${firstValid}, expected 3`);
 });
-
-
-
-

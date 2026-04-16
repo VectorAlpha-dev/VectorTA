@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -135,7 +134,6 @@ test('SINWMA reinput', () => {
     assert.strictEqual(secondResult.length, firstResult.length);
 
 
-
     let firstValid = 0;
     for (let i = 0; i < close.length; i++) {
         if (!isNaN(close[i])) {
@@ -167,7 +165,6 @@ test('SINWMA NaN handling', () => {
 
 
     assertAllNaN(result.slice(0, 13), "Expected NaN in warmup period (first 13 values)");
-
 
 
     let firstValid = 0;
@@ -210,7 +207,6 @@ test('SINWMA batch', () => {
     const batch_first = batch_result.slice(0, close.length);
 
 
-
     let firstValid = 0;
     for (let i = 0; i < close.length; i++) {
         if (!isNaN(close[i])) {
@@ -234,7 +230,6 @@ test('SINWMA different periods', () => {
     for (const period of testPeriods) {
         const result = wasm.sinwma_js(close, period);
         assert.strictEqual(result.length, close.length);
-
 
 
         let firstValid = 0;
@@ -285,7 +280,6 @@ test('SINWMA batch performance', () => {
 });
 
 test('SINWMA edge cases', () => {
-
 
 
     const data = new Float64Array(100);

@@ -109,4 +109,3 @@ class TestGatorOscCuda:
         assert_close(l_gpu, l_cpu, rtol=1e-3, atol=2e-3, msg="lower TM mismatch")
         assert_close(uc_gpu, uc_cpu, rtol=2e-3, atol=3e-3, msg="upper_change TM mismatch")
         assert_close(lc_gpu, lc_cpu, rtol=2e-3, atol=3e-3, msg="lower_change TM mismatch")
-

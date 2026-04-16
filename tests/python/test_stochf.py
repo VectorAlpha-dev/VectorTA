@@ -69,7 +69,6 @@ class TestStochF:
         ]
 
 
-
         assert_close(
             k[-5:],
             expected_k,
@@ -84,10 +83,6 @@ class TestStochF:
             atol=1e-4,
             msg="StochF D last 5 values mismatch"
         )
-
-
-
-
 
 
     def test_stochf_default_candles(self, test_data):
@@ -163,8 +158,6 @@ class TestStochF:
         k, d = ta_indicators.stochf(high, low, close, 5, 3, 0)
         assert len(k) == len(close)
         assert len(d) == len(close)
-
-
 
 
         if len(k) > 10:

@@ -1,14 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -36,7 +25,6 @@
 #endif
 
 
-
 struct KBN32 {
     float s;
     float c;
@@ -57,11 +45,6 @@ __device__ inline float cmo_from_avgs(float avg_g, float avg_l) {
     float numer = avg_g - avg_l;
     return 100.0f * (numer / denom);
 }
-
-
-
-
-
 
 
 extern "C" __global__ void cmo_batch_f32(
@@ -149,7 +132,6 @@ extern "C" __global__ void cmo_batch_f32(
         }
 
 
-
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float A_prev  = __shfl_up_sync(mask, A, offset);
             const float Bg_prev = __shfl_up_sync(mask, Bg, offset);
@@ -178,9 +160,6 @@ extern "C" __global__ void cmo_batch_f32(
         avg_l = __shfl_sync(mask, yl, last_lane);
     }
 }
-
-
-
 
 
 extern "C" __global__ void cmo_many_series_one_param_f32(

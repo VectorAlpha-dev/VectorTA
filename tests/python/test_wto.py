@@ -35,7 +35,6 @@ class TestWto:
         assert len(histogram) == len(close)
 
 
-
         assert_close(
             wavetrend1[-5:],
             expected['last_5_values']['wavetrend1'],
@@ -153,7 +152,6 @@ class TestWto:
         assert len(hist) == len(data)
 
 
-
         nan_count = sum(1 for x in wt1 if np.isnan(x))
         assert nan_count >= 10, f"Expected at least 10 NaN values but got {nan_count}"
 
@@ -238,8 +236,6 @@ class TestWto:
         assert len(batch_wt1) == len(stream_wt1)
         assert len(batch_wt2) == len(stream_wt2)
         assert len(batch_hist) == len(stream_hist)
-
-
 
 
         warmup = max(channel_length, average_length)

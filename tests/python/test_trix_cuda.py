@@ -82,4 +82,3 @@ class TestTrixCuda:
         assert_close(
             gpu_tm, cpu_tm, rtol=5e-5, atol=5e-4, msg="CUDA TRIX many-series mismatch"
         )
-

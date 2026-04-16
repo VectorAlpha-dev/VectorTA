@@ -1,9 +1,3 @@
-
-
-
-
-
-
 #include <cuda_runtime.h>
 #include <math_constants.h>
 #ifndef __CUDACC_RTC__
@@ -33,9 +27,6 @@ __device__ __forceinline__ int ht_dec(int i, int cap) { return (i == 0) ? (cap -
 #define HT_FUSED_MAX_AMP 64
 
 extern "C" {
-
-
-
 
 
 __global__ __launch_bounds__(HT_THREADS_PER_BLOCK, 2)
@@ -160,11 +151,6 @@ void halftrend_batch_f32(
         }
     }
 }
-
-
-
-
-
 
 
 __global__ __launch_bounds__(HT_THREADS_PER_BLOCK, 2)
@@ -451,9 +437,6 @@ void halftrend_batch_fused_f32(
 }
 
 
-
-
-
 __global__ __launch_bounds__(HT_THREADS_PER_BLOCK, 2)
 void halftrend_batch_time_major_f32(
     const float* __restrict__ high,
@@ -569,9 +552,6 @@ void halftrend_batch_time_major_f32(
         }
     }
 }
-
-
-
 
 
 __global__ __launch_bounds__(HT_THREADS_PER_BLOCK, 2)
@@ -846,9 +826,6 @@ void halftrend_batch_fused_time_major_f32(
         }
     }
 }
-
-
-
 
 
 __global__ __launch_bounds__(HT_THREADS_PER_BLOCK, 2)

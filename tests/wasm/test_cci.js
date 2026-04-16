@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -743,9 +742,6 @@ test('CCI extreme values test', () => {
         }
     }
 });
-
-
-
 
 
 test.after(() => {

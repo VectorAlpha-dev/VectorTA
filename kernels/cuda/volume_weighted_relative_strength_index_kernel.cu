@@ -258,7 +258,7 @@ struct HmaState {
         return false;
     }
 };
-}  // namespace
+}
 
 extern "C" __global__ void volume_weighted_relative_strength_index_batch_f64(
     const double* source,

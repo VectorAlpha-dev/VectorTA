@@ -1,16 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -50,7 +37,6 @@ static __device__ __forceinline__ ff two_sum(float a, float b) {
     res.lo = e;
     return res;
 }
-
 
 
 struct lwma7_f32 {
@@ -336,10 +322,6 @@ extern "C" __global__ void ehlers_pma_batch_f32(const float* __restrict__ prices
 }
 
 
-
-
-
-
 extern "C" __global__ void ehlers_pma_batch_tiled_f32_tile128(
     const float* __restrict__ prices,
     int series_len,
@@ -431,9 +413,6 @@ extern "C" __global__ void ehlers_pma_many_series_one_param_f32(
         price_w7.push(prices_tm[pidx]);
     }
 }
-
-
-
 
 
 extern "C" __global__ void ehlers_pma_ms1p_tiled_f32_tx1_ty2(

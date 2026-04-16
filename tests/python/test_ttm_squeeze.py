@@ -251,7 +251,6 @@ class TestTtmSqueeze:
                 continue
 
 
-
             if abs(batch_squeeze[i] - stream_squeeze[i]) <= 1.0:
                 continue
             assert_close(batch_squeeze[i], stream_squeeze[i], rtol=1e-9, atol=1e-9,

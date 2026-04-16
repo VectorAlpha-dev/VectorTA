@@ -50,7 +50,6 @@ class TestMinmax:
         assert len(last_max) == len(high)
 
 
-
         count = len(is_min)
         if count >= 5:
 
@@ -116,8 +115,6 @@ class TestMinmax:
         assert len(last_max) == 8
 
 
-
-
         assert not np.isnan(is_min[2])
         assert not np.isnan(is_max[2])
 
@@ -157,7 +154,6 @@ class TestMinmax:
         stream_is_max = np.array(stream_is_max)
         stream_last_min = np.array(stream_last_min)
         stream_last_max = np.array(stream_last_max)
-
 
 
         buffer_size = order * 2 + 1
@@ -305,11 +301,9 @@ class TestMinmax:
                 break
 
 
-
         for i in range(first_valid_idx, min(first_valid_idx + order, len(is_min))):
             assert np.isnan(is_min[i]), f"Expected NaN at index {i} during warmup for is_min"
             assert np.isnan(is_max[i]), f"Expected NaN at index {i} during warmup for is_max"
-
 
 
         has_min = False

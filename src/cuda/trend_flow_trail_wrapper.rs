@@ -129,7 +129,7 @@ fn longest_valid_run(
 ) -> usize {
     let mut best = 0usize;
     let mut current = 0usize;
-    for (((( &o, &h), &l), &c), &v) in open
+    for ((((&o, &h), &l), &c), &v) in open
         .iter()
         .zip(high.iter())
         .zip(low.iter())
@@ -230,9 +230,7 @@ impl CudaTrendFlowTrail {
             || close.is_empty()
             || volume.is_empty()
         {
-            return Err(CudaTrendFlowTrailError::InvalidInput(
-                "empty input".into(),
-            ));
+            return Err(CudaTrendFlowTrailError::InvalidInput("empty input".into()));
         }
         if open.len() != high.len()
             || open.len() != low.len()
@@ -276,9 +274,7 @@ impl CudaTrendFlowTrail {
 
         for combo in &combos {
             let alpha_length = combo.alpha_length.unwrap_or(DEFAULT_ALPHA_LENGTH);
-            let alpha_multiplier = combo
-                .alpha_multiplier
-                .unwrap_or(DEFAULT_ALPHA_MULTIPLIER);
+            let alpha_multiplier = combo.alpha_multiplier.unwrap_or(DEFAULT_ALPHA_MULTIPLIER);
             let mfi_length = combo.mfi_length.unwrap_or(DEFAULT_MFI_LENGTH);
 
             if alpha_length == 0 {
@@ -305,8 +301,9 @@ impl CudaTrendFlowTrail {
 
             max_alpha_length = max_alpha_length.max(alpha_length);
             max_alpha_half = max_alpha_half.max((alpha_length / 2).max(1));
-            max_alpha_sqrt =
-                max_alpha_sqrt.max((alpha_length as f64).sqrt().floor() as usize).max(1);
+            max_alpha_sqrt = max_alpha_sqrt
+                .max((alpha_length as f64).sqrt().floor() as usize)
+                .max(1);
             max_mfi_length = max_mfi_length.max(mfi_length);
 
             alpha_lengths.push(i32::try_from(alpha_length).map_err(|_| {
@@ -318,26 +315,20 @@ impl CudaTrendFlowTrail {
             })?);
         }
 
-        let output_elems = rows.checked_mul(cols).ok_or_else(|| {
-            CudaTrendFlowTrailError::InvalidInput("rows*cols overflow".into())
-        })?;
+        let output_elems = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaTrendFlowTrailError::InvalidInput("rows*cols overflow".into()))?;
         let input_bytes = cols
             .checked_mul(std::mem::size_of::<f64>())
             .and_then(|value| value.checked_mul(5))
-            .ok_or_else(|| {
-                CudaTrendFlowTrailError::InvalidInput("input bytes overflow".into())
-            })?;
+            .ok_or_else(|| CudaTrendFlowTrailError::InvalidInput("input bytes overflow".into()))?;
         let param_bytes = rows
             .checked_mul(std::mem::size_of::<i32>() * 2 + std::mem::size_of::<f64>())
-            .ok_or_else(|| {
-                CudaTrendFlowTrailError::InvalidInput("param bytes overflow".into())
-            })?;
+            .ok_or_else(|| CudaTrendFlowTrailError::InvalidInput("param bytes overflow".into()))?;
         let output_bytes = output_elems
             .checked_mul(std::mem::size_of::<f64>())
             .and_then(|value| value.checked_mul(17))
-            .ok_or_else(|| {
-                CudaTrendFlowTrailError::InvalidInput("output bytes overflow".into())
-            })?;
+            .ok_or_else(|| CudaTrendFlowTrailError::InvalidInput("output bytes overflow".into()))?;
         let scratch_elems = rows
             .checked_mul(max_alpha_length)
             .and_then(|value| value.checked_add(rows * max_alpha_half))
@@ -371,12 +362,9 @@ impl CudaTrendFlowTrail {
         let d_alpha_lengths = DeviceBuffer::from_slice(&alpha_lengths)?;
         let d_alpha_multipliers = DeviceBuffer::from_slice(&alpha_multipliers)?;
         let d_mfi_lengths = DeviceBuffer::from_slice(&mfi_lengths)?;
-        let d_alpha_full =
-            unsafe { DeviceBuffer::<f64>::uninitialized(rows * max_alpha_length)? };
-        let d_alpha_half =
-            unsafe { DeviceBuffer::<f64>::uninitialized(rows * max_alpha_half)? };
-        let d_alpha_sqrt =
-            unsafe { DeviceBuffer::<f64>::uninitialized(rows * max_alpha_sqrt)? };
+        let d_alpha_full = unsafe { DeviceBuffer::<f64>::uninitialized(rows * max_alpha_length)? };
+        let d_alpha_half = unsafe { DeviceBuffer::<f64>::uninitialized(rows * max_alpha_half)? };
+        let d_alpha_sqrt = unsafe { DeviceBuffer::<f64>::uninitialized(rows * max_alpha_sqrt)? };
         let d_mfi_pos = unsafe { DeviceBuffer::<f64>::uninitialized(rows * max_mfi_length)? };
         let d_mfi_neg = unsafe { DeviceBuffer::<f64>::uninitialized(rows * max_mfi_length)? };
         let d_mfi_full = unsafe { DeviceBuffer::<f64>::uninitialized(rows * MFI_HMA_LENGTH)? };
@@ -384,10 +372,8 @@ impl CudaTrendFlowTrail {
         let d_mfi_sqrt = unsafe { DeviceBuffer::<f64>::uninitialized(rows * MFI_HMA_SQRT)? };
 
         let d_alpha_trail = unsafe { DeviceBuffer::<f64>::uninitialized(output_elems)? };
-        let d_alpha_trail_bullish =
-            unsafe { DeviceBuffer::<f64>::uninitialized(output_elems)? };
-        let d_alpha_trail_bearish =
-            unsafe { DeviceBuffer::<f64>::uninitialized(output_elems)? };
+        let d_alpha_trail_bullish = unsafe { DeviceBuffer::<f64>::uninitialized(output_elems)? };
+        let d_alpha_trail_bearish = unsafe { DeviceBuffer::<f64>::uninitialized(output_elems)? };
         let d_alpha_dir = unsafe { DeviceBuffer::<f64>::uninitialized(output_elems)? };
         let d_mfi = unsafe { DeviceBuffer::<f64>::uninitialized(output_elems)? };
         let d_tp_upper = unsafe { DeviceBuffer::<f64>::uninitialized(output_elems)? };

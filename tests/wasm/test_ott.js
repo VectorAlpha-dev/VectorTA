@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -101,4 +100,3 @@ test('OTT batch single parameter matches single', () => {
   const single = wasm.ott_js(close, period, percent, ma_type);
   assertArrayClose(batch.values, single, 1e-8, 'Batch vs single mismatch');
 });
-

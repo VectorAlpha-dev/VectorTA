@@ -1,10 +1,3 @@
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -22,14 +15,12 @@ static __device__ __forceinline__ float wsum_norm_i32(int p) {
 }
 
 
-
 static __device__ __forceinline__ void kahan_add(float value, float& sum, float& comp) {
     float y = value - comp;
     float t = sum + y;
     comp = (t - sum) - y;
     sum = t;
 }
-
 
 
 static __device__ __forceinline__
@@ -361,10 +352,6 @@ void dma_batch_f32(const float* __restrict__ prices,
 }
 
 
-
-
-
-
 template<int TX>
 __device__ void dma_batch_tiled_f32_tx_core(const float* __restrict__ prices,
                                        const int* __restrict__ hull_lengths,
@@ -613,8 +600,6 @@ __global__ void dma_batch_tiled_f32_tx128(
 }
 
 
-
-
 extern "C" __global__
 void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                    int hull_length,
@@ -656,7 +641,6 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
     const int half = hull_length / 2;
     const int sqrt_len_clamped = (sqrt_len > 0) ? sqrt_len : 1;
-
 
 
     const float denom_half_f = (half        > 0 ? wsum_norm_i32(half)        : 1.0f);
@@ -916,10 +900,6 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
         }
     }
 }
-
-
-
-
 
 
 template<int TY>

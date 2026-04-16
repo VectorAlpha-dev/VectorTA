@@ -38,4 +38,3 @@ def test_rsmk_cuda_many_series_shape():
     )
     assert ind.inner.rows == rows and ind.inner.cols == cols
     assert sig.inner.rows == rows and sig.inner.cols == cols
-

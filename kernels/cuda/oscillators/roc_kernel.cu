@@ -1,11 +1,3 @@
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -20,9 +12,6 @@
 
 
 __device__ __forceinline__ float qnanf() { return nanf(""); }
-
-
-
 
 
 extern "C" __global__
@@ -61,15 +50,9 @@ void roc_batch_f32(const float* __restrict__ prices,
     }
 
 
-
-
     for (int t = threadIdx.x; t < warm; t += blockDim.x) {
         out_row[t] = qnanf();
     }
-
-
-
-
 
 
     for (int t = warm + threadIdx.x; t < series_len; t += blockDim.x) {
@@ -88,7 +71,6 @@ void roc_batch_f32(const float* __restrict__ prices,
 #endif
 
 
-
         if (prev == 0.0f || isnan(prev)) {
             out_row[t] = 0.0f;
         } else {
@@ -100,9 +82,6 @@ void roc_batch_f32(const float* __restrict__ prices,
         }
     }
 }
-
-
-
 
 
 extern "C" __global__
@@ -164,4 +143,3 @@ void roc_many_series_one_param_f32(const float* __restrict__ prices_tm,
         }
     }
 }
-

@@ -1,18 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -30,9 +15,6 @@
 #ifndef UNLIKELY
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
-
-
-
 
 
 __device__ __forceinline__ void kahan_add(float x, float &sum, float &c) {
@@ -96,7 +78,6 @@ extern "C" __global__ void kdj_batch_f32(
     const int base = combo * series_len;
 
 
-
     if (UNLIKELY(first_valid < 0 || first_valid >= series_len)) {
         for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
             out_k[base + i] = KDJ_QNAN;
@@ -143,7 +124,6 @@ extern "C" __global__ void kdj_batch_f32(
     }
     const int offset     = 1 << k_log2;
     const int level_base = level_offsets[k_log2];
-
 
 
     const int lane = threadIdx.x & 31;
@@ -285,7 +265,6 @@ extern "C" __global__ void kdj_batch_f32(
 
 
 }
-
 
 
 extern "C" __global__ void kdj_many_series_one_param_f32(

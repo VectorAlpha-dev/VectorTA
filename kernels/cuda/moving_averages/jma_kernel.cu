@@ -1,6 +1,3 @@
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -8,12 +5,6 @@
 #include <cuda_runtime.h>
 #include <math.h>
 #include <math_constants.h>
-
-
-
-
-
-
 
 
 #ifdef JMA_INTERNAL_F64
@@ -29,7 +20,6 @@
   __device__ __forceinline__ JMA_T cvt(float x){ return x; }
   __device__ __forceinline__ float cvt_back(JMA_T x){ return x; }
 #endif
-
 
 
 extern "C" __global__

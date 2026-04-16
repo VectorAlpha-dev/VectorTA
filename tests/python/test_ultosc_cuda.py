@@ -104,4 +104,3 @@ class TestUltoscCuda:
         mask = ~np.isnan(cpu)
         assert_close(gpu[mask], cpu[mask], rtol=3e-4, atol=5e-4,
                      msg="CUDA UltOsc many-series mismatch vs CPU baseline")
-

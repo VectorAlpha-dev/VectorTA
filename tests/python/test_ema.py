@@ -46,7 +46,6 @@ class TestEma:
         assert len(result) == len(close)
 
 
-
         assert_close(
             result[-5:],
             expected['last_five'],

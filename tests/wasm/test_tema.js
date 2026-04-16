@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -116,7 +115,6 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
         const result = wasm.tema_js(data, period);
 
 
-
         for (let i = 0; i < 5; i++) {
             assert(isNaN(result[i]), `Index ${i} should be NaN`);
         }
@@ -208,7 +206,6 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
 
         const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         const result = wasm.tema_js(data, 10);
-
 
 
         assertAllNaN(result, 'All values should be NaN when warmup exceeds data length');

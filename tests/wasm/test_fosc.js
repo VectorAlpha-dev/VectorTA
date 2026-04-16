@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -22,7 +21,6 @@ let testData;
 test.before(async () => {
 
 
-
     const pkgPath = path.join(__dirname, '../../pkg/vector_ta.js');
     const esmImportPath = process.platform === 'win32'
         ? 'file:///' + pkgPath.replace(/\\/g, '/')
@@ -31,7 +29,6 @@ test.before(async () => {
     try {
         wasm = await import(esmImportPath);
     } catch (error) {
-
 
 
         const msg = String(error && error.message || error);
@@ -234,11 +231,9 @@ test('FOSC NaN handling - mirrors check_fosc_with_nan_data', () => {
     const minWarmup = firstValidIdx + period - 1;
 
 
-
     for (let i = 0; i < minWarmup; i++) {
         assert(isNaN(result[i]), `Expected NaN at index ${i} during minimum warmup`);
     }
-
 
 
     let hasValid = false;
@@ -407,9 +402,6 @@ test('FOSC batch metadata - mirrors check_batch_sweep', () => {
             `Batch row ${row} (period=${period}) should match single calculation`);
     }
 });
-
-
-
 
 
 test('FOSC SIMD128 consistency', () => {

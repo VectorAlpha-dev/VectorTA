@@ -1,7 +1,3 @@
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -16,11 +12,6 @@
 #if SRWMA_USE_ASYNC_COPY
   #include <cuda/pipeline>
 #endif
-
-
-
-
-
 
 
 extern "C" __global__
@@ -74,12 +65,7 @@ void srwma_batch_f32(const float* __restrict__ prices,
         }
 
 
-
 #if SRWMA_USE_ASYNC_COPY && (__CUDA_ARCH__ >= 800)
-
-
-
-
 
 
 #endif
@@ -106,16 +92,6 @@ void srwma_batch_f32(const float* __restrict__ prices,
         __syncthreads();
     }
 }
-
-
-
-
-
-
-
-
-
-
 
 
 #ifndef SRWMA_USE_CONST_WEIGHTS

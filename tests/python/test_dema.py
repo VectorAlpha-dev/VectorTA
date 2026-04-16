@@ -176,7 +176,6 @@ class TestDema:
         assert len(batch_result) == len(stream_values)
 
 
-
         warmup = period - 1
         for i in range(warmup, len(batch_result)):
             b = batch_result[i]
@@ -330,7 +329,6 @@ class TestDema:
         period = 30
 
         result = ta_indicators.dema(close, period=period)
-
 
 
         if len(result) > 100:

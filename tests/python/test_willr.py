@@ -72,9 +72,6 @@ class TestWillr:
         assert np.isnan(result[0])
 
 
-
-
-
         assert abs(result[1] - (-16.666666666666668)) < 1e-8
 
     def test_willr_zero_period(self, test_data):

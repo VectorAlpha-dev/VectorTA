@@ -1,8 +1,3 @@
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -47,8 +42,6 @@ static __device__ __forceinline__ float warp_sum(float v) {
     v += __shfl_down_sync(mask, v,  1);
     return v;
 }
-
-
 
 
 extern "C" __global__ void ift_rsi_batch_f32(
@@ -189,7 +182,6 @@ extern "C" __global__ void ift_rsi_batch_f32(
         }
     }
 }
-
 
 
 extern "C" __global__ void ift_rsi_many_series_one_param_f32(

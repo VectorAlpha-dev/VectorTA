@@ -116,7 +116,7 @@ struct PeriodogramState {
     }
 };
 
-}  // namespace
+}
 
 extern "C" __global__ void ehlers_autocorrelation_periodogram_batch_f64(
     const double* __restrict__ data,

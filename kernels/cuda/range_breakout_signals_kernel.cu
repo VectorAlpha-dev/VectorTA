@@ -61,7 +61,7 @@ __device__ inline unsigned char bool_window_get_ago(
     const int latest = head == 0 ? (len - 1) : (head - 1);
     return ring[(latest + len - ago) % len];
 }
-}  // namespace
+}
 
 extern "C" __global__ void range_breakout_signals_batch_f64(
     const double* open,

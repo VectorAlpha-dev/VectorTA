@@ -64,8 +64,6 @@ test('SuperSmoother3Pole accuracy', async (t) => {
     }
 
 
-
-
     const rustResult = await compareWithRust(
         'supersmoother_3_pole',
         result,
@@ -183,7 +181,6 @@ test('SuperSmoother3Pole NaN handling', (t) => {
     }
 
 
-
     for (let i = 0; i < Math.min(3, result.length); i++) {
         assert.ok(!isNaN(result[i]), `Value at index ${i} should not be NaN`);
     }
@@ -201,11 +198,6 @@ test('SuperSmoother3Pole with leading NaNs', (t) => {
 
     const period = 3;
     const result = wasm.supersmoother_3_pole_js(data, period);
-
-
-
-
-
 
 
     for (let i = 0; i < 5; i++) {
@@ -274,8 +266,6 @@ test('SuperSmoother3Pole batch metadata', (t) => {
     assert.strictEqual(singleMeta.length, 1);
     assert.strictEqual(singleMeta[0], 7);
 });
-
-
 
 
 test('SuperSmoother3Pole fast API basic test', (t) => {

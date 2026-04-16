@@ -1,10 +1,3 @@
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -256,14 +249,6 @@ void nama_batch_f32(const float* __restrict__ prices,
 }
 
 
-
-
-
-
-
-
-
-
 extern "C" __global__
 void nama_batch_prefix_f32(const float* __restrict__ prices,
                            const float* __restrict__ prefix_tr,
@@ -315,7 +300,6 @@ void nama_batch_prefix_f32(const float* __restrict__ prices,
     }
 
 
-
     double eff_sum = static_cast<double>(prefix_tr[warm] - prefix_tr[first_valid]);
 
     const double hi = static_cast<double>(prices[dq_max[max_front]]);
@@ -336,8 +320,6 @@ void nama_batch_prefix_f32(const float* __restrict__ prices,
         const int win_start = i + 1 - period;
         dq_pop_older(win_start, capacity, dq_max, max_front, max_size);
         dq_pop_older(win_start, capacity, dq_min, min_front, min_size);
-
-
 
 
         const double tr_add = static_cast<double>(prefix_tr[i] - prefix_tr[i - 1]);

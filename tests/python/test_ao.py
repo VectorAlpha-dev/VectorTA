@@ -170,7 +170,6 @@ class TestAo:
         first_result = vector_ta.ao(high, low, 5, 34)
 
 
-
         second_result = vector_ta.ao(first_result, first_result, 3, 10)
 
         assert isinstance(second_result, np.ndarray)
@@ -198,7 +197,6 @@ class TestAo:
         low = np.linspace(100, 200, length) - 5
 
         result = vector_ta.ao(high, low, 5, 34)
-
 
 
         assert all(result[-10:] > 0), "AO should be positive in uptrend"
@@ -274,7 +272,6 @@ class TestAo:
         long_periods = result['long_periods']
 
 
-
         assert values.shape[0] == 3
         assert list(zip(short_periods, long_periods)) == [(5, 10), (5, 12), (10, 12)]
 
@@ -323,7 +320,6 @@ class TestAo:
 
         assert len(result) == len(high)
         assert result.dtype == np.float64
-
 
 
         valid_values = result[valid_start:]

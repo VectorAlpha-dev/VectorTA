@@ -123,8 +123,6 @@ class TestUI:
         assert len(result2) == len(close)
 
 
-
-
         result_default = ta_indicators.ui(close, period=14, scalar=100.0)
         for i in range(14*2-2, len(close)):
             if not np.isnan(result_default[i]) and not np.isnan(result2[i]):
@@ -223,7 +221,6 @@ class TestUI:
         """Test UI streaming functionality"""
 
         stream = ta_indicators.UiStream(period=5, scalar=100.0)
-
 
 
         data = [10.0, 12.0, 8.0, 15.0, 11.0, 9.0, 13.0, 10.0, 14.0, 12.0, 11.0, 13.0, 15.0, 14.0, 16.0]

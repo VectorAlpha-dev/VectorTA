@@ -1,10 +1,3 @@
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -17,30 +10,9 @@
 #endif
 
 
-
-
 #ifndef LINREG_LAUNCH_BOUNDS
 #define LINREG_LAUNCH_BOUNDS 256, 2
 #endif
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 extern "C" __global__ void linreg_exclusive_prefix_y_yi_f64(
@@ -151,7 +123,6 @@ void linreg_batch_from_prefix_f64(
 }
 
 
-
 extern "C" __global__
 __launch_bounds__(LINREG_LAUNCH_BOUNDS)
 void linreg_batch_f32(const float* __restrict__ prices,
@@ -236,7 +207,6 @@ void linreg_batch_f32(const float* __restrict__ prices,
         }
     }
 }
-
 
 
 static __device__ __forceinline__

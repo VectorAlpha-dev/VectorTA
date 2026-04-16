@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -101,8 +100,6 @@ test('DX warmup period validation', () => {
 
     const period = 14;
     const result = wasm.dx_js(high, low, close, period);
-
-
 
 
     const expectedWarmup = period - 1;

@@ -1,4 +1,3 @@
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -47,8 +46,6 @@ void vama_batch_f32(const float* __restrict__ prices,
     }
 
 
-
-
     for (int t = 0; t < first_valid; ++t) {
         out[base_offset + t] = NAN;
     }
@@ -69,11 +66,6 @@ void vama_batch_f32(const float* __restrict__ prices,
     }
 
 
-
-
-
-
-
     extern __shared__ unsigned char smem_rb[];
     double* dq_max_vals = reinterpret_cast<double*>(smem_rb);
     int* dq_max_idx = reinterpret_cast<int*>(dq_max_vals + vol_period);
@@ -83,7 +75,6 @@ void vama_batch_f32(const float* __restrict__ prices,
     int* dq_min_idx = reinterpret_cast<int*>(dq_min_vals + vol_period);
     int headMax = 0, tailMax = 0;
     int headMin = 0, tailMin = 0;
-
 
 
     int i = first_valid;

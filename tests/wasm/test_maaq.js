@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -162,7 +161,6 @@ test('MAAQ reinput', () => {
     assert.strictEqual(secondResult.length, firstResult.length);
 
 
-
     for (let i = 40; i < secondResult.length; i++) {
         assert(isFinite(secondResult[i]), `NaN found at index ${i}`);
     }
@@ -181,7 +179,6 @@ test('MAAQ NaN handling', () => {
     for (let i = 0; i < period - 1; i++) {
         assert(isNaN(result[i]), `Expected NaN at warmup index ${i}, got ${result[i]}`);
     }
-
 
 
     if (result.length > 240) {
@@ -209,7 +206,6 @@ test('MAAQ batch', () => {
         2, 2, 0,
         30, 30, 0
     );
-
 
 
     assert.strictEqual(metadata.length, 12);
@@ -294,7 +290,6 @@ test('MAAQ batch performance', () => {
 });
 
 test('MAAQ edge cases', () => {
-
 
 
     const data = new Float64Array(100);
@@ -455,8 +450,6 @@ test('MAAQ large period', () => {
         assert(isFinite(result[i]), `Expected finite value at index ${i}`);
     }
 });
-
-
 
 
 test('MAAQ batch with invalid ranges', () => {

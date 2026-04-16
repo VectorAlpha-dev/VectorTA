@@ -324,6 +324,5 @@ class TestMacz:
         assert not np.all(np.isnan(result)), "Result should not be all NaN"
 
 
-
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

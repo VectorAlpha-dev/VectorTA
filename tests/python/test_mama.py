@@ -52,7 +52,6 @@ def test_mama_accuracy():
         assert np.isfinite(fama_vals[i]), f"FAMA NaN at index {i}"
 
 
-
     expected_mama_last5 = [
         59244.89377664517,
         59241.699087812915,
@@ -211,7 +210,6 @@ def test_mama_batch():
     assert_close(batch_first_fama, individual_fama, atol=1e-9, msg="FAMA first combination mismatch")
 
 
-
 def test_mama_stream():
     """Test MAMA streaming interface"""
     data = load_test_data()
@@ -236,8 +234,6 @@ def test_mama_stream():
 
     for i in range(9):
         assert stream_results[i] is None, f"Expected None at index {i}"
-
-
 
 
     for i in range(10, len(close)):
@@ -404,7 +400,6 @@ def test_mama_fama_relationship():
     mama_vals, fama_vals = mama(close, 0.5, 0.05)
 
 
-
     mama_var = np.var(mama_vals[10:])
     fama_var = np.var(fama_vals[10:])
 
@@ -414,8 +409,6 @@ def test_mama_fama_relationship():
 
 def test_mama_batch_error_handling():
     """Test MAMA batch error handling guards for invalid inputs"""
-
-
 
 
     empty = np.array([], dtype=np.float64)
@@ -518,7 +511,6 @@ def test_mama_all_nan_input():
 def test_mama_zero_period():
     """Test MAMA fails with zero period (invalid parameter)"""
     input_data = np.array([10.0, 20.0, 30.0] * 10, dtype=np.float64)
-
 
 
     pass

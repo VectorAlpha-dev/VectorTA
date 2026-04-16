@@ -486,7 +486,7 @@ struct HmaState {
         return sqrt_wma.update(2.0 * half_value - full_value);
     }
 };
-}  // namespace
+}
 
 extern "C" __global__ void kairi_relative_index_batch_f64(
     const double* __restrict__ source,

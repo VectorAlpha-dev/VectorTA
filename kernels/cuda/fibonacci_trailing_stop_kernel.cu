@@ -133,7 +133,7 @@ __device__ inline void apply_pivot_low(
     pivots[0] = {value, -1};
     *pivot_count = 1;
 }
-}  // namespace
+}
 
 extern "C" __global__ void fibonacci_trailing_stop_batch_f64(
     const double* high,

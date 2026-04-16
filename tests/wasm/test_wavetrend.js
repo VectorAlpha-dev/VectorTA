@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -219,7 +218,6 @@ test('WaveTrend fast API (in-place)', () => {
             hlc3.length,
             9, 12, 3, 0.015
         );
-
 
 
         assert.ok(true, "Fast API executed without error");

@@ -71,8 +71,6 @@ def test_gatorosc_stream():
     stream = ta.GatorOscStream()
 
 
-
-
     for i in range(20):
         result = stream.update(50.0 + i)
         if i < 12:

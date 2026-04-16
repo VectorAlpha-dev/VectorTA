@@ -94,7 +94,6 @@ class TestTrix:
             results.append(result)
 
 
-
         assert results[0] is None
 
     def test_trix_batch(self, test_data):
@@ -159,12 +158,8 @@ class TestTrix:
         assert len(result) == len(close_prices)
 
 
-
-
-
         valid_before_first_nan = ~np.isnan(result[90:100])
         assert np.any(valid_before_first_nan), "Should have valid values before first NaN region"
-
 
 
         all_nan_after = np.isnan(result[110:])

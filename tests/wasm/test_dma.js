@@ -1,4 +1,3 @@
-
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -228,8 +227,6 @@ test('DMA NaN handling', () => {
 });
 
 
-
-
 test('DMA constant input', () => {
 
     const constantVal = EXPECTED_OUTPUTS.dma.constantValue;
@@ -238,7 +235,6 @@ test('DMA constant input', () => {
     const result = wasm.dma_js(inputData, 7, 20, 50, "WMA");
 
     assert.strictEqual(result.length, inputData.length);
-
 
 
     const last10 = result.slice(-10);
@@ -498,7 +494,6 @@ test('DMA zero-copy error handling', () => {
         assert.throws(() => {
             wasm.dma_into(ptr, ptr, 10, 7, 0, 50, "WMA");
         }, /Invalid period/);
-
 
 
         assert.throws(() => {

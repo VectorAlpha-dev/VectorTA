@@ -94,8 +94,6 @@ class TestEri:
         )
 
 
-
-
     def test_eri_default_params(self, test_data):
         """Test ERI with default parameters - mirrors check_eri_default_candles"""
         high = test_data['high']
@@ -157,7 +155,6 @@ class TestEri:
         close = test_data['close']
 
 
-
         bull, bear = ta_indicators.eri(high, low, close, period=13, ma_type="ema")
 
 
@@ -170,8 +167,6 @@ class TestEri:
         assert not np.isnan(bear[12]), "Expected value at index 12 (period-1)"
 
 
-
-
         high_with_nan = np.copy(high[:50])
         low_with_nan = np.copy(low[:50])
         close_with_nan = np.copy(close[:50])
@@ -182,7 +177,6 @@ class TestEri:
         close_with_nan[0] = np.nan
 
         bull, bear = ta_indicators.eri(high_with_nan, low_with_nan, close_with_nan, period=5, ma_type="ema")
-
 
 
         for i in range(5):
@@ -296,7 +290,6 @@ class TestEri:
         ]
 
 
-
         assert_close(
             default_bull[-5:],
             expected_bull,
@@ -356,7 +349,6 @@ class TestEri:
             period_range=(5, 15, 5),
             ma_type="ema"
         )
-
 
 
         expected_warmups = [2 + 5 - 1, 2 + 10 - 1, 2 + 15 - 1]
@@ -490,8 +482,6 @@ class TestEri:
         assert result['ma_types'][0] == "sma"
 
 
-
-
     def test_eri_parameter_validation(self):
         """Test ERI parameter validation for edge cases"""
 
@@ -518,7 +508,6 @@ class TestEri:
 
         bull, bear = ta_indicators.eri(high_inf, low_inf, close_inf, period=2, ma_type="sma")
         assert len(bull) == len(close_inf)
-
 
 
         with pytest.raises((ValueError, OverflowError)):

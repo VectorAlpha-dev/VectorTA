@@ -1,10 +1,3 @@
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -51,7 +44,6 @@ static __forceinline__ __device__ float tr_at_branchless(
     float m = fmaxf(seed, fmaxf(alt1, alt2));
     return (t == first_valid) ? seed : m;
 }
-
 
 
 static __forceinline__ __device__ void acc_add(float &hi, float &lo, float x) {

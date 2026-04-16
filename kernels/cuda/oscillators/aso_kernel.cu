@@ -1,17 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -66,9 +52,6 @@ struct ModHelper {
         return is_pow2 ? (x & mask) : (x % period);
     }
 };
-
-
-
 
 
 extern "C" __global__ void aso_batch_f32(
@@ -206,9 +189,6 @@ extern "C" __global__ void aso_batch_f32(
         out_bears[base + t] = __fdividef(sum_e, n);
     }
 }
-
-
-
 
 
 extern "C" __global__ void aso_many_series_one_param_f32(
@@ -354,4 +334,3 @@ extern "C" __global__ void aso_many_series_one_param_f32(
         }
     }
 }
-

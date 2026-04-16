@@ -159,8 +159,6 @@ class TestRangeFilter:
         filter_values, high_band, low_band = ta_indicators.range_filter(close)
 
 
-
-
         if len(filter_values) > 50:
             for i in range(50, len(filter_values)):
                 assert not np.isnan(filter_values[i]), f"Found unexpected NaN in filter at index {i}"
@@ -330,7 +328,6 @@ class TestRangeFilter:
 
 
         filter_auto, high_auto, low_auto = ta_indicators.range_filter(close)
-
 
 
         filter_second, high_second, low_second = ta_indicators.range_filter(close)

@@ -124,7 +124,6 @@ class TestMfi:
         volume = np.array([100.0, 200.0])
 
 
-
         with pytest.raises(ValueError, match="Empty data"):
             ta_indicators.mfi(typical_price, volume, period=2)
 
@@ -163,8 +162,6 @@ class TestMfi:
 
         result = ta_indicators.mfi(typical_price, volume, period=14)
         assert len(result) == len(typical_price)
-
-
 
 
         period = 14
@@ -219,9 +216,7 @@ class TestMfi:
         assert len(batch_result) == len(stream_values)
 
 
-
         assert np.all(np.isnan(stream_values[:14])), "Expected NaN during streaming warmup"
-
 
 
         for i in range(14, len(batch_result)):

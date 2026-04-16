@@ -325,7 +325,10 @@ impl CudaRangeFilteredTrendSignals {
         Ok(())
     }
 
-    fn will_fit(required: usize, headroom: usize) -> Result<(), CudaRangeFilteredTrendSignalsError> {
+    fn will_fit(
+        required: usize,
+        headroom: usize,
+    ) -> Result<(), CudaRangeFilteredTrendSignalsError> {
         if let Ok((free, _)) = mem_get_info() {
             if required.saturating_add(headroom) > free {
                 return Err(CudaRangeFilteredTrendSignalsError::OutOfMemory {
@@ -422,11 +425,7 @@ impl CudaRangeFilteredTrendSignals {
                 )?,
             );
             devs.push(combo.dev.unwrap_or(DEFAULT_DEV));
-            supertrend_factors.push(
-                combo
-                    .supertrend_factor
-                    .unwrap_or(DEFAULT_SUPERTREND_FACTOR),
-            );
+            supertrend_factors.push(combo.supertrend_factor.unwrap_or(DEFAULT_SUPERTREND_FACTOR));
             supertrend_atr_periods.push(
                 i32::try_from(
                     combo
@@ -503,9 +502,11 @@ impl CudaRangeFilteredTrendSignals {
         let func = self
             .module
             .get_function("range_filtered_trend_signals_batch_f64")
-            .map_err(|_| CudaRangeFilteredTrendSignalsError::MissingKernelSymbol {
-                name: "range_filtered_trend_signals_batch_f64",
-            })?;
+            .map_err(
+                |_| CudaRangeFilteredTrendSignalsError::MissingKernelSymbol {
+                    name: "range_filtered_trend_signals_batch_f64",
+                },
+            )?;
         let grid_x = ((rows as u32) + RANGE_FILTERED_TREND_SIGNALS_BLOCK_X - 1)
             / RANGE_FILTERED_TREND_SIGNALS_BLOCK_X;
         let grid = GridSize::x(grid_x.max(1));

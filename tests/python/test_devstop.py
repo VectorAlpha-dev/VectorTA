@@ -133,7 +133,6 @@ class TestDevStop:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
 
 
-
         expected_warmup = 39
         if len(result) > expected_warmup:
 

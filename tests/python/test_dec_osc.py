@@ -60,13 +60,6 @@ class TestDecOsc:
         )
 
 
-
-
-
-
-
-
-
     def test_dec_osc_default_candles(self, test_data):
         """Test DEC_OSC with default parameters - mirrors check_dec_osc_default_candles"""
         close = test_data['close']
@@ -156,7 +149,6 @@ class TestDecOsc:
 
         result_with_nan = ta_indicators.dec_osc(data_with_nan, hp_period=10, k=1.0)
         assert len(result_with_nan) == len(data_with_nan)
-
 
 
         assert np.all(np.isnan(result_with_nan[:5])), "Expected NaN propagation from input NaNs"
@@ -352,8 +344,6 @@ class TestDecOsc:
 
             if len(result) > expected_warmup:
                 assert not np.isnan(result[expected_warmup]), f"Unexpected NaN at index {expected_warmup} (after warmup) for hp_period={hp_period}"
-
-
 
 
 def test_dec_osc_performance():

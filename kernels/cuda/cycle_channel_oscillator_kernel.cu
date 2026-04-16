@@ -53,7 +53,7 @@ struct AtrState {
         return rma.update(tr);
     }
 };
-}  // namespace
+}
 
 extern "C" __global__ void cycle_channel_oscillator_batch_f64(
     const double* source,

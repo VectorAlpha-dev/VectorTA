@@ -1,22 +1,9 @@
-
-
-
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
 
  #include <cuda_runtime.h>
  #include <math.h>
-
-
 
 
  #ifndef GAUSS_BLOCK_DIM
@@ -26,8 +13,6 @@
  #ifndef GAUSS_USE_STREAMING_STORES
  #define GAUSS_USE_STREAMING_STORES 0
  #endif
-
-
 
 
  static __device__ __forceinline__ float qnan_f() {
@@ -47,10 +32,6 @@
  static __device__ __forceinline__ int clampi(int x, int lo, int hi) {
      return (x < lo) ? lo : (x > hi ? hi : x);
  }
-
-
-
-
 
 
  static __device__ __forceinline__ void gaussian_run_poles1(
@@ -178,9 +159,6 @@
  }
 
 
-
-
-
  extern "C" __global__ void gaussian_batch_f32(
      const float* __restrict__ prices,
      const int* __restrict__ periods,
@@ -204,7 +182,6 @@
 
 
          if (period < 2 || pole < 1 || pole > 4 || series_len <= 0) {
-
 
 
              continue;
@@ -246,9 +223,6 @@
          }
      }
  }
-
-
-
 
 
  extern "C" __global__ void gaussian_many_series_one_param_f32(

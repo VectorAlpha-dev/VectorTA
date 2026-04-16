@@ -1,6 +1,3 @@
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -10,9 +7,6 @@
 #ifndef SMA_NAN
 #define SMA_NAN (__int_as_float(0x7fffffff))
 #endif
-
-
-
 
 
 #ifndef LIKELY
@@ -145,24 +139,6 @@ extern "C" __global__ void sma_prefix_stage3_add_offsets_f64(
     if (i >= series_len) return;
     prefix[i + 1] += block_offsets[blockIdx.x];
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 extern "C" __global__ void sma_exclusive_prefix_f64(

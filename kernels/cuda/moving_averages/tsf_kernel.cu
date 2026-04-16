@@ -1,8 +1,3 @@
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -115,7 +110,6 @@ void tsf_batch_from_prefix_f64(
 }
 
 
-
 extern "C" __global__
 __launch_bounds__(TSF_LAUNCH_BOUNDS)
 void tsf_batch_f32(const float* __restrict__ prices,
@@ -192,7 +186,6 @@ void tsf_batch_f32(const float* __restrict__ prices,
         }
     }
 }
-
 
 
 static __device__ __forceinline__

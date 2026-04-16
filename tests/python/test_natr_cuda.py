@@ -108,4 +108,3 @@ class TestNatrCuda:
                 atol=2e-5,
                 msg=f"many-series mismatch at series={s}",
             )
-

@@ -1,11 +1,3 @@
-
-
-
-
-
-
-
-
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -28,8 +20,6 @@
 #ifndef TRIMA_TT
 #define TRIMA_TT 64
 #endif
-
-
 
 
 extern "C" __global__
@@ -79,8 +69,6 @@ void trima_batch_f32(const float* __restrict__ prices,
 }
 
 
-
-
 extern "C" __global__
 void trima_batch_f32_tiled(const float* __restrict__ prices,
                            const int* __restrict__ periods,
@@ -97,8 +85,6 @@ void trima_batch_f32_tiled(const float* __restrict__ prices,
     if (period <= 0 || period > max_period) return;
 
     const int warm = warm_indices[combo];
-
-
 
 
     extern __shared__ float smem[];
@@ -129,8 +115,6 @@ void trima_batch_f32_tiled(const float* __restrict__ prices,
     const int tile_len  = tile_end - tile_base + 1;
 
 
-
-
     for (int i = threadIdx.x; i < tile_len; i += blockDim.x) {
         tile[i] = prices[tile_base + i];
     }
@@ -154,8 +138,6 @@ void trima_batch_f32_tiled(const float* __restrict__ prices,
         }
     }
 }
-
-
 
 
 extern "C" __global__
@@ -193,8 +175,6 @@ void trima_multi_series_one_param_f32(const float* __restrict__ prices_tm,
         t += stride;
     }
 }
-
-
 
 
 extern "C" __global__
@@ -253,8 +233,6 @@ void trima_multi_series_one_param_f32_tm_tiled(const float* __restrict__ prices_
         }
     }
 }
-
-
 
 
 extern "C" __global__

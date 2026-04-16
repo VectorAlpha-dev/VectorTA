@@ -110,15 +110,17 @@ impl CudaKasePeakOscillatorWithDivergences {
         low: &[f64],
         close: &[f64],
         sweep: &KasePeakOscillatorWithDivergencesBatchRange,
-    ) -> Result<CudaKasePeakOscillatorWithDivergencesBatchResult, CudaKasePeakOscillatorWithDivergencesError>
-    {
+    ) -> Result<
+        CudaKasePeakOscillatorWithDivergencesBatchResult,
+        CudaKasePeakOscillatorWithDivergencesError,
+    > {
         self.module
             .get_function("kase_peak_oscillator_with_divergences_batch_f64")
-            .map_err(|_| {
-                CudaKasePeakOscillatorWithDivergencesError::MissingKernelSymbol {
+            .map_err(
+                |_| CudaKasePeakOscillatorWithDivergencesError::MissingKernelSymbol {
                     name: "kase_peak_oscillator_with_divergences_batch_f64",
-                }
-            })?;
+                },
+            )?;
         let cpu = kase_peak_oscillator_with_divergences_batch_with_kernel(
             high,
             low,

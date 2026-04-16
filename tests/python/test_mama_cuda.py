@@ -102,4 +102,3 @@ class TestMamaCuda:
         assert f_gpu_tm.shape == data_tm.shape
         assert_close(m_gpu_tm, cpu_m_tm, rtol=1e-5, atol=1e-6, msg="MAMA many-series mismatch")
         assert_close(f_gpu_tm, cpu_f_tm, rtol=1e-5, atol=1e-6, msg="FAMA many-series mismatch")
-

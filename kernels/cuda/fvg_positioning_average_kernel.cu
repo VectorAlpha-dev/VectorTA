@@ -97,7 +97,7 @@ struct LevelDeque {
     }
 };
 
-}  // namespace
+}
 
 extern "C" __global__ void fvg_positioning_average_batch_f64(
     const double* __restrict__ open,

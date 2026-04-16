@@ -24,7 +24,7 @@ __device__ inline double compute_phase_angle(double real, double imaginary) {
     }
     return phase_angle;
 }
-}  // namespace
+}
 
 extern "C" __global__ void l1_ehlers_phasor_batch_f64(
     const double* __restrict__ data,

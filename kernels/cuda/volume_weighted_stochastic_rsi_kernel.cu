@@ -367,7 +367,7 @@ struct WeightedMaState {
         return vwma.update(value, weight);
     }
 };
-}  // namespace
+}
 
 extern "C" __global__ void volume_weighted_stochastic_rsi_batch_f64(
     const double* __restrict__ source,
