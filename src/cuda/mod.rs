@@ -1186,7 +1186,7 @@ pub(crate) fn cuda_test_lock() -> CudaTestLock {
             Some(
                 LOCK.get_or_init(|| Mutex::new(()))
                     .lock()
-                    .expect("cuda test lock"),
+                    .unwrap_or_else(|err| err.into_inner()),
             )
         } else {
             None

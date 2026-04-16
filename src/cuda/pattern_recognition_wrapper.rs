@@ -222,10 +222,15 @@ pub struct CudaPatternRecognition {
     context: Arc<Context>,
     kernel_handles: Mutex<HashMap<&'static str, CUfunction>>,
     device_id: u32,
+    #[cfg(test)]
+    _test_lock: crate::cuda::CudaTestLock,
 }
 
 impl CudaPatternRecognition {
     pub fn new(device_id: usize) -> Result<Self, CudaPatternRecognitionError> {
+        #[cfg(test)]
+        let test_lock = crate::cuda::cuda_test_lock();
+
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
@@ -241,6 +246,8 @@ impl CudaPatternRecognition {
             context,
             kernel_handles: Mutex::new(HashMap::new()),
             device_id: device_id as u32,
+            #[cfg(test)]
+            _test_lock: test_lock,
         })
     }
 

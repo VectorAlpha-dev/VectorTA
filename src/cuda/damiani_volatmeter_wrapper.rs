@@ -541,6 +541,7 @@ impl CudaDamianiVolatmeter {
 
     fn launch_batch(
         &self,
+        d_prices: &DeviceBuffer<f32>,
         series_len: usize,
         first_valid: usize,
         d_vis_atr: &DeviceBuffer<i32>,
@@ -575,7 +576,7 @@ impl CudaDamianiVolatmeter {
         let grid: GridSize = (gx, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
-            let mut p: u64 = 0;
+            let mut p = d_prices.as_device_ptr().as_raw();
             let mut n = series_len as i32;
             let mut fv = first_valid as i32;
             let mut va = d_vis_atr.as_device_ptr().as_raw();
@@ -803,6 +804,7 @@ impl CudaDamianiVolatmeter {
                 .map_err(CudaDamianiError::Cuda)?;
 
         self.launch_batch(
+            d_prices,
             series_len,
             first_valid,
             &d_va,
@@ -860,6 +862,7 @@ impl CudaDamianiVolatmeter {
             output_index,
             &mut d_out,
         )?;
+        self.synchronize()?;
         Ok((
             DeviceArrayF32 {
                 buf: d_out,
@@ -1132,6 +1135,7 @@ pub mod benches {
         cuda: CudaDamianiVolatmeter,
         series_len: usize,
         first_valid: usize,
+        d_prices: DeviceBuffer<f32>,
         d_va: DeviceBuffer<i32>,
         d_vs: DeviceBuffer<i32>,
         d_sa: DeviceBuffer<i32>,
@@ -1147,6 +1151,7 @@ pub mod benches {
         fn launch(&mut self) {
             self.cuda
                 .launch_batch(
+                    &self.d_prices,
                     self.series_len,
                     self.first_valid,
                     &self.d_va,
@@ -1235,6 +1240,8 @@ pub mod benches {
         let sed_std: Vec<i32> = combos.iter().map(|p| p.sed_std.unwrap() as i32).collect();
         let thresh: Vec<f32> = combos.iter().map(|p| p.threshold.unwrap() as f32).collect();
 
+        let d_prices =
+            unsafe { DeviceBuffer::from_slice_async(&close, &cuda.stream) }.expect("d_prices");
         let d_va = unsafe { DeviceBuffer::from_slice_async(&vis_atr, &cuda.stream) }.expect("d_va");
         let d_vs = unsafe { DeviceBuffer::from_slice_async(&vis_std, &cuda.stream) }.expect("d_vs");
         let d_sa = unsafe { DeviceBuffer::from_slice_async(&sed_atr, &cuda.stream) }.expect("d_sa");
@@ -1258,6 +1265,7 @@ pub mod benches {
             cuda,
             series_len: ONE_SERIES_LEN,
             first_valid,
+            d_prices,
             d_va,
             d_vs,
             d_sa,
