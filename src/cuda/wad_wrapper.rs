@@ -93,6 +93,11 @@ pub struct CudaWad {
     debug_many_logged: bool,
 }
 
+const WAD_SCAN_BLOCK_X: u32 = 256;
+const WAD_SCAN_ITEMS_PER_THREAD: usize = 8;
+const WAD_SCAN_TILE: usize = WAD_SCAN_BLOCK_X as usize * WAD_SCAN_ITEMS_PER_THREAD;
+const WAD_SCAN_MAX_BLOCKS: usize = WAD_SCAN_TILE;
+
 impl CudaWad {
     pub fn new(device_id: usize) -> Result<Self, CudaWadError> {
         cust::init(CudaFlags::empty())?;
@@ -292,6 +297,12 @@ impl CudaWad {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaWadError> {
+        if n_combos == 1
+            && self.try_launch_series_scan_kernel(d_high, d_low, d_close, series_len, d_out)?
+        {
+            return Ok(());
+        }
+
         let func = self.module.get_function("wad_batch_f32").map_err(|_| {
             CudaWadError::MissingKernelSymbol {
                 name: "wad_batch_f32",
@@ -328,6 +339,104 @@ impl CudaWad {
         }
         self.maybe_log_batch_debug();
         Ok(())
+    }
+
+    fn try_launch_series_scan_kernel(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        series_len: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<bool, CudaWadError> {
+        if series_len == 0 {
+            return Ok(false);
+        }
+
+        let num_blocks = series_len.saturating_add(WAD_SCAN_TILE - 1) / WAD_SCAN_TILE;
+        if num_blocks == 0 || num_blocks > WAD_SCAN_MAX_BLOCKS {
+            return Ok(false);
+        }
+
+        let scan_func = self
+            .module
+            .get_function("wad_series_scan_blocks_f32")
+            .map_err(|_| CudaWadError::MissingKernelSymbol {
+                name: "wad_series_scan_blocks_f32",
+            })?;
+        let sum_func = self
+            .module
+            .get_function("wad_scan_block_sums_f64")
+            .map_err(|_| CudaWadError::MissingKernelSymbol {
+                name: "wad_scan_block_sums_f64",
+            })?;
+        let add_func = self
+            .module
+            .get_function("wad_add_block_offsets_f32")
+            .map_err(|_| CudaWadError::MissingKernelSymbol {
+                name: "wad_add_block_offsets_f32",
+            })?;
+
+        let mut d_block_sums: DeviceBuffer<f64> =
+            unsafe { DeviceBuffer::uninitialized_async(num_blocks, &self.stream) }?;
+        let grid_x: u32 = num_blocks
+            .try_into()
+            .map_err(|_| CudaWadError::InvalidInput("scan block count exceeds u32".into()))?;
+        let series_len_i: i32 = series_len
+            .try_into()
+            .map_err(|_| CudaWadError::InvalidInput("series_len exceeds i32".into()))?;
+        let num_blocks_i: i32 = num_blocks
+            .try_into()
+            .map_err(|_| CudaWadError::InvalidInput("scan block count exceeds i32".into()))?;
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let one_grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (WAD_SCAN_BLOCK_X, 1, 1).into();
+        self.validate_launch(grid_x, 1, 1, WAD_SCAN_BLOCK_X, 1, 1)?;
+        self.validate_launch(1, 1, 1, WAD_SCAN_BLOCK_X, 1, 1)?;
+
+        unsafe {
+            let mut high_ptr = d_high.as_device_ptr().as_raw();
+            let mut low_ptr = d_low.as_device_ptr().as_raw();
+            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut len_arg = series_len_i;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let mut sums_ptr = d_block_sums.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut high_ptr as *mut _ as *mut c_void,
+                &mut low_ptr as *mut _ as *mut c_void,
+                &mut close_ptr as *mut _ as *mut c_void,
+                &mut len_arg as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+                &mut sums_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&scan_func, grid, block, 0, args)?;
+
+            let mut sums_ptr = d_block_sums.as_device_ptr().as_raw();
+            let mut num_blocks_arg = num_blocks_i;
+            let args: &mut [*mut c_void] = &mut [
+                &mut sums_ptr as *mut _ as *mut c_void,
+                &mut num_blocks_arg as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&sum_func, one_grid, block, 0, args)?;
+
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let mut len_arg = series_len_i;
+            let mut sums_ptr = d_block_sums.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut out_ptr as *mut _ as *mut c_void,
+                &mut len_arg as *mut _ as *mut c_void,
+                &mut sums_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&add_func, grid, block, 0, args)?;
+        }
+
+        unsafe {
+            (*(self as *const _ as *mut CudaWad)).last_batch = Some(BatchKernelSelected::Plain {
+                block_x: WAD_SCAN_BLOCK_X,
+            });
+        }
+        self.maybe_log_batch_debug();
+        Ok(true)
     }
 
     fn run_batch(
@@ -564,6 +673,10 @@ impl CudaWad {
         series_len: usize,
         d_row_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaWadError> {
+        if self.try_launch_series_scan_kernel(d_high, d_low, d_close, series_len, d_row_out)? {
+            return Ok(());
+        }
+
         let func = self
             .module
             .get_function("wad_compute_single_row_f32")

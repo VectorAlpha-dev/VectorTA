@@ -51,6 +51,11 @@ pub struct CudaNvi {
     device_id: u32,
 }
 
+const NVI_SCAN_BLOCK_X: u32 = 256;
+const NVI_SCAN_ITEMS_PER_THREAD: usize = 8;
+const NVI_SCAN_TILE: usize = NVI_SCAN_BLOCK_X as usize * NVI_SCAN_ITEMS_PER_THREAD;
+const NVI_SCAN_MAX_BLOCKS: usize = NVI_SCAN_TILE;
+
 impl CudaNvi {
     pub fn new(device_id: usize) -> Result<Self, CudaNviError> {
         cust::init(CudaFlags::empty())?;
@@ -166,6 +171,100 @@ impl CudaNvi {
         Ok(())
     }
 
+    fn try_launch_batch_scan(
+        &self,
+        d_close: &DeviceBuffer<f32>,
+        d_volume: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<bool, CudaNviError> {
+        let num_blocks = len.saturating_add(NVI_SCAN_TILE - 1) / NVI_SCAN_TILE;
+        if len == 0 || num_blocks == 0 || num_blocks > NVI_SCAN_MAX_BLOCKS {
+            return Ok(false);
+        }
+
+        let scan = self
+            .module
+            .get_function("nvi_scan_blocks_f32")
+            .map_err(|_| CudaNviError::MissingKernelSymbol {
+                name: "nvi_scan_blocks_f32",
+            })?;
+        let scan_products = self
+            .module
+            .get_function("nvi_scan_block_products_f64")
+            .map_err(|_| CudaNviError::MissingKernelSymbol {
+                name: "nvi_scan_block_products_f64",
+            })?;
+        let apply = self
+            .module
+            .get_function("nvi_apply_block_products_f32")
+            .map_err(|_| CudaNviError::MissingKernelSymbol {
+                name: "nvi_apply_block_products_f32",
+            })?;
+
+        let mut d_block_products: DeviceBuffer<f64> =
+            unsafe { DeviceBuffer::uninitialized(num_blocks) }?;
+        let grid_x: u32 = num_blocks
+            .try_into()
+            .map_err(|_| CudaNviError::InvalidInput("scan block count exceeds u32".into()))?;
+        let len_i: i32 = len
+            .try_into()
+            .map_err(|_| CudaNviError::InvalidInput("length exceeds i32".into()))?;
+        let first_i: i32 = first_valid
+            .try_into()
+            .map_err(|_| CudaNviError::InvalidInput("first_valid exceeds i32".into()))?;
+        let num_blocks_i: i32 = num_blocks
+            .try_into()
+            .map_err(|_| CudaNviError::InvalidInput("scan block count exceeds i32".into()))?;
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let one_grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (NVI_SCAN_BLOCK_X, 1, 1).into();
+        self.validate_launch_dims((grid_x, 1, 1), (NVI_SCAN_BLOCK_X, 1, 1))?;
+        self.validate_launch_dims((1, 1, 1), (NVI_SCAN_BLOCK_X, 1, 1))?;
+
+        unsafe {
+            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut vol_ptr = d_volume.as_device_ptr().as_raw();
+            let mut len_arg = len_i;
+            let mut first_arg = first_i;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let mut products_ptr = d_block_products.as_device_ptr().as_raw();
+            let mut args: [*mut c_void; 6] = [
+                &mut close_ptr as *mut _ as *mut c_void,
+                &mut vol_ptr as *mut _ as *mut c_void,
+                &mut len_arg as *mut _ as *mut c_void,
+                &mut first_arg as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+                &mut products_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&scan, grid, block, 0, &mut args)?;
+
+            let mut products_ptr = d_block_products.as_device_ptr().as_raw();
+            let mut num_blocks_arg = num_blocks_i;
+            let mut args: [*mut c_void; 2] = [
+                &mut products_ptr as *mut _ as *mut c_void,
+                &mut num_blocks_arg as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&scan_products, one_grid, block, 0, &mut args)?;
+
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let mut len_arg = len_i;
+            let mut first_arg = first_i;
+            let mut products_ptr = d_block_products.as_device_ptr().as_raw();
+            let mut args: [*mut c_void; 4] = [
+                &mut out_ptr as *mut _ as *mut c_void,
+                &mut len_arg as *mut _ as *mut c_void,
+                &mut first_arg as *mut _ as *mut c_void,
+                &mut products_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&apply, grid, block, 0, &mut args)?;
+        }
+
+        Ok(true)
+    }
+
     pub fn nvi_batch_dev(
         &self,
         close: &[f32],
@@ -194,6 +293,15 @@ impl CudaNvi {
         let d_close = DeviceBuffer::from_slice(close)?;
         let d_volume = DeviceBuffer::from_slice(volume)?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
+
+        if self.try_launch_batch_scan(&d_close, &d_volume, len, first, &mut d_out)? {
+            self.stream.synchronize()?;
+            return Ok(DeviceArrayF32 {
+                buf: d_out,
+                rows: 1,
+                cols: len,
+            });
+        }
 
         let func = self.module.get_function("nvi_batch_f32").map_err(|_| {
             CudaNviError::MissingKernelSymbol {
@@ -360,6 +468,10 @@ impl CudaNvi {
         }
         if d_volume.len() != len || d_out.len() != len {
             return Err(CudaNviError::InvalidInput("length mismatch".into()));
+        }
+
+        if self.try_launch_batch_scan(d_close, d_volume, len, first_valid, d_out)? {
+            return Ok(());
         }
 
         let func = self.module.get_function("nvi_batch_f32").map_err(|_| {

@@ -58,6 +58,7 @@ pub struct CudaMom {
     policy: CudaMomPolicy,
     sm_count: u32,
     max_grid_x: u32,
+    max_grid_y: u32,
 }
 
 fn expand_grid_checked_cuda(r: &MomBatchRange) -> Result<Vec<MomParams>, CudaMomError> {
@@ -125,6 +126,7 @@ impl CudaMom {
 
         let sm_count = device.get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
         let max_grid_x = device.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let max_grid_y = device.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
 
         Ok(Self {
             module,
@@ -134,6 +136,7 @@ impl CudaMom {
             policy: CudaMomPolicy::default(),
             sm_count,
             max_grid_x,
+            max_grid_y,
         })
     }
 
@@ -250,20 +253,35 @@ impl CudaMom {
         if n_combos == 0 {
             return Ok(());
         }
-        let func = self.module.get_function("mom_batch_f32").map_err(|_| {
-            CudaMomError::MissingKernelSymbol {
-                name: "mom_batch_f32",
-            }
-        })?;
+        let func = self
+            .module
+            .get_function("mom_batch_tiled_f32")
+            .map_err(|_| CudaMomError::MissingKernelSymbol {
+                name: "mom_batch_tiled_f32",
+            })?;
 
-        let block_x = self.policy.batch_block_x.unwrap_or(1024);
+        let block_x = self.policy.batch_block_x.unwrap_or(1024).clamp(32, 1024);
+        let len_tiles = (((len as u64).saturating_add(block_x as u64 - 1)) / block_x as u64)
+            .max(1)
+            .min(u32::MAX as u64) as u32;
+        let auto_tiles = {
+            let combos = (n_combos as u32).max(1);
+            let target_blocks = self.sm_count.saturating_mul(32).max(1);
+            target_blocks
+                .saturating_add(combos - 1)
+                .checked_div(combos)
+                .unwrap_or(1)
+                .clamp(1, 16)
+        };
+        let tiles_per_combo = auto_tiles.min(len_tiles).min(self.max_grid_x.max(1));
 
-        let max_blocks: u32 = self.max_grid_x.max(1);
+        let max_blocks: u32 = self.max_grid_y.max(1);
         let mut launched = 0usize;
         while launched < n_combos {
             let this_chunk = (n_combos - launched).min(max_blocks as usize);
-            let grid_x = this_chunk as u32;
-            let grid: GridSize = (grid_x.max(1), 1, 1).into();
+            let grid_x = tiles_per_combo;
+            let grid_y = this_chunk as u32;
+            let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
             CudaMom::validate_launch(grid, block)?;
 
@@ -558,7 +576,16 @@ pub mod benches {
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
-        let cuda = CudaMom::new(0).expect("cuda mom");
+        let mut cuda = CudaMom::new(0).expect("cuda mom");
+        let batch_block_x = std::env::var("MOM_BATCH_BLOCK_X")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok());
+        if batch_block_x.is_some() {
+            cuda.set_policy(CudaMomPolicy {
+                batch_block_x,
+                many_block_x: None,
+            });
+        }
         let mut prices = gen_series(ONE_SERIES_LEN);
 
         for i in 0..8 {

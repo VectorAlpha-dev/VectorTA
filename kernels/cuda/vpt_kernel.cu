@@ -2,12 +2,150 @@
 #include <math.h>
 #include <math_constants.h>
 
+#ifndef VPT_SCAN_BLOCK_X
+#define VPT_SCAN_BLOCK_X 256
+#endif
+
+#ifndef VPT_SCAN_ITEMS_PER_THREAD
+#define VPT_SCAN_ITEMS_PER_THREAD 8
+#endif
+
+#define VPT_SCAN_TILE (VPT_SCAN_BLOCK_X * VPT_SCAN_ITEMS_PER_THREAD)
+
 
 static __device__ __forceinline__ void kahan_add(float x, float &sum, float &c) {
     float y = x - c;
     float t = sum + y;
     c = (t - sum) - y;
     sum = t;
+}
+
+
+extern "C" __global__ void vpt_scan_blocks_f32(
+    const float* __restrict__ price,
+    const float* __restrict__ volume,
+    int len,
+    int first_valid,
+    float* __restrict__ out,
+    double* __restrict__ block_sums)
+{
+    __shared__ double scan[VPT_SCAN_TILE];
+    __shared__ double temp[VPT_SCAN_TILE];
+
+    const int base = blockIdx.x * VPT_SCAN_TILE;
+    const int tid = threadIdx.x;
+    const float nan_f = CUDART_NAN_F;
+
+    if (first_valid < 0) first_valid = 0;
+
+    #pragma unroll
+    for (int j = 0; j < VPT_SCAN_ITEMS_PER_THREAD; ++j) {
+        const int lane = tid + j * VPT_SCAN_BLOCK_X;
+        const int idx = base + lane;
+        double inc = 0.0;
+        if (idx >= first_valid && idx < len) {
+            if (idx < 1) {
+                inc = (double)nan_f;
+            } else {
+                const float p0 = price[idx - 1];
+                const float p1 = price[idx];
+                const float v1 = volume[idx];
+                inc = (isfinite(p0) && p0 != 0.0f && isfinite(p1) && isfinite(v1))
+                    ? (double)v1 * ((double)p1 - (double)p0) / (double)p0
+                    : (double)nan_f;
+            }
+        }
+        scan[lane] = inc;
+    }
+    __syncthreads();
+
+    for (int offset = 1; offset < VPT_SCAN_TILE; offset <<= 1) {
+        #pragma unroll
+        for (int j = 0; j < VPT_SCAN_ITEMS_PER_THREAD; ++j) {
+            const int lane = tid + j * VPT_SCAN_BLOCK_X;
+            temp[lane] = scan[lane] + (lane >= offset ? scan[lane - offset] : 0.0);
+        }
+        __syncthreads();
+        #pragma unroll
+        for (int j = 0; j < VPT_SCAN_ITEMS_PER_THREAD; ++j) {
+            const int lane = tid + j * VPT_SCAN_BLOCK_X;
+            scan[lane] = temp[lane];
+        }
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for (int j = 0; j < VPT_SCAN_ITEMS_PER_THREAD; ++j) {
+        const int lane = tid + j * VPT_SCAN_BLOCK_X;
+        const int idx = base + lane;
+        if (idx < len) out[idx] = idx <= first_valid ? nan_f : (float)scan[lane];
+    }
+
+    if (tid == 0) {
+        int remaining = len - base;
+        int count = remaining > VPT_SCAN_TILE ? VPT_SCAN_TILE : remaining;
+        block_sums[blockIdx.x] = count > 0 ? scan[count - 1] : 0.0;
+    }
+}
+
+
+extern "C" __global__ void vpt_scan_block_sums_f64(
+    double* __restrict__ block_sums,
+    int num_blocks)
+{
+    __shared__ double scan[VPT_SCAN_TILE];
+    __shared__ double temp[VPT_SCAN_TILE];
+
+    const int tid = threadIdx.x;
+    #pragma unroll
+    for (int j = 0; j < VPT_SCAN_ITEMS_PER_THREAD; ++j) {
+        const int lane = tid + j * VPT_SCAN_BLOCK_X;
+        scan[lane] = lane < num_blocks ? block_sums[lane] : 0.0;
+    }
+    __syncthreads();
+
+    for (int offset = 1; offset < VPT_SCAN_TILE; offset <<= 1) {
+        #pragma unroll
+        for (int j = 0; j < VPT_SCAN_ITEMS_PER_THREAD; ++j) {
+            const int lane = tid + j * VPT_SCAN_BLOCK_X;
+            temp[lane] = scan[lane] + (lane >= offset ? scan[lane - offset] : 0.0);
+        }
+        __syncthreads();
+        #pragma unroll
+        for (int j = 0; j < VPT_SCAN_ITEMS_PER_THREAD; ++j) {
+            const int lane = tid + j * VPT_SCAN_BLOCK_X;
+            scan[lane] = temp[lane];
+        }
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for (int j = 0; j < VPT_SCAN_ITEMS_PER_THREAD; ++j) {
+        const int lane = tid + j * VPT_SCAN_BLOCK_X;
+        if (lane < num_blocks) block_sums[lane] = scan[lane];
+    }
+}
+
+
+extern "C" __global__ void vpt_add_block_offsets_f32(
+    float* __restrict__ out,
+    int len,
+    int first_valid,
+    const double* __restrict__ block_sums)
+{
+    const int base = blockIdx.x * VPT_SCAN_TILE;
+    if (blockIdx.x == 0) return;
+
+    if (first_valid < 0) first_valid = 0;
+    const double offset = block_sums[blockIdx.x - 1];
+    const int tid = threadIdx.x;
+
+    #pragma unroll
+    for (int j = 0; j < VPT_SCAN_ITEMS_PER_THREAD; ++j) {
+        const int lane = tid + j * VPT_SCAN_BLOCK_X;
+        const int idx = base + lane;
+        if (idx < len && idx > first_valid) out[idx] = (float)((double)out[idx] + offset);
+    }
 }
 
 

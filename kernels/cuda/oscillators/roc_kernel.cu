@@ -85,6 +85,67 @@ void roc_batch_f32(const float* __restrict__ prices,
 
 
 extern "C" __global__
+void roc_batch_tiled_f32(const float* __restrict__ prices,
+                         const int*   __restrict__ periods,
+                         int series_len,
+                         int first_valid,
+                         int n_combos,
+                         float* __restrict__ out)
+{
+    const int combo = blockIdx.y;
+    if (combo >= n_combos) return;
+
+    float* __restrict__ out_row = out + combo * series_len;
+    const int period = periods[combo];
+    const int offset = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = blockDim.x * gridDim.x;
+
+    if (period <= 0) {
+        for (int t = offset; t < series_len; t += stride) {
+            out_row[t] = qnanf();
+        }
+        return;
+    }
+
+    const int warm = first_valid + period;
+
+    if (warm >= series_len) {
+        for (int t = offset; t < series_len; t += stride) {
+            out_row[t] = qnanf();
+        }
+        return;
+    }
+
+    for (int t = offset; t < warm; t += stride) {
+        out_row[t] = qnanf();
+    }
+
+    for (int t = warm + offset; t < series_len; t += stride) {
+        float cur  =
+#if __CUDA_ARCH__ >= 350
+            __ldg(&prices[t]);
+#else
+            prices[t];
+#endif
+        float prev =
+#if __CUDA_ARCH__ >= 350
+            __ldg(&prices[t - period]);
+#else
+            prices[t - period];
+#endif
+
+        if (prev == 0.0f || isnan(prev)) {
+            out_row[t] = 0.0f;
+        } else {
+            const float inv_prev = 1.0f / prev;
+            const float rel      = fmaf(cur, inv_prev, -1.0f);
+            out_row[t] = 100.0f * rel;
+        }
+    }
+}
+
+
+extern "C" __global__
 void roc_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                    const int*   __restrict__ first_valids,
                                    int cols,

@@ -172,7 +172,7 @@ extern "C" __global__ void stddev_batch_f32(
                             ((double)ex2.x + (double)ex2.y) - ((double)sx2.x + (double)sx2.y);
                         const double mean = s1 * inv_n;
                         const double var = (s2 * inv_n) - (mean * mean);
-                        outv = (var > 0.0) ? (float)(sqrt(var) * (double)nb) : 0.0f;
+                        outv = (var > 0.0) ? sqrtf((float)var) * nb : 0.0f;
                     }
                 }
             }

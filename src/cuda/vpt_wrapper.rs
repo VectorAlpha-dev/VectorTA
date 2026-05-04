@@ -51,6 +51,11 @@ pub struct CudaVpt {
     block_x: u32,
 }
 
+const VPT_SCAN_BLOCK_X: u32 = 256;
+const VPT_SCAN_ITEMS_PER_THREAD: usize = 8;
+const VPT_SCAN_TILE: usize = VPT_SCAN_BLOCK_X as usize * VPT_SCAN_ITEMS_PER_THREAD;
+const VPT_SCAN_MAX_BLOCKS: usize = VPT_SCAN_TILE;
+
 impl CudaVpt {
     pub fn new(device_id: usize) -> Result<Self, CudaVptError> {
         cust::init(CudaFlags::empty())?;
@@ -122,6 +127,78 @@ impl CudaVpt {
         Ok(())
     }
 
+    fn try_launch_batch_scan(
+        &self,
+        d_price: &DeviceBuffer<f32>,
+        d_volume: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<bool, CudaVptError> {
+        let num_blocks = len.saturating_add(VPT_SCAN_TILE - 1) / VPT_SCAN_TILE;
+        if len == 0 || num_blocks == 0 || num_blocks > VPT_SCAN_MAX_BLOCKS {
+            return Ok(false);
+        }
+
+        let mut d_block_sums: DeviceBuffer<f64> =
+            unsafe { DeviceBuffer::uninitialized(num_blocks) }?;
+        let scan = self
+            .module
+            .get_function("vpt_scan_blocks_f32")
+            .map_err(|_| CudaVptError::MissingKernelSymbol {
+                name: "vpt_scan_blocks_f32",
+            })?;
+        let scan_sums = self
+            .module
+            .get_function("vpt_scan_block_sums_f64")
+            .map_err(|_| CudaVptError::MissingKernelSymbol {
+                name: "vpt_scan_block_sums_f64",
+            })?;
+        let add = self
+            .module
+            .get_function("vpt_add_block_offsets_f32")
+            .map_err(|_| CudaVptError::MissingKernelSymbol {
+                name: "vpt_add_block_offsets_f32",
+            })?;
+
+        let grid_x: u32 = num_blocks
+            .try_into()
+            .map_err(|_| CudaVptError::InvalidInput("scan block count exceeds u32".into()))?;
+        let len_i: i32 = len
+            .try_into()
+            .map_err(|_| CudaVptError::InvalidInput("length exceeds i32".into()))?;
+        let first_i: i32 = first_valid
+            .try_into()
+            .map_err(|_| CudaVptError::InvalidInput("first_valid exceeds i32".into()))?;
+        let num_blocks_i: i32 = num_blocks
+            .try_into()
+            .map_err(|_| CudaVptError::InvalidInput("scan block count exceeds i32".into()))?;
+        let stream = &self.stream;
+
+        unsafe {
+            launch!(scan<<<(grid_x, 1, 1), (VPT_SCAN_BLOCK_X, 1, 1), 0, stream>>>(
+                d_price.as_device_ptr(),
+                d_volume.as_device_ptr(),
+                len_i,
+                first_i,
+                d_out.as_device_ptr(),
+                d_block_sums.as_device_ptr()
+            ))?;
+            launch!(scan_sums<<<(1, 1, 1), (VPT_SCAN_BLOCK_X, 1, 1), 0, stream>>>(
+                d_block_sums.as_device_ptr(),
+                num_blocks_i
+            ))?;
+            launch!(add<<<(grid_x, 1, 1), (VPT_SCAN_BLOCK_X, 1, 1), 0, stream>>>(
+                d_out.as_device_ptr(),
+                len_i,
+                first_i,
+                d_block_sums.as_device_ptr()
+            ))?;
+        }
+
+        Ok(true)
+    }
+
     pub fn vpt_batch_dev(
         &self,
         price: &[f32],
@@ -147,6 +224,15 @@ impl CudaVpt {
         let d_price = DeviceBuffer::from_slice(price)?;
         let d_volume = DeviceBuffer::from_slice(volume)?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
+
+        if self.try_launch_batch_scan(&d_price, &d_volume, len, first, &mut d_out)? {
+            self.stream.synchronize()?;
+            return Ok(DeviceArrayF32 {
+                buf: d_out,
+                rows: 1,
+                cols: len,
+            });
+        }
 
         let func = self.module.get_function("vpt_batch_f32").map_err(|_| {
             CudaVptError::MissingKernelSymbol {
@@ -198,6 +284,10 @@ impl CudaVpt {
             return Err(CudaVptError::InvalidInput(
                 "output buffer length mismatch".into(),
             ));
+        }
+
+        if self.try_launch_batch_scan(d_price, d_volume, len, first_valid, d_out)? {
+            return Ok(());
         }
 
         let func = self.module.get_function("vpt_batch_f32").map_err(|_| {
@@ -334,29 +424,15 @@ pub mod benches {
     }
     impl CudaBenchState for OneSeriesState {
         fn launch(&mut self) {
-            let func = self
-                .cuda
-                .module
-                .get_function("vpt_batch_f32")
-                .expect("vpt_batch_f32");
-            let stream = &self.cuda.stream;
-            let grid: GridSize = (1, 1, 1).into();
-            let block: BlockSize = (1, 1, 1).into();
-            unsafe {
-                let mut price_ptr = self.d_price.as_device_ptr().as_raw();
-                let mut vol_ptr = self.d_volume.as_device_ptr().as_raw();
-                let mut len_i = self.len as i32;
-                let mut first_i = self.first as i32;
-                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
-                let args: &mut [*mut c_void] = &mut [
-                    &mut price_ptr as *mut _ as *mut c_void,
-                    &mut vol_ptr as *mut _ as *mut c_void,
-                    &mut len_i as *mut _ as *mut c_void,
-                    &mut first_i as *mut _ as *mut c_void,
-                    &mut out_ptr as *mut _ as *mut c_void,
-                ];
-                stream.launch(&func, grid, block, 0, args).expect("launch");
-            }
+            self.cuda
+                .vpt_batch_device(
+                    &self.d_price,
+                    &self.d_volume,
+                    self.len,
+                    self.first,
+                    &mut self.d_out,
+                )
+                .expect("vpt_batch_device");
             self.cuda.stream.synchronize().expect("vpt sync");
         }
     }

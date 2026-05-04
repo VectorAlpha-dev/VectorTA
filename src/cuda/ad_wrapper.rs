@@ -81,6 +81,11 @@ pub struct CudaAd {
     device_id: u32,
 }
 
+const AD_SCAN_BLOCK_X: u32 = 256;
+const AD_SCAN_ITEMS_PER_THREAD: usize = 8;
+const AD_SCAN_TILE: usize = AD_SCAN_BLOCK_X as usize * AD_SCAN_ITEMS_PER_THREAD;
+const AD_SCAN_MAX_BLOCKS: usize = AD_SCAN_TILE;
+
 impl CudaAd {
     pub fn new(device_id: usize) -> Result<Self, CudaAdError> {
         cust::init(CudaFlags::empty()).map_err(CudaAdError::Cuda)?;
@@ -193,6 +198,12 @@ impl CudaAd {
         n_series: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaAdError> {
+        if self
+            .try_launch_series_scan_kernel(d_high, d_low, d_close, d_volume, len, n_series, d_out)?
+        {
+            return Ok(());
+        }
+
         let func = self.module.get_function("ad_series_f32").map_err(|_| {
             CudaAdError::MissingKernelSymbol {
                 name: "ad_series_f32",
@@ -231,6 +242,110 @@ impl CudaAd {
                 .map_err(CudaAdError::Cuda)?;
         }
         Ok(())
+    }
+
+    fn try_launch_series_scan_kernel(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        d_volume: &DeviceBuffer<f32>,
+        len: usize,
+        n_series: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<bool, CudaAdError> {
+        if n_series != 1 || len == 0 {
+            return Ok(false);
+        }
+
+        let num_blocks = len.saturating_add(AD_SCAN_TILE - 1) / AD_SCAN_TILE;
+        if num_blocks == 0 || num_blocks > AD_SCAN_MAX_BLOCKS {
+            return Ok(false);
+        }
+
+        let scan_func = self
+            .module
+            .get_function("ad_series_scan_blocks_f32")
+            .map_err(|_| CudaAdError::MissingKernelSymbol {
+                name: "ad_series_scan_blocks_f32",
+            })?;
+        let sum_func = self
+            .module
+            .get_function("ad_scan_block_sums_f64")
+            .map_err(|_| CudaAdError::MissingKernelSymbol {
+                name: "ad_scan_block_sums_f64",
+            })?;
+        let add_func = self
+            .module
+            .get_function("ad_add_block_offsets_f32")
+            .map_err(|_| CudaAdError::MissingKernelSymbol {
+                name: "ad_add_block_offsets_f32",
+            })?;
+
+        let mut d_block_sums: DeviceBuffer<f64> =
+            unsafe { DeviceBuffer::uninitialized(num_blocks) }.map_err(CudaAdError::Cuda)?;
+
+        let grid_x: u32 = num_blocks
+            .try_into()
+            .map_err(|_| CudaAdError::InvalidInput("scan block count exceeds u32".into()))?;
+        let len_i: i32 = len
+            .try_into()
+            .map_err(|_| CudaAdError::InvalidInput("length exceeds i32".into()))?;
+        let num_blocks_i: i32 = num_blocks
+            .try_into()
+            .map_err(|_| CudaAdError::InvalidInput("scan block count exceeds i32".into()))?;
+
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let one_grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (AD_SCAN_BLOCK_X, 1, 1).into();
+        self.validate_launch((grid_x, 1, 1), (AD_SCAN_BLOCK_X, 1, 1))?;
+        self.validate_launch((1, 1, 1), (AD_SCAN_BLOCK_X, 1, 1))?;
+
+        unsafe {
+            let mut high_ptr = d_high.as_device_ptr().as_raw();
+            let mut low_ptr = d_low.as_device_ptr().as_raw();
+            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut vol_ptr = d_volume.as_device_ptr().as_raw();
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let mut sums_ptr = d_block_sums.as_device_ptr().as_raw();
+            let mut len_scan = len_i;
+            let args: &mut [*mut c_void] = &mut [
+                &mut high_ptr as *mut _ as *mut c_void,
+                &mut low_ptr as *mut _ as *mut c_void,
+                &mut close_ptr as *mut _ as *mut c_void,
+                &mut vol_ptr as *mut _ as *mut c_void,
+                &mut len_scan as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+                &mut sums_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&scan_func, grid, block, 0, args)
+                .map_err(CudaAdError::Cuda)?;
+
+            let mut sums_ptr = d_block_sums.as_device_ptr().as_raw();
+            let mut num_blocks_arg = num_blocks_i;
+            let args: &mut [*mut c_void] = &mut [
+                &mut sums_ptr as *mut _ as *mut c_void,
+                &mut num_blocks_arg as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&sum_func, one_grid, block, 0, args)
+                .map_err(CudaAdError::Cuda)?;
+
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let mut len_add = len_i;
+            let mut sums_ptr = d_block_sums.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut out_ptr as *mut _ as *mut c_void,
+                &mut len_add as *mut _ as *mut c_void,
+                &mut sums_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&add_func, grid, block, 0, args)
+                .map_err(CudaAdError::Cuda)?;
+        }
+
+        Ok(true)
     }
 
     pub fn ad_series_dev(

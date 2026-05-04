@@ -115,12 +115,28 @@ pub struct CudaRocp {
     policy: CudaRocpPolicy,
     debug_batch_logged: bool,
     debug_many_logged: bool,
+    max_grid_x: u32,
+    max_grid_y: u32,
+    max_threads_per_block: u32,
+    sm_count: u32,
 }
 
 impl CudaRocp {
     pub fn new(device_id: usize) -> Result<Self, CudaRocpError> {
         cust::init(CudaFlags::empty()).map_err(CudaRocpError::Cuda)?;
         let device = Device::get_device(device_id as u32).map_err(CudaRocpError::Cuda)?;
+        let max_grid_x = device
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .map_err(CudaRocpError::Cuda)? as u32;
+        let max_grid_y = device
+            .get_attribute(DeviceAttribute::MaxGridDimY)
+            .map_err(CudaRocpError::Cuda)? as u32;
+        let max_threads_per_block = device
+            .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
+            .map_err(CudaRocpError::Cuda)? as u32;
+        let sm_count = device
+            .get_attribute(DeviceAttribute::MultiprocessorCount)
+            .map_err(CudaRocpError::Cuda)? as u32;
         let context = Arc::new(Context::new(device).map_err(CudaRocpError::Cuda)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/rocp_kernel.ptx"));
         let jit_opts = &[
@@ -138,6 +154,10 @@ impl CudaRocp {
             policy: CudaRocpPolicy::default(),
             debug_batch_logged: false,
             debug_many_logged: false,
+            max_grid_x,
+            max_grid_y,
+            max_threads_per_block,
+            sm_count,
         })
     }
 
@@ -514,33 +534,54 @@ impl CudaRocp {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaRocpError> {
-        let func = self.module.get_function("rocp_batch_f32").map_err(|_| {
-            CudaRocpError::MissingKernelSymbol {
-                name: "rocp_batch_f32",
-            }
-        })?;
-        let suggested = func
-            .suggested_launch_configuration(0, (256u32, 1u32, 1u32).into())
-            .map(|(_min_grid, bs)| bs)
-            .unwrap_or(256);
+        let func = self
+            .module
+            .get_function("rocp_batch_tiled_f32")
+            .map_err(|_| CudaRocpError::MissingKernelSymbol {
+                name: "rocp_batch_tiled_f32",
+            })?;
         let block_x = match self.policy.batch {
-            BatchKernelPolicy::Auto => suggested.clamp(32, 1024),
+            BatchKernelPolicy::Auto => 1024.min(self.max_threads_per_block).max(32),
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
         };
+        let len_tiles = (((len as u64).saturating_add(block_x as u64 - 1)) / block_x as u64)
+            .max(1)
+            .min(u32::MAX as u64) as u32;
+        let auto_tiles = {
+            let combos = (rows as u32).max(1);
+            let target_blocks = self.sm_count.saturating_mul(32).max(1);
+            target_blocks
+                .saturating_add(combos - 1)
+                .checked_div(combos)
+                .unwrap_or(1)
+                .clamp(1, 16)
+        };
+        let tiles_per_combo = auto_tiles.min(len_tiles).min(self.max_grid_x.max(1));
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") && !self.debug_batch_logged {
             eprintln!(
-                "[rocp] batch kernel: block_x={} rows={} len={}",
-                block_x, rows, len
+                "[rocp] batch kernel: block_x={} tiles={} rows={} len={}",
+                block_x, tiles_per_combo, rows, len
             );
             unsafe {
                 (*(self as *const _ as *mut CudaRocp)).debug_batch_logged = true;
             }
         }
         unsafe {
-            let gx = rows as u32;
-            let grid: GridSize = (gx, 1, 1).into();
+            let gx = tiles_per_combo;
+            let gy = (rows as u32).min(self.max_grid_y.max(1));
+            if rows as u64 > self.max_grid_y as u64 {
+                return Err(CudaRocpError::LaunchConfigTooLarge {
+                    gx,
+                    gy: rows as u32,
+                    gz: 1,
+                    bx: block_x,
+                    by: 1,
+                    bz: 1,
+                });
+            }
+            let grid: GridSize = (gx, gy, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
-            self.validate_launch(gx, 1, 1, block_x, 1, 1)?;
+            self.validate_launch(gx, gy, 1, block_x, 1, 1)?;
             let mut d_ptr = d_data.as_device_ptr().as_raw();
             let mut i_ptr = d_inv.as_device_ptr().as_raw();
             let mut p_ptr = d_periods.as_device_ptr().as_raw();
@@ -785,7 +826,18 @@ pub mod benches {
                         combos.iter().map(|c| c.period.unwrap() as i32).collect();
                     let inv_host = CudaRocp::build_reciprocals(&data);
                     let rows = combos.len();
-                    let cuda = CudaRocp::new(0).unwrap();
+                    let mut cuda = CudaRocp::new(0).unwrap();
+                    let batch_block_x = std::env::var("ROCP_BATCH_BLOCK_X")
+                        .ok()
+                        .and_then(|v| v.parse::<u32>().ok());
+                    if batch_block_x.is_some() {
+                        cuda.set_policy(CudaRocpPolicy {
+                            batch: batch_block_x
+                                .map(|block_x| BatchKernelPolicy::Plain { block_x })
+                                .unwrap_or(BatchKernelPolicy::Auto),
+                            many_series: ManySeriesKernelPolicy::Auto,
+                        });
+                    }
                     let d_data = DeviceBuffer::from_slice(&data).expect("d_data");
                     let d_inv = DeviceBuffer::from_slice(&inv_host).expect("d_inv");
                     let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods");

@@ -85,6 +85,62 @@ void rocp_batch_f32(const float* __restrict__ data,
 
 
 extern "C" __global__
+void rocp_batch_tiled_f32(const float* __restrict__ data,
+                          const float* __restrict__ inv,
+                          const int* __restrict__ periods,
+                          int len,
+                          int first_valid,
+                          int n_combos,
+                          float* __restrict__ out) {
+    const int row = blockIdx.y;
+    if (row >= n_combos) return;
+    const int period = periods[row];
+    if (period <= 0) return;
+
+    const int base = row * len;
+    const int offset = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = blockDim.x * gridDim.x;
+    const int start = first_valid + period;
+
+    const int warm = (start < len) ? start : len;
+    for (int t = offset; t < warm; t += stride) {
+        out[base + t] = ROCP_QNAN;
+    }
+
+    if (start >= len) return;
+
+    int t = start + offset;
+
+    for (; t + 3*stride < len; t += 4*stride) {
+        const float c0  = data[t];
+        const float ip0 = inv[t - period];
+        out[base + t] = fmaf(c0, ip0, -1.0f);
+
+        const int t1 = t + stride;
+        const float c1  = data[t1];
+        const float ip1 = inv[t1 - period];
+        out[base + t1] = fmaf(c1, ip1, -1.0f);
+
+        const int t2 = t + 2*stride;
+        const float c2  = data[t2];
+        const float ip2 = inv[t2 - period];
+        out[base + t2] = fmaf(c2, ip2, -1.0f);
+
+        const int t3 = t + 3*stride;
+        const float c3  = data[t3];
+        const float ip3 = inv[t3 - period];
+        out[base + t3] = fmaf(c3, ip3, -1.0f);
+    }
+
+    for (; t < len; t += stride) {
+        const float c  = data[t];
+        const float ip = inv[t - period];
+        out[base + t] = fmaf(c, ip, -1.0f);
+    }
+}
+
+
+extern "C" __global__
 void rocp_many_series_one_param_f32(const float* __restrict__ data_tm,
                                     const int* __restrict__ firsts,
                                     int cols,

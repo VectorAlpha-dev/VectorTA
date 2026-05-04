@@ -87,6 +87,8 @@ pub struct CudaRoc {
     policy: CudaRocPolicy,
 
     max_grid_x: u32,
+    max_grid_y: u32,
+    sm_count: u32,
     max_threads_per_block: u32,
 }
 
@@ -96,6 +98,8 @@ impl CudaRoc {
         let device = Device::get_device(device_id as u32)?;
 
         let max_grid_x = device.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let max_grid_y = device.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
+        let sm_count = device.get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
         let max_threads_per_block =
             device.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
 
@@ -120,6 +124,8 @@ impl CudaRoc {
             device_id: device_id as u32,
             policy: CudaRocPolicy::default(),
             max_grid_x,
+            max_grid_y,
+            sm_count,
             max_threads_per_block,
         })
     }
@@ -254,16 +260,30 @@ impl CudaRoc {
             .policy
             .batch_block_x
             .unwrap_or(1024)
-            .min(self.max_threads_per_block);
+            .clamp(32, self.max_threads_per_block.max(32));
+        let len_tiles = (((len as u64).saturating_add(block_x as u64 - 1)) / block_x as u64)
+            .max(1)
+            .min(u32::MAX as u64) as u32;
+        let auto_tiles = {
+            let combos = (n_combos as u32).max(1);
+            let target_blocks = self.sm_count.saturating_mul(32).max(1);
+            target_blocks
+                .saturating_add(combos - 1)
+                .checked_div(combos)
+                .unwrap_or(1)
+                .clamp(1, 16)
+        };
+        let tiles_per_combo = auto_tiles.min(len_tiles).min(self.max_grid_x.max(1));
 
         let mut launched = 0usize;
         while launched < n_combos {
-            let this_chunk = (n_combos - launched).min(self.max_grid_x as usize);
-            let grid_x = this_chunk as u32;
-            if grid_x == 0 || grid_x > self.max_grid_x {
+            let this_chunk = (n_combos - launched).min(self.max_grid_y as usize);
+            let grid_x = tiles_per_combo;
+            let grid_y = this_chunk as u32;
+            if grid_x == 0 || grid_x > self.max_grid_x || grid_y == 0 || grid_y > self.max_grid_y {
                 return Err(CudaRocError::LaunchConfigTooLarge {
                     gx: grid_x,
-                    gy: 1,
+                    gy: grid_y,
                     gz: 1,
                     bx: block_x,
                     by: 1,
@@ -271,13 +291,14 @@ impl CudaRoc {
                 });
             }
 
-            let grid: GridSize = (grid_x.max(1), 1, 1).into();
+            let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
             let block: BlockSize = (block_x.max(1), 1, 1).into();
-            let func = self.module.get_function("roc_batch_f32").map_err(|_| {
-                CudaRocError::MissingKernelSymbol {
-                    name: "roc_batch_f32",
-                }
-            })?;
+            let func = self
+                .module
+                .get_function("roc_batch_tiled_f32")
+                .map_err(|_| CudaRocError::MissingKernelSymbol {
+                    name: "roc_batch_tiled_f32",
+                })?;
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
                 let mut periods_ptr = d_periods.as_device_ptr().add(launched).as_raw();
@@ -515,7 +536,17 @@ pub mod benches {
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
-        let cuda = CudaRoc::new(0).expect("cuda roc");
+        let mut cuda = CudaRoc::new(0).expect("cuda roc");
+        let batch_block_x = std::env::var("ROC_BATCH_BLOCK_X")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok());
+        if batch_block_x.is_some() {
+            cuda.set_policy(CudaRocPolicy {
+                batch_block_x,
+                many_block_x: None,
+                sync_after_launch: true,
+            });
+        }
         let mut prices = gen_series(ONE_SERIES_LEN);
         for i in 0..8 {
             prices[i] = f32::NAN;

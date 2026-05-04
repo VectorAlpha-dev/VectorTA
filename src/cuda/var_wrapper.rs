@@ -3,7 +3,7 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::var::{var_expand_grid, VarBatchRange, VarParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, DeviceCopy, LockedBuffer};
@@ -143,6 +143,9 @@ pub struct CudaVar {
     ctx: Arc<Context>,
     device_id: u32,
     policy: CudaVarPolicy,
+    max_grid_x: u32,
+    max_grid_y: u32,
+    max_threads_per_block: u32,
     debug_logged: std::sync::atomic::AtomicBool,
 }
 
@@ -150,6 +153,10 @@ impl CudaVar {
     pub fn new(device_id: usize) -> Result<Self, CudaVarError> {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
+        let max_grid_x = device.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let max_grid_y = device.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
+        let max_threads_per_block =
+            device.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/var_kernel.ptx"));
@@ -166,6 +173,9 @@ impl CudaVar {
             ctx: context,
             device_id: device_id as u32,
             policy: CudaVarPolicy::default(),
+            max_grid_x,
+            max_grid_y,
+            max_threads_per_block,
             debug_logged: std::sync::atomic::AtomicBool::new(false),
         })
     }
@@ -596,13 +606,28 @@ impl CudaVar {
 
         const TILE: u32 = 4;
         let block_x: u32 = match self.policy.batch {
-            BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
-            _ => 256,
+            BatchKernelPolicy::Plain { block_x } if block_x > 0 => {
+                block_x.clamp(64, self.max_threads_per_block.max(64))
+            }
+            _ => 1024.min(self.max_threads_per_block.max(32)),
         };
-        let grid_x = ((len as u32) + block_x - 1) / block_x;
         let grid_y_groups = (((n_combos as u32) + TILE - 1) / TILE).max(1);
+        let grid_x = (((len as u64).saturating_add(block_x as u64 - 1)) / block_x as u64)
+            .max(1)
+            .min(self.max_grid_x.max(1) as u64) as u32;
+        if grid_y_groups > self.max_grid_y.max(1) {
+            return Err(CudaVarError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: grid_y_groups,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
         let grid: GridSize = (grid_x.max(1), grid_y_groups, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
+        Self::validate_launch(grid, block)?;
 
         unsafe {
             let mut ps_ptr = d_ps.as_device_ptr().as_raw();

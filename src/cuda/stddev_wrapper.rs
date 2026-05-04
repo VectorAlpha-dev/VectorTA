@@ -3,7 +3,7 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::stddev::{StdDevBatchRange, StdDevParams};
 use cust::context::Context;
-use cust::device::Device;
+use cust::device::{Device, DeviceAttribute};
 use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, DeviceCopy, LockedBuffer};
@@ -83,6 +83,10 @@ pub struct CudaStddev {
     context: Arc<Context>,
     device_id: u32,
     policy: CudaStddevPolicy,
+    sm_count: u32,
+    max_grid_x: u32,
+    max_grid_y: u32,
+    max_threads_per_block: u32,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
@@ -101,6 +105,11 @@ impl CudaStddev {
     pub fn new(device_id: usize) -> Result<Self, CudaStddevError> {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
+        let sm_count = device.get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
+        let max_grid_x = device.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let max_grid_y = device.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
+        let max_threads_per_block =
+            device.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/stddev_kernel.ptx"));
@@ -118,6 +127,10 @@ impl CudaStddev {
             context,
             device_id: device_id as u32,
             policy: CudaStddevPolicy::default(),
+            sm_count,
+            max_grid_x,
+            max_grid_y,
+            max_threads_per_block,
             last_batch: None,
             last_many: None,
             debug_batch_logged: false,
@@ -506,38 +519,48 @@ impl CudaStddev {
         })?;
 
         #[inline(always)]
-        fn pick_block_x(len: usize) -> u32 {
+        fn pick_block_x(len: usize, max_threads_per_block: u32) -> u32 {
             if len >= 1_000_000 {
-                512
+                64.min(max_threads_per_block.max(32))
             } else if len >= (1usize << 14) {
-                256
+                512.min(max_threads_per_block.max(32))
             } else {
-                128
+                128.min(max_threads_per_block.max(32))
             }
         }
         let block_x: u32 = match self.policy.batch {
-            BatchKernelPolicy::Auto => pick_block_x(len),
-            BatchKernelPolicy::Plain { block_x } => block_x.max(64),
+            BatchKernelPolicy::Auto => pick_block_x(len, self.max_threads_per_block),
+            BatchKernelPolicy::Plain { block_x } => {
+                block_x.clamp(64, self.max_threads_per_block.max(64))
+            }
         };
-        let grid_x: u32 = ((len as u32) + block_x - 1) / block_x;
-        let grid_base: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        Self::validate_launch(grid_base, block)?;
-        unsafe {
-            (*(self as *const _ as *mut CudaStddev)).last_batch =
-                Some(BatchKernelSelected::Plain { block_x });
-        }
         unsafe {
             (*(self as *const _ as *mut CudaStddev)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
         }
 
         const TILE: u32 = 4;
+        let len_tiles = (((len as u64).saturating_add(block_x as u64 - 1)) / block_x as u64)
+            .max(1)
+            .min(self.max_grid_x.max(1) as u64) as u32;
         let mut launched = 0usize;
         while launched < combos {
-            let chunk = (combos - launched).min(65_535);
+            let max_chunk = (self.max_grid_y as usize)
+                .saturating_mul(TILE as usize)
+                .max(1);
+            let chunk = (combos - launched).min(max_chunk);
             let grid_y_groups = (((chunk as u32) + TILE - 1) / TILE).max(1);
-            let grid: GridSize = (grid_base.x, grid_y_groups, 1).into();
+            let target_blocks = self.sm_count.saturating_mul(32).max(1);
+            let tiles_per_group = target_blocks
+                .saturating_add(grid_y_groups - 1)
+                .checked_div(grid_y_groups)
+                .unwrap_or(1)
+                .clamp(1, 16)
+                .min(len_tiles)
+                .min(self.max_grid_x.max(1));
+            let grid: GridSize = (tiles_per_group.max(1), grid_y_groups, 1).into();
+            Self::validate_launch(grid, block)?;
             unsafe {
                 let mut ps1 = d_ps1.as_device_ptr().as_raw();
                 let mut ps2 = d_ps2.as_device_ptr().as_raw();
@@ -553,9 +576,6 @@ impl CudaStddev {
                     .as_raw()
                     .saturating_add((launched as u64) * (std::mem::size_of::<f32>() as u64));
                 let mut combos_i = chunk as i32;
-                let mut outp = d_out.as_device_ptr().as_raw().saturating_add(
-                    ((launched * len) as u64) * (std::mem::size_of::<f32>() as u64),
-                );
                 let mut outp = d_out.as_device_ptr().as_raw().saturating_add(
                     ((launched * len) as u64) * (std::mem::size_of::<f32>() as u64),
                 );

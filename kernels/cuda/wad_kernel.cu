@@ -2,6 +2,16 @@
 #include <math.h>
 #include <stdint.h>
 
+#ifndef WAD_SCAN_BLOCK_X
+#define WAD_SCAN_BLOCK_X 256
+#endif
+
+#ifndef WAD_SCAN_ITEMS_PER_THREAD
+#define WAD_SCAN_ITEMS_PER_THREAD 8
+#endif
+
+#define WAD_SCAN_TILE (WAD_SCAN_BLOCK_X * WAD_SCAN_ITEMS_PER_THREAD)
+
 
 struct KBNAcc32 {
   float sum;
@@ -28,6 +38,120 @@ __device__ __forceinline__ float wad_step(float hi, float lo, float c, float pc)
   if (c > pc)       ad = c - trl;
   else if (c < pc)  ad = c - trh;
   return ad;
+}
+
+
+extern "C" __global__ void wad_series_scan_blocks_f32(
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    const float* __restrict__ close,
+    int series_len,
+    float* __restrict__ out,
+    double* __restrict__ block_sums) {
+
+  __shared__ double scan[WAD_SCAN_TILE];
+  __shared__ double temp[WAD_SCAN_TILE];
+
+  const int base = blockIdx.x * WAD_SCAN_TILE;
+  const int tid = threadIdx.x;
+
+  #pragma unroll
+  for (int j = 0; j < WAD_SCAN_ITEMS_PER_THREAD; ++j) {
+    const int lane = tid + j * WAD_SCAN_BLOCK_X;
+    const int idx = base + lane;
+    double inc = 0.0;
+    if (idx > 0 && idx < series_len) {
+      inc = (double)wad_step(high[idx], low[idx], close[idx], close[idx - 1]);
+    }
+    scan[lane] = inc;
+  }
+  __syncthreads();
+
+  for (int offset = 1; offset < WAD_SCAN_TILE; offset <<= 1) {
+    #pragma unroll
+    for (int j = 0; j < WAD_SCAN_ITEMS_PER_THREAD; ++j) {
+      const int lane = tid + j * WAD_SCAN_BLOCK_X;
+      temp[lane] = scan[lane] + (lane >= offset ? scan[lane - offset] : 0.0);
+    }
+    __syncthreads();
+    #pragma unroll
+    for (int j = 0; j < WAD_SCAN_ITEMS_PER_THREAD; ++j) {
+      const int lane = tid + j * WAD_SCAN_BLOCK_X;
+      scan[lane] = temp[lane];
+    }
+    __syncthreads();
+  }
+
+  #pragma unroll
+  for (int j = 0; j < WAD_SCAN_ITEMS_PER_THREAD; ++j) {
+    const int lane = tid + j * WAD_SCAN_BLOCK_X;
+    const int idx = base + lane;
+    if (idx < series_len) out[idx] = (float)scan[lane];
+  }
+
+  if (tid == 0) {
+    int remaining = series_len - base;
+    int count = remaining > WAD_SCAN_TILE ? WAD_SCAN_TILE : remaining;
+    block_sums[blockIdx.x] = count > 0 ? scan[count - 1] : 0.0;
+  }
+}
+
+
+extern "C" __global__ void wad_scan_block_sums_f64(
+    double* __restrict__ block_sums,
+    int num_blocks) {
+
+  __shared__ double scan[WAD_SCAN_TILE];
+  __shared__ double temp[WAD_SCAN_TILE];
+
+  const int tid = threadIdx.x;
+  #pragma unroll
+  for (int j = 0; j < WAD_SCAN_ITEMS_PER_THREAD; ++j) {
+    const int lane = tid + j * WAD_SCAN_BLOCK_X;
+    scan[lane] = lane < num_blocks ? block_sums[lane] : 0.0;
+  }
+  __syncthreads();
+
+  for (int offset = 1; offset < WAD_SCAN_TILE; offset <<= 1) {
+    #pragma unroll
+    for (int j = 0; j < WAD_SCAN_ITEMS_PER_THREAD; ++j) {
+      const int lane = tid + j * WAD_SCAN_BLOCK_X;
+      temp[lane] = scan[lane] + (lane >= offset ? scan[lane - offset] : 0.0);
+    }
+    __syncthreads();
+    #pragma unroll
+    for (int j = 0; j < WAD_SCAN_ITEMS_PER_THREAD; ++j) {
+      const int lane = tid + j * WAD_SCAN_BLOCK_X;
+      scan[lane] = temp[lane];
+    }
+    __syncthreads();
+  }
+
+  #pragma unroll
+  for (int j = 0; j < WAD_SCAN_ITEMS_PER_THREAD; ++j) {
+    const int lane = tid + j * WAD_SCAN_BLOCK_X;
+    if (lane < num_blocks) block_sums[lane] = scan[lane];
+  }
+}
+
+
+extern "C" __global__ void wad_add_block_offsets_f32(
+    float* __restrict__ out,
+    int series_len,
+    const double* __restrict__ block_sums) {
+
+  const int base = blockIdx.x * WAD_SCAN_TILE;
+  if (blockIdx.x == 0) return;
+
+  const double offset = block_sums[blockIdx.x - 1];
+  const int tid = threadIdx.x;
+
+  #pragma unroll
+  for (int j = 0; j < WAD_SCAN_ITEMS_PER_THREAD; ++j) {
+    const int lane = tid + j * WAD_SCAN_BLOCK_X;
+    const int idx = base + lane;
+    if (idx < series_len) out[idx] = (float)((double)out[idx] + offset);
+  }
 }
 
 
