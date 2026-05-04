@@ -34,8 +34,20 @@ impl<'a> AsRef<[f64]> for ErInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             ErData::Slice(slice) => slice,
-            ErData::Candles { candles, source } => source_type(candles, source),
+            ErData::Candles { candles, source } => er_source(candles, source),
         }
+    }
+}
+
+#[inline(always)]
+fn er_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "close" => &candles.close,
+        "volume" => &candles.volume,
+        _ => source_type(candles, source),
     }
 }
 
@@ -236,6 +248,10 @@ pub fn er_with_kernel(input: &ErInput, kernel: Kernel) -> Result<ErOutput, ErErr
 
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => er_scalar(data, period, first, &mut out),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                er_scalar(data, period, first, &mut out)
+            }
             _ => unreachable!(),
         }
     }
@@ -286,6 +302,10 @@ pub fn er_into_slice(dst: &mut [f64], input: &ErInput, kern: Kernel) -> Result<(
 
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => er_scalar(data, period, first, dst),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                er_scalar(data, period, first, dst)
+            }
             _ => unreachable!(),
         }
     }
@@ -300,6 +320,11 @@ pub fn er_into_slice(dst: &mut [f64], input: &ErInput, kern: Kernel) -> Result<(
 
 #[inline]
 pub fn er_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    if period == 5 {
+        er_scalar_period5(data, first, out);
+        return;
+    }
+
     let n = data.len();
     let warm = first + period - 1;
     if warm >= n {
@@ -331,6 +356,45 @@ pub fn er_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         roll = roll + add - sub;
         start += 1;
         i += 1;
+    }
+}
+
+#[inline(always)]
+fn er_scalar_period5(data: &[f64], first: usize, out: &mut [f64]) {
+    let n = data.len();
+    let warm = first + 4;
+    if warm >= n {
+        return;
+    }
+
+    unsafe {
+        let ptr = data.as_ptr();
+        let out_ptr = out.as_mut_ptr();
+
+        let mut roll = (*ptr.add(first + 1) - *ptr.add(first)).abs()
+            + (*ptr.add(first + 2) - *ptr.add(first + 1)).abs()
+            + (*ptr.add(first + 3) - *ptr.add(first + 2)).abs()
+            + (*ptr.add(first + 4) - *ptr.add(first + 3)).abs();
+
+        let mut start = first;
+        let mut i = warm;
+        while i < n {
+            let delta = (*ptr.add(i) - *ptr.add(start)).abs();
+            *out_ptr.add(i) = if roll > 0.0 {
+                (delta / roll).min(1.0)
+            } else {
+                0.0
+            };
+
+            if i + 1 == n {
+                break;
+            }
+            let add = (*ptr.add(i + 1) - *ptr.add(i)).abs();
+            let sub = (*ptr.add(start + 1) - *ptr.add(start)).abs();
+            roll = roll + add - sub;
+            start += 1;
+            i += 1;
+        }
     }
 }
 
@@ -638,7 +702,7 @@ impl ErBatchBuilder {
         ErBatchBuilder::new().kernel(k).apply_slice(data)
     }
     pub fn apply_candles(self, c: &Candles, src: &str) -> Result<ErBatchOutput, ErError> {
-        let slice = source_type(c, src);
+        let slice = er_source(c, src);
         self.apply_slice(slice)
     }
     pub fn with_default_candles(c: &Candles) -> Result<ErBatchOutput, ErError> {
@@ -718,6 +782,22 @@ fn expand_grid(r: &ErBatchRange) -> Vec<ErParams> {
 }
 
 #[inline(always)]
+fn validate_er_combos(combos: &[ErParams], len: usize) -> Result<usize, ErError> {
+    let mut max_p = 0usize;
+    for combo in combos {
+        let period = combo.period.unwrap();
+        if period == 0 || period > len {
+            return Err(ErError::InvalidPeriod {
+                period,
+                data_len: len,
+            });
+        }
+        max_p = max_p.max(period);
+    }
+    Ok(max_p)
+}
+
+#[inline(always)]
 pub fn er_batch_slice(
     data: &[f64],
     sweep: &ErBatchRange,
@@ -756,11 +836,11 @@ fn er_batch_inner_into(
     if cols == 0 {
         return Err(ErError::EmptyInputData);
     }
+    let max_p = validate_er_combos(&combos, cols)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(ErError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if cols - first < max_p {
         return Err(ErError::NotEnoughValidData {
             needed: max_p,
@@ -856,11 +936,11 @@ fn er_batch_inner(
     if cols == 0 {
         return Err(ErError::EmptyInputData);
     }
+    let max_p = validate_er_combos(&combos, cols)?;
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(ErError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if cols - first < max_p {
         return Err(ErError::NotEnoughValidData {
             needed: max_p,

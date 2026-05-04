@@ -242,9 +242,9 @@ pub fn rsx_with_kernel(input: &RsxInput, kernel: Kernel) -> Result<RsxOutput, Rs
             Kernel::Scalar | Kernel::ScalarBatch => rsx_scalar(data, period, first, &mut out),
 
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => rsx_avx2(data, period, first, &mut out),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => rsx_avx512(data, period, first, &mut out),
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                rsx_scalar(data, period, first, &mut out)
+            }
 
             _ => rsx_scalar(data, period, first, &mut out),
         }
@@ -270,9 +270,9 @@ pub fn rsx_into_slice(dst: &mut [f64], input: &RsxInput, kern: Kernel) -> Result
             Kernel::Scalar | Kernel::ScalarBatch => rsx_scalar(data, period, first, dst),
 
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => rsx_avx2(data, period, first, dst),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => rsx_avx512(data, period, first, dst),
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                rsx_scalar(data, period, first, dst)
+            }
 
             _ => rsx_scalar(data, period, first, dst),
         }

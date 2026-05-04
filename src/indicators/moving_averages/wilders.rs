@@ -47,7 +47,13 @@ impl<'a> AsRef<[f64]> for WildersInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             WildersData::Slice(slice) => slice,
-            WildersData::Candles { candles, source } => source_type(candles, source),
+            WildersData::Candles { candles, source } => {
+                if source.eq_ignore_ascii_case("close") {
+                    candles.close.as_slice()
+                } else {
+                    source_type(candles, source)
+                }
+            }
         }
     }
 }
@@ -232,7 +238,7 @@ pub fn wilders_with_kernel(
     let warm = first + period - 1;
     let mut out = alloc_with_nan_prefix(len, warm);
     let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => detect_best_kernel(),
         other => other,
     };
     unsafe {
@@ -368,7 +374,7 @@ pub fn wilders_into_slice(
     }
 
     let chosen = match kern {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => detect_best_kernel(),
         other => other,
     };
 

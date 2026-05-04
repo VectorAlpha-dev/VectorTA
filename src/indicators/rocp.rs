@@ -281,7 +281,20 @@ pub fn rocp_into_slice(dst: &mut [f64], input: &RocpInput, kern: Kernel) -> Resu
     }
 
     let chosen = match kern {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            {
+                match detect_best_kernel() {
+                    Kernel::Avx512 if len < 1_000_000 => Kernel::Avx512,
+                    Kernel::Avx512 | Kernel::Avx2 => Kernel::Avx2,
+                    _ => Kernel::Scalar,
+                }
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            {
+                Kernel::Scalar
+            }
+        }
         other => other,
     };
 

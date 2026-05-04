@@ -260,7 +260,7 @@ pub fn dx_with_kernel(input: &DxInput, kernel: Kernel) -> Result<DxOutput, DxErr
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                dx_scalar(h, l, c, input.get_period(), first, &mut out)
+                dx_scalar_for_kernel(h, l, c, input.get_period(), first, kernel, &mut out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
@@ -284,6 +284,118 @@ pub fn dx_into(input: &DxInput, out: &mut [f64]) -> Result<(), DxError> {
 
 #[inline]
 pub fn dx_scalar(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    first_valid_idx: usize,
+    out: &mut [f64],
+) {
+    let len = high.len().min(low.len()).min(close.len());
+    if len == 0 {
+        return;
+    }
+    if len >= 1_000_000 {
+        dx_scalar_original(high, low, close, period, first_valid_idx, out);
+        return;
+    }
+
+    let p_f64 = period as f64;
+
+    let mut prev_high = high[first_valid_idx];
+    let mut prev_low = low[first_valid_idx];
+    let mut prev_close = close[first_valid_idx];
+
+    let mut plus_dm_sum = 0.0f64;
+    let mut minus_dm_sum = 0.0f64;
+    let mut tr_sum = 0.0f64;
+    let mut initial_count: usize = 0;
+
+    unsafe {
+        let mut i = first_valid_idx + 1;
+        while i < len {
+            let h = *high.get_unchecked(i);
+            let l = *low.get_unchecked(i);
+            let cl = *close.get_unchecked(i);
+
+            if h.is_nan() | l.is_nan() | cl.is_nan() {
+                *out.get_unchecked_mut(i) = if i > 0 {
+                    *out.get_unchecked(i - 1)
+                } else {
+                    f64::NAN
+                };
+                prev_high = h;
+                prev_low = l;
+                prev_close = cl;
+                i += 1;
+                continue;
+            }
+
+            let up_move = h - prev_high;
+            let down_move = prev_low - l;
+            let mut plus_dm = 0.0f64;
+            let mut minus_dm = 0.0f64;
+            if up_move > 0.0 && up_move > down_move {
+                plus_dm = up_move;
+            } else if down_move > 0.0 && down_move > up_move {
+                minus_dm = down_move;
+            }
+
+            let tr1 = h - l;
+            let tr2 = (h - prev_close).abs();
+            let tr3 = (l - prev_close).abs();
+            let tr = tr1.max(tr2).max(tr3);
+
+            if initial_count < (period - 1) {
+                plus_dm_sum += plus_dm;
+                minus_dm_sum += minus_dm;
+                tr_sum += tr;
+                initial_count += 1;
+
+                if initial_count == (period - 1) {
+                    *out.get_unchecked_mut(i) = dx_initial_value(plus_dm_sum, minus_dm_sum, tr_sum);
+                }
+            } else {
+                plus_dm_sum = plus_dm_sum - (plus_dm_sum / p_f64) + plus_dm;
+                minus_dm_sum = minus_dm_sum - (minus_dm_sum / p_f64) + minus_dm;
+                tr_sum = tr_sum - (tr_sum / p_f64) + tr;
+
+                *out.get_unchecked_mut(i) =
+                    dx_rolling_value(plus_dm_sum, minus_dm_sum, tr_sum, *out.get_unchecked(i - 1));
+            }
+
+            prev_high = h;
+            prev_low = l;
+            prev_close = cl;
+
+            i += 1;
+        }
+    }
+}
+
+#[inline(always)]
+fn dx_scalar_for_kernel(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    first_valid_idx: usize,
+    kernel: Kernel,
+    out: &mut [f64],
+) {
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        let len = high.len().min(low.len()).min(close.len());
+        if len >= 100_000 && matches!(kernel, Kernel::Scalar | Kernel::ScalarBatch) {
+            dx_scalar_original(high, low, close, period, first_valid_idx, out);
+            return;
+        }
+    }
+    dx_scalar(high, low, close, period, first_valid_idx, out);
+}
+
+#[inline(always)]
+fn dx_scalar_original(
     high: &[f64],
     low: &[f64],
     close: &[f64],
@@ -389,6 +501,49 @@ pub fn dx_scalar(
             i += 1;
         }
     }
+}
+
+#[inline(always)]
+fn dx_initial_value(plus_dm_sum: f64, minus_dm_sum: f64, tr_sum: f64) -> f64 {
+    let hundred = 100.0f64;
+    if tr_sum != 0.0 && tr_sum.is_finite() {
+        let dm_sum = plus_dm_sum + minus_dm_sum;
+        if dm_sum != 0.0 {
+            return hundred * ((plus_dm_sum - minus_dm_sum).abs() / dm_sum);
+        }
+        return 0.0;
+    }
+
+    let plus_di = (plus_dm_sum / tr_sum) * hundred;
+    let minus_di = (minus_dm_sum / tr_sum) * hundred;
+    let sum_di = plus_di + minus_di;
+    if sum_di != 0.0 {
+        hundred * ((plus_di - minus_di).abs() / sum_di)
+    } else {
+        0.0
+    }
+}
+
+#[inline(always)]
+fn dx_rolling_value(plus_dm_sum: f64, minus_dm_sum: f64, tr_sum: f64, fallback: f64) -> f64 {
+    let hundred = 100.0f64;
+    if tr_sum != 0.0 {
+        if tr_sum.is_finite() {
+            let dm_sum = plus_dm_sum + minus_dm_sum;
+            if dm_sum != 0.0 {
+                return hundred * ((plus_dm_sum - minus_dm_sum).abs() / dm_sum);
+            }
+            return fallback;
+        }
+
+        let plus_di = (plus_dm_sum / tr_sum) * hundred;
+        let minus_di = (minus_dm_sum / tr_sum) * hundred;
+        let sum_di = plus_di + minus_di;
+        if sum_di != 0.0 {
+            return hundred * ((plus_di - minus_di).abs() / sum_di);
+        }
+    }
+    fallback
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -899,6 +1054,68 @@ fn dx_precompute_terms(
 
 #[inline(always)]
 unsafe fn dx_row_scalar_precomputed(
+    plus_dm: &[f64],
+    minus_dm: &[f64],
+    tr: &[f64],
+    carry: &[u8],
+    first: usize,
+    period: usize,
+    out: &mut [f64],
+) {
+    let len = out.len();
+    if len == 0 || first + 1 >= len {
+        return;
+    }
+    if len >= 1_000_000 {
+        dx_row_scalar_precomputed_original(plus_dm, minus_dm, tr, carry, first, period, out);
+        return;
+    }
+
+    let p_f64 = period as f64;
+
+    let mut plus_dm_sum = 0.0f64;
+    let mut minus_dm_sum = 0.0f64;
+    let mut tr_sum = 0.0f64;
+    let mut initial_count: usize = 0;
+
+    let mut i = first + 1;
+    while i < len {
+        if *carry.get_unchecked(i) != 0 {
+            *out.get_unchecked_mut(i) = if i > 0 {
+                *out.get_unchecked(i - 1)
+            } else {
+                f64::NAN
+            };
+            i += 1;
+            continue;
+        }
+
+        let pdm = *plus_dm.get_unchecked(i);
+        let mdm = *minus_dm.get_unchecked(i);
+        let t = *tr.get_unchecked(i);
+
+        if initial_count < (period - 1) {
+            plus_dm_sum += pdm;
+            minus_dm_sum += mdm;
+            tr_sum += t;
+            initial_count += 1;
+            if initial_count == (period - 1) {
+                *out.get_unchecked_mut(i) = dx_initial_value(plus_dm_sum, minus_dm_sum, tr_sum);
+            }
+        } else {
+            plus_dm_sum = plus_dm_sum - (plus_dm_sum / p_f64) + pdm;
+            minus_dm_sum = minus_dm_sum - (minus_dm_sum / p_f64) + mdm;
+            tr_sum = tr_sum - (tr_sum / p_f64) + t;
+            *out.get_unchecked_mut(i) =
+                dx_rolling_value(plus_dm_sum, minus_dm_sum, tr_sum, *out.get_unchecked(i - 1));
+        }
+
+        i += 1;
+    }
+}
+
+#[inline(always)]
+unsafe fn dx_row_scalar_precomputed_original(
     plus_dm: &[f64],
     minus_dm: &[f64],
     tr: &[f64],
@@ -2178,7 +2395,7 @@ pub fn dx_into_slice(dst: &mut [f64], input: &DxInput, kern: Kernel) -> Result<(
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                dx_scalar(h, l, c, input.get_period(), first, dst)
+                dx_scalar_for_kernel(h, l, c, input.get_period(), first, kern, dst)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => dx_avx2(h, l, c, input.get_period(), first, dst),

@@ -75,6 +75,16 @@ pub struct CandleStrengthOscillatorOutput {
     pub short_signal: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandleStrengthOscillatorOutputField {
+    Strength,
+    Highs,
+    Lows,
+    Mid,
+    LongSignal,
+    ShortSignal,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -1064,6 +1074,48 @@ pub fn candle_strength_oscillator_into(
         input,
         Kernel::Auto,
     )
+}
+
+pub fn candle_strength_oscillator_output_into_slice(
+    dst: &mut [f64],
+    input: &CandleStrengthOscillatorInput,
+    kernel: Kernel,
+    field: CandleStrengthOscillatorOutputField,
+) -> Result<(), CandleStrengthOscillatorError> {
+    let (open, high, low, close) = input_slices(input)?;
+    let resolved = resolve_params(&input.params)?;
+    validate_common(open, high, low, close, resolved)?;
+    let _chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+    if dst.len() != close.len() {
+        return Err(CandleStrengthOscillatorError::OutputLengthMismatch {
+            expected: close.len(),
+            got: dst.len(),
+        });
+    }
+
+    match field {
+        CandleStrengthOscillatorOutputField::LongSignal
+        | CandleStrengthOscillatorOutputField::ShortSignal => dst.fill(0.0),
+        _ => dst.fill(f64::NAN),
+    }
+
+    let mut stream = CandleStrengthOscillatorStream::try_new(input.params.clone())?;
+    for i in 0..close.len() {
+        if let Some(point) = stream.update(open[i], high[i], low[i], close[i]) {
+            dst[i] = match field {
+                CandleStrengthOscillatorOutputField::Strength => point.strength,
+                CandleStrengthOscillatorOutputField::Highs => point.highs,
+                CandleStrengthOscillatorOutputField::Lows => point.lows,
+                CandleStrengthOscillatorOutputField::Mid => point.mid,
+                CandleStrengthOscillatorOutputField::LongSignal => point.long_signal,
+                CandleStrengthOscillatorOutputField::ShortSignal => point.short_signal,
+            };
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]

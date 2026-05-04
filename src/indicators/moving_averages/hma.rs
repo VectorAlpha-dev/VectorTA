@@ -243,6 +243,17 @@ pub fn hma_with_kernel(input: &HmaInput, kernel: Kernel) -> Result<HmaOutput, Hm
     let mut out = alloc_with_nan_prefix(len, first_out);
     unsafe {
         match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch if period == 5 => {
+                hma_scalar_period5(data, first, &mut out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch if period == 5 => {
+                hma_scalar_period5(data, first, &mut out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch if period == 5 => {
+                hma_scalar_period5(data, first, &mut out)
+            }
             Kernel::Scalar | Kernel::ScalarBatch => hma_scalar(data, period, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => hma_avx2(data, period, first, &mut out),
@@ -306,6 +317,15 @@ fn hma_with_kernel_into(input: &HmaInput, kernel: Kernel, out: &mut [f64]) -> Re
     };
     unsafe {
         match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch if period == 5 => {
+                hma_scalar_period5(data, first, out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch if period == 5 => hma_scalar_period5(data, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch if period == 5 => {
+                hma_scalar_period5(data, first, out)
+            }
             Kernel::Scalar | Kernel::ScalarBatch => hma_scalar(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => hma_avx2(data, period, first, out),
@@ -320,6 +340,28 @@ fn hma_with_kernel_into(input: &HmaInput, kernel: Kernel, out: &mut [f64]) -> Re
         *v = f64::NAN;
     }
     Ok(())
+}
+
+#[inline(always)]
+fn hma_scalar_period5(data: &[f64], first: usize, out: &mut [f64]) {
+    let len = data.len();
+    let first_out = first + 5;
+    if first_out >= len {
+        return;
+    }
+    let inv45 = 1.0 / 45.0;
+    for i in first_out..len {
+        let d2 = data[i - 2];
+        out[i] = if d2.is_nan() {
+            f64::NAN
+        } else {
+            (30.0 * data[i] + 27.0 * data[i - 1]
+                - 7.0 * data[i - 3]
+                - 4.0 * data[i - 4]
+                - data[i - 5])
+                * inv45
+        };
+    }
 }
 
 #[inline]

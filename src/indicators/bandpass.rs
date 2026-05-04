@@ -51,7 +51,13 @@ impl<'a> AsRef<[f64]> for BandPassInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             BandPassData::Slice(slice) => slice,
-            BandPassData::Candles { candles, source } => source_type(candles, source),
+            BandPassData::Candles { candles, source } => {
+                if source.eq_ignore_ascii_case("close") {
+                    candles.close.as_slice()
+                } else {
+                    source_type(candles, source)
+                }
+            }
         }
     }
 }
@@ -225,6 +231,14 @@ pub struct BandPassOutput {
     pub trigger: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BandPassOutputField {
+    Bp,
+    BpNormalized,
+    Signal,
+    Trigger,
+}
+
 #[inline]
 pub fn bandpass(input: &BandPassInput) -> Result<BandPassOutput, BandPassError> {
     bandpass_with_kernel(input, Kernel::Auto)
@@ -274,6 +288,8 @@ fn bandpass_prepare<'a>(
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Scalar,
         k => k,
     };
     Ok((
@@ -285,6 +301,92 @@ fn bandpass_prepare<'a>(
         trigger_period,
         chosen,
     ))
+}
+
+#[inline(always)]
+fn bandpass_fill_bp(
+    data: &[f64],
+    len: usize,
+    period: usize,
+    bandwidth: f64,
+    hp_period: usize,
+    chosen: Kernel,
+    bp_dst: &mut [f64],
+) -> Result<usize, BandPassError> {
+    let mut hp_params = HighPassParams::default();
+    hp_params.period = Some(hp_period);
+    let hp = highpass(&HighPassInput::from_slice(data, hp_params))?.values;
+
+    let first_valid_hp = hp.iter().position(|&x| !x.is_nan()).unwrap_or(len);
+    let warm_bp = first_valid_hp.saturating_add(2).max(2).min(len);
+
+    let beta = (2.0 * std::f64::consts::PI / period as f64).cos();
+    let gamma = (2.0 * std::f64::consts::PI * bandwidth / period as f64).cos();
+    let alpha = 1.0 / gamma - ((1.0 / (gamma * gamma)) - 1.0).sqrt();
+
+    let bp_start = warm_bp.saturating_sub(2);
+    unsafe {
+        match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch => bandpass_scalar(
+                &hp[bp_start..],
+                period,
+                alpha,
+                beta,
+                &mut bp_dst[bp_start..],
+            ),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => bandpass_avx2(
+                &hp[bp_start..],
+                period,
+                alpha,
+                beta,
+                &mut bp_dst[bp_start..],
+            ),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => bandpass_avx512(
+                &hp[bp_start..],
+                period,
+                alpha,
+                beta,
+                &mut bp_dst[bp_start..],
+            ),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                bandpass_scalar(
+                    &hp[bp_start..],
+                    period,
+                    alpha,
+                    beta,
+                    &mut bp_dst[bp_start..],
+                )
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    for v in &mut bp_dst[..warm_bp] {
+        *v = f64::NAN;
+    }
+
+    Ok(warm_bp)
+}
+
+#[inline(always)]
+fn bandpass_fill_normalized(bp: &[f64], warm_bp: usize, dst: &mut [f64]) {
+    for v in &mut dst[..warm_bp] {
+        *v = f64::NAN;
+    }
+    let k = 0.991;
+    let mut peak = 0.0f64;
+    for i in warm_bp..bp.len() {
+        peak *= k;
+        let v = bp[i];
+        let av = v.abs();
+        if av > peak {
+            peak = av;
+        }
+        dst[i] = if peak != 0.0 { v / peak } else { 0.0 };
+    }
 }
 
 pub fn bandpass_with_kernel(
@@ -320,6 +422,10 @@ pub fn bandpass_with_kernel(
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 bandpass_avx512(&hp[bp_start..], period, alpha, beta, &mut bp[bp_start..])
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                bandpass_scalar(&hp[bp_start..], period, alpha, beta, &mut bp[bp_start..])
             }
             _ => unreachable!(),
         }
@@ -459,6 +565,16 @@ pub fn bandpass_into_slice(
                 beta,
                 &mut bp_dst[bp_start..],
             ),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                bandpass_scalar(
+                    &hp[bp_start..],
+                    period,
+                    alpha,
+                    beta,
+                    &mut bp_dst[bp_start..],
+                )
+            }
             _ => unreachable!(),
         }
     }
@@ -506,6 +622,87 @@ pub fn bandpass_into_slice(
         let bn = bpn_dst[i];
         let tr = trig_dst[i];
         sig_dst[i] = if bn < tr {
+            1.0
+        } else if bn > tr {
+            -1.0
+        } else {
+            0.0
+        };
+    }
+
+    Ok(())
+}
+
+#[inline]
+pub fn bandpass_output_into_slice(
+    dst: &mut [f64],
+    input: &BandPassInput,
+    kernel: Kernel,
+    field: BandPassOutputField,
+) -> Result<(), BandPassError> {
+    let (data, len, period, bandwidth, hp_period, trigger_period, chosen) =
+        bandpass_prepare(input, kernel)?;
+    if dst.len() != len {
+        return Err(BandPassError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
+        });
+    }
+
+    if matches!(field, BandPassOutputField::Bp) {
+        bandpass_fill_bp(data, len, period, bandwidth, hp_period, chosen, dst)?;
+        return Ok(());
+    }
+
+    let mut bp = vec![0.0; len];
+    let warm_bp = bandpass_fill_bp(data, len, period, bandwidth, hp_period, chosen, &mut bp)?;
+
+    if matches!(field, BandPassOutputField::BpNormalized) {
+        bandpass_fill_normalized(&bp, warm_bp, dst);
+        return Ok(());
+    }
+
+    let mut bpn = vec![0.0; len];
+    bandpass_fill_normalized(&bp, warm_bp, &mut bpn);
+
+    if matches!(field, BandPassOutputField::Trigger) {
+        for v in dst.iter_mut() {
+            *v = f64::NAN;
+        }
+        if warm_bp < len {
+            let mut trigger_params = HighPassParams::default();
+            trigger_params.period = Some(trigger_period);
+            let trig_inp = HighPassInput::from_slice(&bpn[warm_bp..], trigger_params);
+            crate::indicators::moving_averages::highpass::highpass_into_slice(
+                &mut dst[warm_bp..],
+                &trig_inp,
+                chosen,
+            )?;
+        }
+        return Ok(());
+    }
+
+    let mut trigger = vec![f64::NAN; len];
+    if warm_bp < len {
+        let mut trigger_params = HighPassParams::default();
+        trigger_params.period = Some(trigger_period);
+        let trig_inp = HighPassInput::from_slice(&bpn[warm_bp..], trigger_params);
+        crate::indicators::moving_averages::highpass::highpass_into_slice(
+            &mut trigger[warm_bp..],
+            &trig_inp,
+            chosen,
+        )?;
+    }
+
+    let first_trig = trigger.iter().position(|x| !x.is_nan()).unwrap_or(len);
+    let warm_sig = warm_bp.max(first_trig);
+    for v in &mut dst[..warm_sig] {
+        *v = f64::NAN;
+    }
+    for i in warm_sig..len {
+        let bn = bpn[i];
+        let tr = trigger[i];
+        dst[i] = if bn < tr {
             1.0
         } else if bn > tr {
             -1.0

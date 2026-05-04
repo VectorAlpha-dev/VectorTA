@@ -303,6 +303,25 @@ fn count_valid_from(
 }
 
 #[inline(always)]
+fn first_and_valid_from(
+    open: &[f64],
+    close: &[f64],
+    mode: MarketMeannessSourceMode,
+) -> Option<(usize, usize)> {
+    let mut first = None;
+    let mut valid = 0usize;
+    for i in 0..close.len() {
+        if is_valid_bar(open[i], close[i], mode) {
+            if first.is_none() {
+                first = Some(i);
+            }
+            valid += 1;
+        }
+    }
+    first.map(|idx| (idx, valid))
+}
+
+#[inline(always)]
 fn ordered_window_from_ring(dst: &mut [f64], ring: &[f64], len: usize, head: usize) {
     if head == 0 {
         dst[..len].copy_from_slice(&ring[..len]);
@@ -498,8 +517,17 @@ fn mmi_smoothed_warmup(length: usize, first: usize) -> usize {
 #[inline(always)]
 fn market_meanness_index_prepare<'a>(
     input: &'a MarketMeannessIndexInput,
-) -> Result<(&'a [f64], &'a [f64], usize, MarketMeannessSourceMode, usize), MarketMeannessIndexError>
-{
+) -> Result<
+    (
+        &'a [f64],
+        &'a [f64],
+        usize,
+        MarketMeannessSourceMode,
+        usize,
+        usize,
+    ),
+    MarketMeannessIndexError,
+> {
     let (open, close) = input.as_refs();
     let data_len = close.len();
     if data_len == 0 {
@@ -515,8 +543,9 @@ fn market_meanness_index_prepare<'a>(
     }
 
     let mode = parse_source_mode(input.source_mode_str())?;
-    let first = first_valid_bar(open, close, mode).ok_or(MarketMeannessIndexError::AllValuesNaN)?;
-    let valid = count_valid_from(open, close, first, mode);
+    let (first, total_valid) =
+        first_and_valid_from(open, close, mode).ok_or(MarketMeannessIndexError::AllValuesNaN)?;
+    let valid = total_valid;
     if valid < length {
         return Err(MarketMeannessIndexError::NotEnoughValidData {
             needed: length,
@@ -524,7 +553,7 @@ fn market_meanness_index_prepare<'a>(
         });
     }
 
-    Ok((open, close, length, mode, first))
+    Ok((open, close, length, mode, first, valid))
 }
 
 #[inline(always)]
@@ -546,6 +575,101 @@ fn market_meanness_index_compute_into(
     }
 }
 
+#[inline(always)]
+fn sorted_insert(values: &mut Vec<f64>, value: f64) {
+    let pos = values
+        .binary_search_by(|probe| probe.total_cmp(&value))
+        .unwrap_or_else(|pos| pos);
+    values.insert(pos, value);
+}
+
+#[inline(always)]
+fn sorted_remove(values: &mut Vec<f64>, value: f64) {
+    if let Ok(pos) = values.binary_search_by(|probe| probe.total_cmp(&value)) {
+        values.remove(pos);
+    }
+}
+
+#[inline(always)]
+fn count_meanness_from_ring(ring: &[f64], length: usize, head: usize, median: f64) -> usize {
+    let mut count = 0usize;
+    let mut prev = ring[head];
+
+    let mut i = head + 1;
+    while i < length {
+        let curr = ring[i];
+        if (curr > median && curr > prev) || (curr < median && curr < prev) {
+            count += 1;
+        }
+        prev = curr;
+        i += 1;
+    }
+
+    i = 0;
+    while i < head {
+        let curr = ring[i];
+        if (curr > median && curr > prev) || (curr < median && curr < prev) {
+            count += 1;
+        }
+        prev = curr;
+        i += 1;
+    }
+
+    count
+}
+
+#[inline(always)]
+fn market_meanness_index_compute_clean_sorted(
+    open: &[f64],
+    close: &[f64],
+    length: usize,
+    mode: MarketMeannessSourceMode,
+    first: usize,
+    out_mmi: &mut [f64],
+    out_mmi_smoothed: &mut [f64],
+) {
+    let mut ring = vec![0.0; length];
+    let mut sorted = Vec::with_capacity(length);
+    let mut smoothing = RollingSmaState::new(length);
+    let mut count = 0usize;
+    let mut head = 0usize;
+    let scale = 100.0 / (length - 1) as f64;
+
+    let mut i = first;
+    while i < close.len() {
+        let value = source_value(open[i], close[i], mode);
+        if count < length {
+            ring[count] = value;
+            sorted_insert(&mut sorted, value);
+            count += 1;
+            if count < length {
+                i += 1;
+                continue;
+            }
+        } else {
+            let old = ring[head];
+            sorted_remove(&mut sorted, old);
+            ring[head] = value;
+            sorted_insert(&mut sorted, value);
+            head += 1;
+            if head == length {
+                head = 0;
+            }
+        }
+
+        let mid = length / 2;
+        let median = if (length & 1) == 1 {
+            sorted[mid]
+        } else {
+            (sorted[mid - 1] + sorted[mid]) * 0.5
+        };
+        let mmi = count_meanness_from_ring(&ring, length, head, median) as f64 * scale;
+        out_mmi[i] = mmi;
+        out_mmi_smoothed[i] = smoothing.update(mmi).unwrap_or(f64::NAN);
+        i += 1;
+    }
+}
+
 #[inline]
 pub fn market_meanness_index(
     input: &MarketMeannessIndexInput,
@@ -557,21 +681,33 @@ pub fn market_meanness_index_with_kernel(
     input: &MarketMeannessIndexInput,
     kernel: Kernel,
 ) -> Result<MarketMeannessIndexOutput, MarketMeannessIndexError> {
-    let (open, close, length, mode, first) = market_meanness_index_prepare(input)?;
+    let (open, close, length, mode, first, valid) = market_meanness_index_prepare(input)?;
     let mut mmi = alloc_with_nan_prefix(close.len(), mmi_warmup(length, first).min(close.len()));
     let mut mmi_smoothed = alloc_with_nan_prefix(
         close.len(),
         mmi_smoothed_warmup(length, first).min(close.len()),
     );
-    market_meanness_index_compute_into(
-        open,
-        close,
-        length,
-        mode,
-        kernel,
-        &mut mmi,
-        &mut mmi_smoothed,
-    );
+    if valid == close.len() - first {
+        market_meanness_index_compute_clean_sorted(
+            open,
+            close,
+            length,
+            mode,
+            first,
+            &mut mmi,
+            &mut mmi_smoothed,
+        );
+    } else {
+        market_meanness_index_compute_into(
+            open,
+            close,
+            length,
+            mode,
+            kernel,
+            &mut mmi,
+            &mut mmi_smoothed,
+        );
+    }
     Ok(MarketMeannessIndexOutput { mmi, mmi_smoothed })
 }
 
@@ -591,7 +727,7 @@ pub fn market_meanness_index_into_slice(
     input: &MarketMeannessIndexInput,
     kernel: Kernel,
 ) -> Result<(), MarketMeannessIndexError> {
-    let (open, close, length, mode, _first) = market_meanness_index_prepare(input)?;
+    let (open, close, length, mode, first, valid) = market_meanness_index_prepare(input)?;
     if out_mmi.len() != close.len() || out_mmi_smoothed.len() != close.len() {
         return Err(MarketMeannessIndexError::OutputLengthMismatch {
             expected: close.len(),
@@ -601,15 +737,27 @@ pub fn market_meanness_index_into_slice(
 
     out_mmi.fill(f64::NAN);
     out_mmi_smoothed.fill(f64::NAN);
-    market_meanness_index_compute_into(
-        open,
-        close,
-        length,
-        mode,
-        kernel,
-        out_mmi,
-        out_mmi_smoothed,
-    );
+    if valid == close.len() - first {
+        market_meanness_index_compute_clean_sorted(
+            open,
+            close,
+            length,
+            mode,
+            first,
+            out_mmi,
+            out_mmi_smoothed,
+        );
+    } else {
+        market_meanness_index_compute_into(
+            open,
+            close,
+            length,
+            mode,
+            kernel,
+            out_mmi,
+            out_mmi_smoothed,
+        );
+    }
     Ok(())
 }
 

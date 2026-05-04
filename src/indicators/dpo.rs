@@ -1,8 +1,7 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 use paste::paste;
@@ -17,7 +16,18 @@ impl<'a> AsRef<[f64]> for DpoInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             DpoData::Slice(slice) => slice,
-            DpoData::Candles { candles, source } => source_type(candles, source),
+            DpoData::Candles { candles, source } => match *source {
+                "open" => candles.open.as_slice(),
+                "high" => candles.high.as_slice(),
+                "low" => candles.low.as_slice(),
+                "close" => candles.close.as_slice(),
+                "volume" => candles.volume.as_slice(),
+                "hl2" => candles.hl2.as_slice(),
+                "hlc3" => candles.hlc3.as_slice(),
+                "ohlc4" => candles.ohlc4.as_slice(),
+                "hlcc4" | "hlcc" => candles.hlcc4.as_slice(),
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -203,7 +213,8 @@ pub fn dpo_into_slice(dst: &mut [f64], input: &DpoInput, kern: Kernel) -> Result
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Scalar,
         other => other,
     };
 
@@ -282,7 +293,8 @@ pub fn dpo_with_kernel(input: &DpoInput, kernel: Kernel) -> Result<DpoOutput, Dp
     let warm = (first + period - 1).max(back);
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Scalar,
         other => other,
     };
 
@@ -304,6 +316,10 @@ pub fn dpo_with_kernel(input: &DpoInput, kernel: Kernel) -> Result<DpoOutput, Dp
 pub fn dpo_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
     let len = data.len();
     if len == 0 {
+        return;
+    }
+    if period == 5 {
+        dpo_scalar_period5(data, first_val, out);
         return;
     }
 
@@ -373,6 +389,63 @@ pub fn dpo_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]
                 let next = i + 1;
                 sum += *ptr_d.add(next);
                 sum -= *ptr_d.add(next - period);
+            }
+            i += 1;
+        }
+    }
+}
+
+#[inline(always)]
+fn dpo_scalar_period5(data: &[f64], first_val: usize, out: &mut [f64]) {
+    let len = data.len();
+    unsafe {
+        let base = first_val;
+        let ptr_d = data.as_ptr();
+        let ptr_o = out.as_mut_ptr();
+        let scale = 0.2f64;
+
+        let mut sum = (((*ptr_d.add(base) + *ptr_d.add(base + 1)) + *ptr_d.add(base + 2))
+            + *ptr_d.add(base + 3))
+            + *ptr_d.add(base + 4);
+        let mut i = base + 4;
+
+        while i + 3 < len {
+            let p0 = *ptr_d.add(i - 3);
+            *ptr_o.add(i) = sum.mul_add(-scale, p0);
+
+            let a1 = *ptr_d.add(i + 1);
+            let r1 = *ptr_d.add(i - 4);
+            let s1 = (sum + a1) - r1;
+            let p1 = *ptr_d.add(i - 2);
+            *ptr_o.add(i + 1) = s1.mul_add(-scale, p1);
+
+            let a2 = *ptr_d.add(i + 2);
+            let r2 = *ptr_d.add(i - 3);
+            let s2 = (s1 + a2) - r2;
+            let p2 = *ptr_d.add(i - 1);
+            *ptr_o.add(i + 2) = s2.mul_add(-scale, p2);
+
+            let a3 = *ptr_d.add(i + 3);
+            let r3 = *ptr_d.add(i - 2);
+            let s3 = (s2 + a3) - r3;
+            let p3 = *ptr_d.add(i);
+            *ptr_o.add(i + 3) = s3.mul_add(-scale, p3);
+
+            i += 4;
+            if i >= len {
+                return;
+            }
+            sum = s3 + *ptr_d.add(i);
+            sum -= *ptr_d.add(i - 5);
+        }
+
+        while i < len {
+            let p = *ptr_d.add(i - 3);
+            *ptr_o.add(i) = sum.mul_add(-scale, p);
+            if i + 1 < len {
+                let next = i + 1;
+                sum += *ptr_d.add(next);
+                sum -= *ptr_d.add(next - 5);
             }
             i += 1;
         }

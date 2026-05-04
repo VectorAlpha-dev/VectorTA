@@ -562,14 +562,9 @@ pub fn price_density_market_noise_with_kernel(
     kernel: Kernel,
 ) -> Result<PriceDensityMarketNoiseOutput, PriceDensityMarketNoiseError> {
     let (high, low, close, length, eval_period, first) = price_density_market_noise_prepare(input)?;
-    let mut price_density = alloc_with_nan_prefix(
-        close.len(),
-        price_density_warmup(length, first).min(close.len()),
-    );
-    let mut price_density_percent = alloc_with_nan_prefix(
-        close.len(),
-        price_density_percent_warmup(length, eval_period, first).min(close.len()),
-    );
+    let _ = first;
+    let mut price_density = alloc_with_nan_prefix(close.len(), 0);
+    let mut price_density_percent = alloc_with_nan_prefix(close.len(), 0);
     price_density_market_noise_compute_into(
         high,
         low,

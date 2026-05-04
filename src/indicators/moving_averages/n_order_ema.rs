@@ -36,7 +36,18 @@ impl<'a> AsRef<[f64]> for NOrderEmaInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             NOrderEmaData::Slice(slice) => slice,
-            NOrderEmaData::Candles { candles, source } => source_type(candles, source),
+            NOrderEmaData::Candles { candles, source } => match *source {
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -427,6 +438,11 @@ pub struct NOrderEmaStream {
 impl NOrderEmaStream {
     pub fn try_new(params: NOrderEmaParams) -> Result<Self, NOrderEmaError> {
         let resolved = resolve_params(&params, 0)?;
+        Ok(Self::new_resolved(resolved))
+    }
+
+    #[inline(always)]
+    fn new_resolved(resolved: ResolvedParams) -> Self {
         let period = resolved.period;
         let order = resolved.order;
         let style = resolved.iir_style;
@@ -450,11 +466,11 @@ impl NOrderEmaStream {
             },
         };
 
-        Ok(Self {
+        Self {
             state,
             warmup: warmup_len(resolved),
             count: 0,
-        })
+        }
     }
 
     #[inline(always)]
@@ -559,21 +575,6 @@ fn required_valid_len(params: ResolvedParams) -> usize {
         NOrderEmaStyle::Tema => warmup_len(params).saturating_add(1),
         NOrderEmaStyle::Hema => warmup_len(params).saturating_add(1),
     }
-}
-
-#[inline(always)]
-fn longest_valid_run(data: &[f64]) -> usize {
-    let mut best = 0usize;
-    let mut cur = 0usize;
-    for &value in data {
-        if value.is_finite() {
-            cur += 1;
-            best = best.max(cur);
-        } else {
-            cur = 0;
-        }
-    }
-    best
 }
 
 #[inline(always)]
@@ -704,13 +705,32 @@ fn validate_input(data: &[f64], resolved: ResolvedParams) -> Result<(), NOrderEm
     if data.is_empty() {
         return Err(NOrderEmaError::EmptyInputData);
     }
-    if !data.iter().any(|v| v.is_finite()) {
+    let needed = required_valid_len(resolved);
+    let mut best = 0usize;
+    let mut cur = 0usize;
+    let mut any = false;
+    for &value in data {
+        if value.is_finite() {
+            any = true;
+            cur += 1;
+            if cur >= needed {
+                return Ok(());
+            }
+            if cur > best {
+                best = cur;
+            }
+        } else {
+            cur = 0;
+        }
+    }
+    if !any {
         return Err(NOrderEmaError::AllValuesNaN);
     }
-    let valid = longest_valid_run(data);
-    let needed = required_valid_len(resolved);
-    if valid < needed {
-        return Err(NOrderEmaError::NotEnoughValidData { needed, valid });
+    if best < needed {
+        return Err(NOrderEmaError::NotEnoughValidData {
+            needed,
+            valid: best,
+        });
     }
     Ok(())
 }
@@ -729,7 +749,7 @@ pub fn n_order_ema_with_kernel(
     validate_input(data, resolved)?;
     let warmup = warmup_len(resolved);
     let mut output = alloc_with_nan_prefix(data.len(), warmup.min(data.len()));
-    n_order_ema_into_slice(&mut output, input, Kernel::Scalar)?;
+    n_order_ema_compute_into(data, resolved, &mut output);
     Ok(NOrderEmaOutput { values: output })
 }
 
@@ -753,11 +773,61 @@ pub fn n_order_ema_into_slice(
     }
     let resolved = resolve_params(&input.params, data.len())?;
     validate_input(data, resolved)?;
-    let mut stream = NOrderEmaStream::try_new(input.params.clone())?;
+    n_order_ema_compute_into(data, resolved, out);
+    Ok(())
+}
+
+#[inline(always)]
+fn n_order_ema_compute_into(data: &[f64], resolved: ResolvedParams, out: &mut [f64]) {
+    if is_default_ema(resolved) {
+        n_order_ema_default_ema_into(data, out);
+        return;
+    }
+
+    let mut stream = NOrderEmaStream::new_resolved(resolved);
     for (dst, &value) in out.iter_mut().zip(data.iter()) {
         *dst = stream.update(value).unwrap_or(f64::NAN);
     }
-    Ok(())
+}
+
+#[inline(always)]
+fn is_default_ema(resolved: ResolvedParams) -> bool {
+    resolved.period == DEFAULT_PERIOD
+        && resolved.order == DEFAULT_ORDER
+        && resolved.ema_style == NOrderEmaStyle::Ema
+        && resolved.iir_style == NOrderEmaIirStyle::ImpulseMatched
+}
+
+#[inline(always)]
+fn n_order_ema_default_ema_into(data: &[f64], out: &mut [f64]) {
+    let mut prev = 0.0;
+    let mut initialized = false;
+    let mut count = 0usize;
+
+    for (dst, &value) in out.iter_mut().zip(data.iter()) {
+        if !value.is_finite() {
+            initialized = false;
+            count = 0;
+            *dst = f64::NAN;
+            continue;
+        }
+
+        if initialized {
+            let old = prev;
+            let mut acc = 0.2 * value;
+            acc -= -0.8 * old;
+            prev = acc;
+            count += 1;
+        } else {
+            let mut acc = 0.2 * value;
+            acc -= -0.8 * value;
+            prev = acc;
+            initialized = true;
+            count = 1;
+        }
+
+        *dst = if count > 8 { prev } else { f64::NAN };
+    }
 }
 
 #[inline(always)]

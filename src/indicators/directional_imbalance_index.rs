@@ -45,6 +45,16 @@ pub struct DirectionalImbalanceIndexOutput {
     pub lower: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectionalImbalanceIndexOutputField {
+    Up,
+    Down,
+    Bulls,
+    Bears,
+    Upper,
+    Lower,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -605,6 +615,34 @@ fn compute_into(
     }
 }
 
+fn compute_selected_into(
+    high: &[f64],
+    low: &[f64],
+    resolved: DirectionalImbalanceIndexResolved,
+    field: DirectionalImbalanceIndexOutputField,
+    out: &mut [f64],
+) {
+    let mut stream = DirectionalImbalanceIndexStream::try_new(DirectionalImbalanceIndexParams {
+        length: Some(resolved.length),
+        period: Some(resolved.period),
+    })
+    .expect("validated params");
+
+    for i in 0..high.len() {
+        out[i] = match stream.update(high[i], low[i]) {
+            Some(point) => match field {
+                DirectionalImbalanceIndexOutputField::Up => point.up,
+                DirectionalImbalanceIndexOutputField::Down => point.down,
+                DirectionalImbalanceIndexOutputField::Bulls => point.bulls,
+                DirectionalImbalanceIndexOutputField::Bears => point.bears,
+                DirectionalImbalanceIndexOutputField::Upper => point.upper,
+                DirectionalImbalanceIndexOutputField::Lower => point.lower,
+            },
+            None => f64::NAN,
+        };
+    }
+}
+
 #[inline]
 pub fn directional_imbalance_index(
     input: &DirectionalImbalanceIndexInput,
@@ -682,6 +720,31 @@ pub fn directional_imbalance_index_into_slice(
     compute_into(
         high, low, resolved, out_up, out_down, out_bulls, out_bears, out_upper, out_lower,
     );
+    Ok(())
+}
+
+pub fn directional_imbalance_index_output_into_slice(
+    out: &mut [f64],
+    input: &DirectionalImbalanceIndexInput,
+    kernel: Kernel,
+    field: DirectionalImbalanceIndexOutputField,
+) -> Result<(), DirectionalImbalanceIndexError> {
+    let (high, low) = input_slices(input)?;
+    let resolved = validate_common(high, low, &input.params)?;
+    let len = high.len();
+    if out.len() != len {
+        return Err(DirectionalImbalanceIndexError::OutputLengthMismatch {
+            expected: len,
+            got: out.len(),
+        });
+    }
+
+    let _chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    compute_selected_into(high, low, resolved, field, out);
     Ok(())
 }
 

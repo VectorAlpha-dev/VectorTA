@@ -6,8 +6,12 @@ use crate::utilities::helpers::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use std::arch::is_x86_feature_detected;
 use std::convert::AsRef;
 use std::mem::MaybeUninit;
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use std::sync::OnceLock;
 use thiserror::Error;
 
 #[cfg(feature = "python")]
@@ -31,6 +35,9 @@ use cust::context::Context;
 use cust::memory::DeviceBuffer;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+static EMA_AUTO_KERNEL: OnceLock<Kernel> = OnceLock::new();
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
@@ -315,12 +322,36 @@ fn ema_prepare<'a>(
 
     let alpha = 2.0 / (period as f64 + 1.0);
     let beta = 1.0 - alpha;
-    let chosen = if matches!(kernel, Kernel::Auto) {
-        Kernel::Scalar
-    } else {
-        kernel
-    };
+    let chosen = normalize_single_kernel(kernel);
     Ok((data, period, first, alpha, beta, chosen))
+}
+
+#[inline(always)]
+fn normalize_single_kernel(kernel: Kernel) -> Kernel {
+    match kernel {
+        Kernel::Auto => detect_ema_kernel(),
+        other if other.is_batch() => other.to_non_batch(),
+        other => other,
+    }
+}
+
+#[inline(always)]
+fn detect_ema_kernel() -> Kernel {
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        return *EMA_AUTO_KERNEL.get_or_init(|| {
+            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                Kernel::Avx2
+            } else {
+                Kernel::Scalar
+            }
+        });
+    }
+
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    {
+        Kernel::Scalar
+    }
 }
 
 #[inline(always)]
@@ -468,7 +499,7 @@ unsafe fn ema_scalar_into(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[target_feature(enable = "avx2,fma")]
 pub unsafe fn ema_avx2(
     data: &[f64],
     period: usize,
@@ -479,7 +510,7 @@ pub unsafe fn ema_avx2(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn ema_avx2_into(
     data: &[f64],
     period: usize,
@@ -492,7 +523,7 @@ unsafe fn ema_avx2_into(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[target_feature(enable = "avx512f,fma")]
 pub unsafe fn ema_avx512(
     data: &[f64],
     period: usize,
@@ -503,7 +534,7 @@ pub unsafe fn ema_avx512(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[target_feature(enable = "avx512f,fma")]
 unsafe fn ema_avx512_into(
     data: &[f64],
     period: usize,

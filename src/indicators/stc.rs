@@ -5,8 +5,8 @@ use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArray
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+    init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -45,6 +45,7 @@ impl<'a> AsRef<[f64]> for StcInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             StcData::Slice(slice) => slice,
+            StcData::Candles { candles, source } if *source == "close" => &candles.close,
             StcData::Candles { candles, source } => source_type(candles, source),
         }
     }
@@ -302,8 +303,11 @@ pub fn stc_with_kernel(input: &StcInput, kernel: Kernel) -> Result<StcOutput, St
         other => other,
     };
 
-    let warmup = first + needed - 1;
-    let mut output = alloc_with_nan_prefix(len, warmup);
+    let mut output = if first == 0 {
+        alloc_uninit_f64(len)
+    } else {
+        alloc_with_nan_prefix(len, first)
+    };
 
     unsafe {
         match chosen {
@@ -332,6 +336,18 @@ pub fn stc_with_kernel(input: &StcInput, kernel: Kernel) -> Result<StcOutput, St
             )?,
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => stc_avx512(
+                data,
+                fast_period,
+                slow_period,
+                k_period,
+                d_period,
+                input.get_fast_ma_type(),
+                input.get_slow_ma_type(),
+                first,
+                &mut output,
+            )?,
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => stc_scalar(
                 data,
                 fast_period,
                 slow_period,
@@ -381,9 +397,8 @@ pub fn stc_into_slice(dst: &mut [f64], input: &StcInput, kern: Kernel) -> Result
         });
     }
 
-    let warmup_end = first + needed - 1;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
-    for v in &mut dst[..warmup_end.min(len)] {
+    for v in &mut dst[..first.min(len)] {
         *v = qnan;
     }
 
@@ -392,40 +407,59 @@ pub fn stc_into_slice(dst: &mut [f64], input: &StcInput, kern: Kernel) -> Result
         other => other,
     };
 
+    let fast_period = input.get_fast_period();
+    let slow_period = input.get_slow_period();
+    let k_period = input.get_k_period();
+    let d_period = input.get_d_period();
+    let fast_ma_type = input.get_fast_ma_type();
+    let slow_ma_type = input.get_slow_ma_type();
+
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => stc_scalar(
                 data,
-                input.get_fast_period(),
-                input.get_slow_period(),
-                input.get_k_period(),
-                input.get_d_period(),
-                input.get_fast_ma_type(),
-                input.get_slow_ma_type(),
+                fast_period,
+                slow_period,
+                k_period,
+                d_period,
+                fast_ma_type,
+                slow_ma_type,
                 first,
                 dst,
             )?,
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => stc_avx2(
                 data,
-                input.get_fast_period(),
-                input.get_slow_period(),
-                input.get_k_period(),
-                input.get_d_period(),
-                input.get_fast_ma_type(),
-                input.get_slow_ma_type(),
+                fast_period,
+                slow_period,
+                k_period,
+                d_period,
+                fast_ma_type,
+                slow_ma_type,
                 first,
                 dst,
             )?,
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => stc_avx512(
                 data,
-                input.get_fast_period(),
-                input.get_slow_period(),
-                input.get_k_period(),
-                input.get_d_period(),
-                input.get_fast_ma_type(),
-                input.get_slow_ma_type(),
+                fast_period,
+                slow_period,
+                k_period,
+                d_period,
+                fast_ma_type,
+                slow_ma_type,
+                first,
+                dst,
+            )?,
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => stc_scalar(
+                data,
+                fast_period,
+                slow_period,
+                k_period,
+                d_period,
+                fast_ma_type,
+                slow_ma_type,
                 first,
                 dst,
             )?,
@@ -454,6 +488,9 @@ pub fn stc_scalar(
     out: &mut [f64],
 ) -> Result<(), StcError> {
     if fast_type == "ema" && slow_type == "ema" {
+        if data[first..].iter().all(|value| value.is_finite()) {
+            return unsafe { stc_scalar_classic_ema_finite(data, fast, slow, k, d, first, out) };
+        }
         return unsafe { stc_scalar_classic_ema(data, fast, slow, k, d, first, out) };
     } else if fast_type == "sma" && slow_type == "sma" {
         return unsafe { stc_scalar_classic_sma(data, fast, slow, k, d, first, out) };
@@ -521,6 +558,218 @@ pub fn stc_scalar(
 }
 
 #[inline]
+pub unsafe fn stc_scalar_classic_ema_finite(
+    data: &[f64],
+    fast: usize,
+    slow: usize,
+    k: usize,
+    d: usize,
+    first: usize,
+    out: &mut [f64],
+) -> Result<(), StcError> {
+    #[inline(always)]
+    fn fma(prev: f64, a: f64, x: f64) -> f64 {
+        (x - prev).mul_add(a, prev)
+    }
+
+    const HUNDRED: f64 = 100.0;
+    const EPS: f64 = f64::EPSILON;
+
+    let slice = &data.get_unchecked(first..);
+    let n = slice.len();
+    if n == 0 {
+        return Ok(());
+    }
+
+    let fast_a = 2.0 / (fast as f64 + 1.0);
+    let slow_a = 2.0 / (slow as f64 + 1.0);
+    let d_a = 2.0 / (d as f64 + 1.0);
+    let fast_inv = 1.0 / fast as f64;
+    let slow_inv = 1.0 / slow as f64;
+    let d_inv = 1.0 / d as f64;
+
+    let mut fast_sum = 0.0;
+    let mut slow_sum = 0.0;
+    let mut fast_init_cnt = 0usize;
+    let mut slow_init_cnt = 0usize;
+
+    let mut fast_ema = f64::NAN;
+    let mut slow_ema = f64::NAN;
+
+    let mut macd_ring = vec![f64::NAN; k];
+    let mut macd_count = 0usize;
+    let mut macd_vpos = 0usize;
+
+    let mut d_ring = vec![f64::NAN; k];
+    let mut d_count = 0usize;
+    let mut d_vpos = 0usize;
+
+    let mut d_ema = f64::NAN;
+    let mut d_sum = 0.0;
+    let mut d_init_cnt = 0usize;
+
+    let mut final_ema = f64::NAN;
+    let mut final_sum = 0.0;
+    let mut final_init_cnt = 0usize;
+
+    let mut i = 0usize;
+    while i < n {
+        let x = *slice.get_unchecked(i);
+
+        if fast_init_cnt < fast {
+            fast_init_cnt += 1;
+            fast_sum += x;
+            if fast_init_cnt == fast {
+                fast_ema = fast_sum * fast_inv;
+            }
+        } else {
+            fast_ema = fma(fast_ema, fast_a, x);
+        }
+
+        if slow_init_cnt < slow {
+            slow_init_cnt += 1;
+            slow_sum += x;
+            if slow_init_cnt == slow {
+                slow_ema = slow_sum * slow_inv;
+            }
+        } else {
+            slow_ema = fma(slow_ema, slow_a, x);
+        }
+
+        let macd_is_valid = fast_init_cnt >= fast && slow_init_cnt >= slow;
+        let macd = if macd_is_valid {
+            fast_ema - slow_ema
+        } else {
+            f64::NAN
+        };
+
+        if macd_is_valid {
+            *macd_ring.get_unchecked_mut(macd_vpos) = macd;
+            macd_vpos += 1;
+            if macd_vpos == k {
+                macd_vpos = 0;
+            }
+            if macd_count < k {
+                macd_count += 1;
+            }
+        }
+
+        let stok = if macd_is_valid {
+            if macd_count == k {
+                let mut mn = *macd_ring.get_unchecked(0);
+                let mut mx = mn;
+                let mut j = 1usize;
+                while j < k {
+                    let v = *macd_ring.get_unchecked(j);
+                    if v < mn {
+                        mn = v;
+                    }
+                    if v > mx {
+                        mx = v;
+                    }
+                    j += 1;
+                }
+                let range = mx - mn;
+                if range.abs() > EPS {
+                    (macd - mn) * (HUNDRED / range)
+                } else {
+                    50.0
+                }
+            } else {
+                50.0
+            }
+        } else {
+            f64::NAN
+        };
+
+        let d_val = if !stok.is_nan() {
+            if d_init_cnt < d {
+                d_sum += stok;
+                d_init_cnt += 1;
+                if d_init_cnt == d {
+                    d_ema = d_sum * d_inv;
+                    d_ema
+                } else {
+                    d_sum / (d_init_cnt as f64)
+                }
+            } else {
+                d_ema = fma(d_ema, d_a, stok);
+                d_ema
+            }
+        } else {
+            f64::NAN
+        };
+
+        let d_is_valid = !d_val.is_nan();
+        if d_is_valid {
+            *d_ring.get_unchecked_mut(d_vpos) = d_val;
+            d_vpos += 1;
+            if d_vpos == k {
+                d_vpos = 0;
+            }
+            if d_count < k {
+                d_count += 1;
+            }
+        }
+
+        let kd = if d_is_valid {
+            if d_count == k {
+                let mut mn = *d_ring.get_unchecked(0);
+                let mut mx = mn;
+                let mut j = 1usize;
+                while j < k {
+                    let v = *d_ring.get_unchecked(j);
+                    if v < mn {
+                        mn = v;
+                    }
+                    if v > mx {
+                        mx = v;
+                    }
+                    j += 1;
+                }
+                let range = mx - mn;
+                if range.abs() > EPS {
+                    (d_val - mn) * (HUNDRED / range)
+                } else {
+                    50.0
+                }
+            } else {
+                50.0
+            }
+        } else {
+            f64::NAN
+        };
+
+        let dst = out.get_unchecked_mut(first + i);
+        if !kd.is_nan() {
+            if final_init_cnt < d {
+                final_sum += kd;
+                final_init_cnt += 1;
+                if final_init_cnt == d {
+                    final_ema = final_sum * d_inv;
+                    *dst = final_ema;
+                } else {
+                    *dst = final_sum / (final_init_cnt as f64);
+                }
+            } else {
+                final_ema = fma(final_ema, d_a, kd);
+                *dst = final_ema;
+            }
+        } else if final_init_cnt == 0 {
+            *dst = f64::NAN;
+        } else if final_init_cnt < d {
+            *dst = final_sum / (final_init_cnt as f64);
+        } else {
+            *dst = final_ema;
+        }
+
+        i += 1;
+    }
+
+    Ok(())
+}
+
+#[inline]
 pub unsafe fn stc_scalar_classic_ema(
     data: &[f64],
     fast: usize,
@@ -547,6 +796,9 @@ pub unsafe fn stc_scalar_classic_ema(
     let fast_a = 2.0 / (fast as f64 + 1.0);
     let slow_a = 2.0 / (slow as f64 + 1.0);
     let d_a = 2.0 / (d as f64 + 1.0);
+    let fast_inv = 1.0 / fast as f64;
+    let slow_inv = 1.0 / slow as f64;
+    let d_inv = 1.0 / d as f64;
 
     let mut fast_sum = 0.0;
     let mut slow_sum = 0.0;
@@ -577,31 +829,30 @@ pub unsafe fn stc_scalar_classic_ema(
     let mut i = 0usize;
     while i < n {
         let x = *slice.get_unchecked(i);
+        let x_is_finite = x.is_finite();
 
-        if x.is_finite() {
+        if x_is_finite {
             if fast_init_cnt < fast {
                 fast_init_cnt += 1;
                 fast_sum += x;
                 if fast_init_cnt == fast {
-                    fast_ema = fast_sum / fast as f64;
+                    fast_ema = fast_sum * fast_inv;
                 }
             } else {
                 fast_ema = fma(fast_ema, fast_a, x);
             }
-        } else {
         }
 
-        if x.is_finite() {
+        if x_is_finite {
             if slow_init_cnt < slow {
                 slow_init_cnt += 1;
                 slow_sum += x;
                 if slow_init_cnt == slow {
-                    slow_ema = slow_sum / slow as f64;
+                    slow_ema = slow_sum * slow_inv;
                 }
             } else {
                 slow_ema = fma(slow_ema, slow_a, x);
             }
-        } else {
         }
 
         let macd = if slow_init_cnt >= slow {
@@ -656,7 +907,7 @@ pub unsafe fn stc_scalar_classic_ema(
                 d_sum += stok;
                 d_init_cnt += 1;
                 if d_init_cnt == d {
-                    d_ema = d_sum / d as f64;
+                    d_ema = d_sum * d_inv;
                     d_ema
                 } else {
                     d_sum / (d_init_cnt as f64)
@@ -721,7 +972,7 @@ pub unsafe fn stc_scalar_classic_ema(
                 final_sum += kd;
                 final_init_cnt += 1;
                 if final_init_cnt == d {
-                    final_ema = final_sum / d as f64;
+                    final_ema = final_sum * d_inv;
                     *dst = final_ema;
                 } else {
                     *dst = final_sum / (final_init_cnt as f64);

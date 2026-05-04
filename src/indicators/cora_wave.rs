@@ -519,24 +519,68 @@ pub fn cora_wave_scalar_with_weights(
         }
 
         let mut ring_mu: Vec<MaybeUninit<f64>> = make_uninit_matrix(1, m);
-        let mut head = 0usize;
+        if n < 100_000 {
+            let mut head = 0usize;
+            let warm_total = warm0 + m - 1;
+            unsafe {
+                for i in warm0..n {
+                    ring_mu
+                        .get_unchecked_mut(head)
+                        .write(*data.get_unchecked(i));
+                    head = (head + 1) % m;
+
+                    if i >= warm_total {
+                        let mut acc = 0.0;
+                        for k in 0..m {
+                            let idx = (head + k) % m;
+                            let v = *ring_mu.get_unchecked(idx).assume_init_ref();
+                            acc += v * ((k + 1) as f64);
+                        }
+                        *out.get_unchecked_mut(i) = acc / wma_sum;
+                    }
+                }
+            }
+            return;
+        }
+
+        let mut fill = 0usize;
         let warm_total = warm0 + m - 1;
         unsafe {
-            for i in warm0..n {
+            let mut i = warm0;
+            while i <= warm_total && i < n {
                 ring_mu
-                    .get_unchecked_mut(head)
+                    .get_unchecked_mut(fill)
                     .write(*data.get_unchecked(i));
+                fill += 1;
+                i += 1;
+            }
+            if warm_total >= n {
+                return;
+            }
+
+            let mut ssum = 0.0;
+            let mut wsum = 0.0;
+            for k in 0..m {
+                let v = *ring_mu.get_unchecked(k).assume_init_ref();
+                ssum += v;
+                wsum += v * ((k + 1) as f64);
+            }
+            let mut head = 0usize;
+            let mut t = warm_total;
+            *out.get_unchecked_mut(t) = wsum / wma_sum;
+
+            while t + 1 < n {
+                let y_old = *ring_mu.get_unchecked(head).assume_init_ref();
+                let y_new = *data.get_unchecked(t + 1);
+
+                wsum = wsum - ssum + (m as f64) * y_new;
+
+                ring_mu.get_unchecked_mut(head).write(y_new);
+                ssum = ssum + y_new - y_old;
                 head = (head + 1) % m;
 
-                if i >= warm_total {
-                    let mut acc = 0.0;
-                    for k in 0..m {
-                        let idx = (head + k) % m;
-                        let v = *ring_mu.get_unchecked(idx).assume_init_ref();
-                        acc += v * ((k + 1) as f64);
-                    }
-                    *out.get_unchecked_mut(i) = acc / wma_sum;
-                }
+                *out.get_unchecked_mut(t + 1) = wsum / wma_sum;
+                t += 1;
             }
         }
         return;
@@ -612,17 +656,49 @@ pub fn cora_wave_scalar_with_weights(
             return;
         }
 
-        let mut head = 0usize;
+        if n < 100_000 {
+            let mut head = 0usize;
 
-        {
-            let mut acc = 0.0;
-            for k in 0..m {
-                let idx = (head + k) % m;
-                let v = *ring_mu.get_unchecked(idx).assume_init_ref();
-                acc += v * ((k + 1) as f64);
+            {
+                let mut acc = 0.0;
+                for k in 0..m {
+                    let idx = (head + k) % m;
+                    let v = *ring_mu.get_unchecked(idx).assume_init_ref();
+                    acc += v * ((k + 1) as f64);
+                }
+                *out.get_unchecked_mut(warm_total) = acc / wma_sum;
             }
-            *out.get_unchecked_mut(warm_total) = acc / wma_sum;
+
+            while i + 1 < n {
+                let x_old = *data.get_unchecked(i + 1 - p);
+                let x_new = *data.get_unchecked(i + 1);
+                S = (S * inv_R) - a_old * x_old + w_last * x_new;
+                let y_new = S * inv_wsum;
+
+                ring_mu.get_unchecked_mut(head).write(y_new);
+                head = (head + 1) % m;
+
+                let mut acc = 0.0;
+                for k in 0..m {
+                    let idx = (head + k) % m;
+                    let v = *ring_mu.get_unchecked(idx).assume_init_ref();
+                    acc += v * ((k + 1) as f64);
+                }
+                *out.get_unchecked_mut(i + 1) = acc / wma_sum;
+                i += 1;
+            }
+            return;
         }
+
+        let mut head = 0usize;
+        let mut ssum = 0.0;
+        let mut wsum = 0.0;
+        for k in 0..m {
+            let v = *ring_mu.get_unchecked(k).assume_init_ref();
+            ssum += v;
+            wsum += v * ((k + 1) as f64);
+        }
+        *out.get_unchecked_mut(warm_total) = wsum / wma_sum;
 
         while i + 1 < n {
             let x_old = *data.get_unchecked(i + 1 - p);
@@ -630,16 +706,14 @@ pub fn cora_wave_scalar_with_weights(
             S = (S * inv_R) - a_old * x_old + w_last * x_new;
             let y_new = S * inv_wsum;
 
+            wsum = wsum - ssum + (m as f64) * y_new;
+
+            let y_old = *ring_mu.get_unchecked(head).assume_init_ref();
             ring_mu.get_unchecked_mut(head).write(y_new);
+            ssum = ssum + y_new - y_old;
             head = (head + 1) % m;
 
-            let mut acc = 0.0;
-            for k in 0..m {
-                let idx = (head + k) % m;
-                let v = *ring_mu.get_unchecked(idx).assume_init_ref();
-                acc += v * ((k + 1) as f64);
-            }
-            *out.get_unchecked_mut(i + 1) = acc / wma_sum;
+            *out.get_unchecked_mut(i + 1) = wsum / wma_sum;
             i += 1;
         }
     }

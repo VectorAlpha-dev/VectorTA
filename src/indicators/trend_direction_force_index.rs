@@ -15,8 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -31,9 +30,18 @@ impl<'a> AsRef<[f64]> for TrendDirectionForceIndexInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             TrendDirectionForceIndexData::Slice(slice) => slice,
-            TrendDirectionForceIndexData::Candles { candles, source } => {
-                source_type(candles, source)
-            }
+            TrendDirectionForceIndexData::Candles { candles, source } => match *source {
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -444,12 +452,118 @@ fn validate_common(data: &[f64], length: usize) -> Result<(), TrendDirectionForc
 
 #[inline(always)]
 fn compute_row(data: &[f64], length: usize, out: &mut [f64]) {
-    let mut stream = TrendDirectionForceIndexStream::try_new(TrendDirectionForceIndexParams {
-        length: Some(length),
-    })
-    .expect("validated length");
-    for (dst, &value) in out.iter_mut().zip(data.iter()) {
-        *dst = stream.update(value).unwrap_or(f64::NAN);
+    let norm_window = normalization_window(length);
+    if length == 10 {
+        let mut max_idx = [0usize; 31];
+        let mut max_vals = [0.0f64; 31];
+        compute_row_with_buffers(data, length, norm_window, out, &mut max_idx, &mut max_vals);
+        return;
+    }
+
+    let cap = norm_window + 1;
+    let mut max_idx = vec![0usize; cap];
+    let mut max_vals = vec![0.0f64; cap];
+    compute_row_with_buffers(data, length, norm_window, out, &mut max_idx, &mut max_vals);
+}
+
+#[inline(always)]
+fn compute_row_with_buffers(
+    data: &[f64],
+    length: usize,
+    norm_window: usize,
+    out: &mut [f64],
+    max_idx: &mut [usize],
+    max_vals: &mut [f64],
+) {
+    let half = half_length(length);
+    let mut ema1_stream = EmaSeededStream::new(half);
+    let mut ema2_stream = EmaSeededStream::new(half);
+    let mut next_index = 0usize;
+    let mut prev_ema1 = f64::NAN;
+    let mut prev_ema2 = f64::NAN;
+    let mut have_prev_emas = false;
+    let mut head = 0usize;
+    let mut tail = 0usize;
+    let mut count = 0usize;
+    let cap = max_idx.len();
+
+    for i in 0..data.len() {
+        let value = data[i];
+        if !value.is_finite() {
+            ema1_stream.reset();
+            ema2_stream.reset();
+            next_index = 0;
+            prev_ema1 = f64::NAN;
+            prev_ema2 = f64::NAN;
+            have_prev_emas = false;
+            head = 0;
+            tail = 0;
+            count = 0;
+            out[i] = f64::NAN;
+            continue;
+        }
+
+        let idx = next_index;
+        next_index += 1;
+
+        let ema1 = match ema1_stream.update(value * 1000.0) {
+            Some(value) => value,
+            None => {
+                out[i] = f64::NAN;
+                continue;
+            }
+        };
+        let ema2 = match ema2_stream.update(ema1) {
+            Some(value) => value,
+            None => {
+                out[i] = f64::NAN;
+                continue;
+            }
+        };
+
+        if !have_prev_emas {
+            prev_ema1 = ema1;
+            prev_ema2 = ema2;
+            have_prev_emas = true;
+            out[i] = f64::NAN;
+            continue;
+        }
+
+        let ema_diff_avg = ((ema1 - prev_ema1) + (ema2 - prev_ema2)) * 0.5;
+        let tdf = (ema1 - ema2).abs() * ema_diff_avg.powi(3);
+        prev_ema1 = ema1;
+        prev_ema2 = ema2;
+
+        let abs_tdf = tdf.abs();
+        while count > 0 {
+            let back = if tail == 0 { cap - 1 } else { tail - 1 };
+            if max_vals[back] <= abs_tdf {
+                tail = back;
+                count -= 1;
+            } else {
+                break;
+            }
+        }
+
+        max_idx[tail] = idx;
+        max_vals[tail] = abs_tdf;
+        tail += 1;
+        if tail == cap {
+            tail = 0;
+        }
+        count += 1;
+
+        let window_start = idx.saturating_add(1).saturating_sub(norm_window);
+        while count > 0 && max_idx[head] < window_start {
+            head += 1;
+            if head == cap {
+                head = 0;
+            }
+            count -= 1;
+        }
+
+        let max_abs = if count == 0 { 0.0 } else { max_vals[head] };
+        out[i] = if max_abs == 0.0 { 0.0 } else { tdf / max_abs };
     }
 }
 
@@ -462,20 +576,14 @@ pub fn trend_direction_force_index(
 
 pub fn trend_direction_force_index_with_kernel(
     input: &TrendDirectionForceIndexInput,
-    kernel: Kernel,
+    _kernel: Kernel,
 ) -> Result<TrendDirectionForceIndexOutput, TrendDirectionForceIndexError> {
     let data = input.as_ref();
     let length = input.get_length();
     validate_common(data, length)?;
 
-    let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
-
     let warmup = required_samples(length).saturating_sub(1);
     let mut out = alloc_with_nan_prefix(data.len(), warmup);
-    out.fill(f64::NAN);
     compute_row(data, length, &mut out);
     Ok(TrendDirectionForceIndexOutput { values: out })
 }
@@ -483,7 +591,7 @@ pub fn trend_direction_force_index_with_kernel(
 pub fn trend_direction_force_index_into_slice(
     dst: &mut [f64],
     input: &TrendDirectionForceIndexInput,
-    kernel: Kernel,
+    _kernel: Kernel,
 ) -> Result<(), TrendDirectionForceIndexError> {
     let data = input.as_ref();
     let length = input.get_length();
@@ -495,12 +603,6 @@ pub fn trend_direction_force_index_into_slice(
         });
     }
 
-    let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
-
-    dst.fill(f64::NAN);
     compute_row(data, length, dst);
     Ok(())
 }

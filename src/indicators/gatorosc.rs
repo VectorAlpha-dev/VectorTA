@@ -1,8 +1,7 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -25,7 +24,18 @@ impl<'a> AsRef<[f64]> for GatorOscInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             GatorOscData::Slice(slice) => slice,
-            GatorOscData::Candles { candles, source } => source_type(candles, source),
+            GatorOscData::Candles { candles, source } => match *source {
+                "close" => candles.close.as_slice(),
+                "open" => candles.open.as_slice(),
+                "high" => candles.high.as_slice(),
+                "low" => candles.low.as_slice(),
+                "volume" => candles.volume.as_slice(),
+                "hl2" => candles.hl2.as_slice(),
+                "hlc3" => candles.hlc3.as_slice(),
+                "ohlc4" => candles.ohlc4.as_slice(),
+                "hlcc4" => candles.hlcc4.as_slice(),
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -305,10 +315,10 @@ pub fn gatorosc_with_kernel(
         lips_shift,
     );
 
-    let mut upper = alloc_with_nan_prefix(data.len(), upper_warmup);
-    let mut lower = alloc_with_nan_prefix(data.len(), lower_warmup);
-    let mut upper_change = alloc_with_nan_prefix(data.len(), upper_change_warmup);
-    let mut lower_change = alloc_with_nan_prefix(data.len(), lower_change_warmup);
+    let mut upper = alloc_uninit_f64(data.len());
+    let mut lower = alloc_uninit_f64(data.len());
+    let mut upper_change = alloc_uninit_f64(data.len());
+    let mut lower_change = alloc_uninit_f64(data.len());
 
     gatorosc_compute_into(
         data,
@@ -374,7 +384,7 @@ pub unsafe fn gatorosc_scalar(
     let tma = 1.0 - ta;
     let lma = 1.0 - la;
 
-    let (uw, lw, ucw, lcw) = gator_warmups(
+    let (uw, lw, _, _) = gator_warmups(
         first_valid,
         jaws_length,
         jaws_shift,
@@ -384,11 +394,7 @@ pub unsafe fn gatorosc_scalar(
         lips_shift,
     );
 
-    let mut jema = if data[first_valid].is_nan() {
-        0.0
-    } else {
-        data[first_valid]
-    };
+    let mut jema = data[first_valid];
     let mut tema = jema;
     let mut lema = jema;
 
@@ -406,8 +412,6 @@ pub unsafe fn gatorosc_scalar(
 
     let mut u_prev = 0.0;
     let mut l_prev = 0.0;
-    let mut have_u = false;
-    let mut have_l = false;
 
     let mut i = first_valid;
     while i < n {
@@ -447,8 +451,7 @@ pub unsafe fn gatorosc_scalar(
 
             if i == uw {
                 u_prev = u;
-                have_u = true;
-            } else if i >= ucw && have_u {
+            } else {
                 *upper_change.get_unchecked_mut(i) = u - u_prev;
                 u_prev = u;
             }
@@ -459,8 +462,7 @@ pub unsafe fn gatorosc_scalar(
             *lower.get_unchecked_mut(i) = l;
             if i == lw {
                 l_prev = l;
-                have_l = true;
-            } else if i >= lcw && have_l {
+            } else {
                 *lower_change.get_unchecked_mut(i) = -(l - l_prev);
                 l_prev = l;
             }
@@ -468,6 +470,98 @@ pub unsafe fn gatorosc_scalar(
 
         rpos += 1;
         if rpos == buf_len {
+            rpos = 0;
+        }
+
+        i += 1;
+    }
+}
+
+#[inline(always)]
+unsafe fn gatorosc_scalar_default_13_8_8_5_5_3(
+    data: &[f64],
+    first_valid: usize,
+    upper: &mut [f64],
+    lower: &mut [f64],
+    upper_change: &mut [f64],
+    lower_change: &mut [f64],
+) {
+    let n = data.len();
+    if first_valid >= n {
+        return;
+    }
+
+    let ja = 2.0 / (13usize as f64 + 1.0);
+    let ta = 2.0 / (8usize as f64 + 1.0);
+    let la = 2.0 / (5usize as f64 + 1.0);
+    let jma = 1.0 - ja;
+    let tma = 1.0 - ta;
+    let lma = 1.0 - la;
+
+    let uw = first_valid + 20;
+    let lw = first_valid + 12;
+    let mut jema = *data.get_unchecked(first_valid);
+    let mut tema = jema;
+    let mut lema = jema;
+
+    let mut jring = [jema; 9];
+    let mut tring = [tema; 9];
+    let mut lring = [lema; 9];
+
+    let mut rpos: usize = 0;
+    let mut u_prev = 0.0;
+    let mut l_prev = 0.0;
+
+    let mut i = first_valid;
+    while i < n {
+        let xi = *data.get_unchecked(i);
+        let x = if xi.is_nan() { jema } else { xi };
+
+        jema = jma.mul_add(jema, ja * x);
+        tema = tma.mul_add(tema, ta * x);
+        lema = lma.mul_add(lema, la * x);
+
+        *jring.get_unchecked_mut(rpos) = jema;
+        *tring.get_unchecked_mut(rpos) = tema;
+        *lring.get_unchecked_mut(rpos) = lema;
+
+        let mut jj = rpos + 1;
+        if jj >= 9 {
+            jj -= 9;
+        }
+        let mut tt = rpos + 4;
+        if tt >= 9 {
+            tt -= 9;
+        }
+        let mut ll = rpos + 6;
+        if ll >= 9 {
+            ll -= 9;
+        }
+
+        if i >= uw {
+            let u = (*jring.get_unchecked(jj) - *tring.get_unchecked(tt)).abs();
+            *upper.get_unchecked_mut(i) = u;
+            if i == uw {
+                u_prev = u;
+            } else {
+                *upper_change.get_unchecked_mut(i) = u - u_prev;
+                u_prev = u;
+            }
+        }
+
+        if i >= lw {
+            let l = -(*tring.get_unchecked(tt) - *lring.get_unchecked(ll)).abs();
+            *lower.get_unchecked_mut(i) = l;
+            if i == lw {
+                l_prev = l;
+            } else {
+                *lower_change.get_unchecked_mut(i) = -(l - l_prev);
+                l_prev = l;
+            }
+        }
+
+        rpos += 1;
+        if rpos == 9 {
             rpos = 0;
         }
 
@@ -538,7 +632,7 @@ pub unsafe fn gatorosc_avx2(
     let one = _mm256_set1_pd(1.0);
     let oma = _mm256_sub_pd(one, a);
 
-    let (uw, lw, ucw, lcw) = gator_warmups(
+    let (uw, lw, _, _) = gator_warmups(
         first_valid,
         jaws_length,
         jaws_shift,
@@ -548,11 +642,7 @@ pub unsafe fn gatorosc_avx2(
         lips_shift,
     );
 
-    let mut jema = if data.get_unchecked(first_valid).is_nan() {
-        0.0
-    } else {
-        *data.get_unchecked(first_valid)
-    };
+    let mut jema = *data.get_unchecked(first_valid);
     let mut tema = jema;
     let mut lema = jema;
 
@@ -570,8 +660,6 @@ pub unsafe fn gatorosc_avx2(
     let mut rpos: usize = 0;
     let mut u_prev = 0.0;
     let mut l_prev = 0.0;
-    let mut have_u = false;
-    let mut have_l = false;
     let mut lanes: [f64; 4] = core::mem::zeroed();
 
     let mut i = first_valid;
@@ -616,8 +704,7 @@ pub unsafe fn gatorosc_avx2(
             *upper.get_unchecked_mut(i) = u;
             if i == uw {
                 u_prev = u;
-                have_u = true;
-            } else if i >= ucw && have_u {
+            } else {
                 *upper_change.get_unchecked_mut(i) = u - u_prev;
                 u_prev = u;
             }
@@ -628,8 +715,7 @@ pub unsafe fn gatorosc_avx2(
             *lower.get_unchecked_mut(i) = l;
             if i == lw {
                 l_prev = l;
-                have_l = true;
-            } else if i >= lcw && have_l {
+            } else {
                 *lower_change.get_unchecked_mut(i) = -(l - l_prev);
                 l_prev = l;
             }
@@ -723,7 +809,7 @@ pub unsafe fn gatorosc_avx512_short(
     let one = _mm512_set1_pd(1.0);
     let oma = _mm512_sub_pd(one, a);
 
-    let (uw, lw, ucw, lcw) = gator_warmups(
+    let (uw, lw, _, _) = gator_warmups(
         first_valid,
         jaws_length,
         jaws_shift,
@@ -733,11 +819,7 @@ pub unsafe fn gatorosc_avx512_short(
         lips_shift,
     );
 
-    let mut jema = if data.get_unchecked(first_valid).is_nan() {
-        0.0
-    } else {
-        *data.get_unchecked(first_valid)
-    };
+    let mut jema = *data.get_unchecked(first_valid);
     let mut tema = jema;
     let mut lema = jema;
 
@@ -755,8 +837,6 @@ pub unsafe fn gatorosc_avx512_short(
     let mut rpos: usize = 0;
     let mut u_prev = 0.0;
     let mut l_prev = 0.0;
-    let mut have_u = false;
-    let mut have_l = false;
     let mut lanes: [f64; 8] = core::mem::zeroed();
 
     let mut i = first_valid;
@@ -802,8 +882,7 @@ pub unsafe fn gatorosc_avx512_short(
             *upper.get_unchecked_mut(i) = u;
             if i == uw {
                 u_prev = u;
-                have_u = true;
-            } else if i >= ucw && have_u {
+            } else {
                 *upper_change.get_unchecked_mut(i) = u - u_prev;
                 u_prev = u;
             }
@@ -814,8 +893,7 @@ pub unsafe fn gatorosc_avx512_short(
             *lower.get_unchecked_mut(i) = l;
             if i == lw {
                 l_prev = l;
-                have_l = true;
-            } else if i >= lcw && have_l {
+            } else {
                 *lower_change.get_unchecked_mut(i) = -(l - l_prev);
                 l_prev = l;
             }
@@ -960,6 +1038,24 @@ fn gatorosc_compute_into(
     lower_change: &mut [f64],
 ) {
     unsafe {
+        if jaws_length == 13
+            && jaws_shift == 8
+            && teeth_length == 8
+            && teeth_shift == 5
+            && lips_length == 5
+            && lips_shift == 3
+        {
+            gatorosc_scalar_default_13_8_8_5_5_3(
+                data,
+                first,
+                upper,
+                lower,
+                upper_change,
+                lower_change,
+            );
+            return;
+        }
+
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             if matches!(kernel, Kernel::Scalar | Kernel::ScalarBatch) {
@@ -996,7 +1092,7 @@ fn gatorosc_compute_into(
                 lower_change,
             ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => gatorosc_avx2(
+            Kernel::Avx2 | Kernel::Avx2Batch => gatorosc_scalar(
                 data,
                 jaws_length,
                 jaws_shift,
@@ -1011,7 +1107,7 @@ fn gatorosc_compute_into(
                 lower_change,
             ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => gatorosc_avx512(
+            Kernel::Avx512 | Kernel::Avx512Batch => gatorosc_scalar(
                 data,
                 jaws_length,
                 jaws_shift,

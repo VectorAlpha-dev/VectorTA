@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
@@ -211,6 +211,14 @@ pub fn dti(input: &DtiInput) -> Result<DtiOutput, DtiError> {
     dti_with_kernel(input, Kernel::Auto)
 }
 
+#[inline(always)]
+fn input_high_low<'a>(input: &'a DtiInput<'a>) -> (&'a [f64], &'a [f64]) {
+    match &input.data {
+        DtiData::Candles { candles } => (candles.high.as_slice(), candles.low.as_slice()),
+        DtiData::Slices { high, low } => (*high, *low),
+    }
+}
+
 #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn dti_into(input: &DtiInput, out: &mut [f64]) -> Result<(), DtiError> {
@@ -219,18 +227,7 @@ pub fn dti_into(input: &DtiInput, out: &mut [f64]) -> Result<(), DtiError> {
 
 #[inline]
 pub fn dti_into_slice(dst: &mut [f64], input: &DtiInput, kern: Kernel) -> Result<(), DtiError> {
-    let (high, low) = match &input.data {
-        DtiData::Candles { candles } => {
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| DtiError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| DtiError::CandleFieldError(e.to_string()))?;
-            (high, low)
-        }
-        DtiData::Slices { high, low } => (*high, *low),
-    };
+    let (high, low) = input_high_low(input);
 
     if high.is_empty() || low.is_empty() {
         return Err(DtiError::EmptyInputData);
@@ -272,7 +269,8 @@ pub fn dti_into_slice(dst: &mut [f64], input: &DtiInput, kern: Kernel) -> Result
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Scalar,
         k => k,
     };
 
@@ -308,18 +306,7 @@ pub fn dti_into_slice(dst: &mut [f64], input: &DtiInput, kern: Kernel) -> Result
 }
 
 pub fn dti_with_kernel(input: &DtiInput, kernel: Kernel) -> Result<DtiOutput, DtiError> {
-    let (high, low) = match &input.data {
-        DtiData::Candles { candles } => {
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| DtiError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| DtiError::CandleFieldError(e.to_string()))?;
-            (high, low)
-        }
-        DtiData::Slices { high, low } => (*high, *low),
-    };
+    let (high, low) = input_high_low(input);
 
     if high.is_empty() || low.is_empty() {
         return Err(DtiError::EmptyInputData);
@@ -357,7 +344,8 @@ pub fn dti_with_kernel(input: &DtiInput, kernel: Kernel) -> Result<DtiOutput, Dt
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Scalar,
         other => other,
     };
 
@@ -1349,13 +1337,7 @@ impl DtiBatchBuilder {
         DtiBatchBuilder::new().kernel(k).apply_slices(high, low)
     }
     pub fn apply_candles(self, c: &Candles) -> Result<DtiBatchOutput, DtiError> {
-        let high = c
-            .select_candle_field("high")
-            .map_err(|e| DtiError::CandleFieldError(e.to_string()))?;
-        let low = c
-            .select_candle_field("low")
-            .map_err(|e| DtiError::CandleFieldError(e.to_string()))?;
-        self.apply_slices(high, low)
+        self.apply_slices(c.high.as_slice(), c.low.as_slice())
     }
     pub fn with_default_candles(c: &Candles) -> Result<DtiBatchOutput, DtiError> {
         DtiBatchBuilder::new().kernel(Kernel::Auto).apply_candles(c)

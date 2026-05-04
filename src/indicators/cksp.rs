@@ -254,18 +254,7 @@ pub fn cksp_into(
 
 pub fn cksp_with_kernel(input: &CkspInput, kernel: Kernel) -> Result<CkspOutput, CkspError> {
     let (high, low, close) = match &input.data {
-        CkspData::Candles { candles } => {
-            let h = candles
-                .select_candle_field("high")
-                .map_err(|e| CkspError::CandleFieldError(e.to_string()))?;
-            let l = candles
-                .select_candle_field("low")
-                .map_err(|e| CkspError::CandleFieldError(e.to_string()))?;
-            let c = candles
-                .select_candle_field("close")
-                .map_err(|e| CkspError::CandleFieldError(e.to_string()))?;
-            (h, l, c)
-        }
+        CkspData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
         CkspData::Slices { high, low, close } => {
             if high.len() != low.len() || low.len() != close.len() {
                 return Err(CkspError::InconsistentLengths);
@@ -345,17 +334,7 @@ pub fn cksp_into_slices(
     kern: Kernel,
 ) -> Result<(), CkspError> {
     let (high, low, close) = match &input.data {
-        CkspData::Candles { candles } => (
-            candles
-                .select_candle_field("high")
-                .map_err(|e| CkspError::CandleFieldError(e.to_string()))?,
-            candles
-                .select_candle_field("low")
-                .map_err(|e| CkspError::CandleFieldError(e.to_string()))?,
-            candles
-                .select_candle_field("close")
-                .map_err(|e| CkspError::CandleFieldError(e.to_string()))?,
-        ),
+        CkspData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
         CkspData::Slices { high, low, close } => (*high, *low, *close),
     };
     if high.len() != low.len() || low.len() != close.len() {
@@ -424,6 +403,207 @@ pub fn cksp_into_slices(
     Ok(())
 }
 
+#[inline(always)]
+unsafe fn cksp_compute_into_fixed<const CAP: usize>(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    p: usize,
+    x: f64,
+    q: usize,
+    first_valid_idx: usize,
+    out_long: &mut [f64],
+    out_short: &mut [f64],
+) {
+    debug_assert_eq!(CAP, q + 1);
+    let size = close.len();
+    let warmup = first_valid_idx + p + q - 1;
+
+    for i in 0..warmup.min(size) {
+        *out_long.get_unchecked_mut(i) = f64::NAN;
+        *out_short.get_unchecked_mut(i) = f64::NAN;
+    }
+
+    let mut h_idx = [0usize; CAP];
+    let mut h_head = 0usize;
+    let mut h_tail = 0usize;
+
+    let mut l_idx = [0usize; CAP];
+    let mut l_head = 0usize;
+    let mut l_tail = 0usize;
+
+    let mut ls_idx = [0usize; CAP];
+    let mut ls_val = [0.0f64; CAP];
+    let mut ls_head = 0usize;
+    let mut ls_tail = 0usize;
+
+    let mut ss_idx = [0usize; CAP];
+    let mut ss_val = [0.0f64; CAP];
+    let mut ss_head = 0usize;
+    let mut ss_tail = 0usize;
+
+    let mut sum_tr = 0.0;
+    let mut rma = 0.0;
+    let alpha = 1.0 / p as f64;
+
+    #[inline(always)]
+    fn rb_dec<const CAP: usize>(idx: usize) -> usize {
+        if idx == 0 {
+            CAP - 1
+        } else {
+            idx - 1
+        }
+    }
+    #[inline(always)]
+    fn rb_inc<const CAP: usize>(idx: usize) -> usize {
+        let next = idx + 1;
+        if next == CAP {
+            0
+        } else {
+            next
+        }
+    }
+
+    for i in first_valid_idx..size {
+        let hi = *high.get_unchecked(i);
+        let lo = *low.get_unchecked(i);
+        let tr = if i == first_valid_idx {
+            hi - lo
+        } else {
+            let cprev = *close.get_unchecked(i - 1);
+            let hl = hi - lo;
+            let hc = (hi - cprev).abs();
+            let lc = (lo - cprev).abs();
+            if hl >= hc {
+                if hl >= lc {
+                    hl
+                } else {
+                    lc
+                }
+            } else if hc >= lc {
+                hc
+            } else {
+                lc
+            }
+        };
+
+        let k = i - first_valid_idx;
+        if k < p {
+            sum_tr += tr;
+            if k == p - 1 {
+                rma = sum_tr / p as f64;
+            }
+        } else {
+            rma = alpha.mul_add(tr - rma, rma);
+        }
+
+        while h_head != h_tail {
+            let last = rb_dec::<CAP>(h_tail);
+            let last_i = *h_idx.get_unchecked(last);
+            if *high.get_unchecked(last_i) <= hi {
+                h_tail = last;
+            } else {
+                break;
+            }
+        }
+        let mut next_tail = rb_inc::<CAP>(h_tail);
+        if next_tail == h_head {
+            h_head = rb_inc::<CAP>(h_head);
+        }
+        *h_idx.get_unchecked_mut(h_tail) = i;
+        h_tail = next_tail;
+        while h_head != h_tail {
+            let front_i = *h_idx.get_unchecked(h_head);
+            if front_i + q <= i {
+                h_head = rb_inc::<CAP>(h_head);
+            } else {
+                break;
+            }
+        }
+        let mh = *high.get_unchecked(*h_idx.get_unchecked(h_head));
+
+        while l_head != l_tail {
+            let last = rb_dec::<CAP>(l_tail);
+            let last_i = *l_idx.get_unchecked(last);
+            if *low.get_unchecked(last_i) >= lo {
+                l_tail = last;
+            } else {
+                break;
+            }
+        }
+        next_tail = rb_inc::<CAP>(l_tail);
+        if next_tail == l_head {
+            l_head = rb_inc::<CAP>(l_head);
+        }
+        *l_idx.get_unchecked_mut(l_tail) = i;
+        l_tail = next_tail;
+        while l_head != l_tail {
+            let front_i = *l_idx.get_unchecked(l_head);
+            if front_i + q <= i {
+                l_head = rb_inc::<CAP>(l_head);
+            } else {
+                break;
+            }
+        }
+        let ml = *low.get_unchecked(*l_idx.get_unchecked(l_head));
+
+        if i >= warmup {
+            let ls0 = (-x).mul_add(rma, mh);
+            let ss0 = x.mul_add(rma, ml);
+
+            while ls_head != ls_tail {
+                let last = rb_dec::<CAP>(ls_tail);
+                if *ls_val.get_unchecked(last) <= ls0 {
+                    ls_tail = last;
+                } else {
+                    break;
+                }
+            }
+            next_tail = rb_inc::<CAP>(ls_tail);
+            if next_tail == ls_head {
+                ls_head = rb_inc::<CAP>(ls_head);
+            }
+            *ls_idx.get_unchecked_mut(ls_tail) = i;
+            *ls_val.get_unchecked_mut(ls_tail) = ls0;
+            ls_tail = next_tail;
+            while ls_head != ls_tail {
+                let front_i = *ls_idx.get_unchecked(ls_head);
+                if front_i + q <= i {
+                    ls_head = rb_inc::<CAP>(ls_head);
+                } else {
+                    break;
+                }
+            }
+            *out_long.get_unchecked_mut(i) = *ls_val.get_unchecked(ls_head);
+
+            while ss_head != ss_tail {
+                let last = rb_dec::<CAP>(ss_tail);
+                if *ss_val.get_unchecked(last) >= ss0 {
+                    ss_tail = last;
+                } else {
+                    break;
+                }
+            }
+            next_tail = rb_inc::<CAP>(ss_tail);
+            if next_tail == ss_head {
+                ss_head = rb_inc::<CAP>(ss_head);
+            }
+            *ss_idx.get_unchecked_mut(ss_tail) = i;
+            *ss_val.get_unchecked_mut(ss_tail) = ss0;
+            ss_tail = next_tail;
+            while ss_head != ss_tail {
+                let front_i = *ss_idx.get_unchecked(ss_head);
+                if front_i + q <= i {
+                    ss_head = rb_inc::<CAP>(ss_head);
+                } else {
+                    break;
+                }
+            }
+            *out_short.get_unchecked_mut(i) = *ss_val.get_unchecked(ss_head);
+        }
+    }
+}
+
 #[inline]
 pub unsafe fn cksp_scalar(
     high: &[f64],
@@ -441,6 +621,24 @@ pub unsafe fn cksp_scalar(
     let mut short_values = alloc_with_nan_prefix(size, warmup);
 
     if first_valid_idx >= size {
+        return Ok(CkspOutput {
+            long_values,
+            short_values,
+        });
+    }
+
+    if q == 9 {
+        cksp_compute_into_fixed::<10>(
+            high,
+            low,
+            close,
+            p,
+            x,
+            q,
+            first_valid_idx,
+            &mut long_values,
+            &mut short_values,
+        );
         return Ok(CkspOutput {
             long_values,
             short_values,
@@ -718,6 +916,21 @@ pub unsafe fn cksp_compute_into(
 ) {
     let size = close.len();
     let warmup = first_valid_idx + p + q - 1;
+
+    if q == 9 {
+        cksp_compute_into_fixed::<10>(
+            high,
+            low,
+            close,
+            p,
+            x,
+            q,
+            first_valid_idx,
+            out_long,
+            out_short,
+        );
+        return;
+    }
 
     for i in 0..warmup.min(size) {
         *out_long.get_unchecked_mut(i) = f64::NAN;

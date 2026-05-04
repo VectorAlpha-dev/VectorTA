@@ -148,7 +148,10 @@ impl<'a> AsRef<[f64]> for VoscInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             VoscData::Slice(slice) => slice,
-            VoscData::Candles { candles, source } => source_type(candles, source),
+            VoscData::Candles { candles, source } => match *source {
+                "volume" => candles.volume.as_slice(),
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -323,7 +326,10 @@ pub fn vosc(input: &VoscInput) -> Result<VoscOutput, VoscError> {
 
 pub fn vosc_with_kernel(input: &VoscInput, kernel: Kernel) -> Result<VoscOutput, VoscError> {
     let data: &[f64] = match &input.data {
-        VoscData::Candles { candles, source } => source_type(candles, source),
+        VoscData::Candles { candles, source } => match *source {
+            "volume" => candles.volume.as_slice(),
+            _ => source_type(candles, source),
+        },
         VoscData::Slice(sl) => sl,
     };
 
@@ -922,7 +928,10 @@ impl VoscBatchBuilder {
         VoscBatchBuilder::new().kernel(k).apply_slice(data)
     }
     pub fn apply_candles(self, c: &Candles, src: &str) -> Result<VoscBatchOutput, VoscError> {
-        let slice = source_type(c, src);
+        let slice = match src {
+            "volume" => c.volume.as_slice(),
+            _ => source_type(c, src),
+        };
         self.apply_slice(slice)
     }
     pub fn with_default_candles(c: &Candles) -> Result<VoscBatchOutput, VoscError> {
@@ -2184,7 +2193,10 @@ pub fn vosc_cuda_many_series_one_param_dev_py(
 #[inline]
 pub fn vosc_into_slice(dst: &mut [f64], input: &VoscInput, kern: Kernel) -> Result<(), VoscError> {
     let data: &[f64] = match &input.data {
-        VoscData::Candles { candles, source } => source_type(candles, source),
+        VoscData::Candles { candles, source } => match *source {
+            "volume" => candles.volume.as_slice(),
+            _ => source_type(candles, source),
+        },
         VoscData::Slice(sl) => sl,
     };
 

@@ -277,8 +277,14 @@ fn build_hann_weights_rec(period: usize) -> (AVec<f64>, f64) {
     (w, inv)
 }
 
+#[inline(always)]
+fn reverse_weights_in_place(weights: &mut [f64]) {
+    weights.reverse();
+}
+
 pub fn ehma_with_kernel(input: &EhmaInput, kernel: Kernel) -> Result<EhmaOutput, EhmaError> {
-    let (data, weights, period, first, inv_coef, chosen) = ehma_prepare(input, kernel)?;
+    let (data, mut weights, period, first, inv_coef, chosen) = ehma_prepare(input, kernel)?;
+    reverse_weights_in_place(&mut weights);
 
     let mut out = alloc_with_nan_prefix(data.len(), first + period - 1);
 
@@ -289,7 +295,8 @@ pub fn ehma_with_kernel(input: &EhmaInput, kernel: Kernel) -> Result<EhmaOutput,
 
 #[inline]
 pub fn ehma_into_slice(dst: &mut [f64], input: &EhmaInput, kern: Kernel) -> Result<(), EhmaError> {
-    let (data, weights, period, first, inv_coef, chosen) = ehma_prepare(input, kern)?;
+    let (data, mut weights, period, first, inv_coef, chosen) = ehma_prepare(input, kern)?;
+    reverse_weights_in_place(&mut weights);
 
     if dst.len() != data.len() {
         return Err(EhmaError::OutputLengthMismatch {
@@ -311,7 +318,8 @@ pub fn ehma_into_slice(dst: &mut [f64], input: &EhmaInput, kern: Kernel) -> Resu
 #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn ehma_into(input: &EhmaInput, out: &mut [f64]) -> Result<(), EhmaError> {
-    let (data, weights, period, first, inv_coef, chosen) = ehma_prepare(input, Kernel::Auto)?;
+    let (data, mut weights, period, first, inv_coef, chosen) = ehma_prepare(input, Kernel::Auto)?;
+    reverse_weights_in_place(&mut weights);
 
     if out.len() != data.len() {
         return Err(EhmaError::OutputLengthMismatch {
@@ -402,7 +410,7 @@ pub fn ehma_scalar(
         let mut sum = 0.0;
 
         for j in 0..period {
-            sum = window[j].mul_add(weights[period - 1 - j], sum);
+            sum = window[j].mul_add(weights[j], sum);
         }
 
         out[i] = sum * inv_coef;
@@ -466,9 +474,7 @@ unsafe fn ehma_avx2(
         while j < p4 {
             let d = _mm256_loadu_pd(window.as_ptr().add(j));
 
-            let w_block = _mm256_loadu_pd(weights.as_ptr().add(period - 4 - j));
-
-            let w = _mm256_permute4x64_pd(w_block, 0b0001_1011);
+            let w = _mm256_loadu_pd(weights.as_ptr().add(j));
 
             acc = _mm256_fmadd_pd(d, w, acc);
             j += 4;
@@ -482,7 +488,7 @@ unsafe fn ehma_avx2(
 
         while j < period {
             let d = *window.get_unchecked(j);
-            let w = *weights.get_unchecked(period - 1 - j);
+            let w = *weights.get_unchecked(j);
             sum = d.mul_add(w, sum);
             j += 1;
         }
@@ -518,8 +524,6 @@ unsafe fn ehma_avx512_impl(
 ) {
     let p8 = period & !7;
 
-    let rev_idx: __m512i = _mm512_set_epi64(0, 1, 2, 3, 4, 5, 6, 7);
-
     for i in (first_val + period - 1)..data.len() {
         let start = i + 1 - period;
         let window = &data[start..start + period];
@@ -530,9 +534,7 @@ unsafe fn ehma_avx512_impl(
         while j < p8 {
             let dv = _mm512_loadu_pd(window.as_ptr().add(j));
 
-            let w_block = _mm512_loadu_pd(weights.as_ptr().add(period - 8 - j));
-
-            let w = _mm512_permutexvar_pd(rev_idx, w_block);
+            let w = _mm512_loadu_pd(weights.as_ptr().add(j));
 
             acc = _mm512_fmadd_pd(dv, w, acc);
             j += 8;
@@ -542,7 +544,7 @@ unsafe fn ehma_avx512_impl(
 
         while j < period {
             let d = *window.get_unchecked(j);
-            let w = *weights.get_unchecked(period - 1 - j);
+            let w = *weights.get_unchecked(j);
             sum = d.mul_add(w, sum);
             j += 1;
         }

@@ -31,7 +31,10 @@ impl<'a> AsRef<[f64]> for PercentileNearestRankInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             PercentileNearestRankData::Slice(slice) => slice,
-            PercentileNearestRankData::Candles { candles, source } => source_type(candles, source),
+            PercentileNearestRankData::Candles { candles, source } => match *source {
+                "close" => candles.close.as_slice(),
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -204,6 +207,10 @@ fn pnr_compute_into(
         return;
     }
 
+    if length == 15 && percentage == 50.0 && pnr_compute_default_15_50_into(data, first, out) {
+        return;
+    }
+
     let mut sorted: Vec<f64> = Vec::with_capacity(length);
     let window_start0 = start_i + 1 - length;
     for idx in window_start0..=start_i {
@@ -264,11 +271,72 @@ fn pnr_compute_into(
     }
 }
 
+#[inline(always)]
+fn pnr_compute_default_15_50_into(data: &[f64], first: usize, out: &mut [f64]) -> bool {
+    let n = data.len();
+    let start_i = first + 14;
+    if start_i >= n {
+        return true;
+    }
+
+    let mut sorted = [0.0f64; 15];
+    for j in 0..15 {
+        let value = data[first + j];
+        if value.is_nan() {
+            return false;
+        }
+        sorted[j] = value;
+    }
+    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+
+    out[start_i] = sorted[7];
+
+    let mut i = start_i + 1;
+    while i < n {
+        let outgoing = data[i - 15];
+        let incoming = data[i];
+        if outgoing.is_nan() || incoming.is_nan() {
+            return false;
+        }
+
+        let mut remove_pos = 0usize;
+        while remove_pos < 15 && sorted[remove_pos] != outgoing {
+            remove_pos += 1;
+        }
+        if remove_pos == 15 {
+            return false;
+        }
+
+        let mut j = remove_pos;
+        while j < 14 {
+            sorted[j] = sorted[j + 1];
+            j += 1;
+        }
+
+        let mut insert_pos = 0usize;
+        while insert_pos < 14 && sorted[insert_pos] < incoming {
+            insert_pos += 1;
+        }
+
+        let mut k = 14usize;
+        while k > insert_pos {
+            sorted[k] = sorted[k - 1];
+            k -= 1;
+        }
+        sorted[insert_pos] = incoming;
+
+        out[i] = sorted[7];
+        i += 1;
+    }
+
+    true
+}
+
 #[inline]
 pub fn percentile_nearest_rank(
     input: &PercentileNearestRankInput,
 ) -> Result<PercentileNearestRankOutput, PercentileNearestRankError> {
-    percentile_nearest_rank_with_kernel(input, Kernel::Auto)
+    percentile_nearest_rank_with_kernel(input, Kernel::Scalar)
 }
 
 pub fn percentile_nearest_rank_with_kernel(

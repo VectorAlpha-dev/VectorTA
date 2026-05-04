@@ -23,10 +23,26 @@ use thiserror::Error;
 impl<'a> AsRef<[f64]> for MaaqInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
-        match &self.data {
-            MaaqData::Slice(slice) => slice,
-            MaaqData::Candles { candles, source } => source_type(candles, source),
-        }
+        maaq_data_slice(&self.data)
+    }
+}
+
+#[inline(always)]
+fn maaq_data_slice<'a>(data: &'a MaaqData<'a>) -> &'a [f64] {
+    match data {
+        MaaqData::Slice(slice) => slice,
+        MaaqData::Candles { candles, source } => match *source {
+            "open" => &candles.open,
+            "high" => &candles.high,
+            "low" => &candles.low,
+            "close" => &candles.close,
+            "volume" => &candles.volume,
+            "hl2" => &candles.hl2,
+            "hlc3" => &candles.hlc3,
+            "ohlc4" => &candles.ohlc4,
+            "hlcc4" | "hlcc" => &candles.hlcc4,
+            _ => source_type(candles, source),
+        },
     }
 }
 
@@ -216,6 +232,11 @@ pub fn maaq(input: &MaaqInput) -> Result<MaaqOutput, MaaqError> {
 }
 
 #[inline(always)]
+fn maaq_auto_kernel() -> Kernel {
+    Kernel::Scalar
+}
+
+#[inline(always)]
 fn maaq_compute_into(
     data: &[f64],
     period: usize,
@@ -295,7 +316,7 @@ fn maaq_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => maaq_auto_kernel(),
         k => k,
     };
 
@@ -340,60 +361,68 @@ pub fn maaq_scalar(
     let mut diffs = vec![0.0f64; period];
     let mut vol_sum = 0.0;
 
-    for j in 1..period {
-        let d = (data[first + j] - data[first + j - 1]).abs();
-        diffs[j] = d;
-        vol_sum += d;
-    }
-
-    let warm_end = (first + period).min(len);
-    if warm_end > first {
-        out[first..warm_end].copy_from_slice(&data[first..warm_end]);
-    }
-
-    let i0 = first + period;
-    if i0 >= len {
-        return Ok(());
-    }
-
-    let new_diff = (data[i0] - data[i0 - 1]).abs();
-    diffs[0] = new_diff;
-    vol_sum += new_diff;
-
-    let mut prev_val = data[i0 - 1];
-    let er0 = if vol_sum > f64::EPSILON {
-        (data[i0] - data[first]).abs() / vol_sum
-    } else {
-        0.0
-    };
-    let mut sc = fast_sc.mul_add(er0, slow_sc);
-    sc *= sc;
-
-    prev_val = sc.mul_add(data[i0] - prev_val, prev_val);
-    out[i0] = prev_val;
-
-    let mut head = if period > 1 { 1usize } else { 0usize };
-
-    for i in (i0 + 1)..len {
-        vol_sum -= diffs[head];
-        let nd = (data[i] - data[i - 1]).abs();
-        diffs[head] = nd;
-        vol_sum += nd;
-        head += 1;
-        if head == period {
-            head = 0;
+    unsafe {
+        let dp = data.as_ptr();
+        let op = out.as_mut_ptr();
+        let mut j = 1usize;
+        while j < period {
+            let d = (*dp.add(first + j) - *dp.add(first + j - 1)).abs();
+            *diffs.get_unchecked_mut(j) = d;
+            vol_sum += d;
+            j += 1;
         }
 
-        let er = if vol_sum > f64::EPSILON {
-            (data[i] - data[i - period]).abs() / vol_sum
+        let warm_end = (first + period).min(len);
+        if warm_end > first {
+            core::ptr::copy_nonoverlapping(dp.add(first), op.add(first), warm_end - first);
+        }
+
+        let i0 = first + period;
+        if i0 >= len {
+            return Ok(());
+        }
+
+        let new_diff = (*dp.add(i0) - *dp.add(i0 - 1)).abs();
+        *diffs.get_unchecked_mut(0) = new_diff;
+        vol_sum += new_diff;
+
+        let mut prev_val = *dp.add(i0 - 1);
+        let er0 = if vol_sum > f64::EPSILON {
+            (*dp.add(i0) - *dp.add(first)).abs() / vol_sum
         } else {
             0.0
         };
-        let mut sc = fast_sc.mul_add(er, slow_sc);
+        let mut sc = fast_sc.mul_add(er0, slow_sc);
         sc *= sc;
 
-        prev_val = sc.mul_add(data[i] - prev_val, prev_val);
-        out[i] = prev_val;
+        prev_val = sc.mul_add(*dp.add(i0) - prev_val, prev_val);
+        *op.add(i0) = prev_val;
+
+        let mut head = if period > 1 { 1usize } else { 0usize };
+
+        let mut i = i0 + 1;
+        while i < len {
+            vol_sum -= *diffs.get_unchecked(head);
+            let nd = (*dp.add(i) - *dp.add(i - 1)).abs();
+            *diffs.get_unchecked_mut(head) = nd;
+            vol_sum += nd;
+            head += 1;
+            if head == period {
+                head = 0;
+            }
+
+            let er = if vol_sum > f64::EPSILON {
+                (*dp.add(i) - *dp.add(i - period)).abs() / vol_sum
+            } else {
+                0.0
+            };
+            let mut sc = fast_sc.mul_add(er, slow_sc);
+            sc *= sc;
+
+            prev_val = sc.mul_add(*dp.add(i) - prev_val, prev_val);
+            *op.add(i) = prev_val;
+            i += 1;
+        }
     }
     Ok(())
 }

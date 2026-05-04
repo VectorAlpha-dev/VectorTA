@@ -64,6 +64,13 @@ pub struct WavetrendOutput {
     pub wt_diff: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WavetrendOutputField {
+    Wt1,
+    Wt2,
+    WtDiff,
+}
+
 #[derive(Debug, Clone)]
 pub struct WavetrendParams {
     pub channel_length: Option<usize>,
@@ -838,6 +845,162 @@ fn wavetrend_compute_into(
     Ok(())
 }
 
+#[inline(always)]
+fn wavetrend_compute_output_into(
+    data: &[f64],
+    channel_len: usize,
+    average_len: usize,
+    ma_len: usize,
+    factor: f64,
+    first: usize,
+    warmup_period: usize,
+    dst: &mut [f64],
+    field: WavetrendOutputField,
+) {
+    let n = data.len();
+    for i in 0..warmup_period.min(n) {
+        dst[i] = f64::NAN;
+    }
+    if n == 0 {
+        return;
+    }
+
+    let alpha_ch = 2.0 / (channel_len as f64 + 1.0);
+    let beta_ch = 1.0 - alpha_ch;
+    let alpha_avg = 2.0 / (average_len as f64 + 1.0);
+    let beta_avg = 1.0 - alpha_avg;
+
+    let mut esa_state: f64 = f64::NAN;
+    let mut de_state: f64 = f64::NAN;
+    let mut wt1_state: f64 = f64::NAN;
+    let mut esa_seeded = false;
+    let mut de_seeded = false;
+    let mut wt1_seeded = false;
+
+    if matches!(field, WavetrendOutputField::Wt1) {
+        for idx in first..n {
+            let x = data[idx];
+            let mut wt1_i = f64::NAN;
+
+            if x.is_finite() {
+                if !esa_seeded {
+                    esa_state = x;
+                    esa_seeded = true;
+                } else {
+                    esa_state = alpha_ch * x + beta_ch * esa_state;
+                }
+
+                let abs_diff = (x - esa_state).abs();
+                if !de_seeded {
+                    de_state = abs_diff;
+                    de_seeded = true;
+                } else {
+                    de_state = alpha_ch * abs_diff + beta_ch * de_state;
+                }
+
+                let den = factor * de_state;
+                if den != 0.0 && den.is_finite() && esa_state.is_finite() {
+                    let ci = (x - esa_state) / den;
+                    if ci.is_finite() {
+                        if !wt1_seeded {
+                            wt1_state = ci;
+                            wt1_seeded = true;
+                        } else {
+                            wt1_state = alpha_avg * ci + beta_avg * wt1_state;
+                        }
+                        wt1_i = wt1_state;
+                    }
+                }
+            }
+
+            if idx >= warmup_period {
+                dst[idx] = wt1_i;
+            }
+        }
+        return;
+    }
+
+    let mut ring_vals = vec![f64::NAN; ma_len];
+    let mut ring_mask = vec![0u8; ma_len];
+    let mut head = 0usize;
+    let mut sma_sum = 0.0f64;
+    let mut sma_count = 0usize;
+
+    for idx in first..n {
+        let x = data[idx];
+        let mut wt1_i = f64::NAN;
+        let mut wt2_i = f64::NAN;
+
+        if x.is_finite() {
+            if !esa_seeded {
+                esa_state = x;
+                esa_seeded = true;
+            } else {
+                esa_state = alpha_ch * x + beta_ch * esa_state;
+            }
+
+            let abs_diff = (x - esa_state).abs();
+            if !de_seeded {
+                de_state = abs_diff;
+                de_seeded = true;
+            } else {
+                de_state = alpha_ch * abs_diff + beta_ch * de_state;
+            }
+
+            let den = factor * de_state;
+            if den != 0.0 && den.is_finite() && esa_state.is_finite() {
+                let ci = (x - esa_state) / den;
+                if ci.is_finite() {
+                    if !wt1_seeded {
+                        wt1_state = ci;
+                        wt1_seeded = true;
+                    } else {
+                        wt1_state = alpha_avg * ci + beta_avg * wt1_state;
+                    }
+                    wt1_i = wt1_state;
+                }
+            }
+        }
+
+        if ring_mask[head] != 0 {
+            sma_sum -= ring_vals[head];
+            sma_count -= 1;
+        }
+
+        if wt1_i.is_finite() {
+            ring_vals[head] = wt1_i;
+            ring_mask[head] = 1;
+            sma_sum += wt1_i;
+            sma_count += 1;
+        } else {
+            ring_vals[head] = f64::NAN;
+            ring_mask[head] = 0;
+        }
+        head += 1;
+        if head == ma_len {
+            head = 0;
+        }
+
+        if sma_count == ma_len {
+            wt2_i = sma_sum / (ma_len as f64);
+        }
+
+        if idx >= warmup_period {
+            dst[idx] = match field {
+                WavetrendOutputField::Wt2 => wt2_i,
+                WavetrendOutputField::WtDiff => {
+                    if wt1_i.is_finite() && wt2_i.is_finite() {
+                        wt2_i - wt1_i
+                    } else {
+                        f64::NAN
+                    }
+                }
+                WavetrendOutputField::Wt1 => unreachable!(),
+            };
+        }
+    }
+}
+
 const STACK_LIMIT: usize = 512;
 
 #[inline(always)]
@@ -1184,6 +1347,39 @@ pub fn wavetrend_into_slice(
         dst_wt_diff,
         chosen,
     )?;
+
+    Ok(())
+}
+
+#[inline]
+pub fn wavetrend_output_into_slice(
+    dst: &mut [f64],
+    input: &WavetrendInput,
+    kern: Kernel,
+    field: WavetrendOutputField,
+) -> Result<(), WavetrendError> {
+    let _ = kern;
+    let (data, channel_len, average_len, ma_len, factor, first, warmup_period) =
+        wavetrend_prepare(input)?;
+
+    if dst.len() != data.len() {
+        return Err(WavetrendError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
+        });
+    }
+
+    wavetrend_compute_output_into(
+        data,
+        channel_len,
+        average_len,
+        ma_len,
+        factor,
+        first,
+        warmup_period,
+        dst,
+        field,
+    );
 
     Ok(())
 }

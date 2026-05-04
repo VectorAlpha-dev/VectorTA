@@ -17,7 +17,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    alloc_uninit_f64, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
 #[cfg(feature = "python")]
@@ -41,7 +41,7 @@ impl<'a> AsRef<[f64]> for StochasticDistanceInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             StochasticDistanceData::Slice(slice) => slice,
-            StochasticDistanceData::Candles { candles } => source_type(candles, "close"),
+            StochasticDistanceData::Candles { candles } => &candles.close,
         }
     }
 }
@@ -275,6 +275,8 @@ struct ResolvedParams {
     length2: usize,
     ob_level: f64,
     os_level: f64,
+    alpha: f64,
+    beta: f64,
 }
 
 #[inline(always)]
@@ -347,12 +349,15 @@ fn resolve_params(
         }
     }
 
+    let alpha = 2.0 / (length2 as f64 + 1.0);
     Ok(ResolvedParams {
         lookback_length,
         length1,
         length2,
         ob_level: ob_level as f64,
         os_level: os_level as f64,
+        alpha,
+        beta: 1.0 - alpha,
     })
 }
 
@@ -472,9 +477,8 @@ impl StochasticDistanceStream {
             0.0
         };
 
-        let alpha = 2.0 / (self.params.length2 as f64 + 1.0);
         if self.have_ema {
-            self.ema = alpha * distance_d + (1.0 - alpha) * self.ema;
+            self.ema = self.params.alpha * distance_d + self.params.beta * self.ema;
         } else {
             self.ema = distance_d;
             self.have_ema = true;
@@ -548,7 +552,7 @@ fn stochastic_distance_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other.to_non_batch(),
     };
     Ok((data, first, valid, params, chosen))
@@ -559,9 +563,8 @@ pub fn stochastic_distance_with_kernel(
     kernel: Kernel,
 ) -> Result<StochasticDistanceOutput, StochasticDistanceError> {
     let (data, first, _valid, params, _chosen) = stochastic_distance_prepare(input, kernel)?;
-    let warm = (first + warmup_period(params)).min(data.len());
-    let mut oscillator = alloc_with_nan_prefix(data.len(), warm);
-    let mut signal = alloc_with_nan_prefix(data.len(), warm);
+    let mut oscillator = alloc_uninit_f64(data.len());
+    let mut signal = alloc_uninit_f64(data.len());
     stochastic_distance_row_from_slice(data, params, &mut oscillator, &mut signal);
     Ok(StochasticDistanceOutput { oscillator, signal })
 }

@@ -199,11 +199,10 @@ pub fn midprice_with_kernel(
             candles,
             high_src,
             low_src,
-        } => {
-            let h = source_type(candles, high_src);
-            let l = source_type(candles, low_src);
-            (h, l)
-        }
+        } => (
+            midprice_source(candles, high_src),
+            midprice_source(candles, low_src),
+        ),
         MidpriceData::Slices { high, low } => (*high, *low),
     };
 
@@ -223,7 +222,7 @@ pub fn midprice_with_kernel(
             data_len: high.len(),
         });
     }
-    let first_valid_idx = match (0..high.len()).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
+    let first_valid_idx = match first_valid_pair(high, low) {
         Some(idx) => idx,
         None => return Err(MidpriceError::AllValuesNaN),
     };
@@ -268,11 +267,10 @@ pub fn midprice_into(input: &MidpriceInput, out: &mut [f64]) -> Result<(), Midpr
             candles,
             high_src,
             low_src,
-        } => {
-            let h = source_type(candles, high_src);
-            let l = source_type(candles, low_src);
-            (h, l)
-        }
+        } => (
+            midprice_source(candles, high_src),
+            midprice_source(candles, low_src),
+        ),
         MidpriceData::Slices { high, low } => (*high, *low),
     };
 
@@ -294,6 +292,11 @@ pub fn midprice_scalar(
     first_valid_idx: usize,
     out: &mut [f64],
 ) {
+    if period == 14 {
+        midprice_scalar_period_14(high, low, first_valid_idx, out);
+        return;
+    }
+
     if period <= 64 {
         let len = high.len();
         let warmup_end = first_valid_idx + period - 1;
@@ -380,6 +383,107 @@ pub fn midprice_scalar(
             .unwrap_or(f64::NEG_INFINITY);
         let lowest = dq_low.front().map(|&j| low[j]).unwrap_or(f64::INFINITY);
         out[i] = (highest + lowest) * 0.5;
+    }
+}
+
+#[inline(always)]
+fn midprice_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "close" => &candles.close,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
+    }
+}
+
+#[inline(always)]
+fn first_valid_pair(high: &[f64], low: &[f64]) -> Option<usize> {
+    let mut i = 0usize;
+    let len = high.len();
+    unsafe {
+        let high_ptr = high.as_ptr();
+        let low_ptr = low.as_ptr();
+        while i < len {
+            if !(*high_ptr.add(i)).is_nan() && !(*low_ptr.add(i)).is_nan() {
+                return Some(i);
+            }
+            i += 1;
+        }
+    }
+    None
+}
+
+#[inline(always)]
+fn midprice_scalar_period_14(high: &[f64], low: &[f64], first_valid_idx: usize, out: &mut [f64]) {
+    let len = high.len();
+    let warmup_end = first_valid_idx + 13;
+    unsafe {
+        let high_ptr = high.as_ptr();
+        let low_ptr = low.as_ptr();
+        let out_ptr = out.as_mut_ptr();
+
+        macro_rules! fold_high {
+            ($ptr:ident, $idx:expr, $highest:ident) => {{
+                let value = *$ptr.add($idx);
+                if value > $highest {
+                    $highest = value;
+                }
+            }};
+        }
+        macro_rules! fold_low {
+            ($ptr:ident, $idx:expr, $lowest:ident) => {{
+                let value = *$ptr.add($idx);
+                if value < $lowest {
+                    $lowest = value;
+                }
+            }};
+        }
+
+        for i in warmup_end..len {
+            let base = i - 13;
+            let hp = high_ptr.add(base);
+            let lp = low_ptr.add(base);
+            let mut highest = f64::NEG_INFINITY;
+            let mut lowest = f64::INFINITY;
+
+            fold_high!(hp, 0, highest);
+            fold_high!(hp, 1, highest);
+            fold_high!(hp, 2, highest);
+            fold_high!(hp, 3, highest);
+            fold_high!(hp, 4, highest);
+            fold_high!(hp, 5, highest);
+            fold_high!(hp, 6, highest);
+            fold_high!(hp, 7, highest);
+            fold_high!(hp, 8, highest);
+            fold_high!(hp, 9, highest);
+            fold_high!(hp, 10, highest);
+            fold_high!(hp, 11, highest);
+            fold_high!(hp, 12, highest);
+            fold_high!(hp, 13, highest);
+
+            fold_low!(lp, 0, lowest);
+            fold_low!(lp, 1, lowest);
+            fold_low!(lp, 2, lowest);
+            fold_low!(lp, 3, lowest);
+            fold_low!(lp, 4, lowest);
+            fold_low!(lp, 5, lowest);
+            fold_low!(lp, 6, lowest);
+            fold_low!(lp, 7, lowest);
+            fold_low!(lp, 8, lowest);
+            fold_low!(lp, 9, lowest);
+            fold_low!(lp, 10, lowest);
+            fold_low!(lp, 11, lowest);
+            fold_low!(lp, 12, lowest);
+            fold_low!(lp, 13, lowest);
+
+            *out_ptr.add(i) = (highest + lowest) * 0.5;
+        }
     }
 }
 
@@ -906,6 +1010,11 @@ pub unsafe fn midprice_row_scalar(
     period: usize,
     out: &mut [f64],
 ) {
+    if period == 14 {
+        midprice_scalar_period_14(high, low, first, out);
+        return;
+    }
+
     if period <= 64 {
         let len = high.len();
         let warmup_end = first + period - 1;
@@ -1206,7 +1315,7 @@ pub fn midprice_into_slice(
         });
     }
 
-    let first_valid_idx = match (0..high.len()).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
+    let first_valid_idx = match first_valid_pair(high, low) {
         Some(idx) => idx,
         None => return Err(MidpriceError::AllValuesNaN),
     };

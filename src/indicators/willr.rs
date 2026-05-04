@@ -216,9 +216,9 @@ pub fn willr(input: &WillrInput) -> Result<WillrOutput, WillrError> {
 pub fn willr_with_kernel(input: &WillrInput, kernel: Kernel) -> Result<WillrOutput, WillrError> {
     let (high, low, close): (&[f64], &[f64], &[f64]) = match &input.data {
         WillrData::Candles { candles } => (
-            source_type(candles, "high"),
-            source_type(candles, "low"),
-            source_type(candles, "close"),
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
         ),
         WillrData::Slices { high, low, close } => (high, low, close),
     };
@@ -247,7 +247,7 @@ pub fn willr_with_kernel(input: &WillrInput, kernel: Kernel) -> Result<WillrOutp
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -270,9 +270,9 @@ pub fn willr_into_slice(
 ) -> Result<(), WillrError> {
     let (high, low, close): (&[f64], &[f64], &[f64]) = match &input.data {
         WillrData::Candles { candles } => (
-            source_type(candles, "high"),
-            source_type(candles, "low"),
-            source_type(candles, "close"),
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
         ),
         WillrData::Slices { high, low, close } => (high, low, close),
     };
@@ -309,7 +309,7 @@ pub fn willr_into_slice(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 

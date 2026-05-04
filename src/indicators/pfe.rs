@@ -42,7 +42,10 @@ impl<'a> AsRef<[f64]> for PfeInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             PfeData::Slice(slice) => slice,
-            PfeData::Candles { candles, source } => source_type(candles, source),
+            PfeData::Candles { candles, source } => match *source {
+                "close" => candles.close.as_slice(),
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -269,6 +272,11 @@ fn pfe_compute_into(
         return;
     }
 
+    if period == 10 && smoothing == 5 {
+        pfe_compute_default_10_5_into(data, first, out);
+        return;
+    }
+
     let p = period as f64;
     let p2 = p * p;
     let alpha = 2.0 / (smoothing as f64 + 1.0);
@@ -339,7 +347,82 @@ fn pfe_compute_into(
     }
 }
 
-#[inline]
+#[inline(always)]
+fn pfe_compute_default_10_5_into(data: &[f64], first: usize, out: &mut [f64]) {
+    let len = data.len();
+    let start = first + 10;
+    if start >= len {
+        return;
+    }
+
+    let mut seg = [0.0f64; 10];
+    let mut head = 0usize;
+    let mut denom = 0.0f64;
+
+    let base = start - 9;
+    for j in 0..10 {
+        let k = base + j;
+        let d = data[k] - data[k - 1];
+        let s = (d.mul_add(d, 1.0)).sqrt();
+        seg[j] = s;
+        denom += s;
+    }
+
+    let alpha = 2.0f64 / 6.0;
+    let one_minus_alpha = 1.0 - alpha;
+    let mut ema_started = false;
+    let mut ema_val = 0.0f64;
+
+    let last = len - 1;
+    for t in start..last {
+        let cur = data[t];
+        let past = data[t - 10];
+        let diff = cur - past;
+
+        let long_leg = (diff.mul_add(diff, 100.0)).sqrt();
+
+        let raw = 100.0 * (long_leg / denom);
+        let signed = if diff > 0.0 { raw } else { -raw };
+
+        let val = if !ema_started {
+            ema_started = true;
+            ema_val = signed;
+            signed
+        } else {
+            ema_val = alpha.mul_add(signed, one_minus_alpha * ema_val);
+            ema_val
+        };
+
+        out[t] = val;
+
+        let old = seg[head];
+        let next = data[t + 1];
+        let new_d = next - cur;
+        let new_s = (new_d.mul_add(new_d, 1.0)).sqrt();
+        denom += new_s - old;
+        seg[head] = new_s;
+        head += 1;
+        if head == 10 {
+            head = 0;
+        }
+    }
+
+    if start <= last {
+        let cur = data[last];
+        let past = data[last - 10];
+        let diff = cur - past;
+        let long_leg = (diff.mul_add(diff, 100.0)).sqrt();
+        let raw = 100.0 * (long_leg / denom);
+        let signed = if diff > 0.0 { raw } else { -raw };
+        out[last] = if !ema_started {
+            signed
+        } else {
+            alpha.mul_add(signed, one_minus_alpha * ema_val)
+        };
+    }
+}
+
+#[inline(always)]
 pub fn pfe(input: &PfeInput) -> Result<PfeOutput, PfeError> {
     pfe_with_kernel(input, Kernel::Auto)
 }

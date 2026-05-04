@@ -395,7 +395,7 @@ pub fn ttm_squeeze_with_kernel(
     let warmup = first + length - 1;
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -610,6 +610,37 @@ pub fn ttm_squeeze_into_slices(
     for i in 0..warmup {
         dst_momentum[i] = f64::NAN;
         dst_squeeze[i] = f64::NAN;
+    }
+
+    let chosen = match kernel {
+        Kernel::Auto => Kernel::Scalar,
+        k => k,
+    };
+
+    if chosen == Kernel::Scalar
+        && length == 20
+        && bb_mult == 2.0
+        && kc_mult_high == 1.0
+        && kc_mult_mid == 1.5
+        && kc_mult_low == 2.0
+    {
+        unsafe {
+            ttm_squeeze_scalar_classic(
+                high,
+                low,
+                close,
+                length,
+                bb_mult,
+                kc_mult_high,
+                kc_mult_mid,
+                kc_mult_low,
+                first,
+                warmup,
+                dst_momentum,
+                dst_squeeze,
+            )?;
+        }
+        return Ok(());
     }
 
     let sma_params = SmaParams {

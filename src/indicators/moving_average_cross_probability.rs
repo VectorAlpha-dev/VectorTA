@@ -471,6 +471,147 @@ fn truncated_ema_from_window(window: &VecDeque<f64>, alpha: f64, beta: f64) -> O
 }
 
 #[inline(always)]
+fn truncated_ema_pair_from_window(
+    window: &VecDeque<f64>,
+    slow_alpha: f64,
+    slow_beta: f64,
+    fast_alpha: f64,
+    fast_beta: f64,
+) -> Option<(f64, f64)> {
+    let mut iter = window.iter().rev();
+    let first = *iter.next()?;
+    if !first.is_finite() {
+        return None;
+    }
+    let mut slow = first;
+    let mut fast = first;
+    for value in iter {
+        if !value.is_finite() {
+            return None;
+        }
+        slow = slow_alpha.mul_add(*value, slow_beta * slow);
+        fast = fast_alpha.mul_add(*value, fast_beta * fast);
+    }
+    Some((slow, fast))
+}
+
+#[inline(always)]
+fn truncated_ema_pair_from_slice(
+    values: &[f64],
+    slow_alpha: f64,
+    slow_beta: f64,
+    fast_alpha: f64,
+    fast_beta: f64,
+) -> (f64, f64) {
+    let mut slow = values[0];
+    let mut fast = values[0];
+    for value in &values[1..] {
+        slow = slow_alpha.mul_add(*value, slow_beta * slow);
+        fast = fast_alpha.mul_add(*value, fast_beta * fast);
+    }
+    (slow, fast)
+}
+
+#[inline(always)]
+fn count_crosses_by_probe<F>(resolution: usize, mut crossed: F) -> usize
+where
+    F: FnMut(usize) -> bool,
+{
+    let first = crossed(0);
+    let last_idx = resolution - 1;
+    let last = crossed(last_idx);
+
+    if first == last {
+        return if first { resolution } else { 0 };
+    }
+
+    let mut lo = 0usize;
+    let mut hi = last_idx;
+    while lo + 1 < hi {
+        let mid = (lo + hi) >> 1;
+        if crossed(mid) == first {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+
+    if first {
+        lo + 1
+    } else {
+        resolution - hi
+    }
+}
+
+#[inline(always)]
+fn count_ema_crosses_estimated(
+    params: &ResolvedParams,
+    lower: f64,
+    step: f64,
+    direction: f64,
+    slow_current: f64,
+    fast_current: f64,
+) -> usize {
+    let slow_base = params
+        .slow_alpha
+        .mul_add(lower, params.slow_beta * slow_current);
+    let fast_base = params
+        .fast_alpha
+        .mul_add(lower, params.fast_beta * fast_current);
+    let base = slow_base - fast_base;
+    let slope = (params.slow_alpha - params.fast_alpha) * step;
+    let crossed = |idx: usize| {
+        let price = lower + step * idx as f64;
+        let slow_future = params
+            .slow_alpha
+            .mul_add(price, params.slow_beta * slow_current);
+        let fast_future = params
+            .fast_alpha
+            .mul_add(price, params.fast_beta * fast_current);
+        if direction < 0.0 {
+            slow_future > fast_future
+        } else {
+            slow_future <= fast_future
+        }
+    };
+
+    if slope == 0.0 || !slope.is_finite() {
+        return if crossed(0) { params.resolution } else { 0 };
+    }
+
+    let estimate = (-base / slope).floor();
+    let mut hits = if direction < 0.0 {
+        (estimate as isize + 1).clamp(0, params.resolution as isize) as usize
+    } else {
+        let first_true = (estimate as isize + 1).clamp(0, params.resolution as isize) as usize;
+        params.resolution - first_true
+    };
+
+    if direction < 0.0 {
+        while hits > 0 && !crossed(hits - 1) {
+            hits -= 1;
+        }
+        while hits < params.resolution && crossed(hits) {
+            hits += 1;
+        }
+    } else {
+        while hits > 0 && !crossed(params.resolution - hits) {
+            hits -= 1;
+        }
+        while hits < params.resolution {
+            let idx = params.resolution - hits - 1;
+            if crossed(idx) {
+                hits += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    hits
+}
+
+#[inline(always)]
 fn probability_from_window(
     window: &VecDeque<f64>,
     params: &ResolvedParams,
@@ -483,27 +624,21 @@ fn probability_from_window(
 
     match params.ma_type {
         MovingAverageCrossProbabilityMaType::Ema => {
-            let slow_current =
-                truncated_ema_from_window(window, params.slow_alpha, params.slow_beta)?;
-            let fast_current =
-                truncated_ema_from_window(window, params.fast_alpha, params.fast_beta)?;
-            for idx in 0..params.resolution {
-                let price = lower + step * idx as f64;
-                let slow_future = params
-                    .slow_alpha
-                    .mul_add(price, params.slow_beta * slow_current);
-                let fast_future = params
-                    .fast_alpha
-                    .mul_add(price, params.fast_beta * fast_current);
-                let crossed = if direction < 0.0 {
-                    slow_future > fast_future
-                } else {
-                    slow_future <= fast_future
-                };
-                if crossed {
-                    hits += 1;
-                }
-            }
+            let (slow_current, fast_current) = truncated_ema_pair_from_window(
+                window,
+                params.slow_alpha,
+                params.slow_beta,
+                params.fast_alpha,
+                params.fast_beta,
+            )?;
+            hits = count_ema_crosses_estimated(
+                params,
+                lower,
+                step,
+                direction,
+                slow_current,
+                fast_current,
+            );
         }
         MovingAverageCrossProbabilityMaType::Sma => {
             let slow_needed = params.slow_length.saturating_sub(1);
@@ -521,7 +656,7 @@ fn probability_from_window(
                     break;
                 }
             }
-            for idx in 0..params.resolution {
+            hits = count_crosses_by_probe(params.resolution, |idx| {
                 let price = lower + step * idx as f64;
                 let slow_future = (price + slow_sum) / params.slow_length as f64;
                 let fast_future = (price + fast_sum) / params.fast_length as f64;
@@ -530,10 +665,8 @@ fn probability_from_window(
                 } else {
                     slow_future <= fast_future
                 };
-                if crossed {
-                    hits += 1;
-                }
-            }
+                crossed
+            });
         }
     }
 
@@ -560,6 +693,22 @@ fn moving_average_cross_probability_compute_into(
     check_output_len(out_upper, len)?;
     check_output_len(out_lower, len)?;
     check_output_len(out_direction, len)?;
+
+    if params.ma_type == MovingAverageCrossProbabilityMaType::Ema
+        && data.iter().all(|value| value.is_finite())
+    {
+        return moving_average_cross_probability_ema_finite_compute_into(
+            data,
+            params,
+            out_value,
+            out_slow_ma,
+            out_fast_ma,
+            out_forecast,
+            out_upper,
+            out_lower,
+            out_direction,
+        );
+    }
 
     out_value.fill(f64::NAN);
     out_slow_ma.fill(f64::NAN);
@@ -648,6 +797,133 @@ fn moving_average_cross_probability_compute_into(
                 }
             }
         }
+
+        previous_hma = current_hma;
+    }
+
+    Ok(())
+}
+
+#[inline(always)]
+fn moving_average_cross_probability_ema_finite_compute_into(
+    data: &[f64],
+    params: &ResolvedParams,
+    out_value: &mut [f64],
+    out_slow_ma: &mut [f64],
+    out_fast_ma: &mut [f64],
+    out_forecast: &mut [f64],
+    out_upper: &mut [f64],
+    out_lower: &mut [f64],
+    out_direction: &mut [f64],
+) -> Result<(), MovingAverageCrossProbabilityError> {
+    let mut slow_stream = EmaStream::try_new(EmaParams {
+        period: Some(params.slow_length),
+    })
+    .map_err(|_| MovingAverageCrossProbabilityError::InvalidSlowLength {
+        slow_length: params.slow_length,
+    })?;
+    let mut fast_stream = EmaStream::try_new(EmaParams {
+        period: Some(params.fast_length),
+    })
+    .map_err(|_| MovingAverageCrossProbabilityError::InvalidFastLength {
+        fast_length: params.fast_length,
+    })?;
+    let mut hma_stream = HmaStream::try_new(HmaParams {
+        period: Some(params.smoothing_window),
+    })
+    .map_err(
+        |_| MovingAverageCrossProbabilityError::InvalidSmoothingWindow {
+            smoothing_window: params.smoothing_window,
+        },
+    )?;
+    let mut stddev_stream = StdDevStream::try_new(StdDevParams {
+        period: Some(params.smoothing_window),
+        nbdev: Some(4.0),
+    })
+    .map_err(
+        |_| MovingAverageCrossProbabilityError::InvalidSmoothingWindow {
+            smoothing_window: params.smoothing_window,
+        },
+    )?;
+
+    let history_len = params.history_window_len;
+    let slow_drop_scale = params.slow_beta.powi(history_len as i32);
+    let fast_drop_scale = params.fast_beta.powi(history_len as i32);
+    let mut slow_probability_ema = f64::NAN;
+    let mut fast_probability_ema = f64::NAN;
+    let mut previous_hma = f64::NAN;
+
+    for (idx, &value) in data.iter().enumerate() {
+        let slow_ma = slow_stream.update(value).unwrap_or(f64::NAN);
+        let fast_ma = fast_stream.update(value).unwrap_or(f64::NAN);
+        let current_hma = hma_stream.update(value).unwrap_or(f64::NAN);
+        let current_std = stddev_stream.update(value).unwrap_or(f64::NAN);
+
+        out_slow_ma[idx] = slow_ma;
+        out_fast_ma[idx] = fast_ma;
+
+        let direction = if slow_ma.is_finite() && fast_ma.is_finite() {
+            if fast_ma > slow_ma {
+                -1.0
+            } else {
+                1.0
+            }
+        } else {
+            f64::NAN
+        };
+        out_direction[idx] = direction;
+
+        let mut forecast = f64::NAN;
+        let mut upper = f64::NAN;
+        let mut lower = f64::NAN;
+        let mut probability = f64::NAN;
+
+        if idx + 1 == history_len {
+            let pair = truncated_ema_pair_from_slice(
+                &data[..=idx],
+                params.slow_alpha,
+                params.slow_beta,
+                params.fast_alpha,
+                params.fast_beta,
+            );
+            slow_probability_ema = pair.0;
+            fast_probability_ema = pair.1;
+        } else if idx + 1 > history_len {
+            let dropped = data[idx - history_len];
+            let new_oldest = data[idx + 1 - history_len];
+            slow_probability_ema = params
+                .slow_alpha
+                .mul_add(value, params.slow_beta * slow_probability_ema)
+                + slow_drop_scale * (new_oldest - dropped);
+            fast_probability_ema = params
+                .fast_alpha
+                .mul_add(value, params.fast_beta * fast_probability_ema)
+                + fast_drop_scale * (new_oldest - dropped);
+        }
+
+        if current_hma.is_finite() && previous_hma.is_finite() && current_std.is_finite() {
+            forecast = current_hma + (current_hma - previous_hma);
+            upper = forecast + current_std;
+            lower = forecast - current_std;
+
+            if direction.is_finite() && idx + 1 >= history_len {
+                let step = (upper - lower) / (params.resolution - 1) as f64;
+                let hits = count_ema_crosses_estimated(
+                    params,
+                    lower,
+                    step,
+                    direction,
+                    slow_probability_ema,
+                    fast_probability_ema,
+                );
+                probability = 100.0 * hits as f64 / params.resolution as f64;
+            }
+        }
+
+        out_value[idx] = probability;
+        out_forecast[idx] = forecast;
+        out_upper[idx] = upper;
+        out_lower[idx] = lower;
 
         previous_hma = current_hma;
     }

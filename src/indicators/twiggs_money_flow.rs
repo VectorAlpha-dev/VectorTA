@@ -15,8 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -126,10 +125,10 @@ impl<'a> TwiggsMoneyFlowInput<'a> {
     pub fn as_refs(&'a self) -> (&'a [f64], &'a [f64], &'a [f64], &'a [f64]) {
         match &self.data {
             TwiggsMoneyFlowData::Candles { candles } => (
-                source_type(candles, "high"),
-                source_type(candles, "low"),
-                source_type(candles, "close"),
-                source_type(candles, "volume"),
+                candles.high.as_slice(),
+                candles.low.as_slice(),
+                candles.close.as_slice(),
+                candles.volume.as_slice(),
             ),
             TwiggsMoneyFlowData::Slices {
                 high,
@@ -272,6 +271,13 @@ enum TwiggsMaType {
 
 #[inline(always)]
 fn parse_ma_type(value: &str) -> Result<TwiggsMaType, TwiggsMoneyFlowError> {
+    match value {
+        "SMA" => return Ok(TwiggsMaType::Sma),
+        "EMA" => return Ok(TwiggsMaType::Ema),
+        "WMA" => return Ok(TwiggsMaType::Wma),
+        "VWMA" => return Ok(TwiggsMaType::Vwma),
+        _ => {}
+    }
     let normalized = value.trim().to_ascii_uppercase();
     match normalized.as_str() {
         "SMA" => Ok(TwiggsMaType::Sma),
@@ -447,6 +453,60 @@ impl WmaState {
             self.head = (self.head + 1) % period;
             self.plain_sum = prev_plain - old + value;
             self.weighted_sum = self.weighted_sum - prev_plain + value * period as f64;
+            self.weighted_sum / self.divisor
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct WmaFixed<const N: usize> {
+    window: [f64; N],
+    head: usize,
+    count: usize,
+    plain_sum: f64,
+    weighted_sum: f64,
+    divisor: f64,
+}
+
+impl<const N: usize> WmaFixed<N> {
+    #[inline]
+    fn new() -> Self {
+        Self {
+            window: [0.0; N],
+            head: 0,
+            count: 0,
+            plain_sum: 0.0,
+            weighted_sum: 0.0,
+            divisor: (N * (N + 1) / 2) as f64,
+        }
+    }
+
+    #[inline]
+    fn update(&mut self, value: f64) -> f64 {
+        if self.count < N {
+            self.window[self.head] = value;
+            self.head += 1;
+            if self.head == N {
+                self.head = 0;
+            }
+            self.count += 1;
+            self.plain_sum += value;
+            self.weighted_sum += value * self.count as f64;
+            if self.count == N {
+                self.weighted_sum / self.divisor
+            } else {
+                f64::NAN
+            }
+        } else {
+            let old = self.window[self.head];
+            let prev_plain = self.plain_sum;
+            self.window[self.head] = value;
+            self.head += 1;
+            if self.head == N {
+                self.head = 0;
+            }
+            self.plain_sum = prev_plain - old + value;
+            self.weighted_sum = self.weighted_sum - prev_plain + value * N as f64;
             self.weighted_sum / self.divisor
         }
     }
@@ -634,6 +694,173 @@ impl TwiggsMoneyFlowState {
     }
 }
 
+#[derive(Clone, Debug)]
+struct TwiggsMoneyFlowDefaultWmaState {
+    adv_ma: WmaFixed<21>,
+    vol_ma: WmaFixed<21>,
+    half: WmaFixed<7>,
+    full: WmaFixed<14>,
+    sqrt: WmaFixed<3>,
+    prev_close: Option<f64>,
+}
+
+impl TwiggsMoneyFlowDefaultWmaState {
+    #[inline]
+    fn new() -> Self {
+        Self {
+            adv_ma: WmaFixed::new(),
+            vol_ma: WmaFixed::new(),
+            half: WmaFixed::new(),
+            full: WmaFixed::new(),
+            sqrt: WmaFixed::new(),
+            prev_close: None,
+        }
+    }
+
+    #[inline]
+    fn update(&mut self, high: f64, low: f64, close: f64, volume: f64) -> (f64, f64) {
+        if !is_valid_bar(high, low, close, volume) {
+            self.prev_close = if close.is_finite() { Some(close) } else { None };
+            return (f64::NAN, f64::NAN);
+        }
+
+        let prev_close = match self.prev_close {
+            Some(prev) if prev.is_finite() => prev,
+            _ => {
+                self.prev_close = Some(close);
+                return (f64::NAN, f64::NAN);
+            }
+        };
+
+        let tr_h = prev_close.max(high);
+        let tr_l = prev_close.min(low);
+        let tr_c = tr_h - tr_l;
+        let denom = if tr_c == 0.0 {
+            ZERO_RANGE_DIVISOR
+        } else {
+            tr_c
+        };
+        let adv = volume * (((close - tr_l) - (tr_h - close)) / denom);
+
+        let wm_v = self.vol_ma.update(volume);
+        let wm_a = self.adv_ma.update(adv);
+        let tmf = if wm_v == 0.0 {
+            0.0
+        } else if wm_v.is_finite() && wm_a.is_finite() {
+            wm_a / wm_v
+        } else {
+            f64::NAN
+        };
+        let smoothed = if tmf.is_finite() {
+            let half = self.half.update(tmf);
+            let full = self.full.update(tmf);
+            if !half.is_finite() || !full.is_finite() {
+                f64::NAN
+            } else {
+                self.sqrt.update(2.0 * half - full)
+            }
+        } else {
+            f64::NAN
+        };
+
+        self.prev_close = Some(close);
+        (tmf, smoothed)
+    }
+}
+
+#[inline(always)]
+fn twiggs_money_flow_default_wma_compute_into(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    out_tmf: &mut [f64],
+    out_smoothed: &mut [f64],
+) {
+    let mut state = TwiggsMoneyFlowDefaultWmaState::new();
+    for i in 0..close.len() {
+        let (tmf, smoothed) = state.update(high[i], low[i], close[i], volume[i]);
+        out_tmf[i] = tmf;
+        out_smoothed[i] = smoothed;
+    }
+}
+
+#[inline(always)]
+fn twiggs_money_flow_all_valid(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> bool {
+    for i in 0..close.len() {
+        if !is_valid_bar(high[i], low[i], close[i], volume[i]) {
+            return false;
+        }
+    }
+    true
+}
+
+#[inline(always)]
+fn twiggs_money_flow_default_wma_all_valid_compute_into(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    out_tmf: &mut [f64],
+    out_smoothed: &mut [f64],
+) {
+    let len = close.len();
+    if len == 0 {
+        return;
+    }
+
+    let mut adv_ma = WmaFixed::<21>::new();
+    let mut vol_ma = WmaFixed::<21>::new();
+    let mut half = WmaFixed::<7>::new();
+    let mut full = WmaFixed::<14>::new();
+    let mut sqrt = WmaFixed::<3>::new();
+
+    out_tmf[0] = f64::NAN;
+    out_smoothed[0] = f64::NAN;
+    let mut prev_close = close[0];
+
+    for i in 1..len {
+        let h = high[i];
+        let l = low[i];
+        let c = close[i];
+        let v = volume[i];
+        let tr_h = prev_close.max(h);
+        let tr_l = prev_close.min(l);
+        let tr_c = tr_h - tr_l;
+        let denom = if tr_c == 0.0 {
+            ZERO_RANGE_DIVISOR
+        } else {
+            tr_c
+        };
+        let adv = v * (((c - tr_l) - (tr_h - c)) / denom);
+
+        let wm_v = vol_ma.update(v);
+        let wm_a = adv_ma.update(adv);
+        let tmf = if wm_v == 0.0 {
+            0.0
+        } else if wm_v.is_finite() && wm_a.is_finite() {
+            wm_a / wm_v
+        } else {
+            f64::NAN
+        };
+        let smoothed = if tmf.is_finite() {
+            let hma_half = half.update(tmf);
+            let hma_full = full.update(tmf);
+            if !hma_half.is_finite() || !hma_full.is_finite() {
+                f64::NAN
+            } else {
+                sqrt.update(2.0 * hma_half - hma_full)
+            }
+        } else {
+            f64::NAN
+        };
+
+        out_tmf[i] = tmf;
+        out_smoothed[i] = smoothed;
+        prev_close = c;
+    }
+}
+
 #[inline(always)]
 fn twiggs_money_flow_compute_into(
     high: &[f64],
@@ -646,6 +873,22 @@ fn twiggs_money_flow_compute_into(
     out_tmf: &mut [f64],
     out_smoothed: &mut [f64],
 ) {
+    if length == 21 && smoothing_length == 14 && ma_type == TwiggsMaType::Wma {
+        if twiggs_money_flow_all_valid(high, low, close, volume) {
+            twiggs_money_flow_default_wma_all_valid_compute_into(
+                high,
+                low,
+                close,
+                volume,
+                out_tmf,
+                out_smoothed,
+            );
+            return;
+        }
+        twiggs_money_flow_default_wma_compute_into(high, low, close, volume, out_tmf, out_smoothed);
+        return;
+    }
+
     let mut state = TwiggsMoneyFlowState::new(length, smoothing_length, ma_type);
     for i in 0..close.len() {
         let (tmf, smoothed) = state.update(high[i], low[i], close[i], volume[i]);
@@ -710,7 +953,7 @@ fn twiggs_money_flow_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other.to_non_batch(),
     };
 
@@ -739,12 +982,10 @@ pub fn twiggs_money_flow_with_kernel(
     input: &TwiggsMoneyFlowInput,
     kernel: Kernel,
 ) -> Result<TwiggsMoneyFlowOutput, TwiggsMoneyFlowError> {
-    let (high, low, close, volume, length, smoothing_length, ma_type, first_adv, _chosen) =
+    let (high, low, close, volume, length, smoothing_length, ma_type, _first_adv, _chosen) =
         twiggs_money_flow_prepare(input, kernel)?;
-    let tmf_first = tmf_warmup(length, ma_type, first_adv);
-    let smoothed_first = smoothed_warmup(tmf_first, smoothing_length);
-    let mut tmf = alloc_with_nan_prefix(close.len(), tmf_first);
-    let mut smoothed = alloc_with_nan_prefix(close.len(), smoothed_first);
+    let mut tmf = alloc_uninit_f64(close.len());
+    let mut smoothed = alloc_uninit_f64(close.len());
     twiggs_money_flow_compute_into(
         high,
         low,

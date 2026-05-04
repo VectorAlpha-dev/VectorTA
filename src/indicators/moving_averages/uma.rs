@@ -650,6 +650,99 @@ fn uma_prepare<'a>(input: &'a UmaInput) -> Result<(&'a [f64], usize, usize, usiz
     Ok((data, first, min_length, max_length, accelerator))
 }
 
+#[inline]
+fn uma_build_candle_flow_prefix(candles: &Candles, len: usize) -> Option<(Vec<f64>, Vec<f64>)> {
+    if candles.high.len() < len
+        || candles.low.len() < len
+        || candles.close.len() < len
+        || candles.volume.len() < len
+    {
+        return None;
+    }
+
+    let mut pos = vec![0.0; len + 1];
+    let mut neg = vec![0.0; len + 1];
+    if len == 0 {
+        return Some((pos, neg));
+    }
+
+    let mut prev_tp = (candles.high[0] + candles.low[0] + candles.close[0]) / 3.0;
+    if !prev_tp.is_finite() {
+        return None;
+    }
+
+    for j in 1..len {
+        pos[j + 1] = pos[j];
+        neg[j + 1] = neg[j];
+
+        let tp = (candles.high[j] + candles.low[j] + candles.close[j]) / 3.0;
+        let volume = candles.volume[j];
+        if !tp.is_finite() || !volume.is_finite() {
+            return None;
+        }
+
+        let mf = tp * volume;
+        if tp > prev_tp {
+            pos[j + 1] += mf;
+        } else if tp < prev_tp {
+            neg[j + 1] += mf;
+        }
+        prev_tp = tp;
+    }
+
+    Some((pos, neg))
+}
+
+#[inline]
+fn uma_build_slice_flow_prefix(data: &[f64], volume: &[f64]) -> Option<(Vec<f64>, Vec<f64>)> {
+    let len = data.len();
+    if volume.len() < len {
+        return None;
+    }
+
+    let mut pos = vec![0.0; len + 1];
+    let mut neg = vec![0.0; len + 1];
+    if len == 0 {
+        return Some((pos, neg));
+    }
+    if !data[0].is_finite() {
+        return None;
+    }
+
+    for j in 1..len {
+        pos[j + 1] = pos[j];
+        neg[j + 1] = neg[j];
+
+        let cur = data[j];
+        let prev = data[j - 1];
+        let v = volume[j];
+        if !cur.is_finite() || !prev.is_finite() || !v.is_finite() {
+            return None;
+        }
+
+        let diff = cur - prev;
+        if diff > 0.0 {
+            pos[j + 1] += v;
+        } else if diff < 0.0 {
+            neg[j + 1] += v;
+        }
+    }
+
+    Some((pos, neg))
+}
+
+#[inline(always)]
+fn uma_flow_from_prefix(pos: &[f64], neg: &[f64], start: usize, end: usize) -> f64 {
+    let up_sum = pos[end + 1] - pos[start + 1];
+    let dn_sum = neg[end + 1] - neg[start + 1];
+    let tot = up_sum + dn_sum;
+    if tot > 0.0 {
+        100.0 * up_sum / tot
+    } else {
+        50.0
+    }
+}
+
 #[inline(always)]
 fn uma_core_into(
     input: &UmaInput,
@@ -693,6 +786,14 @@ fn uma_core_into(
     let (candles_opt, vol_opt) = match &input.data {
         UmaData::Candles { candles, .. } => (Some(*candles), input.volume),
         UmaData::Slice(_) => (None, input.volume),
+    };
+    let candle_flow_prefix = match (candles_opt, vol_opt) {
+        (Some(candles), Some(_)) => uma_build_candle_flow_prefix(candles, len),
+        _ => None,
+    };
+    let slice_flow_prefix = match (candles_opt, vol_opt) {
+        (None, Some(volume)) => uma_build_slice_flow_prefix(data, volume),
+        _ => None,
     };
 
     let warmup_end = first
@@ -827,6 +928,9 @@ fn uma_core_into(
                         0
                     };
                     rsi_wilder_last(data, start, end, len_r)
+                } else if let Some((pos, neg)) = candle_flow_prefix.as_ref() {
+                    let start = i + 1 - len_r;
+                    uma_flow_from_prefix(pos, neg, start, i)
                 } else {
                     let start = i + 1 - len_r;
                     mfi_window_last_candles(candles, start, i)
@@ -834,25 +938,29 @@ fn uma_core_into(
             }
             (Some(vol), None) => {
                 let start = i + 1 - len_r;
-                let mut up_vol = 0.0f64;
-                let mut dn_vol = 0.0f64;
-                let mut prev = data[start];
-                for j in (start + 1)..=i {
-                    let cur = data[j];
-                    let v = vol[j];
-                    let diff = cur - prev;
-                    if diff > 0.0 {
-                        up_vol += v;
-                    } else if diff < 0.0 {
-                        dn_vol += v;
-                    }
-                    prev = cur;
-                }
-                let tot = up_vol + dn_vol;
-                if tot > 0.0 {
-                    100.0 * up_vol / tot
+                if let Some((pos, neg)) = slice_flow_prefix.as_ref() {
+                    uma_flow_from_prefix(pos, neg, start, i)
                 } else {
-                    50.0
+                    let mut up_vol = 0.0f64;
+                    let mut dn_vol = 0.0f64;
+                    let mut prev = data[start];
+                    for j in (start + 1)..=i {
+                        let cur = data[j];
+                        let v = vol[j];
+                        let diff = cur - prev;
+                        if diff > 0.0 {
+                            up_vol += v;
+                        } else if diff < 0.0 {
+                            dn_vol += v;
+                        }
+                        prev = cur;
+                    }
+                    let tot = up_vol + dn_vol;
+                    if tot > 0.0 {
+                        100.0 * up_vol / tot
+                    } else {
+                        50.0
+                    }
                 }
             }
             _ => {
@@ -875,7 +983,6 @@ fn uma_core_into(
 
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         match _kernel {
-            #[cfg(target_feature = "avx512f")]
             Kernel::Avx512 => unsafe {
                 let (sx, sw) = uma_weighted_accumulate_avx512(
                     data.as_ptr().add(start),
@@ -886,7 +993,6 @@ fn uma_core_into(
                 xws = sx;
                 wsum = sw;
             },
-            #[cfg(target_feature = "avx2")]
             Kernel::Avx2 => unsafe {
                 let (sx, sw) = uma_weighted_accumulate_avx2(
                     data.as_ptr().add(start),
@@ -940,7 +1046,9 @@ fn uma_core_into(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[inline]
+#[target_feature(enable = "avx2")]
+#[target_feature(enable = "fma")]
 unsafe fn uma_weighted_accumulate_avx2(
     data: *const f64,
     ln_lut: *const f64,
@@ -998,40 +1106,10 @@ unsafe fn uma_weighted_accumulate_avx2(
     (xws, wsum)
 }
 
-#[cfg(all(
-    feature = "nightly-avx",
-    target_arch = "x86_64",
-    not(target_feature = "avx512f")
-))]
-#[inline(always)]
-unsafe fn uma_weighted_accumulate_avx512(
-    data: *const f64,
-    ln_lut: *const f64,
-    len_r: usize,
-    p: f64,
-) -> (f64, f64) {
-    let mut xws = 0.0f64;
-    let mut wsum = 0.0f64;
-    let mut j = 0usize;
-    while j < len_r {
-        let k = len_r - j;
-        let w = exp_kernel(p * *ln_lut.add(k));
-        let x = *data.add(j);
-        if !x.is_nan() {
-            xws = x.mul_add(w, xws);
-            wsum += w;
-        }
-        j += 1;
-    }
-    (xws, wsum)
-}
-
-#[cfg(all(
-    feature = "nightly-avx",
-    target_arch = "x86_64",
-    target_feature = "avx512f"
-))]
-#[inline(always)]
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+#[target_feature(enable = "avx512f")]
+#[target_feature(enable = "fma")]
 unsafe fn uma_weighted_accumulate_avx512(
     data: *const f64,
     ln_lut: *const f64,
@@ -1112,7 +1190,7 @@ pub fn uma_with_kernel(input: &UmaInput, kernel: Kernel) -> Result<UmaOutput, Um
     let mut out = alloc_with_nan_prefix(data.len(), warm);
 
     let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => detect_best_kernel(),
         k => k,
     };
     uma_core_into(input, first, min_len, max_len, accel, chosen, &mut out)?;
@@ -1155,7 +1233,7 @@ pub fn uma_into_slice(dst: &mut [f64], input: &UmaInput, kern: Kernel) -> Result
     }
 
     let chosen = match kern {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => detect_best_kernel(),
         k => k,
     };
     uma_core_into(input, first, min_len, max_len, accel, chosen, dst)?;

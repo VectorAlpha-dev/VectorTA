@@ -209,20 +209,27 @@ pub fn fosc_with_kernel(input: &FoscInput, kernel: Kernel) -> Result<FoscOutput,
             valid: len - first,
         });
     }
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
-
     let mut out = alloc_with_nan_prefix(len, first + period - 1);
-    unsafe {
-        match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => fosc_scalar(data, period, first, &mut out),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => fosc_avx2(data, period, first, &mut out),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => fosc_avx512(data, period, first, &mut out),
-            _ => unreachable!(),
+
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    {
+        let _ = kernel;
+        fosc_scalar(data, period, first, &mut out);
+    }
+
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        let chosen = match kernel {
+            Kernel::Auto => detect_best_kernel(),
+            other => other,
+        };
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => fosc_scalar(data, period, first, &mut out),
+                Kernel::Avx2 | Kernel::Avx2Batch => fosc_avx2(data, period, first, &mut out),
+                Kernel::Avx512 | Kernel::Avx512Batch => fosc_avx512(data, period, first, &mut out),
+                _ => unreachable!(),
+            }
         }
     }
     Ok(FoscOutput { values: out })
@@ -262,19 +269,25 @@ pub fn fosc_into_slice(dst: &mut [f64], input: &FoscInput, kern: Kernel) -> Resu
         });
     }
 
-    let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    {
+        let _ = kern;
+        fosc_scalar(data, period, first, dst);
+    }
 
-    unsafe {
-        match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => fosc_scalar(data, period, first, dst),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => fosc_avx2(data, period, first, dst),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => fosc_avx512(data, period, first, dst),
-            _ => unreachable!(),
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        let chosen = match kern {
+            Kernel::Auto => detect_best_kernel(),
+            other => other,
+        };
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => fosc_scalar(data, period, first, dst),
+                Kernel::Avx2 | Kernel::Avx2Batch => fosc_avx2(data, period, first, dst),
+                Kernel::Avx512 | Kernel::Avx512Batch => fosc_avx512(data, period, first, dst),
+                _ => unreachable!(),
+            }
         }
     }
 
@@ -303,7 +316,6 @@ unsafe fn fosc_core(data: &[f64], period: usize, first: usize, out: &mut [f64]) 
     if begin >= n {
         return;
     }
-
     let p = period as f64;
     let x = 0.5 * p * (p + 1.0);
     let x2 = (p * (p + 1.0) * (2.0 * p + 1.0)) / 6.0;

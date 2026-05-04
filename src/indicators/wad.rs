@@ -148,9 +148,9 @@ pub fn wad(input: &WadInput) -> Result<WadOutput, WadError> {
 pub fn wad_with_kernel(input: &WadInput, kernel: Kernel) -> Result<WadOutput, WadError> {
     let (high, low, close): (&[f64], &[f64], &[f64]) = match &input.data {
         WadData::Candles { candles } => (
-            source_type(candles, "high"),
-            source_type(candles, "low"),
-            source_type(candles, "close"),
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
         ),
         WadData::Slices { high, low, close } => (*high, *low, *close),
     };
@@ -682,10 +682,7 @@ impl WadBatchBuilder {
             .apply_slices(high, low, close)
     }
     pub fn apply_candles(self, c: &Candles) -> Result<WadBatchOutput, WadError> {
-        let high = source_type(c, "high");
-        let low = source_type(c, "low");
-        let close = source_type(c, "close");
-        self.apply_slices(high, low, close)
+        self.apply_slices(c.high.as_slice(), c.low.as_slice(), c.close.as_slice())
     }
     pub fn with_default_candles(c: &Candles) -> Result<WadBatchOutput, WadError> {
         WadBatchBuilder::new().kernel(Kernel::Auto).apply_candles(c)
@@ -1390,15 +1387,16 @@ mod tests {
 }
 
 #[inline(always)]
+#[inline(always)]
 fn wad_prepare<'a>(
     input: &'a WadInput,
     _kernel: Kernel,
 ) -> Result<(&'a [f64], &'a [f64], &'a [f64], usize, Kernel), WadError> {
     let (high, low, close): (&[f64], &[f64], &[f64]) = match &input.data {
         WadData::Candles { candles } => (
-            source_type(candles, "high"),
-            source_type(candles, "low"),
-            source_type(candles, "close"),
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
         ),
         WadData::Slices { high, low, close } => (*high, *low, *close),
     };

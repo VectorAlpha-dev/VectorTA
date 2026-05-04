@@ -15,7 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
+    detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -228,9 +228,9 @@ fn extract_triples<'a>(
 ) -> Result<(&'a [f64], &'a [f64], &'a [f64]), L2EhlersSignalToNoiseError> {
     let (source, high, low) = match &input.data {
         L2EhlersSignalToNoiseData::Candles { candles, source } => (
-            source_type(candles, source),
-            source_type(candles, "high"),
-            source_type(candles, "low"),
+            l2_source(candles, source),
+            candles.high.as_slice(),
+            candles.low.as_slice(),
         ),
         L2EhlersSignalToNoiseData::Slices { source, high, low } => (*source, *high, *low),
     };
@@ -245,6 +245,19 @@ fn extract_triples<'a>(
         });
     }
     Ok((source, high, low))
+}
+
+#[inline(always)]
+fn l2_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "hl2" => &candles.hl2,
+        "close" => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        _ => source_type(candles, source),
+    }
 }
 
 #[inline(always)]
@@ -343,6 +356,11 @@ impl SignalToNoiseCore {
             return f64::NAN;
         }
 
+        self.update_clean(source, high, low)
+    }
+
+    #[inline(always)]
+    fn update_clean(&mut self, source: f64, high: f64, low: f64) -> f64 {
         self.range_1 = 0.1 * (high - low) + 0.9 * self.range_1;
         self.source_ring[self.source_idx] = source;
 
@@ -440,11 +458,26 @@ impl SignalToNoiseCore {
         }
 
         self.valid_count += 1;
-        self.source_idx = (self.source_idx + 1) % 4;
-        self.smooth_idx = (self.smooth_idx + 1) % 7;
-        self.detrender_idx = (self.detrender_idx + 1) % 7;
-        self.i1_idx = (self.i1_idx + 1) % 7;
-        self.q1_idx = (self.q1_idx + 1) % 7;
+        self.source_idx += 1;
+        if self.source_idx == 4 {
+            self.source_idx = 0;
+        }
+        self.smooth_idx += 1;
+        if self.smooth_idx == 7 {
+            self.smooth_idx = 0;
+        }
+        self.detrender_idx += 1;
+        if self.detrender_idx == 7 {
+            self.detrender_idx = 0;
+        }
+        self.i1_idx += 1;
+        if self.i1_idx == 7 {
+            self.i1_idx = 0;
+        }
+        self.q1_idx += 1;
+        if self.q1_idx == 7 {
+            self.q1_idx = 0;
+        }
 
         if self.valid_count <= MIN_WARMUP_BARS {
             f64::NAN
@@ -460,6 +493,7 @@ fn compute_l2_ehlers_signal_to_noise_into(
     high: &[f64],
     low: &[f64],
     smooth_period: usize,
+    first: usize,
     out: &mut [f64],
 ) -> Result<(), L2EhlersSignalToNoiseError> {
     let n = source.len();
@@ -469,11 +503,48 @@ fn compute_l2_ehlers_signal_to_noise_into(
             got: out.len(),
         });
     }
+    if compute_l2_ehlers_signal_to_noise_clean(source, high, low, smooth_period, first, out) {
+        return Ok(());
+    }
     let mut core = SignalToNoiseCore::new(smooth_period);
     for i in 0..n {
         out[i] = core.update(source[i], high[i], low[i]);
     }
     Ok(())
+}
+
+#[inline(always)]
+fn compute_l2_ehlers_signal_to_noise_clean(
+    source: &[f64],
+    high: &[f64],
+    low: &[f64],
+    smooth_period: usize,
+    first: usize,
+    out: &mut [f64],
+) -> bool {
+    let mut core = SignalToNoiseCore::new(smooth_period);
+    for value in &mut out[..first] {
+        *value = f64::NAN;
+    }
+    for i in first..source.len() {
+        let source_value = source[i];
+        let high_value = high[i];
+        let low_value = low[i];
+        if !(source_value.is_finite() && high_value.is_finite() && low_value.is_finite()) {
+            return false;
+        }
+        out[i] = core.update_clean(source_value, high_value, low_value);
+    }
+    true
+}
+
+#[inline(always)]
+fn alloc_l2_output(len: usize) -> Vec<f64> {
+    let mut out = Vec::with_capacity(len);
+    unsafe {
+        out.set_len(len);
+    }
+    out
 }
 
 #[inline]
@@ -488,8 +559,8 @@ pub fn l2_ehlers_signal_to_noise_with_kernel(
     kernel: Kernel,
 ) -> Result<L2EhlersSignalToNoiseOutput, L2EhlersSignalToNoiseError> {
     let (source, high, low, smooth_period, first, _kernel) = validate_input(input, kernel)?;
-    let mut out = alloc_with_nan_prefix(source.len(), (first + MIN_WARMUP_BARS).min(source.len()));
-    compute_l2_ehlers_signal_to_noise_into(source, high, low, smooth_period, &mut out)?;
+    let mut out = alloc_l2_output(source.len());
+    compute_l2_ehlers_signal_to_noise_into(source, high, low, smooth_period, first, &mut out)?;
     Ok(L2EhlersSignalToNoiseOutput { values: out })
 }
 
@@ -507,8 +578,8 @@ pub fn l2_ehlers_signal_to_noise_into_slice(
     input: &L2EhlersSignalToNoiseInput,
     kernel: Kernel,
 ) -> Result<(), L2EhlersSignalToNoiseError> {
-    let (source, high, low, smooth_period, _first, _kernel) = validate_input(input, kernel)?;
-    compute_l2_ehlers_signal_to_noise_into(source, high, low, smooth_period, out)
+    let (source, high, low, smooth_period, first, _kernel) = validate_input(input, kernel)?;
+    compute_l2_ehlers_signal_to_noise_into(source, high, low, smooth_period, first, out)
 }
 
 #[derive(Clone, Debug)]
@@ -813,7 +884,7 @@ fn l2_ehlers_signal_to_noise_batch_inner_into(
 
     let do_row = |row: usize, dst: &mut [f64]| -> Result<(), L2EhlersSignalToNoiseError> {
         let smooth_period = combos[row].smooth_period.unwrap_or(DEFAULT_SMOOTH_PERIOD);
-        compute_l2_ehlers_signal_to_noise_into(source, high, low, smooth_period, dst)
+        compute_l2_ehlers_signal_to_noise_into(source, high, low, smooth_period, first, dst)
     };
 
     if parallel {

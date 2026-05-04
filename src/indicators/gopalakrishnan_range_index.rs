@@ -15,7 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    alloc_uninit_f64, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
 #[cfg(feature = "python")]
@@ -349,27 +349,19 @@ fn gapo_value(highest: f64, lowest: f64, log_length: f64) -> f64 {
 }
 
 #[inline(always)]
-fn first_valid_high_low(high: &[f64], low: &[f64]) -> usize {
+fn scan_valid_high_low(high: &[f64], low: &[f64]) -> (usize, usize) {
     let len = high.len();
-    let mut i = 0usize;
-    while i < len {
-        if valid_high_low_bar(high[i], low[i]) {
-            break;
-        }
-        i += 1;
-    }
-    i.min(len)
-}
-
-#[inline(always)]
-fn count_valid_high_low(high: &[f64], low: &[f64]) -> usize {
+    let mut first = len;
     let mut count = 0usize;
     for i in 0..high.len() {
         if valid_high_low_bar(high[i], low[i]) {
+            if first == len {
+                first = i;
+            }
             count += 1;
         }
     }
-    count
+    (first, count)
 }
 
 #[inline(always)]
@@ -460,10 +452,217 @@ fn gapo_row_from_slices(
 }
 
 #[inline(always)]
+fn gapo_row_len5_all_valid(high: &[f64], low: &[f64], out: &mut [f64]) {
+    let len = high.len();
+    let warmup = 4.min(len);
+    out[..warmup].fill(f64::NAN);
+    let log_length = 5.0f64.ln();
+
+    for i in 4..len {
+        let h0 = high[i - 4];
+        let h1 = high[i - 3];
+        let h2 = high[i - 2];
+        let h3 = high[i - 1];
+        let h4 = high[i];
+        let l0 = low[i - 4];
+        let l1 = low[i - 3];
+        let l2 = low[i - 2];
+        let l3 = low[i - 1];
+        let l4 = low[i];
+        let highest = h0.max(h1).max(h2).max(h3).max(h4);
+        let lowest = l0.min(l1).min(l2).min(l3).min(l4);
+        out[i] = gapo_value(highest, lowest, log_length);
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn gapo_row_len5_all_valid_avx2(high: &[f64], low: &[f64], out: &mut [f64]) {
+    use std::arch::x86_64::{_mm256_loadu_pd, _mm256_max_pd, _mm256_min_pd, _mm256_storeu_pd};
+
+    let len = high.len();
+    out[..4.min(len)].fill(f64::NAN);
+    let log_length = 5.0f64.ln();
+    let mut i = 4usize;
+    let mut ranges = [0.0; 4];
+
+    while i + 3 < len {
+        let base = i - 4;
+        let h0 = _mm256_loadu_pd(high.as_ptr().add(base));
+        let h1 = _mm256_loadu_pd(high.as_ptr().add(base + 1));
+        let h2 = _mm256_loadu_pd(high.as_ptr().add(base + 2));
+        let h3 = _mm256_loadu_pd(high.as_ptr().add(base + 3));
+        let h4 = _mm256_loadu_pd(high.as_ptr().add(base + 4));
+        let highest = _mm256_max_pd(
+            _mm256_max_pd(_mm256_max_pd(h0, h1), _mm256_max_pd(h2, h3)),
+            h4,
+        );
+
+        let l0 = _mm256_loadu_pd(low.as_ptr().add(base));
+        let l1 = _mm256_loadu_pd(low.as_ptr().add(base + 1));
+        let l2 = _mm256_loadu_pd(low.as_ptr().add(base + 2));
+        let l3 = _mm256_loadu_pd(low.as_ptr().add(base + 3));
+        let l4 = _mm256_loadu_pd(low.as_ptr().add(base + 4));
+        let lowest = _mm256_min_pd(
+            _mm256_min_pd(_mm256_min_pd(l0, l1), _mm256_min_pd(l2, l3)),
+            l4,
+        );
+
+        let range = std::arch::x86_64::_mm256_sub_pd(highest, lowest);
+        _mm256_storeu_pd(ranges.as_mut_ptr(), range);
+        out[i] = gapo_value_from_range(ranges[0], log_length);
+        out[i + 1] = gapo_value_from_range(ranges[1], log_length);
+        out[i + 2] = gapo_value_from_range(ranges[2], log_length);
+        out[i + 3] = gapo_value_from_range(ranges[3], log_length);
+        i += 4;
+    }
+
+    while i < len {
+        let h0 = high[i - 4];
+        let h1 = high[i - 3];
+        let h2 = high[i - 2];
+        let h3 = high[i - 1];
+        let h4 = high[i];
+        let l0 = low[i - 4];
+        let l1 = low[i - 3];
+        let l2 = low[i - 2];
+        let l3 = low[i - 1];
+        let l4 = low[i];
+        let highest = h0.max(h1).max(h2).max(h3).max(h4);
+        let lowest = l0.min(l1).min(l2).min(l3).min(l4);
+        out[i] = gapo_value(highest, lowest, log_length);
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn gapo_row_len5_all_valid_avx512(high: &[f64], low: &[f64], out: &mut [f64]) {
+    use std::arch::x86_64::{_mm512_loadu_pd, _mm512_max_pd, _mm512_min_pd, _mm512_storeu_pd};
+
+    let len = high.len();
+    out[..4.min(len)].fill(f64::NAN);
+    let log_length = 5.0f64.ln();
+    let mut i = 4usize;
+    let mut ranges = [0.0; 8];
+
+    while i + 7 < len {
+        let base = i - 4;
+        let h0 = _mm512_loadu_pd(high.as_ptr().add(base));
+        let h1 = _mm512_loadu_pd(high.as_ptr().add(base + 1));
+        let h2 = _mm512_loadu_pd(high.as_ptr().add(base + 2));
+        let h3 = _mm512_loadu_pd(high.as_ptr().add(base + 3));
+        let h4 = _mm512_loadu_pd(high.as_ptr().add(base + 4));
+        let highest = _mm512_max_pd(
+            _mm512_max_pd(_mm512_max_pd(h0, h1), _mm512_max_pd(h2, h3)),
+            h4,
+        );
+
+        let l0 = _mm512_loadu_pd(low.as_ptr().add(base));
+        let l1 = _mm512_loadu_pd(low.as_ptr().add(base + 1));
+        let l2 = _mm512_loadu_pd(low.as_ptr().add(base + 2));
+        let l3 = _mm512_loadu_pd(low.as_ptr().add(base + 3));
+        let l4 = _mm512_loadu_pd(low.as_ptr().add(base + 4));
+        let lowest = _mm512_min_pd(
+            _mm512_min_pd(_mm512_min_pd(l0, l1), _mm512_min_pd(l2, l3)),
+            l4,
+        );
+
+        let range = std::arch::x86_64::_mm512_sub_pd(highest, lowest);
+        _mm512_storeu_pd(ranges.as_mut_ptr(), range);
+        out[i] = gapo_value_from_range(ranges[0], log_length);
+        out[i + 1] = gapo_value_from_range(ranges[1], log_length);
+        out[i + 2] = gapo_value_from_range(ranges[2], log_length);
+        out[i + 3] = gapo_value_from_range(ranges[3], log_length);
+        out[i + 4] = gapo_value_from_range(ranges[4], log_length);
+        out[i + 5] = gapo_value_from_range(ranges[5], log_length);
+        out[i + 6] = gapo_value_from_range(ranges[6], log_length);
+        out[i + 7] = gapo_value_from_range(ranges[7], log_length);
+        i += 8;
+    }
+
+    while i < len {
+        let h0 = high[i - 4];
+        let h1 = high[i - 3];
+        let h2 = high[i - 2];
+        let h3 = high[i - 1];
+        let h4 = high[i];
+        let l0 = low[i - 4];
+        let l1 = low[i - 3];
+        let l2 = low[i - 2];
+        let l3 = low[i - 1];
+        let l4 = low[i];
+        let highest = h0.max(h1).max(h2).max(h3).max(h4);
+        let lowest = l0.min(l1).min(l2).min(l3).min(l4);
+        out[i] = gapo_value(highest, lowest, log_length);
+        i += 1;
+    }
+}
+
+#[inline(always)]
+fn gapo_value_from_range(range: f64, log_length: f64) -> f64 {
+    if range.is_finite() && range > 0.0 {
+        range.ln() / log_length
+    } else {
+        f64::NAN
+    }
+}
+
+#[inline(always)]
+fn gapo_row_len5_all_valid_kernel(high: &[f64], low: &[f64], kernel: Kernel, out: &mut [f64]) {
+    let chosen = match kernel {
+        Kernel::Auto => {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    Kernel::Avx2
+                } else if is_x86_feature_detected!("avx512f") {
+                    Kernel::Avx512
+                } else {
+                    Kernel::Scalar
+                }
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            {
+                Kernel::Scalar
+            }
+        }
+        other => other.to_non_batch(),
+    };
+    match chosen {
+        Kernel::Avx2 => {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") {
+                    unsafe {
+                        gapo_row_len5_all_valid_avx2(high, low, out);
+                    }
+                    return;
+                }
+            }
+            gapo_row_len5_all_valid(high, low, out);
+        }
+        Kernel::Avx512 => {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx512f") {
+                    unsafe {
+                        gapo_row_len5_all_valid_avx512(high, low, out);
+                    }
+                    return;
+                }
+            }
+            gapo_row_len5_all_valid(high, low, out);
+        }
+        _ => gapo_row_len5_all_valid(high, low, out),
+    }
+}
+
+#[inline(always)]
 fn gopalakrishnan_range_index_prepare<'a>(
     input: &'a GopalakrishnanRangeIndexInput,
-    kernel: Kernel,
-) -> Result<(&'a [f64], &'a [f64], usize, usize, Kernel), GopalakrishnanRangeIndexError> {
+    _kernel: Kernel,
+) -> Result<(&'a [f64], &'a [f64], usize, usize, bool), GopalakrishnanRangeIndexError> {
     let (high, low): (&[f64], &[f64]) = match &input.data {
         GopalakrishnanRangeIndexData::Candles { candles } => (&candles.high, &candles.low),
         GopalakrishnanRangeIndexData::Slices { high, low } => (high, low),
@@ -480,7 +679,7 @@ fn gopalakrishnan_range_index_prepare<'a>(
         });
     }
 
-    let first = first_valid_high_low(high, low);
+    let (first, valid) = scan_valid_high_low(high, low);
     if first >= len {
         return Err(GopalakrishnanRangeIndexError::AllValuesNaN);
     }
@@ -493,7 +692,6 @@ fn gopalakrishnan_range_index_prepare<'a>(
         });
     }
 
-    let valid = count_valid_high_low(high, low);
     if valid < length {
         return Err(GopalakrishnanRangeIndexError::NotEnoughValidData {
             needed: length,
@@ -501,12 +699,7 @@ fn gopalakrishnan_range_index_prepare<'a>(
         });
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other.to_non_batch(),
-    };
-
-    Ok((high, low, length, first, chosen))
+    Ok((high, low, length, first, valid == len))
 }
 
 #[inline]
@@ -514,11 +707,14 @@ pub fn gopalakrishnan_range_index_with_kernel(
     input: &GopalakrishnanRangeIndexInput,
     kernel: Kernel,
 ) -> Result<GopalakrishnanRangeIndexOutput, GopalakrishnanRangeIndexError> {
-    let (high, low, length, first, _chosen) = gopalakrishnan_range_index_prepare(input, kernel)?;
-    let mut values =
-        alloc_with_nan_prefix(high.len(), first.saturating_add(length.saturating_sub(1)));
-    let prefix_valid = build_prefix_valid(high, low);
-    gapo_row_from_slices(high, low, &prefix_valid, length, first, &mut values);
+    let (high, low, length, first, all_valid) = gopalakrishnan_range_index_prepare(input, kernel)?;
+    let mut values = alloc_uninit_f64(high.len());
+    if all_valid && length == 5 {
+        gapo_row_len5_all_valid_kernel(high, low, kernel, &mut values);
+    } else {
+        let prefix_valid = build_prefix_valid(high, low);
+        gapo_row_from_slices(high, low, &prefix_valid, length, first, &mut values);
+    }
     Ok(GopalakrishnanRangeIndexOutput { values })
 }
 
@@ -528,15 +724,19 @@ pub fn gopalakrishnan_range_index_into_slice(
     input: &GopalakrishnanRangeIndexInput,
     kernel: Kernel,
 ) -> Result<(), GopalakrishnanRangeIndexError> {
-    let (high, low, length, first, _chosen) = gopalakrishnan_range_index_prepare(input, kernel)?;
+    let (high, low, length, first, all_valid) = gopalakrishnan_range_index_prepare(input, kernel)?;
     if dst.len() != high.len() {
         return Err(GopalakrishnanRangeIndexError::OutputLengthMismatch {
             expected: high.len(),
             got: dst.len(),
         });
     }
-    let prefix_valid = build_prefix_valid(high, low);
-    gapo_row_from_slices(high, low, &prefix_valid, length, first, dst);
+    if all_valid && length == 5 {
+        gapo_row_len5_all_valid_kernel(high, low, kernel, dst);
+    } else {
+        let prefix_valid = build_prefix_valid(high, low);
+        gapo_row_from_slices(high, low, &prefix_valid, length, first, dst);
+    }
     Ok(())
 }
 
@@ -758,12 +958,11 @@ fn gopalakrishnan_range_index_batch_inner(
         });
     }
 
-    let first = first_valid_high_low(high, low);
+    let (first, valid) = scan_valid_high_low(high, low);
     if first >= cols {
         return Err(GopalakrishnanRangeIndexError::AllValuesNaN);
     }
 
-    let valid = count_valid_high_low(high, low);
     let max_length = combos
         .iter()
         .map(|combo| combo.length.unwrap_or(5))
@@ -859,12 +1058,11 @@ pub fn gopalakrishnan_range_index_batch_inner_into(
         });
     }
 
-    let first = first_valid_high_low(high, low);
+    let (first, valid) = scan_valid_high_low(high, low);
     if first >= cols {
         return Err(GopalakrishnanRangeIndexError::AllValuesNaN);
     }
 
-    let valid = count_valid_high_low(high, low);
     let max_length = combos
         .iter()
         .map(|combo| combo.length.unwrap_or(5))

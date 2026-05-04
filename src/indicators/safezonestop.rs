@@ -287,9 +287,28 @@ pub fn safezonestop_with_kernel(
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
-
     let warm = warm_len(first, period, max_lookback);
     let mut out = alloc_with_nan_prefix(len, warm);
+
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    if matches!(
+        chosen,
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch
+    ) {
+        unsafe {
+            safezonestop_scalar(
+                high,
+                low,
+                period,
+                mult,
+                max_lookback,
+                direction,
+                first,
+                &mut out,
+            );
+        }
+        return Ok(SafeZoneStopOutput { values: out });
+    }
 
     unsafe {
         match chosen {
@@ -388,6 +407,20 @@ pub fn safezonestop_into_slice(
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    if matches!(
+        chosen,
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch
+    ) {
+        unsafe {
+            safezonestop_scalar(high, low, period, mult, max_lookback, direction, first, dst);
+        }
+        let warm_end = warm_len(first, period, max_lookback).min(dst.len());
+        for v in &mut dst[..warm_end] {
+            *v = f64::NAN;
+        }
+        return Ok(());
+    }
 
     unsafe {
         match chosen {
@@ -420,60 +453,6 @@ pub fn safezonestop_into(
     input: &SafeZoneStopInput,
     out: &mut [f64],
 ) -> Result<(), SafeZoneStopError> {
-    let (high, low, direction) = match &input.data {
-        SafeZoneStopData::Candles { candles, direction } => (
-            source_type(candles, "high"),
-            source_type(candles, "low"),
-            *direction,
-        ),
-        SafeZoneStopData::Slices {
-            high,
-            low,
-            direction,
-        } => (*high, *low, *direction),
-    };
-
-    if high.len() != low.len() {
-        return Err(SafeZoneStopError::MismatchedLengths);
-    }
-    let len = high.len();
-    if len == 0 {
-        return Err(SafeZoneStopError::EmptyInputData);
-    }
-    if out.len() != len {
-        return Err(SafeZoneStopError::OutputLengthMismatch {
-            expected: len,
-            got: out.len(),
-        });
-    }
-
-    let period = input.get_period();
-    let max_lookback = input.get_max_lookback();
-    if period == 0 || period > len {
-        return Err(SafeZoneStopError::InvalidPeriod {
-            period,
-            data_len: len,
-        });
-    }
-    if direction != "long" && direction != "short" {
-        return Err(SafeZoneStopError::InvalidDirection);
-    }
-
-    let first = first_valid_pair(high, low).ok_or(SafeZoneStopError::AllValuesNaN)?;
-    let needed = (period + 1).max(max_lookback);
-    if len - first < needed {
-        return Err(SafeZoneStopError::NotEnoughValidData {
-            needed,
-            valid: len - first,
-        });
-    }
-
-    let warm = warm_len(first, period, max_lookback).min(out.len());
-    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
-    for v in &mut out[..warm] {
-        *v = qnan;
-    }
-
     safezonestop_into_slice(out, input, Kernel::Auto)
 }
 
@@ -507,7 +486,7 @@ pub unsafe fn safezonestop_scalar(
         .map(|&b| b == b'l')
         .unwrap_or(true);
 
-    const LB_DEQUE_THRESHOLD: usize = 32;
+    const LB_DEQUE_THRESHOLD: usize = 0;
     let end0 = first + period;
 
     if max_lookback > LB_DEQUE_THRESHOLD {

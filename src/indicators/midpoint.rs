@@ -41,7 +41,18 @@ impl<'a> AsRef<[f64]> for MidpointInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             MidpointData::Slice(slice) => slice,
-            MidpointData::Candles { candles, source } => source_type(candles, source),
+            MidpointData::Candles { candles, source } => match *source {
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -301,6 +312,11 @@ pub fn midpoint_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64
 
 #[inline]
 pub fn midpoint_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    if period == 14 {
+        midpoint_scalar_period_14(data, first, out);
+        return;
+    }
+
     for i in (first + period - 1)..data.len() {
         let window = &data[(i + 1 - period)..=i];
         let mut highest = f64::MIN;
@@ -313,6 +329,45 @@ pub fn midpoint_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64
                 lowest = val;
             }
         }
+        out[i] = (highest + lowest) / 2.0;
+    }
+}
+
+#[inline(always)]
+fn midpoint_scalar_period_14(data: &[f64], first: usize, out: &mut [f64]) {
+    macro_rules! fold {
+        ($value:expr, $highest:ident, $lowest:ident) => {{
+            let value = $value;
+            if value > $highest {
+                $highest = value;
+            }
+            if value < $lowest {
+                $lowest = value;
+            }
+        }};
+    }
+
+    for i in (first + 13)..data.len() {
+        let base = i - 13;
+        let window = &data[base..(base + 14)];
+        let mut highest = f64::MIN;
+        let mut lowest = f64::MAX;
+
+        fold!(window[0], highest, lowest);
+        fold!(window[1], highest, lowest);
+        fold!(window[2], highest, lowest);
+        fold!(window[3], highest, lowest);
+        fold!(window[4], highest, lowest);
+        fold!(window[5], highest, lowest);
+        fold!(window[6], highest, lowest);
+        fold!(window[7], highest, lowest);
+        fold!(window[8], highest, lowest);
+        fold!(window[9], highest, lowest);
+        fold!(window[10], highest, lowest);
+        fold!(window[11], highest, lowest);
+        fold!(window[12], highest, lowest);
+        fold!(window[13], highest, lowest);
+
         out[i] = (highest + lowest) / 2.0;
     }
 }

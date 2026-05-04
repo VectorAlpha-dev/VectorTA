@@ -243,6 +243,14 @@ pub fn sar_with_kernel(input: &SarInput, kernel: Kernel) -> Result<SarOutput, Sa
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    if matches!(
+        chosen,
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch
+    ) {
+        sar_scalar(high, low, first, acceleration, maximum, &mut out);
+        return Ok(SarOutput { values: out });
+    }
 
     unsafe {
         match chosen {

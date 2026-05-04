@@ -15,7 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
+    alloc_uninit_f64, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -552,6 +552,152 @@ fn impulse_macd_compute_into(
     }
 }
 
+#[inline(always)]
+fn is_default_impulse_macd_params(length_ma: usize, length_signal: usize) -> bool {
+    length_ma == 34 && length_signal == 9
+}
+
+#[inline]
+fn impulse_macd_compute_default_into(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    out_impulse_macd: &mut [f64],
+    out_impulse_histo: &mut [f64],
+    out_signal: &mut [f64],
+) {
+    const LENGTH_MA: usize = 34;
+    const LENGTH_SIGNAL: usize = 9;
+    const MA_F: f64 = 34.0;
+    const MA_M1: f64 = 33.0;
+    const EMA_ALPHA: f64 = 2.0 / 35.0;
+    const EMA_BETA: f64 = 1.0 - EMA_ALPHA;
+    const SIGNAL_RCP: f64 = 1.0 / 9.0;
+
+    let mut hi_count = 0usize;
+    let mut hi_sum = 0.0;
+    let mut hi_value = f64::NAN;
+    let mut hi_ready = false;
+
+    let mut lo_count = 0usize;
+    let mut lo_sum = 0.0;
+    let mut lo_value = f64::NAN;
+    let mut lo_ready = false;
+
+    let mut ema1_value = 0.0;
+    let mut ema1_ready = false;
+    let mut ema2_value = 0.0;
+    let mut ema2_ready = false;
+
+    let mut signal_buf = [0.0; LENGTH_SIGNAL];
+    let mut signal_head = 0usize;
+    let mut signal_len = 0usize;
+    let mut signal_sum = 0.0;
+
+    for i in 0..close.len() {
+        let h = high[i];
+        let l = low[i];
+        let c = close[i];
+        if !valid_bar(h, l, c) {
+            hi_count = 0;
+            hi_sum = 0.0;
+            hi_value = f64::NAN;
+            hi_ready = false;
+            lo_count = 0;
+            lo_sum = 0.0;
+            lo_value = f64::NAN;
+            lo_ready = false;
+            ema1_ready = false;
+            ema2_ready = false;
+            signal_head = 0;
+            signal_len = 0;
+            signal_sum = 0.0;
+            out_impulse_macd[i] = f64::NAN;
+            out_impulse_histo[i] = f64::NAN;
+            out_signal[i] = f64::NAN;
+            continue;
+        }
+
+        if !hi_ready {
+            hi_sum += h;
+            hi_count += 1;
+            if hi_count == LENGTH_MA {
+                hi_value = hi_sum / MA_F;
+                hi_ready = true;
+            }
+        } else {
+            hi_value = (hi_value * MA_M1 + h) / MA_F;
+        }
+
+        if !lo_ready {
+            lo_sum += l;
+            lo_count += 1;
+            if lo_count == LENGTH_MA {
+                lo_value = lo_sum / MA_F;
+                lo_ready = true;
+            }
+        } else {
+            lo_value = (lo_value * MA_M1 + l) / MA_F;
+        }
+
+        let src = (h + l + c) / 3.0;
+        let ema1_next = if ema1_ready {
+            EMA_ALPHA.mul_add(src, EMA_BETA * ema1_value)
+        } else {
+            ema1_ready = true;
+            src
+        };
+        ema1_value = ema1_next;
+
+        let ema2_next = if ema2_ready {
+            EMA_ALPHA.mul_add(ema1_next, EMA_BETA * ema2_value)
+        } else {
+            ema2_ready = true;
+            ema1_next
+        };
+        ema2_value = ema2_next;
+
+        let mi = ema1_next + (ema1_next - ema2_next);
+        let md = if hi_ready && lo_ready {
+            if mi > hi_value {
+                mi - hi_value
+            } else if mi < lo_value {
+                mi - lo_value
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        out_impulse_macd[i] = md;
+
+        if signal_len < LENGTH_SIGNAL {
+            signal_buf[signal_len] = md;
+            signal_len += 1;
+            signal_sum += md;
+            if signal_len == LENGTH_SIGNAL {
+                let sig = signal_sum * SIGNAL_RCP;
+                out_signal[i] = sig;
+                out_impulse_histo[i] = md - sig;
+            } else {
+                out_signal[i] = f64::NAN;
+                out_impulse_histo[i] = f64::NAN;
+            }
+        } else {
+            let old = signal_buf[signal_head];
+            signal_buf[signal_head] = md;
+            signal_head += 1;
+            if signal_head == LENGTH_SIGNAL {
+                signal_head = 0;
+            }
+            signal_sum += md - old;
+            let sig = signal_sum * SIGNAL_RCP;
+            out_signal[i] = sig;
+            out_impulse_histo[i] = md - sig;
+        }
+    }
+}
+
 #[inline]
 pub fn impulse_macd(input: &ImpulseMacdInput) -> Result<ImpulseMacdOutput, ImpulseMacdError> {
     impulse_macd_with_kernel(input, Kernel::Auto)
@@ -562,28 +708,32 @@ pub fn impulse_macd_with_kernel(
     kernel: Kernel,
 ) -> Result<ImpulseMacdOutput, ImpulseMacdError> {
     let (high, low, close, length_ma, length_signal, first) = impulse_macd_prepare(input)?;
-    let mut impulse_macd_values =
-        alloc_with_nan_prefix(close.len(), impulse_macd_warmup(first).min(close.len()));
-    let mut impulse_histo = alloc_with_nan_prefix(
-        close.len(),
-        signal_warmup(first, length_signal).min(close.len()),
-    );
-    let mut signal = alloc_with_nan_prefix(
-        close.len(),
-        signal_warmup(first, length_signal).min(close.len()),
-    );
+    let mut impulse_macd_values = alloc_uninit_f64(close.len());
+    let mut impulse_histo = alloc_uninit_f64(close.len());
+    let mut signal = alloc_uninit_f64(close.len());
 
-    impulse_macd_compute_into(
-        high,
-        low,
-        close,
-        length_ma,
-        length_signal,
-        kernel,
-        &mut impulse_macd_values,
-        &mut impulse_histo,
-        &mut signal,
-    );
+    if is_default_impulse_macd_params(length_ma, length_signal) {
+        impulse_macd_compute_default_into(
+            high,
+            low,
+            close,
+            &mut impulse_macd_values,
+            &mut impulse_histo,
+            &mut signal,
+        );
+    } else {
+        impulse_macd_compute_into(
+            high,
+            low,
+            close,
+            length_ma,
+            length_signal,
+            kernel,
+            &mut impulse_macd_values,
+            &mut impulse_histo,
+            &mut signal,
+        );
+    }
 
     Ok(ImpulseMacdOutput {
         impulse_macd: impulse_macd_values,

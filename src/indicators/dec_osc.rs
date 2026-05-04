@@ -34,8 +34,24 @@ impl<'a> AsRef<[f64]> for DecOscInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             DecOscData::Slice(slice) => slice,
-            DecOscData::Candles { candles, source } => source_type(candles, source),
+            DecOscData::Candles { candles, source } => dec_osc_source_type(candles, source),
         }
+    }
+}
+
+#[inline(always)]
+fn dec_osc_source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "close" => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
     }
 }
 
@@ -376,6 +392,8 @@ pub fn dec_osc_scalar(data: &[f64], period: usize, k_val: f64, first: usize, out
     let mut hp_prev_1 = x1;
     let mut decosc_prev_2 = 0.0f64;
     let mut decosc_prev_1 = 0.0f64;
+    let mut dec_prev_2 = x2 - hp_prev_2;
+    let mut dec_prev_1 = x1 - hp_prev_1;
 
     for i in (first + 2)..len {
         let d0 = data[i];
@@ -384,9 +402,7 @@ pub fn dec_osc_scalar(data: &[f64], period: usize, k_val: f64, first: usize, out
         let hp0 = c1 * dx + two_oma1 * hp_prev_1 - oma1_sq * hp_prev_2;
 
         let dec = d0 - hp0;
-        let d_dec1 = x1 - hp_prev_1;
-        let d_dec2 = x2 - hp_prev_2;
-        let decdx = dec - 2.0 * d_dec1 + d_dec2;
+        let decdx = dec - 2.0 * dec_prev_1 + dec_prev_2;
         let osc0 = c2 * decdx + two_oma2 * decosc_prev_1 - oma2_sq * decosc_prev_2;
 
         out[i] = scale * osc0 / d0;
@@ -395,6 +411,8 @@ pub fn dec_osc_scalar(data: &[f64], period: usize, k_val: f64, first: usize, out
         hp_prev_1 = hp0;
         decosc_prev_2 = decosc_prev_1;
         decosc_prev_1 = osc0;
+        dec_prev_2 = dec_prev_1;
+        dec_prev_1 = dec;
         x2 = x1;
         x1 = d0;
     }

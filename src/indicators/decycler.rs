@@ -141,8 +141,24 @@ impl<'a> AsRef<[f64]> for DecyclerInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             DecyclerData::Slice(slice) => slice,
-            DecyclerData::Candles { candles, source } => source_type(candles, source),
+            DecyclerData::Candles { candles, source } => decycler_source_type(candles, source),
         }
+    }
+}
+
+#[inline(always)]
+fn decycler_source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "close" => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
     }
 }
 
@@ -417,20 +433,22 @@ unsafe fn decycler_scalar_into(
 
     let mut hp_prev2 = data[first];
     let mut hp_prev1 = data[first + 1];
+    let mut x2 = data[first];
+    let mut x1 = data[first + 1];
 
     for i in (first + 2)..data.len() {
         let current = data[i];
-        let prev1 = data[i - 1];
-        let prev2 = data[i - 2];
 
         let s0 = current * c;
-        let s1 = prev1.mul_add(-2.0 * c, s0);
-        let s2 = prev2.mul_add(c, s1);
+        let s1 = x1.mul_add(-2.0 * c, s0);
+        let s2 = x2.mul_add(c, s1);
         let s3 = hp_prev1.mul_add(2.0 * one_minus_alpha, s2);
         let hp_val = hp_prev2.mul_add(-one_minus_alpha_sq, s3);
 
         hp_prev2 = hp_prev1;
         hp_prev1 = hp_val;
+        x2 = x1;
+        x1 = current;
 
         out[i] = current - hp_val;
     }
@@ -442,7 +460,7 @@ pub fn decycler_with_kernel(
     kernel: Kernel,
 ) -> Result<DecyclerOutput, DecyclerError> {
     let data: &[f64] = match &input.data {
-        DecyclerData::Candles { candles, source } => source_type(candles, source),
+        DecyclerData::Candles { candles, source } => decycler_source_type(candles, source),
         DecyclerData::Slice(sl) => sl,
     };
 
@@ -524,20 +542,22 @@ pub fn decycler_scalar(
     if data.len() > (first + 1) {
         hp_prev1 = data[first + 1];
     }
+    let mut x2 = hp_prev2;
+    let mut x1 = hp_prev1;
 
     for i in (first + 2)..data.len() {
         let current = data[i];
-        let prev1 = data[i - 1];
-        let prev2 = data[i - 2];
 
         let s0 = current * c;
-        let s1 = prev1.mul_add(-2.0 * c, s0);
-        let s2 = prev2.mul_add(c, s1);
+        let s1 = x1.mul_add(-2.0 * c, s0);
+        let s2 = x2.mul_add(c, s1);
         let s3 = hp_prev1.mul_add(2.0 * one_minus_alpha, s2);
         let hp_val = hp_prev2.mul_add(-one_minus_alpha_sq, s3);
 
         hp_prev2 = hp_prev1;
         hp_prev1 = hp_val;
+        x2 = x1;
+        x1 = current;
 
         out[i] = current - hp_val;
     }

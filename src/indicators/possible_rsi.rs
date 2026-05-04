@@ -543,7 +543,14 @@ impl PossibleRsiStream {
 #[inline(always)]
 fn input_slice<'a>(input: &'a PossibleRsiInput<'a>) -> &'a [f64] {
     match &input.data {
-        PossibleRsiData::Candles { candles, source } => source_type(candles, source),
+        PossibleRsiData::Candles { candles, source } => match *source {
+            "open" => candles.open.as_slice(),
+            "high" => candles.high.as_slice(),
+            "low" => candles.low.as_slice(),
+            "close" => candles.close.as_slice(),
+            "volume" => candles.volume.as_slice(),
+            _ => source_type(candles, source),
+        },
         PossibleRsiData::Slice(values) => values,
     }
 }
@@ -1125,12 +1132,29 @@ fn rolling_percentile_series(data: &[f64], period: usize, probability: f64) -> V
         if end - start < period {
             return;
         }
-        let mut scratch = Vec::with_capacity(period);
-        for i in (start + period - 1)..end {
-            scratch.clear();
-            scratch.extend_from_slice(&data[(i + 1 - period)..=i]);
-            scratch.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            out[i] = percentile_nearest_rank(&scratch, probability);
+        let mut sorted = data[start..(start + period)].to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        out[start + period - 1] = percentile_nearest_rank(&sorted, probability);
+
+        for i in (start + period)..end {
+            let old = data[i - period];
+            let remove_idx = sorted
+                .binary_search_by(|probe| {
+                    probe.partial_cmp(&old).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or_else(|idx| idx.min(sorted.len() - 1));
+            sorted.remove(remove_idx);
+
+            let new_value = data[i];
+            let insert_idx = sorted
+                .binary_search_by(|probe| {
+                    probe
+                        .partial_cmp(&new_value)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or_else(|idx| idx);
+            sorted.insert(insert_idx, new_value);
+            out[i] = percentile_nearest_rank(&sorted, probability);
         }
     });
     out
@@ -1170,10 +1194,44 @@ fn compute_possible_rsi_output(
     data: &[f64],
     params: PossibleRsiResolved,
 ) -> Result<PossibleRsiOutput, PossibleRsiError> {
+    let (value, buy_level, sell_level, middle_level) = compute_possible_rsi_levels(data, params)?;
+    let mut state = vec![f64::NAN; data.len()];
+    let mut long_signal = vec![0.0; data.len()];
+    let mut short_signal = vec![0.0; data.len()];
+
+    fill_possible_rsi_signal_outputs(
+        &value,
+        &buy_level,
+        &sell_level,
+        &middle_level,
+        params.signal_type,
+        &mut state,
+        &mut long_signal,
+        &mut short_signal,
+    );
+
+    Ok(PossibleRsiOutput {
+        value,
+        buy_level,
+        sell_level,
+        middle_level,
+        state,
+        long_signal,
+        short_signal,
+    })
+}
+
+#[inline(always)]
+fn compute_possible_rsi_levels(
+    data: &[f64],
+    params: PossibleRsiResolved,
+) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>), PossibleRsiError> {
+    let source_storage;
     let source = if params.run_highpass {
-        highpass_series(data, params.highpass_period)
+        source_storage = highpass_series(data, params.highpass_period);
+        source_storage.as_slice()
     } else {
-        data.to_vec()
+        data
     };
     let rsi = compute_rsi_series(&source, params.rsi_mode, params.period)?;
     let scaled = normalize_min_max(&rsi, params.norm_period);
@@ -1192,15 +1250,29 @@ fn compute_possible_rsi_output(
     );
     let middle_level = rolling_percentile_series(&value, params.dynamic_zone_period, 0.5);
 
-    let mut state = vec![f64::NAN; data.len()];
-    let mut long_signal = vec![0.0; data.len()];
-    let mut short_signal = vec![0.0; data.len()];
+    Ok((value, buy_level, sell_level, middle_level))
+}
 
-    for i in 0..data.len() {
+#[inline(always)]
+fn fill_possible_rsi_signal_outputs(
+    value: &[f64],
+    buy_level: &[f64],
+    sell_level: &[f64],
+    middle_level: &[f64],
+    signal_type: PossibleRsiSignalType,
+    state: &mut [f64],
+    long_signal: &mut [f64],
+    short_signal: &mut [f64],
+) {
+    state.fill(f64::NAN);
+    long_signal.fill(0.0);
+    short_signal.fill(0.0);
+
+    for i in 0..value.len() {
         if !value[i].is_finite() {
             continue;
         }
-        let signal_value = match params.signal_type {
+        let signal_value = match signal_type {
             PossibleRsiSignalType::Slope => {
                 if i == 0 || !value[i - 1].is_finite() {
                     continue;
@@ -1222,7 +1294,7 @@ fn compute_possible_rsi_output(
             PossibleRsiSignalType::ZerolineCrossover => 0.0,
         };
 
-        state[i] = match params.signal_type {
+        state[i] = match signal_type {
             PossibleRsiSignalType::Slope
             | PossibleRsiSignalType::DynamicMiddleCrossover
             | PossibleRsiSignalType::ZerolineCrossover => {
@@ -1249,7 +1321,7 @@ fn compute_possible_rsi_output(
             continue;
         }
 
-        match params.signal_type {
+        match signal_type {
             PossibleRsiSignalType::Slope => {
                 long_signal[i] = crossover(
                     value[i - 1],
@@ -1282,16 +1354,6 @@ fn compute_possible_rsi_output(
             }
         }
     }
-
-    Ok(PossibleRsiOutput {
-        value,
-        buy_level,
-        sell_level,
-        middle_level,
-        state,
-        long_signal,
-        short_signal,
-    })
 }
 
 pub fn possible_rsi(input: &PossibleRsiInput) -> Result<PossibleRsiOutput, PossibleRsiError> {
@@ -1350,14 +1412,21 @@ pub fn possible_rsi_into_slice(
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
-    let out = compute_possible_rsi_output(data, params)?;
-    dst_value.copy_from_slice(&out.value);
-    dst_buy_level.copy_from_slice(&out.buy_level);
-    dst_sell_level.copy_from_slice(&out.sell_level);
-    dst_middle_level.copy_from_slice(&out.middle_level);
-    dst_state.copy_from_slice(&out.state);
-    dst_long_signal.copy_from_slice(&out.long_signal);
-    dst_short_signal.copy_from_slice(&out.short_signal);
+    let (value, buy_level, sell_level, middle_level) = compute_possible_rsi_levels(data, params)?;
+    dst_value.copy_from_slice(&value);
+    dst_buy_level.copy_from_slice(&buy_level);
+    dst_sell_level.copy_from_slice(&sell_level);
+    dst_middle_level.copy_from_slice(&middle_level);
+    fill_possible_rsi_signal_outputs(
+        &value,
+        &buy_level,
+        &sell_level,
+        &middle_level,
+        params.signal_type,
+        dst_state,
+        dst_long_signal,
+        dst_short_signal,
+    );
     Ok(())
 }
 

@@ -51,6 +51,12 @@ pub struct CycleChannelOscillatorOutput {
     pub slow: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CycleChannelOscillatorOutputField {
+    Fast,
+    Slow,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -630,6 +636,33 @@ pub fn cycle_channel_oscillator_into_slice(
     out_fast.fill(f64::NAN);
     out_slow.fill(f64::NAN);
     compute_cycle_channel_oscillator_into(source, high, low, close, resolved, out_fast, out_slow)
+}
+
+#[inline]
+pub fn cycle_channel_oscillator_output_into_slice(
+    dst: &mut [f64],
+    input: &CycleChannelOscillatorInput,
+    kernel: Kernel,
+    field: CycleChannelOscillatorOutputField,
+) -> Result<(), CycleChannelOscillatorError> {
+    let (source, high, low, close, resolved, _first, chosen) = validate_input(input, kernel)?;
+    let _ = chosen;
+    if dst.len() != source.len() {
+        return Err(CycleChannelOscillatorError::OutputLengthMismatch {
+            expected: source.len(),
+            got: dst.len(),
+        });
+    }
+    dst.fill(f64::NAN);
+    let mut core = CycleChannelOscillatorCore::new(resolved);
+    for i in 0..source.len() {
+        let (fast, slow) = core.update(source[i], high[i], low[i], close[i]);
+        dst[i] = match field {
+            CycleChannelOscillatorOutputField::Fast => fast,
+            CycleChannelOscillatorOutputField::Slow => slow,
+        };
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]

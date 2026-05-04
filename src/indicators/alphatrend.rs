@@ -76,6 +76,12 @@ pub struct AlphaTrendOutput {
     pub k2: Vec<f64>,
 }
 
+#[derive(Copy, Clone, Debug)]
+pub enum AlphaTrendOutputField {
+    K1,
+    K2,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -364,6 +370,80 @@ pub fn alphatrend_into_slices(
     Ok(())
 }
 
+#[inline]
+pub fn alphatrend_output_into_slice(
+    dst: &mut [f64],
+    input: &AlphaTrendInput,
+    kern: Kernel,
+    field: AlphaTrendOutputField,
+) -> Result<(), AlphaTrendError> {
+    let (open, high, low, close, volume, coeff, period, no_volume, first, chosen) =
+        alphatrend_prepare(input, kern)?;
+
+    if dst.len() != close.len() {
+        return Err(AlphaTrendError::OutputLengthMismatch {
+            expected: close.len(),
+            got: dst.len(),
+        });
+    }
+
+    let warm = first + period - 1;
+    let warm_end = match field {
+        AlphaTrendOutputField::K1 => warm,
+        AlphaTrendOutputField::K2 => warm + 2,
+    }
+    .min(dst.len());
+    for v in &mut dst[..warm_end] {
+        *v = f64::NAN;
+    }
+
+    match chosen {
+        Kernel::Scalar | Kernel::ScalarBatch | Kernel::Auto => alphatrend_scalar_output_selected(
+            open, high, low, close, volume, coeff, period, no_volume, first, field, dst,
+        ),
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+            let mut sibling = vec![f64::NAN; close.len()];
+            match field {
+                AlphaTrendOutputField::K1 => alphatrend_compute_into(
+                    open,
+                    high,
+                    low,
+                    close,
+                    volume,
+                    coeff,
+                    period,
+                    no_volume,
+                    first,
+                    chosen,
+                    dst,
+                    &mut sibling,
+                ),
+                AlphaTrendOutputField::K2 => alphatrend_compute_into(
+                    open,
+                    high,
+                    low,
+                    close,
+                    volume,
+                    coeff,
+                    period,
+                    no_volume,
+                    first,
+                    chosen,
+                    &mut sibling,
+                    dst,
+                ),
+            }
+        }
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+            alphatrend_scalar_output_selected(
+                open, high, low, close, volume, coeff, period, no_volume, first, field, dst,
+            )
+        }
+    }
+}
+
 #[inline(always)]
 fn alphatrend_prepare<'a>(
     input: &'a AlphaTrendInput,
@@ -606,6 +686,127 @@ pub fn alphatrend_scalar(
         *v = f64::NAN;
     }
     for v in &mut out_k2[..(warmup + 2).min(len)] {
+        *v = f64::NAN;
+    }
+
+    Ok(())
+}
+
+#[inline]
+fn alphatrend_scalar_output_selected(
+    _open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    coeff: f64,
+    period: usize,
+    no_volume: bool,
+    first_val: usize,
+    field: AlphaTrendOutputField,
+    out: &mut [f64],
+) -> Result<(), AlphaTrendError> {
+    let len = close.len();
+    let warmup = first_val + period - 1;
+
+    let mut tr_mu = make_uninit_matrix(1, len);
+    let tr: &mut [f64] =
+        unsafe { core::slice::from_raw_parts_mut(tr_mu.as_mut_ptr() as *mut f64, len) };
+
+    if first_val < len {
+        tr[first_val] = high[first_val] - low[first_val];
+    }
+    for i in (first_val + 1)..len {
+        let hl = high[i] - low[i];
+        let hc = (high[i] - close[i - 1]).abs();
+        let lc = (low[i] - close[i - 1]).abs();
+        tr[i] = hl.max(hc).max(lc);
+    }
+
+    let momentum_values: Vec<f64> = if no_volume {
+        let rsi_params = RsiParams {
+            period: Some(period),
+        };
+        let rsi_input = RsiInput::from_slice(close, rsi_params);
+        rsi_with_kernel(&rsi_input, Kernel::Scalar)
+            .map_err(|e| AlphaTrendError::RsiError { msg: e.to_string() })?
+            .values
+    } else {
+        let mut hlc3_mu = make_uninit_matrix(1, len);
+        let hlc3: &mut [f64] =
+            unsafe { core::slice::from_raw_parts_mut(hlc3_mu.as_mut_ptr() as *mut f64, len) };
+        for i in 0..len {
+            hlc3[i] = (high[i] + low[i] + close[i]) / 3.0;
+        }
+        let mfi_params = MfiParams {
+            period: Some(period),
+        };
+        let mfi_input = MfiInput::from_slices(hlc3, volume, mfi_params);
+        mfi_with_kernel(&mfi_input, Kernel::Scalar)
+            .map_err(|e| AlphaTrendError::MfiError { msg: e.to_string() })?
+            .values
+    };
+
+    if warmup < len {
+        let mut sum = 0.0f64;
+        for j in first_val..=warmup {
+            sum += tr[j];
+        }
+
+        let mut prev_alpha = f64::NAN;
+        let mut prev1 = f64::NAN;
+        let mut prev2 = f64::NAN;
+
+        for i in warmup..len {
+            let a = sum / period as f64;
+
+            let up_t = low[i] - a * coeff;
+            let down_t = high[i] + a * coeff;
+            let m_check = momentum_values[i] >= 50.0;
+
+            let cur = if i == warmup {
+                if m_check {
+                    up_t
+                } else {
+                    down_t
+                }
+            } else if m_check {
+                if up_t < prev_alpha {
+                    prev_alpha
+                } else {
+                    up_t
+                }
+            } else if down_t > prev_alpha {
+                prev_alpha
+            } else {
+                down_t
+            };
+
+            match field {
+                AlphaTrendOutputField::K1 => out[i] = cur,
+                AlphaTrendOutputField::K2 => {
+                    if i >= warmup + 2 {
+                        out[i] = prev2;
+                    }
+                }
+            }
+
+            prev2 = prev1;
+            prev1 = cur;
+            prev_alpha = cur;
+
+            if i + 1 < len {
+                sum += tr[i + 1] - tr[i + 1 - period];
+            }
+        }
+    }
+
+    let warm_end = match field {
+        AlphaTrendOutputField::K1 => warmup,
+        AlphaTrendOutputField::K2 => warmup + 2,
+    }
+    .min(len);
+    for v in &mut out[..warm_end] {
         *v = f64::NAN;
     }
 

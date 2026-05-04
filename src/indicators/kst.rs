@@ -94,8 +94,17 @@ impl<'a> AsRef<[f64]> for KstInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             KstData::Slice(slice) => slice,
-            KstData::Candles { candles, source } => source_type(candles, source),
+            KstData::Candles { candles, source } => kst_source(candles, source),
         }
+    }
+}
+
+#[inline(always)]
+fn kst_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    if source.eq_ignore_ascii_case("close") {
+        &candles.close
+    } else {
+        source_type(candles, source)
     }
 }
 
@@ -409,7 +418,7 @@ fn kst_prepare<'a>(
 
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
-        k => k,
+        k => k.to_non_batch(),
     };
     Ok((
         data,
@@ -435,6 +444,16 @@ fn kst_compute_into(
     out_line: &mut [f64],
     out_sig: &mut [f64],
 ) {
+    if data[first..]
+        .iter()
+        .all(|value| value.is_finite() && *value != 0.0)
+    {
+        kst_compute_into_nonzero(
+            data, s, r, sig, first, warm_line, warm_sig, out_line, out_sig,
+        );
+        return;
+    }
+
     let len = data.len();
     let (s1, s2, s3, s4) = s;
     let (r1, r2, r3, r4) = r;
@@ -531,6 +550,7 @@ fn kst_compute_into(
 
     let start_line = first + warm_line;
     let warm_sig_abs = first + warm_sig;
+    let sig_inv = 1.0 / sig as f64;
 
     let mut sidx = 0usize;
     let mut ssum = 0.0f64;
@@ -609,7 +629,7 @@ fn kst_compute_into(
                 sbuilt += 1;
 
                 if i >= warm_sig_abs {
-                    *out_sig_ptr.add(i) = ssum / (sig as f64);
+                    *out_sig_ptr.add(i) = ssum * sig_inv;
                 }
             } else {
                 let old = *sb_ptr.add(sidx);
@@ -619,7 +639,189 @@ fn kst_compute_into(
                 if sidx == sig {
                     sidx = 0;
                 }
-                *out_sig_ptr.add(i) = ssum / (sig as f64);
+                *out_sig_ptr.add(i) = ssum * sig_inv;
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn kst_compute_into_nonzero(
+    data: &[f64],
+    s: (usize, usize, usize, usize),
+    r: (usize, usize, usize, usize),
+    sig: usize,
+    first: usize,
+    warm_line: usize,
+    warm_sig: usize,
+    out_line: &mut [f64],
+    out_sig: &mut [f64],
+) {
+    let len = data.len();
+    let (s1, s2, s3, s4) = s;
+    let (r1, r2, r3, r4) = r;
+
+    const STACK: usize = 256;
+    let mut sb1 = [0.0f64; STACK];
+    let mut sb2 = [0.0f64; STACK];
+    let mut sb3 = [0.0f64; STACK];
+    let mut sb4 = [0.0f64; STACK];
+    let mut sbs = [0.0f64; STACK];
+
+    let mut v1_heap;
+    let mut v2_heap;
+    let mut v3_heap;
+    let mut v4_heap;
+    let mut vs_heap;
+
+    let (b1, b2, b3, b4, sbuf): (&mut [f64], &mut [f64], &mut [f64], &mut [f64], &mut [f64]) = {
+        v1_heap = if s1 > STACK {
+            vec![0.0; s1]
+        } else {
+            Vec::new()
+        };
+        v2_heap = if s2 > STACK {
+            vec![0.0; s2]
+        } else {
+            Vec::new()
+        };
+        v3_heap = if s3 > STACK {
+            vec![0.0; s3]
+        } else {
+            Vec::new()
+        };
+        v4_heap = if s4 > STACK {
+            vec![0.0; s4]
+        } else {
+            Vec::new()
+        };
+        vs_heap = if sig > STACK {
+            vec![0.0; sig]
+        } else {
+            Vec::new()
+        };
+
+        let b1 = if s1 <= STACK {
+            &mut sb1[..s1]
+        } else {
+            v1_heap.as_mut_slice()
+        };
+        let b2 = if s2 <= STACK {
+            &mut sb2[..s2]
+        } else {
+            v2_heap.as_mut_slice()
+        };
+        let b3 = if s3 <= STACK {
+            &mut sb3[..s3]
+        } else {
+            v3_heap.as_mut_slice()
+        };
+        let b4 = if s4 <= STACK {
+            &mut sb4[..s4]
+        } else {
+            v4_heap.as_mut_slice()
+        };
+        let sbuf = if sig <= STACK {
+            &mut sbs[..sig]
+        } else {
+            vs_heap.as_mut_slice()
+        };
+        (b1, b2, b3, b4, sbuf)
+    };
+
+    let mut i1 = 0usize;
+    let mut i2 = 0usize;
+    let mut i3 = 0usize;
+    let mut i4 = 0usize;
+    let mut sum1 = 0.0f64;
+    let mut sum2 = 0.0f64;
+    let mut sum3 = 0.0f64;
+    let mut sum4 = 0.0f64;
+
+    let inv1 = 1.0 / (s1 as f64);
+    let inv2 = 1.0 / (s2 as f64);
+    let inv3 = 1.0 / (s3 as f64);
+    let inv4 = (4.0f64) / (s4 as f64);
+    let w2 = inv2 + inv2;
+    let w3 = inv3 + inv3 + inv3;
+
+    let start1 = first + r1;
+    let start2 = first + r2;
+    let start3 = first + r3;
+    let start4 = first + r4;
+
+    let start_line = first + warm_line;
+    let warm_sig_abs = first + warm_sig;
+    let sig_inv = 1.0 / sig as f64;
+
+    let mut sidx = 0usize;
+    let mut ssum = 0.0f64;
+    let mut sbuilt = 0usize;
+
+    unsafe {
+        let out_line_ptr = out_line.as_mut_ptr();
+        let out_sig_ptr = out_sig.as_mut_ptr();
+        let data_ptr = data.as_ptr();
+
+        let b1_ptr = b1.as_mut_ptr();
+        let b2_ptr = b2.as_mut_ptr();
+        let b3_ptr = b3.as_mut_ptr();
+        let b4_ptr = b4.as_mut_ptr();
+        let sb_ptr = sbuf.as_mut_ptr();
+
+        #[inline(always)]
+        unsafe fn ring_update(buf: *mut f64, idx: &mut usize, cap: usize, sum: &mut f64, v: f64) {
+            let old = *buf.add(*idx);
+            *sum = (*sum) + (v - old);
+            *buf.add(*idx) = v;
+            *idx += 1;
+            if *idx == cap {
+                *idx = 0;
+            }
+        }
+
+        for i in first..len {
+            let x = *data_ptr.add(i);
+
+            if i >= start1 {
+                let p = *data_ptr.add(i - r1);
+                ring_update(b1_ptr, &mut i1, s1, &mut sum1, ((x / p) - 1.0) * 100.0);
+            }
+            if i >= start2 {
+                let p = *data_ptr.add(i - r2);
+                ring_update(b2_ptr, &mut i2, s2, &mut sum2, ((x / p) - 1.0) * 100.0);
+            }
+            if i >= start3 {
+                let p = *data_ptr.add(i - r3);
+                ring_update(b3_ptr, &mut i3, s3, &mut sum3, ((x / p) - 1.0) * 100.0);
+            }
+            if i >= start4 {
+                let p = *data_ptr.add(i - r4);
+                ring_update(b4_ptr, &mut i4, s4, &mut sum4, ((x / p) - 1.0) * 100.0);
+            }
+
+            if i < start_line {
+                continue;
+            }
+
+            let kst = sum1.mul_add(inv1, sum2.mul_add(w2, sum3.mul_add(w3, sum4 * inv4)));
+            *out_line_ptr.add(i) = kst;
+
+            let old = *sb_ptr.add(sidx);
+            ssum += kst - old;
+            *sb_ptr.add(sidx) = kst;
+            sidx += 1;
+            if sidx == sig {
+                sidx = 0;
+            }
+
+            if sbuilt < sig {
+                sbuilt += 1;
+                if i >= warm_sig_abs {
+                    *out_sig_ptr.add(i) = ssum * sig_inv;
+                }
+            } else {
+                *out_sig_ptr.add(i) = ssum * sig_inv;
             }
         }
     }
@@ -663,7 +865,19 @@ pub fn kst_with_kernel(input: &KstInput, kernel: Kernel) -> Result<KstOutput, Ks
                     &mut signal,
                 );
             }
-            _ => unreachable!(),
+            _ => {
+                kst_compute_into(
+                    data,
+                    s,
+                    r,
+                    sig,
+                    first,
+                    warm_line,
+                    warm_sig,
+                    &mut line,
+                    &mut signal,
+                );
+            }
         }
     }
     Ok(KstOutput { line, signal })

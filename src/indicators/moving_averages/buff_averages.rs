@@ -497,6 +497,21 @@ fn buff_averages_prepare<'a>(
         });
     }
 
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    let chosen = match kernel {
+        Kernel::Auto => {
+            if std::arch::is_x86_feature_detected!("avx2")
+                && std::arch::is_x86_feature_detected!("fma")
+            {
+                Kernel::Avx2
+            } else {
+                Kernel::Scalar
+            }
+        }
+        k => k,
+    };
+
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         k => k,

@@ -1113,15 +1113,10 @@ pub fn pattern_recognition_with_kernel(
     kernel: Kernel,
 ) -> Result<PatternRecognitionOutput, PatternRecognitionError> {
     let _ = kernel;
-    let (pattern_data, open, high, low, close, cols) = match &input.data {
-        PatternRecognitionData::Candles { candles } => (
-            PatternData::Candles { candles },
-            candles.open.as_slice(),
-            candles.high.as_slice(),
-            candles.low.as_slice(),
-            candles.close.as_slice(),
-            candles.close.len(),
-        ),
+    let (pattern_data, cols) = match &input.data {
+        PatternRecognitionData::Candles { candles } => {
+            (PatternData::Candles { candles }, candles.close.len())
+        }
         PatternRecognitionData::Slices {
             open,
             high,
@@ -1143,35 +1138,23 @@ pub fn pattern_recognition_with_kernel(
                     low,
                     close,
                 },
-                *open,
-                *high,
-                *low,
-                *close,
                 close.len(),
             )
         }
     };
 
-    let primitives = build_shared_primitives(open, high, low, close);
-    debug_assert_eq!(primitives.body.len(), cols);
-    debug_assert_eq!(primitives.range.len(), cols);
-    debug_assert_eq!(primitives.upper_shadow.len(), cols);
-    debug_assert_eq!(primitives.lower_shadow.len(), cols);
-    debug_assert_eq!(primitives.direction.len(), cols);
-    debug_assert_eq!(primitives.body_gap_up.len(), cols);
-    debug_assert_eq!(primitives.body_gap_down.len(), cols);
-
     let rows = PATTERN_RUNNERS.len();
     let mut matrix = make_uninit_u8_matrix(rows, cols);
+    let mut pattern_input = PatternInput {
+        data: pattern_data,
+        params: PatternParams {
+            pattern_type: PatternType::default(),
+            penetration: 0.0,
+        },
+    };
 
     for (row, runner) in PATTERN_RUNNERS.iter().enumerate() {
-        let pattern_input = PatternInput {
-            data: pattern_data.clone(),
-            params: PatternParams {
-                pattern_type: runner.pattern_type,
-                penetration: 0.0,
-            },
-        };
+        pattern_input.params.pattern_type = runner.pattern_type;
         let out = (runner.run)(&pattern_input)?;
         if out.values.len() != cols {
             return Err(PatternRecognitionError::OutputLengthMismatch {
@@ -1182,8 +1165,11 @@ pub fn pattern_recognition_with_kernel(
         }
         let offset = row * cols;
         let dst = &mut matrix[offset..offset + cols];
-        for (cell, value) in dst.iter_mut().zip(out.values.into_iter()) {
-            cell.write(if value == 0 { 0 } else { 1 });
+        for idx in 0..cols {
+            unsafe {
+                dst.get_unchecked_mut(idx)
+                    .write((*out.values.get_unchecked(idx) != 0) as u8);
+            }
         }
     }
 
@@ -1309,19 +1295,7 @@ fn input_ohlc<'a>(
 ) -> Result<(&'a [f64], &'a [f64], &'a [f64], &'a [f64]), PatternError> {
     match data {
         PatternData::Candles { candles } => {
-            let open = candles
-                .select_candle_field("open")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            Ok((open, high, low, close))
+            Ok((&candles.open, &candles.high, &candles.low, &candles.close))
         }
         PatternData::Slices {
             open,

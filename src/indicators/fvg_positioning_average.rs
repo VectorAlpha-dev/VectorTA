@@ -14,9 +14,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
-};
+use crate::utilities::helpers::{alloc_uninit_f64, detect_best_batch_kernel};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
@@ -280,9 +278,10 @@ fn is_valid_ohlc(open: f64, high: f64, low: f64, close: f64) -> bool {
 }
 
 #[inline(always)]
-fn longest_valid_run(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> usize {
+fn longest_valid_run(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> (usize, bool) {
     let mut best = 0usize;
     let mut cur = 0usize;
+    let mut all_valid = true;
     for (((&o, &h), &l), &c) in open
         .iter()
         .zip(high.iter())
@@ -293,10 +292,11 @@ fn longest_valid_run(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> 
             cur += 1;
             best = best.max(cur);
         } else {
+            all_valid = false;
             cur = 0;
         }
     }
-    best
+    (best, all_valid)
 }
 
 #[inline(always)]
@@ -365,7 +365,7 @@ fn validate_common(
     lookback: usize,
     lookback_type: &str,
     atr_multiplier: f64,
-) -> Result<LookbackMode, FvgPositioningAverageError> {
+) -> Result<(LookbackMode, bool), FvgPositioningAverageError> {
     if open.is_empty() || high.is_empty() || low.is_empty() || close.is_empty() {
         return Err(FvgPositioningAverageError::EmptyInputData);
     }
@@ -378,7 +378,7 @@ fn validate_common(
         });
     }
     let lookback_mode = validate_params_only(lookback, lookback_type, atr_multiplier)?;
-    let longest = longest_valid_run(open, high, low, close);
+    let (longest, all_valid) = longest_valid_run(open, high, low, close);
     if longest == 0 {
         return Err(FvgPositioningAverageError::AllValuesNaN);
     }
@@ -388,7 +388,7 @@ fn validate_common(
             valid: longest,
         });
     }
-    Ok(lookback_mode)
+    Ok((lookback_mode, all_valid))
 }
 
 #[inline(always)]
@@ -472,6 +472,10 @@ fn compute_row(
             cumulative_range = 0.0;
             tr_sum = 0.0;
             atr = None;
+            out_bull_average[i] = f64::NAN;
+            out_bear_average[i] = f64::NAN;
+            out_bull_mid[i] = f64::NAN;
+            out_bear_mid[i] = f64::NAN;
             continue;
         }
 
@@ -562,6 +566,101 @@ fn compute_row(
     }
 }
 
+#[inline(always)]
+fn compute_row_bar_count_all_valid(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    lookback: usize,
+    atr_multiplier: f64,
+    out_bull_average: &mut [f64],
+    out_bear_average: &mut [f64],
+    out_bull_mid: &mut [f64],
+    out_bear_mid: &mut [f64],
+) {
+    let mut bull_levels = VecDeque::<FvgLevel>::new();
+    let mut bear_levels = VecDeque::<FvgLevel>::new();
+    let mut bull_sum = 0.0;
+    let mut bear_sum = 0.0;
+    let mut valid_count = 0usize;
+    let mut cumulative_range = 0.0;
+    let mut tr_sum = 0.0;
+    let mut atr = None::<f64>;
+    let mut prev_close = 0.0;
+
+    for i in 0..close.len() {
+        valid_count += 1;
+        let high_low = high[i] - low[i];
+        cumulative_range += high_low;
+        let tr = if valid_count == 1 {
+            high_low
+        } else {
+            high_low
+                .max((high[i] - prev_close).abs())
+                .max((low[i] - prev_close).abs())
+        };
+
+        let threshold = if valid_count < ATR_PERIOD {
+            tr_sum += tr;
+            cumulative_range / valid_count as f64
+        } else if valid_count == ATR_PERIOD {
+            tr_sum += tr;
+            let seed = tr_sum / ATR_PERIOD as f64;
+            atr = Some(seed);
+            seed * atr_multiplier
+        } else {
+            let next = (atr.unwrap_or(tr) * (ATR_PERIOD as f64 - 1.0) + tr) / ATR_PERIOD as f64;
+            atr = Some(next);
+            next * atr_multiplier
+        };
+
+        if valid_count >= 3 {
+            let idx1 = i - 1;
+            let idx2 = i - 2;
+
+            if low[i] > high[idx2] && close[idx1] > high[idx2] && (low[i] - high[idx2]) > threshold
+            {
+                let level = FvgLevel {
+                    left: idx2,
+                    value: high[idx2],
+                };
+                bull_levels.push_back(level);
+                bull_sum += level.value;
+            }
+
+            if high[i] < low[idx2] && close[idx1] < low[idx2] && (low[idx2] - high[i]) > threshold {
+                let level = FvgLevel {
+                    left: idx2,
+                    value: low[idx2],
+                };
+                bear_levels.push_back(level);
+                bear_sum += level.value;
+            }
+        }
+
+        prune_levels_bar_count(&mut bull_levels, &mut bull_sum, i, lookback);
+        prune_levels_bar_count(&mut bear_levels, &mut bear_sum, i, lookback);
+
+        let bull_average = current_average(&bull_levels, bull_sum);
+        let bear_average = current_average(&bear_levels, bear_sum);
+        let body_mid = 0.5 * (open[i] + close[i]);
+        out_bull_average[i] = bull_average;
+        out_bear_average[i] = bear_average;
+        out_bull_mid[i] = if bull_average.is_nan() {
+            f64::NAN
+        } else {
+            body_mid.max(bull_average)
+        };
+        out_bear_mid[i] = if bear_average.is_nan() {
+            f64::NAN
+        } else {
+            body_mid.min(bear_average)
+        };
+        prev_close = close[i];
+    }
+}
+
 #[inline]
 pub fn fvg_positioning_average(
     input: &FvgPositioningAverageInput,
@@ -576,7 +675,7 @@ pub fn fvg_positioning_average_with_kernel(
     let (open, high, low, close) = input_slices(input)?;
     let lookback = input.get_lookback();
     let atr_multiplier = input.get_atr_multiplier();
-    let lookback_mode = validate_common(
+    let (lookback_mode, all_valid) = validate_common(
         open,
         high,
         low,
@@ -586,29 +685,40 @@ pub fn fvg_positioning_average_with_kernel(
         atr_multiplier,
     )?;
 
-    let mut bull_average = alloc_with_nan_prefix(close.len(), 0);
-    let mut bear_average = alloc_with_nan_prefix(close.len(), 0);
-    let mut bull_mid = alloc_with_nan_prefix(close.len(), 0);
-    let mut bear_mid = alloc_with_nan_prefix(close.len(), 0);
+    let mut bull_average = alloc_uninit_f64(close.len());
+    let mut bear_average = alloc_uninit_f64(close.len());
+    let mut bull_mid = alloc_uninit_f64(close.len());
+    let mut bear_mid = alloc_uninit_f64(close.len());
+    let _ = kernel;
 
-    let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
-
-    compute_row(
-        open,
-        high,
-        low,
-        close,
-        lookback,
-        lookback_mode,
-        atr_multiplier,
-        &mut bull_average,
-        &mut bear_average,
-        &mut bull_mid,
-        &mut bear_mid,
-    );
+    if all_valid && lookback_mode == LookbackMode::BarCount {
+        compute_row_bar_count_all_valid(
+            open,
+            high,
+            low,
+            close,
+            lookback,
+            atr_multiplier,
+            &mut bull_average,
+            &mut bear_average,
+            &mut bull_mid,
+            &mut bear_mid,
+        );
+    } else {
+        compute_row(
+            open,
+            high,
+            low,
+            close,
+            lookback,
+            lookback_mode,
+            atr_multiplier,
+            &mut bull_average,
+            &mut bear_average,
+            &mut bull_mid,
+            &mut bear_mid,
+        );
+    }
 
     Ok(FvgPositioningAverageOutput {
         bull_average,
@@ -629,7 +739,7 @@ pub fn fvg_positioning_average_into_slice(
     let (open, high, low, close) = input_slices(input)?;
     let lookback = input.get_lookback();
     let atr_multiplier = input.get_atr_multiplier();
-    let lookback_mode = validate_common(
+    let (lookback_mode, all_valid) = validate_common(
         open,
         high,
         low,
@@ -664,28 +774,35 @@ pub fn fvg_positioning_average_into_slice(
         });
     }
 
-    let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
-
-    out_bull_average.fill(f64::NAN);
-    out_bear_average.fill(f64::NAN);
-    out_bull_mid.fill(f64::NAN);
-    out_bear_mid.fill(f64::NAN);
-    compute_row(
-        open,
-        high,
-        low,
-        close,
-        lookback,
-        lookback_mode,
-        atr_multiplier,
-        out_bull_average,
-        out_bear_average,
-        out_bull_mid,
-        out_bear_mid,
-    );
+    let _ = kernel;
+    if all_valid && lookback_mode == LookbackMode::BarCount {
+        compute_row_bar_count_all_valid(
+            open,
+            high,
+            low,
+            close,
+            lookback,
+            atr_multiplier,
+            out_bull_average,
+            out_bear_average,
+            out_bull_mid,
+            out_bear_mid,
+        );
+    } else {
+        compute_row(
+            open,
+            high,
+            low,
+            close,
+            lookback,
+            lookback_mode,
+            atr_multiplier,
+            out_bull_average,
+            out_bear_average,
+            out_bull_mid,
+            out_bear_mid,
+        );
+    }
     Ok(())
 }
 

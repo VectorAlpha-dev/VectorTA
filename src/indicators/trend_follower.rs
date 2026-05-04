@@ -867,6 +867,103 @@ fn evict_front(queue: &mut VecDeque<(usize, f64)>, idx: usize, window: usize) {
     }
 }
 
+#[derive(Clone, Debug)]
+struct MonoQueue {
+    idx: Vec<usize>,
+    vals: Vec<f64>,
+    head: usize,
+    tail: usize,
+    count: usize,
+}
+
+impl MonoQueue {
+    fn new(window: usize) -> Self {
+        let cap = window.max(1) + 1;
+        Self {
+            idx: vec![0; cap],
+            vals: vec![0.0; cap],
+            head: 0,
+            tail: 0,
+            count: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn cap(&self) -> usize {
+        self.idx.len()
+    }
+
+    #[inline(always)]
+    fn prev_pos(&self) -> usize {
+        if self.tail == 0 {
+            self.cap() - 1
+        } else {
+            self.tail - 1
+        }
+    }
+
+    #[inline(always)]
+    fn evict(&mut self, idx: usize, window: usize) {
+        let min_idx = idx.saturating_add(1).saturating_sub(window);
+        while self.count > 0 && self.idx[self.head] < min_idx {
+            self.head += 1;
+            if self.head == self.cap() {
+                self.head = 0;
+            }
+            self.count -= 1;
+        }
+    }
+
+    #[inline(always)]
+    fn push_max(&mut self, idx: usize, value: f64) {
+        while self.count > 0 {
+            let back = self.prev_pos();
+            if self.vals[back] <= value {
+                self.tail = back;
+                self.count -= 1;
+            } else {
+                break;
+            }
+        }
+        self.idx[self.tail] = idx;
+        self.vals[self.tail] = value;
+        self.tail += 1;
+        if self.tail == self.cap() {
+            self.tail = 0;
+        }
+        self.count += 1;
+    }
+
+    #[inline(always)]
+    fn push_min(&mut self, idx: usize, value: f64) {
+        while self.count > 0 {
+            let back = self.prev_pos();
+            if self.vals[back] >= value {
+                self.tail = back;
+                self.count -= 1;
+            } else {
+                break;
+            }
+        }
+        self.idx[self.tail] = idx;
+        self.vals[self.tail] = value;
+        self.tail += 1;
+        if self.tail == self.cap() {
+            self.tail = 0;
+        }
+        self.count += 1;
+    }
+
+    #[inline(always)]
+    fn front_value(&self) -> Option<f64> {
+        if self.count == 0 {
+            None
+        } else {
+            Some(self.vals[self.head])
+        }
+    }
+}
+
 fn trend_follower_compute_clean_into(
     high: &[f64],
     low: &[f64],
@@ -894,32 +991,32 @@ fn trend_follower_compute_clean_into(
         base_ma
     };
 
-    let mut high_max = VecDeque::with_capacity(CHANNEL_WINDOW);
-    let mut low_min = VecDeque::with_capacity(CHANNEL_WINDOW);
-    let mut ma_max = VecDeque::with_capacity(params.trend_period.max(1));
-    let mut ma_min = VecDeque::with_capacity(params.trend_period.max(1));
+    let mut high_max = MonoQueue::new(CHANNEL_WINDOW);
+    let mut low_min = MonoQueue::new(CHANNEL_WINDOW);
+    let mut ma_max = MonoQueue::new(params.trend_period.max(1));
+    let mut ma_min = MonoQueue::new(params.trend_period.max(1));
 
     for i in first..high.len() {
-        evict_front(&mut high_max, i, CHANNEL_WINDOW);
-        evict_front(&mut low_min, i, CHANNEL_WINDOW);
-        evict_front(&mut ma_max, i, params.trend_period);
-        evict_front(&mut ma_min, i, params.trend_period);
+        high_max.evict(i, CHANNEL_WINDOW);
+        low_min.evict(i, CHANNEL_WINDOW);
+        ma_max.evict(i, params.trend_period);
+        ma_min.evict(i, params.trend_period);
 
-        push_max(&mut high_max, i, high[i], CHANNEL_WINDOW);
-        push_min(&mut low_min, i, low[i], CHANNEL_WINDOW);
+        high_max.push_max(i, high[i]);
+        low_min.push_min(i, low[i]);
 
         let ma = trend_ma[i];
         if ma.is_finite() {
-            push_max(&mut ma_max, i, ma, params.trend_period);
-            push_min(&mut ma_min, i, ma, params.trend_period);
+            ma_max.push_max(i, ma);
+            ma_min.push_min(i, ma);
         }
 
-        let (hh, ll) = match (ma_max.front(), ma_min.front()) {
-            (Some((_, hh)), Some((_, ll))) => (*hh, *ll),
+        let (hh, ll) = match (ma_max.front_value(), ma_min.front_value()) {
+            (Some(hh), Some(ll)) => (hh, ll),
             _ => continue,
         };
-        let (channel_high, channel_low) = match (high_max.front(), low_min.front()) {
-            (Some((_, hi)), Some((_, lo))) => (*hi, *lo),
+        let (channel_high, channel_low) = match (high_max.front_value(), low_min.front_value()) {
+            (Some(hi), Some(lo)) => (hi, lo),
             _ => continue,
         };
         let chan = (channel_high - channel_low) * params.channel_rate_fraction;
@@ -988,6 +1085,17 @@ fn trend_follower_compute_into(
     }
 }
 
+#[inline(always)]
+fn trend_follower_single_kernel(kernel: Kernel) -> Kernel {
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        if matches!(kernel, Kernel::Auto) && std::arch::is_x86_feature_detected!("avx2") {
+            return Kernel::Avx2;
+        }
+    }
+    kernel
+}
+
 #[inline]
 pub fn trend_follower(
     input: &TrendFollowerInput<'_>,
@@ -1000,6 +1108,7 @@ pub fn trend_follower_with_kernel(
     kernel: Kernel,
 ) -> Result<TrendFollowerOutput, TrendFollowerError> {
     let (high, low, close, volume, params, first) = trend_follower_prepare(input)?;
+    let kernel = trend_follower_single_kernel(kernel);
     let mut out = alloc_with_nan_prefix(close.len(), close.len());
     trend_follower_compute_into(
         high, low, close, volume, input, params, first, kernel, &mut out,
@@ -1022,6 +1131,7 @@ pub fn trend_follower_into_slice(
     kernel: Kernel,
 ) -> Result<(), TrendFollowerError> {
     let (high, low, close, volume, params, first) = trend_follower_prepare(input)?;
+    let kernel = trend_follower_single_kernel(kernel);
     if out.len() != close.len() {
         return Err(TrendFollowerError::OutputLengthMismatch {
             expected: close.len(),

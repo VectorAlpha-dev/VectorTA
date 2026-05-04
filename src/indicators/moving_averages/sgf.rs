@@ -7,8 +7,11 @@ use crate::utilities::helpers::{
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use std::arch::x86_64::*;
 use std::convert::AsRef;
 use std::mem::MaybeUninit;
+use std::sync::OnceLock;
 use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -37,7 +40,18 @@ impl<'a> AsRef<[f64]> for SgfInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             SgfData::Slice(slice) => slice,
-            SgfData::Candles { candles, source } => source_type(candles, source),
+            SgfData::Candles { candles, source } => match *source {
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -362,10 +376,46 @@ pub(crate) fn build_endpoint_sgf_weights(
     Ok(weights)
 }
 
+static SGF_DEFAULT_WEIGHTS_21_2: OnceLock<AVec<f64>> = OnceLock::new();
+
+#[derive(Clone)]
+enum SgfWeights {
+    Static(&'static [f64]),
+    Owned(AVec<f64>),
+}
+
+impl SgfWeights {
+    #[inline(always)]
+    fn as_slice(&self) -> &[f64] {
+        match self {
+            Self::Static(weights) => weights,
+            Self::Owned(weights) => weights,
+        }
+    }
+}
+
+#[inline]
+fn sgf_weights(
+    requested_period: usize,
+    effective_period: usize,
+    poly_order: usize,
+) -> Result<SgfWeights, SgfError> {
+    if effective_period == 21 && poly_order == 2 {
+        let weights = SGF_DEFAULT_WEIGHTS_21_2
+            .get_or_init(|| build_endpoint_sgf_weights(21, 2).expect("valid default SGF weights"));
+        Ok(SgfWeights::Static(weights.as_slice()))
+    } else {
+        Ok(SgfWeights::Owned(build_endpoint_sgf_weights(
+            requested_period,
+            poly_order,
+        )?))
+    }
+}
+
 #[derive(Clone)]
 struct SgfPrepared<'a> {
     data: &'a [f64],
-    weights: AVec<f64>,
+    weights: SgfWeights,
     period: usize,
     poly_order: usize,
     first: usize,
@@ -400,9 +450,18 @@ fn sgf_prepare<'a>(input: &'a SgfInput, kernel: Kernel) -> Result<SgfPrepared<'a
         });
     }
 
-    let weights = build_endpoint_sgf_weights(requested_period, poly_order)?;
+    let weights = sgf_weights(requested_period, period, poly_order)?;
     let kernel = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            {
+                detect_best_kernel()
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            {
+                Kernel::Scalar
+            }
+        }
         other => other,
     };
 
@@ -441,15 +500,106 @@ fn sgf_dot(window: &[f64], weights: &[f64]) -> f64 {
 }
 
 #[inline(always)]
+fn sgf_dot_21(data: &[f64], from: usize, weights: &[f64]) -> f64 {
+    unsafe {
+        let d = data.as_ptr().add(from);
+        let w = weights.as_ptr();
+
+        let mut acc0 = *d.add(0) * *w.add(0);
+        acc0 += *d.add(4) * *w.add(4);
+        acc0 += *d.add(8) * *w.add(8);
+        acc0 += *d.add(12) * *w.add(12);
+        acc0 += *d.add(16) * *w.add(16);
+        acc0 += *d.add(20) * *w.add(20);
+
+        let mut acc1 = *d.add(1) * *w.add(1);
+        acc1 += *d.add(5) * *w.add(5);
+        acc1 += *d.add(9) * *w.add(9);
+        acc1 += *d.add(13) * *w.add(13);
+        acc1 += *d.add(17) * *w.add(17);
+
+        let mut acc2 = *d.add(2) * *w.add(2);
+        acc2 += *d.add(6) * *w.add(6);
+        acc2 += *d.add(10) * *w.add(10);
+        acc2 += *d.add(14) * *w.add(14);
+        acc2 += *d.add(18) * *w.add(18);
+
+        let mut acc3 = *d.add(3) * *w.add(3);
+        acc3 += *d.add(7) * *w.add(7);
+        acc3 += *d.add(11) * *w.add(11);
+        acc3 += *d.add(15) * *w.add(15);
+        acc3 += *d.add(19) * *w.add(19);
+
+        (acc0 + acc1) + (acc2 + acc3)
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn sgf_compute_21_avx2(data: &[f64], weights: &[f64], first: usize, out: &mut [f64]) {
+    let start = first + 20;
+    let w0 = _mm256_loadu_pd(weights.as_ptr());
+    let w4 = _mm256_loadu_pd(weights.as_ptr().add(4));
+    let w8 = _mm256_loadu_pd(weights.as_ptr().add(8));
+    let w12 = _mm256_loadu_pd(weights.as_ptr().add(12));
+    let w16 = _mm256_loadu_pd(weights.as_ptr().add(16));
+    let w20 = *weights.get_unchecked(20);
+    let mut lanes = [0.0f64; 4];
+
+    for idx in start..data.len() {
+        let from = idx - 20;
+        let d0 = _mm256_loadu_pd(data.as_ptr().add(from));
+        let d4 = _mm256_loadu_pd(data.as_ptr().add(from + 4));
+        let d8 = _mm256_loadu_pd(data.as_ptr().add(from + 8));
+        let d12 = _mm256_loadu_pd(data.as_ptr().add(from + 12));
+        let d16 = _mm256_loadu_pd(data.as_ptr().add(from + 16));
+
+        let mut acc = _mm256_mul_pd(d0, w0);
+        acc = _mm256_add_pd(acc, _mm256_mul_pd(d4, w4));
+        acc = _mm256_add_pd(acc, _mm256_mul_pd(d8, w8));
+        acc = _mm256_add_pd(acc, _mm256_mul_pd(d12, w12));
+        acc = _mm256_add_pd(acc, _mm256_mul_pd(d16, w16));
+
+        _mm256_storeu_pd(lanes.as_mut_ptr(), acc);
+        lanes[0] += *data.get_unchecked(from + 20) * w20;
+        *out.get_unchecked_mut(idx) = (lanes[0] + lanes[1]) + (lanes[2] + lanes[3]);
+    }
+}
+
+#[inline(always)]
 fn sgf_compute_into(
     data: &[f64],
     weights: &[f64],
     period: usize,
     first: usize,
-    _kernel: Kernel,
+    kernel: Kernel,
     out: &mut [f64],
 ) {
     let start = first + period - 1;
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    if period == 21
+        && matches!(
+            kernel,
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch
+        )
+        && std::arch::is_x86_feature_detected!("avx2")
+    {
+        unsafe {
+            sgf_compute_21_avx2(data, weights, first, out);
+        }
+        return;
+    }
+
+    if period == 21 {
+        for idx in start..data.len() {
+            let from = idx + 1 - 21;
+            unsafe {
+                *out.get_unchecked_mut(idx) = sgf_dot_21(data, from, weights);
+            }
+        }
+        return;
+    }
+
     for idx in start..data.len() {
         let from = idx + 1 - period;
         out[idx] = sgf_dot(&data[from..(idx + 1)], weights);
@@ -462,7 +612,7 @@ pub fn sgf_with_kernel(input: &SgfInput, kernel: Kernel) -> Result<SgfOutput, Sg
     let mut out = alloc_with_nan_prefix(prepared.data.len(), warm);
     sgf_compute_into(
         prepared.data,
-        &prepared.weights,
+        prepared.weights.as_slice(),
         prepared.period,
         prepared.first,
         prepared.kernel,
@@ -487,7 +637,7 @@ pub fn sgf_into_slice(dst: &mut [f64], input: &SgfInput, kernel: Kernel) -> Resu
     }
     sgf_compute_into(
         prepared.data,
-        &prepared.weights,
+        prepared.weights.as_slice(),
         prepared.period,
         prepared.first,
         prepared.kernel,

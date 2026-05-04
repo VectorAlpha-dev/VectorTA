@@ -66,6 +66,13 @@ pub struct AdaptiveMacdOutput {
     pub hist: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdaptiveMacdOutputField {
+    Macd,
+    Signal,
+    Hist,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -749,6 +756,32 @@ fn compute_row(
     Ok(())
 }
 
+#[inline(always)]
+fn compute_output_row(
+    data: &[f64],
+    params: &AdaptiveMacdParams,
+    field: AdaptiveMacdOutputField,
+    out: &mut [f64],
+) -> Result<(), AdaptiveMacdError> {
+    if out.len() != data.len() {
+        return Err(AdaptiveMacdError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
+        });
+    }
+
+    let mut state = AdaptiveMacdState::new(params)?;
+    for i in 0..data.len() {
+        let (macd, signal, hist) = state.update(data[i]);
+        out[i] = match field {
+            AdaptiveMacdOutputField::Macd => macd,
+            AdaptiveMacdOutputField::Signal => signal,
+            AdaptiveMacdOutputField::Hist => hist,
+        };
+    }
+    Ok(())
+}
+
 #[inline]
 pub fn adaptive_macd(input: &AdaptiveMacdInput) -> Result<AdaptiveMacdOutput, AdaptiveMacdError> {
     adaptive_macd_with_kernel(input, Kernel::Auto)
@@ -808,6 +841,27 @@ pub fn adaptive_macd_into_slice(
         macd_out,
         signal_out,
         hist_out,
+    )
+}
+
+pub fn adaptive_macd_output_into_slice(
+    out: &mut [f64],
+    input: &AdaptiveMacdInput,
+    kernel: Kernel,
+    field: AdaptiveMacdOutputField,
+) -> Result<(), AdaptiveMacdError> {
+    let prepared = prepare_input(input, kernel)?;
+    let _ = prepared.kernel;
+    compute_output_row(
+        prepared.data,
+        &AdaptiveMacdParams {
+            length: Some(prepared.length),
+            fast_period: Some(prepared.fast_period),
+            slow_period: Some(prepared.slow_period),
+            signal_period: Some(prepared.signal_period),
+        },
+        field,
+        out,
     )
 }
 

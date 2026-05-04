@@ -42,6 +42,13 @@ pub struct AndeanOscillatorOutput {
     pub signal: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AndeanOscillatorOutputField {
+    Bull,
+    Bear,
+    Signal,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -414,6 +421,33 @@ pub fn andean_oscillator_into_slice(
     out_bear.fill(f64::NAN);
     out_signal.fill(f64::NAN);
     compute_andean_oscillator_into(open, close, params, out_bull, out_bear, out_signal)
+}
+
+#[inline]
+pub fn andean_oscillator_output_into_slice(
+    dst: &mut [f64],
+    input: &AndeanOscillatorInput,
+    kernel: Kernel,
+    field: AndeanOscillatorOutputField,
+) -> Result<(), AndeanOscillatorError> {
+    let (open, close, params, _first, _kernel) = validate_input(input, kernel)?;
+    if dst.len() != open.len() {
+        return Err(AndeanOscillatorError::OutputLengthMismatch {
+            expected: open.len(),
+            got: dst.len(),
+        });
+    }
+    dst.fill(f64::NAN);
+    let mut core = AndeanCore::new(params);
+    for i in 0..open.len() {
+        let (bull, bear, signal) = core.update(open[i], close[i]);
+        dst[i] = match field {
+            AndeanOscillatorOutputField::Bull => bull,
+            AndeanOscillatorOutputField::Bear => bear,
+            AndeanOscillatorOutputField::Signal => signal,
+        };
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]

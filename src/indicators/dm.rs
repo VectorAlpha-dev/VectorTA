@@ -168,13 +168,9 @@ fn dm_prepare<'a>(
 ) -> Result<(&'a [f64], &'a [f64], usize, usize, Kernel), DmError> {
     let (high, low) = match &input.data {
         DmData::Candles { candles } => {
-            let h = candles
-                .select_candle_field("high")
-                .map_err(|_| DmError::EmptyInputData)?;
-            let l = candles
-                .select_candle_field("low")
-                .map_err(|_| DmError::EmptyInputData)?;
-            (h, l)
+            let high = candles.high.as_slice();
+            let low = candles.low.as_slice();
+            (high, low)
         }
         DmData::Slices { high, low } => (*high, *low),
     };
@@ -205,10 +201,26 @@ fn dm_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => dm_auto_kernel(high.len()),
         k => k,
     };
     Ok((high, low, period, first, chosen))
+}
+
+#[inline(always)]
+fn dm_auto_kernel(len: usize) -> Kernel {
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        if len >= 32_768 {
+            if std::arch::is_x86_feature_detected!("avx2")
+                && std::arch::is_x86_feature_detected!("fma")
+            {
+                return Kernel::Avx2;
+            }
+        }
+    }
+
+    Kernel::Scalar
 }
 
 #[inline(always)]
@@ -292,6 +304,91 @@ fn dm_compute_into_scalar(
 
             *plus_out.get_unchecked_mut(j) = sum_plus;
             *minus_out.get_unchecked_mut(j) = sum_minus;
+            j += 1;
+        }
+    }
+}
+
+#[inline(always)]
+fn dm_compute_selected_scalar<const PLUS: bool>(
+    high: &[f64],
+    low: &[f64],
+    period: usize,
+    first: usize,
+    out: &mut [f64],
+) {
+    debug_assert_eq!(high.len(), low.len());
+    let n = high.len();
+    if n == 0 {
+        return;
+    }
+
+    let end_init = first + period - 1;
+
+    unsafe {
+        let mut sum = 0.0f64;
+        let mut i = first + 1;
+        let warm_stop = end_init + 1;
+
+        let mut prev_high = *high.get_unchecked(first);
+        let mut prev_low = *low.get_unchecked(first);
+
+        while i < warm_stop {
+            let hi = *high.get_unchecked(i);
+            let lo = *low.get_unchecked(i);
+            let diff_p = hi - prev_high;
+            let diff_m = prev_low - lo;
+            prev_high = hi;
+            prev_low = lo;
+
+            if PLUS {
+                if diff_p > 0.0 && diff_p > diff_m {
+                    sum += diff_p;
+                }
+            } else if diff_m > 0.0 && diff_m > diff_p {
+                sum += diff_m;
+            }
+            i += 1;
+        }
+
+        *out.get_unchecked_mut(end_init) = sum;
+
+        if end_init + 1 >= n {
+            return;
+        }
+        let inv_p = 1.0 / (period as f64);
+
+        let mut j = end_init + 1;
+        while j < n {
+            let hi = *high.get_unchecked(j);
+            let lo = *low.get_unchecked(j);
+            let diff_p = hi - prev_high;
+            let diff_m = prev_low - lo;
+            prev_high = hi;
+            prev_low = lo;
+
+            let val = if PLUS {
+                if diff_p > 0.0 && diff_p > diff_m {
+                    diff_p
+                } else {
+                    0.0
+                }
+            } else if diff_m > 0.0 && diff_m > diff_p {
+                diff_m
+            } else {
+                0.0
+            };
+
+            #[cfg(target_feature = "fma")]
+            {
+                sum = (-inv_p).mul_add(sum, sum + val);
+            }
+            #[cfg(not(target_feature = "fma"))]
+            {
+                sum = sum - (sum * inv_p) + val;
+            }
+
+            *out.get_unchecked_mut(j) = sum;
             j += 1;
         }
     }
@@ -640,6 +737,43 @@ pub fn dm_with_kernel(input: &DmInput, kernel: Kernel) -> Result<DmOutput, DmErr
     Ok(DmOutput { plus, minus })
 }
 
+#[inline]
+pub fn dm_plus_with_kernel(input: &DmInput, kernel: Kernel) -> Result<Vec<f64>, DmError> {
+    dm_selected_with_kernel::<true>(input, kernel)
+}
+
+#[inline]
+pub fn dm_minus_with_kernel(input: &DmInput, kernel: Kernel) -> Result<Vec<f64>, DmError> {
+    dm_selected_with_kernel::<false>(input, kernel)
+}
+
+#[inline]
+fn dm_selected_with_kernel<const PLUS: bool>(
+    input: &DmInput,
+    kernel: Kernel,
+) -> Result<Vec<f64>, DmError> {
+    let (high, low, period, first, chosen) = dm_prepare(input, kernel)?;
+    let warm = first + period - 1;
+
+    match chosen {
+        Kernel::Scalar | Kernel::ScalarBatch => {
+            let mut out = alloc_with_nan_prefix(high.len(), warm);
+            dm_compute_selected_scalar::<PLUS>(high, low, period, first, &mut out);
+            Ok(out)
+        }
+        _ => {
+            let mut plus = alloc_with_nan_prefix(high.len(), warm);
+            let mut minus = alloc_with_nan_prefix(high.len(), warm);
+            dm_compute_into(high, low, period, first, chosen, &mut plus, &mut minus);
+            if PLUS {
+                Ok(plus)
+            } else {
+                Ok(minus)
+            }
+        }
+    }
+}
+
 #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn dm_into(
@@ -924,13 +1058,7 @@ impl DmBatchBuilder {
         dm_batch_with_kernel(high, low, &self.range, self.kernel)
     }
     pub fn apply_candles(self, c: &Candles) -> Result<DmBatchOutput, DmError> {
-        let high = c
-            .select_candle_field("high")
-            .map_err(|_| DmError::EmptyInputData)?;
-        let low = c
-            .select_candle_field("low")
-            .map_err(|_| DmError::EmptyInputData)?;
-        self.apply_slices(high, low)
+        self.apply_slices(&c.high, &c.low)
     }
     pub fn with_default_candles(c: &Candles) -> Result<DmBatchOutput, DmError> {
         DmBatchBuilder::new().kernel(Kernel::Auto).apply_candles(c)
@@ -1869,6 +1997,39 @@ mod tests {
                 "minus mismatch at {}: base={} into={}",
                 i,
                 base.minus[i],
+                minus[i]
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_dm_selected_outputs_match_api() -> Result<(), Box<dyn std::error::Error>> {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = DmInput::with_default_candles(&candles);
+        let baseline = dm(&input)?;
+        let plus = dm_plus_with_kernel(&input, Kernel::Scalar)?;
+        let minus = dm_minus_with_kernel(&input, Kernel::Scalar)?;
+
+        assert_eq!(baseline.plus.len(), plus.len());
+        assert_eq!(baseline.minus.len(), minus.len());
+
+        for i in 0..plus.len() {
+            assert!(
+                (baseline.plus[i].is_nan() && plus[i].is_nan())
+                    || (baseline.plus[i] - plus[i]).abs() <= 1e-12,
+                "+DM selected mismatch at index {}: baseline={} selected={}",
+                i,
+                baseline.plus[i],
+                plus[i]
+            );
+            assert!(
+                (baseline.minus[i].is_nan() && minus[i].is_nan())
+                    || (baseline.minus[i] - minus[i]).abs() <= 1e-12,
+                "-DM selected mismatch at index {}: baseline={} selected={}",
+                i,
+                baseline.minus[i],
                 minus[i]
             );
         }

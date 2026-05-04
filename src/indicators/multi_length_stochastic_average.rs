@@ -76,9 +76,18 @@ impl<'a> AsRef<[f64]> for MultiLengthStochasticAverageInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             MultiLengthStochasticAverageData::Slice(slice) => slice,
-            MultiLengthStochasticAverageData::Candles { candles, source } => {
-                source_type(candles, source)
-            }
+            MultiLengthStochasticAverageData::Candles { candles, source } => match *source {
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -737,11 +746,128 @@ fn multi_length_stochastic_average_row_from_slice(
     params: ResolvedParams,
     out: &mut [f64],
 ) {
+    if params.length == DEFAULT_LENGTH
+        && params.presmooth == DEFAULT_PRESMOOTH
+        && params.postsmooth == DEFAULT_POSTSMOOTH
+        && params.premethod == SmoothingMethod::Sma
+        && params.postmethod == SmoothingMethod::Sma
+        && data.iter().all(|value| value.is_finite())
+    {
+        multi_length_stochastic_average_default_sma_finite(data, out);
+        return;
+    }
+
     out.fill(f64::NAN);
     let mut stream = MultiLengthStochasticAverageStream::new_resolved(params);
     for (slot, &value) in out.iter_mut().zip(data.iter()) {
         if let Some(result) = stream.update(value) {
             *slot = result;
+        }
+    }
+}
+
+#[inline(always)]
+fn multi_length_stochastic_average_default_sma_finite(data: &[f64], out: &mut [f64]) {
+    out.fill(f64::NAN);
+
+    let mut pre_ring = [0.0f64; DEFAULT_PRESMOOTH];
+    let mut pre_head = 0usize;
+    let mut pre_count = 0usize;
+    let mut pre_sum = 0.0;
+
+    let mut stoch_ring = [0.0f64; DEFAULT_LENGTH];
+    let mut stoch_head = 0usize;
+    let mut stoch_count = 0usize;
+
+    let mut post_ring = [0.0f64; DEFAULT_POSTSMOOTH];
+    let mut post_head = 0usize;
+    let mut post_count = 0usize;
+    let mut post_sum = 0.0;
+
+    for (out_slot, &value) in out.iter_mut().zip(data.iter()) {
+        if pre_count == DEFAULT_PRESMOOTH {
+            pre_sum -= pre_ring[pre_head];
+        } else {
+            pre_count += 1;
+        }
+        pre_ring[pre_head] = value;
+        pre_sum += value;
+        pre_head += 1;
+        if pre_head == DEFAULT_PRESMOOTH {
+            pre_head = 0;
+        }
+        if pre_count < DEFAULT_PRESMOOTH {
+            continue;
+        }
+
+        let pre = pre_sum / DEFAULT_PRESMOOTH as f64;
+        stoch_ring[stoch_head] = pre;
+        stoch_head += 1;
+        if stoch_head == DEFAULT_LENGTH {
+            stoch_head = 0;
+        }
+        if stoch_count < DEFAULT_LENGTH {
+            stoch_count += 1;
+            if stoch_count < DEFAULT_LENGTH {
+                continue;
+            }
+        }
+
+        let newest = if stoch_head == 0 {
+            DEFAULT_LENGTH - 1
+        } else {
+            stoch_head - 1
+        };
+        let current = stoch_ring[newest];
+        let mut min_value = current;
+        let mut max_value = current;
+        let mut idx = newest;
+        let mut sum = 0.0;
+        let mut valid_norm = true;
+
+        for window in 1..=DEFAULT_LENGTH {
+            let sample = stoch_ring[idx];
+            if sample < min_value {
+                min_value = sample;
+            }
+            if sample > max_value {
+                max_value = sample;
+            }
+            if window >= MIN_STOCH_LENGTH {
+                let denom = max_value - min_value;
+                if denom.abs() <= FLOAT_TOL {
+                    post_head = 0;
+                    post_count = 0;
+                    post_sum = 0.0;
+                    valid_norm = false;
+                    break;
+                }
+                sum += (current - min_value) / denom;
+            }
+            idx = if idx == 0 {
+                DEFAULT_LENGTH - 1
+            } else {
+                idx - 1
+            };
+        }
+        if !valid_norm {
+            continue;
+        }
+
+        let norm = sum / (DEFAULT_LENGTH - (MIN_STOCH_LENGTH - 1)) as f64 * 100.0;
+        if post_count == DEFAULT_POSTSMOOTH {
+            post_sum -= post_ring[post_head];
+        } else {
+            post_count += 1;
+        }
+        post_ring[post_head] = norm;
+        post_sum += norm;
+        post_head += 1;
+        if post_head == DEFAULT_POSTSMOOTH {
+            post_head = 0;
+        }
+        if post_count == DEFAULT_POSTSMOOTH {
+            *out_slot = post_sum / DEFAULT_POSTSMOOTH as f64;
         }
     }
 }

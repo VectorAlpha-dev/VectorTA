@@ -41,7 +41,10 @@ impl<'a> AsRef<[f64]> for VarInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             VarData::Slice(slice) => slice,
-            VarData::Candles { candles, source } => source_type(candles, source),
+            VarData::Candles { candles, source } => match *source {
+                "close" => candles.close.as_slice(),
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -248,7 +251,7 @@ pub fn var_with_kernel(input: &VarInput, kernel: Kernel) -> Result<VarOutput, Va
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 var_avx512(data, period, first, nbdev, &mut out)?
             }
-            _ => unreachable!(),
+            _ => var_scalar(data, period, first, nbdev, &mut out)?,
         }
     }
 
@@ -308,7 +311,7 @@ pub fn var_into(input: &VarInput, out: &mut [f64]) -> Result<(), VarError> {
             Kernel::Avx2 | Kernel::Avx2Batch => var_avx2(data, period, first, nbdev, out)?,
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => var_avx512(data, period, first, nbdev, out)?,
-            _ => unreachable!(),
+            _ => var_scalar(data, period, first, nbdev, out)?,
         }
     }
 
@@ -605,7 +608,7 @@ pub fn var_into_slice(dst: &mut [f64], input: &VarInput, kern: Kernel) -> Result
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 var_avx512(data, period, first, nbdev, dst)?;
             }
-            _ => unreachable!(),
+            _ => var_scalar(data, period, first, nbdev, dst)?,
         }
     }
 

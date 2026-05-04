@@ -426,43 +426,21 @@ pub(crate) fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
     let mut imag_part = vec![0.0; len];
     let mut delta_phase = vec![0.0; len];
     let mut inst_per = vec![0.0; len];
+    let tau = 2.0 * PI;
 
     for i in 7..len {
         let val1 = src[i] - src[i - 7];
 
-        if i >= 4 {
-            let val1_4 = if i >= 4 {
-                src[i - 4] - src[i.saturating_sub(11)]
-            } else {
-                0.0
-            };
-            let val1_2 = if i >= 2 {
-                src[i - 2] - src[i.saturating_sub(9)]
-            } else {
-                0.0
-            };
-            in_phase[i] = 1.25 * (val1_4 - 0.635 * val1_2)
-                + if i >= 3 { 0.635 * in_phase[i - 3] } else { 0.0 };
-        }
+        let val1_4 = src[i - 4] - src[i.saturating_sub(11)];
+        let val1_2 = src[i - 2] - src[i.saturating_sub(9)];
+        in_phase[i] = 1.25 * (val1_4 - 0.635 * val1_2) + 0.635 * in_phase[i - 3];
 
-        if i >= 2 {
-            let val1_2 = src[i - 2] - src[i.saturating_sub(9)];
-            quadrature[i] = val1_2 - 0.338 * val1
-                + if i >= 2 {
-                    0.338 * quadrature[i - 2]
-                } else {
-                    0.0
-                };
-        }
+        quadrature[i] = val1_2 - 0.338 * val1 + 0.338 * quadrature[i - 2];
 
-        if i >= 1 {
-            real_part[i] = 0.2
-                * (in_phase[i] * in_phase[i - 1] + quadrature[i] * quadrature[i - 1])
-                + 0.8 * real_part[i - 1];
-            imag_part[i] = 0.2
-                * (in_phase[i] * quadrature[i - 1] - in_phase[i - 1] * quadrature[i])
-                + 0.8 * imag_part[i - 1];
-        }
+        real_part[i] = 0.2 * (in_phase[i] * in_phase[i - 1] + quadrature[i] * quadrature[i - 1])
+            + 0.8 * real_part[i - 1];
+        imag_part[i] = 0.2 * (in_phase[i] * quadrature[i - 1] - in_phase[i - 1] * quadrature[i])
+            + 0.8 * imag_part[i - 1];
 
         if real_part[i] != 0.0 {
             delta_phase[i] = (imag_part[i] / real_part[i]).atan();
@@ -470,14 +448,13 @@ pub(crate) fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
 
         let mut val2 = 0.0;
         let mut found_period = false;
-        for j in 0..=max_cycle_limit.min(i) {
-            if i >= j {
-                val2 += delta_phase[i - j];
-                if val2 > 2.0 * PI && !found_period {
-                    inst_per[i] = j as f64;
-                    found_period = true;
-                    break;
-                }
+        let limit = max_cycle_limit.min(i);
+        for j in 0..=limit {
+            val2 += delta_phase[i - j];
+            if val2 > tau {
+                inst_per[i] = j as f64;
+                found_period = true;
+                break;
             }
         }
 
@@ -591,6 +568,15 @@ pub fn lpc_scalar(
         (1.0 - s) / c
     }
     #[inline(always)]
+    fn alpha_for_period(p: usize, cache: Option<&[f64]>) -> f64 {
+        if let Some(values) = cache {
+            if p >= 3 && p < values.len() {
+                return values[p];
+            }
+        }
+        alpha_from_period(p)
+    }
+    #[inline(always)]
     fn per_bar_period(dc_opt: Option<&[f64]>, idx: usize, fixed_p: usize, cm: f64) -> usize {
         if let Some(dc) = dc_opt {
             let base = dc[idx];
@@ -604,6 +590,23 @@ pub fn lpc_scalar(
         }
     }
 
+    let alpha_cache = if dc.is_some() {
+        let scaled = if cycle_mult.is_finite() && cycle_mult > 0.0 {
+            (max_cycle_limit as f64 * cycle_mult).round()
+        } else {
+            3.0
+        };
+        let max_cache_period = scaled.max(fixed_period as f64).max(3.0).min(4096.0) as usize;
+        let mut values = vec![0.0; max_cache_period + 1];
+        let mut p = 3usize;
+        while p <= max_cache_period {
+            values[p] = alpha_from_period(p);
+            p += 1;
+        }
+        Some(values)
+    } else {
+        None
+    };
     let mut last_p: usize = if dc.is_none() { fixed_period } else { 0 };
     let mut alpha: f64 = if dc.is_none() {
         alpha_from_period(fixed_period)
@@ -616,7 +619,7 @@ pub fn lpc_scalar(
         let p_i = per_bar_period(dc.as_deref(), i, fixed_period, cycle_mult);
         if p_i != last_p {
             last_p = p_i;
-            alpha = alpha_from_period(last_p);
+            alpha = alpha_for_period(last_p, alpha_cache.as_deref());
         }
         let one_m_a = 1.0 - alpha;
         let s_im1 = src[i - 1];
@@ -639,7 +642,7 @@ pub fn lpc_scalar(
         let p_i1 = per_bar_period(dc.as_deref(), i1, fixed_period, cycle_mult);
         if p_i1 != last_p {
             last_p = p_i1;
-            alpha = alpha_from_period(last_p);
+            alpha = alpha_for_period(last_p, alpha_cache.as_deref());
         }
         let one_m_a1 = 1.0 - alpha;
         let s_i1 = src[i1];
@@ -663,7 +666,7 @@ pub fn lpc_scalar(
         let p_i = per_bar_period(dc.as_deref(), i, fixed_period, cycle_mult);
         if p_i != last_p {
             last_p = p_i;
-            alpha = alpha_from_period(last_p);
+            alpha = alpha_for_period(last_p, alpha_cache.as_deref());
         }
         let one_m_a = 1.0 - alpha;
         let s_im1 = src[i - 1];
@@ -699,12 +702,46 @@ pub fn lpc_avx2(
     out_low: &mut [f64],
 ) {
     unsafe {
-        if src.len() > first + 32 {
-            _mm_prefetch(src.as_ptr().add(first + 16) as *const i8, _MM_HINT_T0);
-            _mm_prefetch(high.as_ptr().add(first + 16) as *const i8, _MM_HINT_T0);
-            _mm_prefetch(low.as_ptr().add(first + 16) as *const i8, _MM_HINT_T0);
-            _mm_prefetch(close.as_ptr().add(first + 16) as *const i8, _MM_HINT_T0);
-        }
+        lpc_avx2_inner(
+            high,
+            low,
+            close,
+            src,
+            cutoff_type,
+            fixed_period,
+            max_cycle_limit,
+            cycle_mult,
+            tr_mult,
+            first,
+            out_filter,
+            out_high,
+            out_low,
+        )
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn lpc_avx2_inner(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    src: &[f64],
+    cutoff_type: &str,
+    fixed_period: usize,
+    max_cycle_limit: usize,
+    cycle_mult: f64,
+    tr_mult: f64,
+    first: usize,
+    out_filter: &mut [f64],
+    out_high: &mut [f64],
+    out_low: &mut [f64],
+) {
+    if src.len() > first + 32 {
+        _mm_prefetch(src.as_ptr().add(first + 16) as *const i8, _MM_HINT_T0);
+        _mm_prefetch(high.as_ptr().add(first + 16) as *const i8, _MM_HINT_T0);
+        _mm_prefetch(low.as_ptr().add(first + 16) as *const i8, _MM_HINT_T0);
+        _mm_prefetch(close.as_ptr().add(first + 16) as *const i8, _MM_HINT_T0);
     }
     lpc_scalar(
         high,
@@ -740,12 +777,46 @@ pub fn lpc_avx512(
     out_low: &mut [f64],
 ) {
     unsafe {
-        if src.len() > first + 64 {
-            _mm_prefetch(src.as_ptr().add(first + 32) as *const i8, _MM_HINT_T0);
-            _mm_prefetch(high.as_ptr().add(first + 32) as *const i8, _MM_HINT_T0);
-            _mm_prefetch(low.as_ptr().add(first + 32) as *const i8, _MM_HINT_T0);
-            _mm_prefetch(close.as_ptr().add(first + 32) as *const i8, _MM_HINT_T0);
-        }
+        lpc_avx512_inner(
+            high,
+            low,
+            close,
+            src,
+            cutoff_type,
+            fixed_period,
+            max_cycle_limit,
+            cycle_mult,
+            tr_mult,
+            first,
+            out_filter,
+            out_high,
+            out_low,
+        )
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,fma")]
+unsafe fn lpc_avx512_inner(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    src: &[f64],
+    cutoff_type: &str,
+    fixed_period: usize,
+    max_cycle_limit: usize,
+    cycle_mult: f64,
+    tr_mult: f64,
+    first: usize,
+    out_filter: &mut [f64],
+    out_high: &mut [f64],
+    out_low: &mut [f64],
+) {
+    if src.len() > first + 64 {
+        _mm_prefetch(src.as_ptr().add(first + 32) as *const i8, _MM_HINT_T0);
+        _mm_prefetch(high.as_ptr().add(first + 32) as *const i8, _MM_HINT_T0);
+        _mm_prefetch(low.as_ptr().add(first + 32) as *const i8, _MM_HINT_T0);
+        _mm_prefetch(close.as_ptr().add(first + 32) as *const i8, _MM_HINT_T0);
     }
     lpc_scalar(
         high,
@@ -782,7 +853,7 @@ fn lpc_compute_into(
     out_low: &mut [f64],
 ) {
     let actual_kernel = match kernel {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => detect_best_kernel(),
         k => k,
     };
 
@@ -1226,7 +1297,7 @@ fn lpc_prepare<'a>(
     }
 
     let chosen = if kernel == Kernel::Auto {
-        Kernel::Scalar
+        detect_best_kernel()
     } else {
         kernel
     };

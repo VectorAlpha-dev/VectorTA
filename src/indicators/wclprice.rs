@@ -156,18 +156,11 @@ fn wclprice_prepare<'a>(
     kernel: Kernel,
 ) -> Result<(&'a [f64], &'a [f64], &'a [f64], usize, usize, Kernel), WclpriceError> {
     let (high, low, close) = match &input.data {
-        WclpriceData::Candles { candles } => {
-            let h = candles
-                .select_candle_field("high")
-                .map_err(|_| WclpriceError::MissingField { field: "high" })?;
-            let l = candles
-                .select_candle_field("low")
-                .map_err(|_| WclpriceError::MissingField { field: "low" })?;
-            let c = candles
-                .select_candle_field("close")
-                .map_err(|_| WclpriceError::MissingField { field: "close" })?;
-            (h, l, c)
-        }
+        WclpriceData::Candles { candles } => (
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
+        ),
         WclpriceData::Slices { high, low, close } => (*high, *low, *close),
     };
 
@@ -184,7 +177,7 @@ fn wclprice_prepare<'a>(
         .ok_or(WclpriceError::AllValuesNaN)?;
 
     let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => detect_best_kernel(),
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::ScalarBatch => Kernel::Scalar,

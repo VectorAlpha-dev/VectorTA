@@ -16,7 +16,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    alloc_uninit_f64, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
 #[cfg(feature = "python")]
@@ -265,6 +265,21 @@ fn count_valid_pairs(advancing: &[f64], declining: &[f64]) -> usize {
 }
 
 #[inline(always)]
+fn first_and_valid_pairs(advancing: &[f64], declining: &[f64]) -> (usize, usize) {
+    let mut first = advancing.len();
+    let mut count = 0usize;
+    for i in 0..advancing.len() {
+        if valid_breadth_pair(advancing[i], declining[i]) {
+            if first == advancing.len() {
+                first = i;
+            }
+            count += 1;
+        }
+    }
+    (first, count)
+}
+
+#[inline(always)]
 fn decisionpoint_breadth_swenlin_trading_oscillator_prepare<'a>(
     input: &'a DecisionPointBreadthSwenlinTradingOscillatorInput,
     kernel: Kernel,
@@ -289,12 +304,11 @@ fn decisionpoint_breadth_swenlin_trading_oscillator_prepare<'a>(
         return Err(DecisionPointBreadthSwenlinTradingOscillatorError::EmptyInputData);
     }
 
-    let first = first_valid_pair(advancing, declining);
+    let (first, valid) = first_and_valid_pairs(advancing, declining);
     if first >= advancing.len() {
         return Err(DecisionPointBreadthSwenlinTradingOscillatorError::AllValuesNaN);
     }
 
-    let valid = count_valid_pairs(advancing, declining);
     if valid < SMA_LENGTH {
         return Err(
             DecisionPointBreadthSwenlinTradingOscillatorError::NotEnoughValidData {
@@ -334,9 +348,9 @@ pub fn decisionpoint_breadth_swenlin_trading_oscillator_with_kernel(
     DecisionPointBreadthSwenlinTradingOscillatorOutput,
     DecisionPointBreadthSwenlinTradingOscillatorError,
 > {
-    let (advancing, declining, first, _chosen) =
+    let (advancing, declining, _first, _chosen) =
         decisionpoint_breadth_swenlin_trading_oscillator_prepare(input, kernel)?;
-    let mut values = alloc_with_nan_prefix(advancing.len(), (first + WARMUP).min(advancing.len()));
+    let mut values = alloc_uninit_f64(advancing.len());
     decisionpoint_breadth_swenlin_trading_oscillator_row(advancing, declining, &mut values);
     Ok(DecisionPointBreadthSwenlinTradingOscillatorOutput { values })
 }

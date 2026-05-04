@@ -14,8 +14,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -36,8 +35,39 @@ impl<'a> AsRef<[f64]> for PviInput<'a> {
                 candles,
                 close_source,
                 ..
-            } => source_type(candles, close_source),
+            } => pvi_source(candles, close_source),
         }
+    }
+}
+
+#[inline(always)]
+fn pvi_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => candles.open.as_slice(),
+        "high" => candles.high.as_slice(),
+        "low" => candles.low.as_slice(),
+        "close" => candles.close.as_slice(),
+        "volume" => candles.volume.as_slice(),
+        "hl2" => candles.hl2.as_slice(),
+        "hlc3" => candles.hlc3.as_slice(),
+        "ohlc4" => candles.ohlc4.as_slice(),
+        "hlcc4" | "hlcc" => candles.hlcc4.as_slice(),
+        _ => source_type(candles, source),
+    }
+}
+
+#[inline(always)]
+fn pvi_input_slices<'a>(input: &'a PviInput<'a>) -> (&'a [f64], &'a [f64]) {
+    match &input.data {
+        PviData::Candles {
+            candles,
+            close_source,
+            volume_source,
+        } => (
+            pvi_source(candles, close_source),
+            pvi_source(candles, volume_source),
+        ),
+        PviData::Slices { close, volume } => (*close, *volume),
     }
 }
 
@@ -197,18 +227,7 @@ pub fn pvi(input: &PviInput) -> Result<PviOutput, PviError> {
 }
 
 pub fn pvi_with_kernel(input: &PviInput, kernel: Kernel) -> Result<PviOutput, PviError> {
-    let (close, volume) = match &input.data {
-        PviData::Candles {
-            candles,
-            close_source,
-            volume_source,
-        } => {
-            let c = source_type(candles, close_source);
-            let v = source_type(candles, volume_source);
-            (c, v)
-        }
-        PviData::Slices { close, volume } => (*close, *volume),
-    };
+    let (close, volume) = pvi_input_slices(input);
 
     if close.is_empty() || volume.is_empty() {
         return Err(PviError::EmptyInputData);
@@ -227,14 +246,7 @@ pub fn pvi_with_kernel(input: &PviInput, kernel: Kernel) -> Result<PviOutput, Pv
     }
 
     let mut out = alloc_with_nan_prefix(close.len(), first_valid_idx);
-    let chosen = match kernel {
-        Kernel::Auto => match detect_best_kernel() {
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => Kernel::Avx2,
-            other => other,
-        },
-        other => other,
-    };
+    let chosen = pvi_single_kernel(kernel, close.len());
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => pvi_scalar(
@@ -269,18 +281,7 @@ pub fn pvi_with_kernel(input: &PviInput, kernel: Kernel) -> Result<PviOutput, Pv
 #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn pvi_into(input: &PviInput, out: &mut [f64]) -> Result<(), PviError> {
-    let (close, volume) = match &input.data {
-        PviData::Candles {
-            candles,
-            close_source,
-            volume_source,
-        } => {
-            let c = source_type(candles, close_source);
-            let v = source_type(candles, volume_source);
-            (c, v)
-        }
-        PviData::Slices { close, volume } => (*close, *volume),
-    };
+    let (close, volume) = pvi_input_slices(input);
 
     if close.is_empty() || volume.is_empty() {
         return Err(PviError::EmptyInputData);
@@ -311,14 +312,7 @@ pub fn pvi_into(input: &PviInput, out: &mut [f64]) -> Result<(), PviError> {
         *v = qnan;
     }
 
-    let chosen = match Kernel::Auto {
-        Kernel::Auto => match detect_best_kernel() {
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => Kernel::Avx2,
-            other => other,
-        },
-        other => other,
-    };
+    let chosen = pvi_single_kernel(Kernel::Auto, close.len());
     let initial = input.get_initial_value();
     unsafe {
         match chosen {
@@ -342,18 +336,7 @@ pub fn pvi_into(input: &PviInput, out: &mut [f64]) -> Result<(), PviError> {
 
 #[inline]
 pub fn pvi_into_slice(dst: &mut [f64], input: &PviInput, kern: Kernel) -> Result<(), PviError> {
-    let (close, volume) = match &input.data {
-        PviData::Candles {
-            candles,
-            close_source,
-            volume_source,
-        } => {
-            let c = source_type(candles, close_source);
-            let v = source_type(candles, volume_source);
-            (c, v)
-        }
-        PviData::Slices { close, volume } => (*close, *volume),
-    };
+    let (close, volume) = pvi_input_slices(input);
 
     if close.is_empty() || volume.is_empty() {
         return Err(PviError::EmptyInputData);
@@ -378,14 +361,7 @@ pub fn pvi_into_slice(dst: &mut [f64], input: &PviInput, kern: Kernel) -> Result
         return Err(PviError::NotEnoughValidData { needed: 2, valid });
     }
 
-    let chosen = match kern {
-        Kernel::Auto => match detect_best_kernel() {
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => Kernel::Avx2,
-            other => other,
-        },
-        other => other,
-    };
+    let chosen = pvi_single_kernel(kern, close.len());
 
     let initial_value = input.get_initial_value();
 
@@ -428,6 +404,14 @@ pub fn pvi_avx512(
         } else {
             pvi_avx512_long(close, volume, first_valid, initial, out)
         }
+    }
+}
+
+#[inline(always)]
+fn pvi_single_kernel(kernel: Kernel, len: usize) -> Kernel {
+    match kernel {
+        Kernel::Auto => Kernel::Scalar,
+        other => other,
     }
 }
 
@@ -508,7 +492,7 @@ pub fn pvi_avx2(close: &[f64], volume: &[f64], first_valid: usize, initial: f64,
             if not_nan(c0) && not_nan(v0) && not_nan(prev_close) && not_nan(prev_vol) {
                 if v0 > prev_vol {
                     let r = (c0 - prev_close) / prev_close;
-                    pvi = f64::mul_add(r, pvi, pvi);
+                    pvi += r * pvi;
                 }
                 *optr.add(j) = pvi;
                 prev_close = c0;
@@ -526,7 +510,7 @@ pub fn pvi_avx2(close: &[f64], volume: &[f64], first_valid: usize, initial: f64,
             if not_nan(c1) && not_nan(v1) && not_nan(prev_close) && not_nan(prev_vol) {
                 if v1 > prev_vol {
                     let r = (c1 - prev_close) / prev_close;
-                    pvi = f64::mul_add(r, pvi, pvi);
+                    pvi += r * pvi;
                 }
                 *optr.add(j + 1) = pvi;
                 prev_close = c1;
@@ -548,7 +532,7 @@ pub fn pvi_avx2(close: &[f64], volume: &[f64], first_valid: usize, initial: f64,
             if not_nan(c) && not_nan(v) && not_nan(prev_close) && not_nan(prev_vol) {
                 if v > prev_vol {
                     let r = (c - prev_close) / prev_close;
-                    pvi = f64::mul_add(r, pvi, pvi);
+                    pvi += r * pvi;
                 }
                 *optr.add(j) = pvi;
             } else {

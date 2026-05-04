@@ -22,7 +22,7 @@ use crate::indicators::tsf::{TsfParams, TsfStream};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+    alloc_uninit_f64, alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -608,7 +608,19 @@ fn input_slices<'a>(
 ) -> Result<(&'a [f64], &'a [f64]), KairiRelativeIndexError> {
     match &input.data {
         KairiRelativeIndexData::Candles { candles, source } => {
-            Ok((source_type(candles, source), candles.volume.as_slice()))
+            let source = match *source {
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            };
+            Ok((source, candles.volume.as_slice()))
         }
         KairiRelativeIndexData::Slices { source, volume } => Ok((*source, *volume)),
     }
@@ -711,6 +723,62 @@ fn compute_into(
     Ok(())
 }
 
+#[inline(always)]
+fn is_default_kairi_params(params: &ValidatedKairiRelativeIndexParams) -> bool {
+    params.length == 50 && matches!(params.ma_kind, KairiMaKind::Sma)
+}
+
+#[inline]
+fn compute_default_sma50_into(source: &[f64], out: &mut [f64]) {
+    const PERIOD: usize = 50;
+    const SCALE: f64 = 100.0;
+    const RCP: f64 = 1.0 / PERIOD as f64;
+
+    out.fill(f64::NAN);
+    let mut sum = 0.0;
+    let mut valid_count = 0usize;
+    let mut values = [0.0f64; PERIOD];
+    let mut valid = [0u8; PERIOD];
+    let mut head = 0usize;
+    let mut count = 0usize;
+
+    for i in 0..source.len() {
+        if count == PERIOD {
+            if valid[head] != 0 {
+                sum -= values[head];
+                valid_count -= 1;
+            }
+        } else {
+            count += 1;
+        }
+
+        let src = source[i];
+        if src.is_finite() {
+            values[head] = src;
+            valid[head] = 1;
+            sum += src;
+            valid_count += 1;
+        } else {
+            values[head] = 0.0;
+            valid[head] = 0;
+        }
+
+        head += 1;
+        if head == PERIOD {
+            head = 0;
+        }
+
+        if count == PERIOD && valid_count == PERIOD {
+            let ma = sum * RCP;
+            if ma != 0.0 {
+                out[i] = (src - ma) * SCALE / ma;
+            } else if src == 0.0 {
+                out[i] = 0.0;
+            }
+        }
+    }
+}
+
 #[inline]
 pub fn kairi_relative_index(
     input: &KairiRelativeIndexInput,
@@ -724,8 +792,16 @@ pub fn kairi_relative_index_with_kernel(
     kernel: Kernel,
 ) -> Result<KairiRelativeIndexOutput, KairiRelativeIndexError> {
     let (source, volume, params, _chosen) = validate_input(input, kernel)?;
-    let mut out = alloc_with_nan_prefix(source.len(), source.len());
-    compute_into(source, volume, &params, &mut out)?;
+    let mut out = if is_default_kairi_params(&params) {
+        alloc_uninit_f64(source.len())
+    } else {
+        alloc_with_nan_prefix(source.len(), source.len())
+    };
+    if is_default_kairi_params(&params) {
+        compute_default_sma50_into(source, &mut out);
+    } else {
+        compute_into(source, volume, &params, &mut out)?;
+    }
     Ok(KairiRelativeIndexOutput { values: out })
 }
 
@@ -742,10 +818,15 @@ pub fn kairi_relative_index_into_slice(
             got: dst.len(),
         });
     }
-    for v in dst.iter_mut() {
-        *v = f64::NAN;
+    if is_default_kairi_params(&params) {
+        compute_default_sma50_into(source, dst);
+    } else {
+        for v in dst.iter_mut() {
+            *v = f64::NAN;
+        }
+        compute_into(source, volume, &params, dst)?;
     }
-    compute_into(source, volume, &params, dst)
+    Ok(())
 }
 
 #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]

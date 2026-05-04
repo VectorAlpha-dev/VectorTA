@@ -367,7 +367,10 @@ impl MedianSmaWindow {
                 self.sorted.remove(index);
             }
             self.ring[self.head] = value;
-            self.head = (self.head + 1) % self.len;
+            self.head += 1;
+            if self.head == self.len {
+                self.head = 0;
+            }
         } else {
             self.ring[self.count] = value;
             self.count += 1;
@@ -494,7 +497,10 @@ impl VolumeWindow {
             self.down_sum -= self.down_ring[self.head];
             self.up_ring[self.head] = up;
             self.down_ring[self.head] = down;
-            self.head = (self.head + 1) % self.len;
+            self.head += 1;
+            if self.head == self.len {
+                self.head = 0;
+            }
         } else {
             self.up_ring[self.count] = up;
             self.down_ring[self.count] = down;
@@ -540,7 +546,10 @@ impl BoolWindow {
     fn push(&mut self, value: bool) {
         if self.count == self.ring.len() {
             self.ring[self.head] = value;
-            self.head = (self.head + 1) % self.ring.len();
+            self.head += 1;
+            if self.head == self.ring.len() {
+                self.head = 0;
+            }
         } else {
             self.ring[self.count] = value;
             self.count += 1;
@@ -564,12 +573,356 @@ impl BoolWindow {
         } else {
             self.head - 1
         };
-        Some(self.ring[(latest + len - ago) % len])
+        let index = if latest >= ago {
+            latest - ago
+        } else {
+            latest + len - ago
+        };
+        Some(self.ring[index])
     }
 
     #[inline(always)]
     fn is_full(&self) -> bool {
         self.count == self.ring.len()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MedianSmaWindow20 {
+    ring: [f64; DEFAULT_RANGE_LENGTH],
+    sorted: [f64; DEFAULT_RANGE_LENGTH],
+    head: usize,
+    count: usize,
+    sum: f64,
+}
+
+impl MedianSmaWindow20 {
+    #[inline(always)]
+    fn new() -> Self {
+        Self {
+            ring: [0.0; DEFAULT_RANGE_LENGTH],
+            sorted: [0.0; DEFAULT_RANGE_LENGTH],
+            head: 0,
+            count: 0,
+            sum: 0.0,
+        }
+    }
+
+    #[inline(always)]
+    fn reset(&mut self) {
+        self.head = 0;
+        self.count = 0;
+        self.sum = 0.0;
+    }
+
+    #[inline(always)]
+    fn push(&mut self, value: f64) -> Option<(f64, f64)> {
+        let sorted_len;
+        if self.count == DEFAULT_RANGE_LENGTH {
+            let old = self.ring[self.head];
+            self.sum -= old;
+            let mut index = 0usize;
+            while self.sorted[index] != old {
+                index += 1;
+            }
+            while index + 1 < DEFAULT_RANGE_LENGTH {
+                self.sorted[index] = self.sorted[index + 1];
+                index += 1;
+            }
+            self.ring[self.head] = value;
+            self.head += 1;
+            if self.head == DEFAULT_RANGE_LENGTH {
+                self.head = 0;
+            }
+            sorted_len = DEFAULT_RANGE_LENGTH - 1;
+        } else {
+            self.ring[self.count] = value;
+            self.count += 1;
+            if self.count == DEFAULT_RANGE_LENGTH {
+                self.head = 0;
+            }
+            sorted_len = self.count - 1;
+        }
+
+        self.sum += value;
+        let mut index = 0usize;
+        while index < sorted_len && self.sorted[index] <= value {
+            index += 1;
+        }
+        let mut j = sorted_len;
+        while j > index {
+            self.sorted[j] = self.sorted[j - 1];
+            j -= 1;
+        }
+        self.sorted[index] = value;
+
+        if self.count < DEFAULT_RANGE_LENGTH {
+            return None;
+        }
+
+        Some((
+            (self.sorted[9] + self.sorted[10]) * 0.5,
+            self.sum / DEFAULT_RANGE_LENGTH as f64,
+        ))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct VolumeWindow6 {
+    up_ring: [f64; DEFAULT_CONFIRMATION_LENGTH + 1],
+    down_ring: [f64; DEFAULT_CONFIRMATION_LENGTH + 1],
+    head: usize,
+    count: usize,
+    up_sum: f64,
+    down_sum: f64,
+}
+
+impl VolumeWindow6 {
+    #[inline(always)]
+    fn new() -> Self {
+        Self {
+            up_ring: [0.0; DEFAULT_CONFIRMATION_LENGTH + 1],
+            down_ring: [0.0; DEFAULT_CONFIRMATION_LENGTH + 1],
+            head: 0,
+            count: 0,
+            up_sum: 0.0,
+            down_sum: 0.0,
+        }
+    }
+
+    #[inline(always)]
+    fn reset(&mut self) {
+        self.head = 0;
+        self.count = 0;
+        self.up_sum = 0.0;
+        self.down_sum = 0.0;
+    }
+
+    #[inline(always)]
+    fn push(&mut self, up: f64, down: f64) {
+        if self.count == DEFAULT_CONFIRMATION_LENGTH + 1 {
+            self.up_sum -= self.up_ring[self.head];
+            self.down_sum -= self.down_ring[self.head];
+            self.up_ring[self.head] = up;
+            self.down_ring[self.head] = down;
+            self.head += 1;
+            if self.head == DEFAULT_CONFIRMATION_LENGTH + 1 {
+                self.head = 0;
+            }
+        } else {
+            self.up_ring[self.count] = up;
+            self.down_ring[self.count] = down;
+            self.count += 1;
+            if self.count == DEFAULT_CONFIRMATION_LENGTH + 1 {
+                self.head = 0;
+            }
+        }
+        self.up_sum += up;
+        self.down_sum += down;
+    }
+
+    #[inline(always)]
+    fn is_full(&self) -> bool {
+        self.count == DEFAULT_CONFIRMATION_LENGTH + 1
+    }
+}
+
+#[derive(Clone, Debug)]
+struct BoolWindow6 {
+    ring: [bool; DEFAULT_CONFIRMATION_LENGTH + 1],
+    head: usize,
+    count: usize,
+}
+
+impl BoolWindow6 {
+    #[inline(always)]
+    fn new() -> Self {
+        Self {
+            ring: [false; DEFAULT_CONFIRMATION_LENGTH + 1],
+            head: 0,
+            count: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn reset(&mut self) {
+        self.head = 0;
+        self.count = 0;
+    }
+
+    #[inline(always)]
+    fn push(&mut self, value: bool) {
+        if self.count == DEFAULT_CONFIRMATION_LENGTH + 1 {
+            self.ring[self.head] = value;
+            self.head += 1;
+            if self.head == DEFAULT_CONFIRMATION_LENGTH + 1 {
+                self.head = 0;
+            }
+        } else {
+            self.ring[self.count] = value;
+            self.count += 1;
+            if self.count == DEFAULT_CONFIRMATION_LENGTH + 1 {
+                self.head = 0;
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn get_ago(&self, ago: usize) -> Option<bool> {
+        if ago >= self.count {
+            return None;
+        }
+        if self.count < DEFAULT_CONFIRMATION_LENGTH + 1 {
+            return Some(self.ring[self.count - 1 - ago]);
+        }
+        let latest = if self.head == 0 {
+            DEFAULT_CONFIRMATION_LENGTH
+        } else {
+            self.head - 1
+        };
+        let index = if latest >= ago {
+            latest - ago
+        } else {
+            latest + DEFAULT_CONFIRMATION_LENGTH + 1 - ago
+        };
+        Some(self.ring[index])
+    }
+
+    #[inline(always)]
+    fn is_full(&self) -> bool {
+        self.count == DEFAULT_CONFIRMATION_LENGTH + 1
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RangeBreakoutSignalsDefaultState {
+    dist_window: MedianSmaWindow20,
+    atr_state: AtrState,
+    volume_window: VolumeWindow6,
+    under_window: BoolWindow6,
+    prev_volatility: f64,
+    active_range: Option<ActiveRange>,
+}
+
+impl RangeBreakoutSignalsDefaultState {
+    #[inline(always)]
+    fn new() -> Self {
+        Self {
+            dist_window: MedianSmaWindow20::new(),
+            atr_state: AtrState::new(ATR_LENGTH),
+            volume_window: VolumeWindow6::new(),
+            under_window: BoolWindow6::new(),
+            prev_volatility: f64::NAN,
+            active_range: None,
+        }
+    }
+
+    #[inline(always)]
+    fn reset(&mut self) {
+        self.dist_window.reset();
+        self.atr_state.reset();
+        self.volume_window.reset();
+        self.under_window.reset();
+        self.prev_volatility = f64::NAN;
+        self.active_range = None;
+    }
+
+    #[inline(always)]
+    fn update(
+        &mut self,
+        open: f64,
+        high: f64,
+        low: f64,
+        close: f64,
+        volume: f64,
+    ) -> Option<(f64, f64, f64, f64, f64, f64)> {
+        if !open.is_finite()
+            || !high.is_finite()
+            || !low.is_finite()
+            || !close.is_finite()
+            || !volume.is_finite()
+        {
+            self.reset();
+            return None;
+        }
+
+        let previous_volatility = self.prev_volatility;
+        let atr = self.atr_state.update(high, low, close);
+        let volatility = self
+            .dist_window
+            .push((close - open).abs())
+            .and_then(|(median, mean)| (median > 0.0).then_some(mean / median));
+
+        let current_isunder = volatility.is_some_and(|value| value < VOLATILITY_THRESHOLD);
+        let (up_volume, down_volume) = RangeBreakoutSignalsState::split_volume(open, close, volume);
+        self.volume_window.push(up_volume, down_volume);
+        self.under_window.push(current_isunder);
+
+        let ready = volatility.is_some()
+            && atr.is_some()
+            && previous_volatility.is_finite()
+            && self.volume_window.is_full()
+            && self.under_window.is_full();
+
+        if ready {
+            let under_ago = self
+                .under_window
+                .get_ago(DEFAULT_CONFIRMATION_LENGTH)
+                .unwrap_or(false);
+            let current_volatility = volatility.unwrap_or(f64::NAN);
+            let crossed_under = previous_volatility >= VOLATILITY_THRESHOLD
+                && current_volatility < VOLATILITY_THRESHOLD;
+            if self.active_range.is_none() && crossed_under && current_isunder && under_ago {
+                let offset = atr.unwrap_or(f64::NAN) * ATR_MULTIPLIER;
+                self.active_range = Some(ActiveRange {
+                    top: close + offset,
+                    bottom: close - offset,
+                });
+            }
+        }
+
+        let mut range_top = f64::NAN;
+        let mut range_bottom = f64::NAN;
+        let mut bullish = f64::NAN;
+        let mut extra_bullish = f64::NAN;
+        let mut bearish = f64::NAN;
+        let mut extra_bearish = f64::NAN;
+
+        if let Some(range) = self.active_range {
+            range_top = range.top;
+            range_bottom = range.bottom;
+
+            if close > range.top || close < range.bottom {
+                let bullish_break = close > range.top;
+                let location = RangeBreakoutSignalsState::location(range, bullish_break);
+                let bullish_volume = self.volume_window.up_sum > self.volume_window.down_sum;
+
+                if bullish_break {
+                    bullish = location;
+                    if bullish_volume {
+                        extra_bullish = location;
+                    }
+                } else {
+                    bearish = location;
+                    if !bullish_volume {
+                        extra_bearish = location;
+                    }
+                }
+
+                self.active_range = None;
+            }
+        }
+
+        self.prev_volatility = volatility.unwrap_or(f64::NAN);
+
+        ready.then_some((
+            range_top,
+            range_bottom,
+            bullish,
+            extra_bullish,
+            bearish,
+            extra_bearish,
+        ))
     }
 }
 
@@ -650,6 +1003,18 @@ impl RangeBreakoutSignalsState {
             return None;
         }
 
+        self.update_finite(open, high, low, close, volume)
+    }
+
+    #[inline(always)]
+    fn update_finite(
+        &mut self,
+        open: f64,
+        high: f64,
+        low: f64,
+        close: f64,
+        volume: f64,
+    ) -> Option<(f64, f64, f64, f64, f64, f64)> {
         let previous_volatility = self.prev_volatility;
         let atr = self.atr_state.update(high, low, close);
         let volatility = self
@@ -919,6 +1284,30 @@ fn compute_row(
                 got: out.len(),
             });
         }
+    }
+
+    if range_length == DEFAULT_RANGE_LENGTH && confirmation_length == DEFAULT_CONFIRMATION_LENGTH {
+        let mut state = RangeBreakoutSignalsDefaultState::new();
+        for i in 0..expected {
+            if let Some((rt, rb, b, eb, br, ebr)) =
+                state.update(open[i], high[i], low[i], close[i], volume[i])
+            {
+                range_top_out[i] = rt;
+                range_bottom_out[i] = rb;
+                bullish_out[i] = b;
+                extra_bullish_out[i] = eb;
+                bearish_out[i] = br;
+                extra_bearish_out[i] = ebr;
+            } else {
+                range_top_out[i] = f64::NAN;
+                range_bottom_out[i] = f64::NAN;
+                bullish_out[i] = f64::NAN;
+                extra_bullish_out[i] = f64::NAN;
+                bearish_out[i] = f64::NAN;
+                extra_bearish_out[i] = f64::NAN;
+            }
+        }
+        return Ok(());
     }
 
     let mut state = RangeBreakoutSignalsState::new(range_length, confirmation_length);
@@ -1943,6 +2332,65 @@ mod tests {
         ))?;
         assert!(out.range_top.iter().any(|value| value.is_finite()));
         assert!(out.range_bottom.iter().any(|value| value.is_finite()));
+        Ok(())
+    }
+
+    fn assert_same(lhs: &[f64], rhs: &[f64]) {
+        assert_eq!(lhs.len(), rhs.len());
+        for (idx, (&a, &b)) in lhs.iter().zip(rhs.iter()).enumerate() {
+            if a.is_nan() && b.is_nan() {
+                continue;
+            }
+            assert_eq!(a, b, "mismatch at {idx}: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn default_fixed_state_matches_stream() -> Result<(), Box<dyn StdError>> {
+        let (open, high, low, close, volume) = sample_ohlcv();
+        let out = range_breakout_signals(&RangeBreakoutSignalsInput::from_slices(
+            &open,
+            &high,
+            &low,
+            &close,
+            &volume,
+            RangeBreakoutSignalsParams::default(),
+        ))?;
+        let mut stream =
+            RangeBreakoutSignalsStream::try_new(RangeBreakoutSignalsParams::default())?;
+        let mut range_top = Vec::with_capacity(close.len());
+        let mut range_bottom = Vec::with_capacity(close.len());
+        let mut bullish = Vec::with_capacity(close.len());
+        let mut extra_bullish = Vec::with_capacity(close.len());
+        let mut bearish = Vec::with_capacity(close.len());
+        let mut extra_bearish = Vec::with_capacity(close.len());
+
+        for i in 0..close.len() {
+            if let Some((rt, rb, b, eb, br, ebr)) =
+                stream.update(open[i], high[i], low[i], close[i], volume[i])
+            {
+                range_top.push(rt);
+                range_bottom.push(rb);
+                bullish.push(b);
+                extra_bullish.push(eb);
+                bearish.push(br);
+                extra_bearish.push(ebr);
+            } else {
+                range_top.push(f64::NAN);
+                range_bottom.push(f64::NAN);
+                bullish.push(f64::NAN);
+                extra_bullish.push(f64::NAN);
+                bearish.push(f64::NAN);
+                extra_bearish.push(f64::NAN);
+            }
+        }
+
+        assert_same(&out.range_top, &range_top);
+        assert_same(&out.range_bottom, &range_bottom);
+        assert_same(&out.bullish, &bullish);
+        assert_same(&out.extra_bullish, &extra_bullish);
+        assert_same(&out.bearish, &bearish);
+        assert_same(&out.extra_bearish, &extra_bearish);
         Ok(())
     }
 }

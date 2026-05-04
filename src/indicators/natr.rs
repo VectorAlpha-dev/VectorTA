@@ -249,7 +249,7 @@ pub fn natr_with_kernel(input: &NatrInput, kernel: Kernel) -> Result<NatrOutput,
     let mut out = alloc_with_nan_prefix(len, first_valid_idx + period - 1);
 
     let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => natr_auto_kernel(),
         other => other,
     };
 
@@ -271,6 +271,17 @@ pub fn natr_with_kernel(input: &NatrInput, kernel: Kernel) -> Result<NatrOutput,
     }
 
     Ok(NatrOutput { values: out })
+}
+
+#[inline(always)]
+fn natr_auto_kernel() -> Kernel {
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            return Kernel::Avx2;
+        }
+    }
+    Kernel::Scalar
 }
 
 #[inline]
@@ -2372,7 +2383,7 @@ pub fn natr_into_slice(dst: &mut [f64], input: &NatrInput, kern: Kernel) -> Resu
     }
 
     let chosen = match kern {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => natr_auto_kernel(),
         other => other,
     };
 

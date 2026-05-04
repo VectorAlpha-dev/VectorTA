@@ -15,7 +15,8 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
+    alloc_uninit_f64, alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -415,11 +416,23 @@ fn compute_vqi_point(
 #[inline(always)]
 fn compute_vqi_sum_series(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
     let len = close.len();
-    let mut out = vec![0.0; len];
+    let mut out = alloc_uninit_f64(len);
+    compute_vqi_sum_series_into(open, high, low, close, &mut out);
+    out
+}
+
+#[inline(always)]
+fn compute_vqi_sum_series_into(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    out: &mut [f64],
+) {
     let mut prev_close = f64::NAN;
     let mut prev_vqi_t = 0.0;
     let mut cumulative = 0.0;
-    for i in 0..len {
+    for i in 0..close.len() {
         let (vqi_t, raw) =
             compute_vqi_point(prev_close, prev_vqi_t, open[i], high[i], low[i], close[i]);
         prev_vqi_t = vqi_t;
@@ -427,7 +440,6 @@ fn compute_vqi_sum_series(open: &[f64], high: &[f64], low: &[f64], close: &[f64]
         cumulative += raw;
         out[i] = cumulative;
     }
-    out
 }
 
 #[inline(always)]
@@ -471,11 +483,10 @@ pub fn volatility_quality_index_with_kernel(
         other => other.to_non_batch(),
     };
     let _ = chosen;
-    let vqi_sum = compute_vqi_sum_series(open, high, low, close);
-    let mut fast_sma =
-        alloc_with_nan_prefix(close.len(), fast_length.saturating_sub(1).min(close.len()));
-    let mut slow_sma =
-        alloc_with_nan_prefix(close.len(), slow_length.saturating_sub(1).min(close.len()));
+    let mut vqi_sum = alloc_uninit_f64(close.len());
+    compute_vqi_sum_series_into(open, high, low, close, &mut vqi_sum);
+    let mut fast_sma = alloc_uninit_f64(close.len());
+    let mut slow_sma = alloc_uninit_f64(close.len());
     sma_into(&vqi_sum, fast_length, &mut fast_sma);
     sma_into(&vqi_sum, slow_length, &mut slow_sma);
     Ok(VolatilityQualityIndexOutput {
@@ -537,10 +548,9 @@ pub fn volatility_quality_index_into_slice(
         other => other.to_non_batch(),
     };
     let _ = chosen;
-    let vqi_sum = compute_vqi_sum_series(open, high, low, close);
-    out_vqi_sum.copy_from_slice(&vqi_sum);
-    sma_into(&vqi_sum, fast_length, out_fast_sma);
-    sma_into(&vqi_sum, slow_length, out_slow_sma);
+    compute_vqi_sum_series_into(open, high, low, close, out_vqi_sum);
+    sma_into(out_vqi_sum, fast_length, out_fast_sma);
+    sma_into(out_vqi_sum, slow_length, out_slow_sma);
     Ok(())
 }
 

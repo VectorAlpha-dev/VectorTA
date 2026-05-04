@@ -8,12 +8,21 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
 
+#[inline(always)]
+fn medium_ad_candle_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    if source.eq_ignore_ascii_case("close") {
+        &candles.close
+    } else {
+        source_type(candles, source)
+    }
+}
+
 impl<'a> AsRef<[f64]> for MediumAdInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             MediumAdData::Slice(slice) => slice,
-            MediumAdData::Candles { candles, source } => source_type(candles, source),
+            MediumAdData::Candles { candles, source } => medium_ad_candle_source(candles, source),
         }
     }
 }
@@ -177,7 +186,7 @@ pub fn medium_ad_with_kernel(
     kernel: Kernel,
 ) -> Result<MediumAdOutput, MediumAdError> {
     let data: &[f64] = match &input.data {
-        MediumAdData::Candles { candles, source } => source_type(candles, source),
+        MediumAdData::Candles { candles, source } => medium_ad_candle_source(candles, source),
         MediumAdData::Slice(sl) => sl,
     };
 
@@ -231,7 +240,7 @@ pub fn medium_ad_with_kernel(
 #[inline]
 pub fn medium_ad_into(input: &MediumAdInput, out: &mut [f64]) -> Result<(), MediumAdError> {
     let data: &[f64] = match &input.data {
-        MediumAdData::Candles { candles, source } => source_type(candles, source),
+        MediumAdData::Candles { candles, source } => medium_ad_candle_source(candles, source),
         MediumAdData::Slice(sl) => sl,
     };
 
@@ -289,6 +298,66 @@ pub fn medium_ad_into(input: &MediumAdInput, out: &mut [f64]) -> Result<(), Medi
     Ok(())
 }
 
+#[inline(always)]
+fn medium_ad_abs(x: f64) -> f64 {
+    f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
+}
+
+#[inline(always)]
+fn medium_ad_median5(mut a: f64, mut b: f64, mut c: f64, mut d: f64, mut e: f64) -> f64 {
+    if b < a {
+        core::mem::swap(&mut a, &mut b);
+    }
+    if d < c {
+        core::mem::swap(&mut c, &mut d);
+    }
+    if c < a {
+        core::mem::swap(&mut a, &mut c);
+        core::mem::swap(&mut b, &mut d);
+    }
+    if e < b {
+        core::mem::swap(&mut b, &mut e);
+    }
+    if c < b {
+        core::mem::swap(&mut b, &mut c);
+    }
+    if e < d {
+        core::mem::swap(&mut d, &mut e);
+    }
+    if d < c {
+        core::mem::swap(&mut c, &mut d);
+    }
+    c
+}
+
+#[inline(always)]
+fn medium_ad_period5(data: &[f64], first_valid: usize, out: &mut [f64]) {
+    let len = data.len();
+    let warm = first_valid + 4;
+    for i in warm..len {
+        unsafe {
+            let a0 = *data.get_unchecked(i - 4);
+            let a1 = *data.get_unchecked(i - 3);
+            let a2 = *data.get_unchecked(i - 2);
+            let a3 = *data.get_unchecked(i - 1);
+            let a4 = *data.get_unchecked(i);
+            if (a0 != a0) | (a1 != a1) | (a2 != a2) | (a3 != a3) | (a4 != a4) {
+                *out.get_unchecked_mut(i) = f64::NAN;
+                continue;
+            }
+
+            let med = medium_ad_median5(a0, a1, a2, a3, a4);
+            *out.get_unchecked_mut(i) = medium_ad_median5(
+                medium_ad_abs(a0 - med),
+                medium_ad_abs(a1 - med),
+                medium_ad_abs(a2 - med),
+                medium_ad_abs(a3 - med),
+                medium_ad_abs(a4 - med),
+            );
+        }
+    }
+}
+
 #[inline]
 pub fn medium_ad_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
     use core::cmp::Ordering;
@@ -324,6 +393,10 @@ pub fn medium_ad_scalar(data: &[f64], period: usize, first_valid: usize, out: &m
     }
 
     let len = data.len();
+    if period == 5 {
+        medium_ad_period5(data, first_valid, out);
+        return;
+    }
     if period == 1 {
         let start = first_valid;
         for i in start..len {
@@ -403,6 +476,10 @@ pub fn medium_ad_scalar(data: &[f64], period: usize, first_valid: usize, out: &m
 #[inline]
 pub fn medium_ad_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
     use core::cmp::Ordering;
+    if period == 5 {
+        medium_ad_period5(data, first_valid, out);
+        return;
+    }
     unsafe {
         let len = data.len();
 
@@ -506,6 +583,10 @@ pub fn medium_ad_avx512(data: &[f64], period: usize, first_valid: usize, out: &m
 #[inline]
 pub fn medium_ad_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
     use core::cmp::Ordering;
+    if period == 5 {
+        medium_ad_period5(data, first_valid, out);
+        return;
+    }
     unsafe {
         let len = data.len();
 
@@ -675,7 +756,7 @@ impl MediumAdBatchBuilder {
         c: &Candles,
         src: &str,
     ) -> Result<MediumAdBatchOutput, MediumAdError> {
-        let slice = source_type(c, src);
+        let slice = medium_ad_candle_source(c, src);
         self.apply_slice(slice)
     }
 
@@ -995,6 +1076,11 @@ unsafe fn medium_ad_row_scalar(data: &[f64], first: usize, period: usize, out: &
             let v = *data.get_unchecked(i);
             *out.get_unchecked_mut(i) = if v.is_nan() { f64::NAN } else { 0.0 };
         }
+        return;
+    }
+
+    if period == 5 {
+        medium_ad_period5(data, first, out);
         return;
     }
 
@@ -2365,7 +2451,7 @@ pub fn medium_ad_into_slice(
     kern: Kernel,
 ) -> Result<(), MediumAdError> {
     let data = match &input.data {
-        MediumAdData::Candles { candles, source } => source_type(candles, source),
+        MediumAdData::Candles { candles, source } => medium_ad_candle_source(candles, source),
         MediumAdData::Slice(s) => s,
     };
     let period = input.params.period.unwrap_or(5);

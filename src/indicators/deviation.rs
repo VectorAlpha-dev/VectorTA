@@ -35,17 +35,7 @@ use thiserror::Error;
 
 #[inline(always)]
 fn deviation_auto_kernel() -> Kernel {
-    let k = detect_best_kernel();
-    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-    {
-        if k == Kernel::Avx512
-            && std::arch::is_x86_feature_detected!("avx2")
-            && std::arch::is_x86_feature_detected!("fma")
-        {
-            return Kernel::Avx2;
-        }
-    }
-    k
+    detect_best_kernel()
 }
 
 impl<'a> AsRef<[f64]> for DeviationInput<'a> {
@@ -53,8 +43,24 @@ impl<'a> AsRef<[f64]> for DeviationInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             DeviationData::Slice(slice) => slice,
-            DeviationData::Candles { candles, source } => source_type(candles, source),
+            DeviationData::Candles { candles, source } => deviation_source_type(candles, source),
         }
+    }
+}
+
+#[inline(always)]
+fn deviation_source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "close" => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
     }
 }
 
@@ -1070,6 +1076,9 @@ fn standard_deviation_rolling_into(
             valid: data.len() - first,
         });
     }
+    if data[first..].iter().all(|x| x.is_finite()) {
+        return standard_deviation_rolling_finite_into(data, period, first, out);
+    }
 
     let n = period as f64;
     let warm = first + period - 1;
@@ -1193,6 +1202,100 @@ fn standard_deviation_rolling_into(
             }
             out[i] = var.sqrt();
         }
+        i += 1;
+    }
+    Ok(())
+}
+
+#[inline]
+fn standard_deviation_rolling_finite_into(
+    data: &[f64],
+    period: usize,
+    first: usize,
+    out: &mut [f64],
+) -> Result<(), DeviationError> {
+    let n = period as f64;
+    let warm = first + period - 1;
+
+    let mut sum = 0.0f64;
+    let mut sumsq = 0.0f64;
+    let end0 = first + period;
+    let mut j = first;
+    while j < end0 {
+        let v = unsafe { *data.get_unchecked(j) };
+        sum += v;
+        sumsq = v.mul_add(v, sumsq);
+        j += 1;
+    }
+
+    if !sum.is_finite() || !sumsq.is_finite() {
+        out[warm] = f64::NAN;
+    } else {
+        let mut mean = sum / n;
+        let mut var = (sumsq / n) - mean * mean;
+        let scale = (sumsq / n).abs();
+        if var.abs() / scale.max(1e-30) < 1e-10 {
+            let mut v2 = 0.0;
+            let mut k = first;
+            while k <= warm {
+                let x = unsafe { *data.get_unchecked(k) };
+                let d = x - mean;
+                v2 = d.mul_add(d, v2);
+                k += 1;
+            }
+            var = v2 / n;
+        }
+        if var < 0.0 {
+            var = 0.0;
+        }
+        out[warm] = var.sqrt();
+    }
+
+    let mut i = warm + 1;
+    while i < data.len() {
+        let v_in = unsafe { *data.get_unchecked(i) };
+        let v_out = unsafe { *data.get_unchecked(i - period) };
+        sum += v_in;
+        sumsq = v_in.mul_add(v_in, sumsq);
+        sum -= v_out;
+        sumsq -= v_out * v_out;
+
+        let start = i + 1 - period;
+        if !sum.is_finite() || !sumsq.is_finite() {
+            sum = 0.0;
+            sumsq = 0.0;
+            let mut k = start;
+            while k <= i {
+                let x = unsafe { *data.get_unchecked(k) };
+                sum += x;
+                sumsq = x.mul_add(x, sumsq);
+                k += 1;
+            }
+            if !sum.is_finite() || !sumsq.is_finite() {
+                out[i] = f64::NAN;
+                i += 1;
+                continue;
+            }
+        }
+
+        let mean = sum / n;
+        let mut var = (sumsq / n) - mean * mean;
+        let scale = (sumsq / n).abs();
+        if var.abs() / scale.max(1e-30) < 1e-10 {
+            let mut v2 = 0.0;
+            let mut k = start;
+            while k <= i {
+                let x = unsafe { *data.get_unchecked(k) };
+                let d = x - mean;
+                v2 = d.mul_add(d, v2);
+                k += 1;
+            }
+            var = v2 / n;
+        }
+        if var < 0.0 {
+            var = 0.0;
+        }
+        out[i] = var.sqrt();
         i += 1;
     }
     Ok(())

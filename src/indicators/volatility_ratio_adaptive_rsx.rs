@@ -15,8 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -28,13 +27,33 @@ use std::error::Error;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
 
+const DEFAULT_PERIOD: usize = 14;
+const DEFAULT_SPEED: f64 = 0.5;
+const DEFAULT_SOURCE: &str = "close";
+
+#[inline(always)]
+fn source_slice<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        DEFAULT_SOURCE => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
+    }
+}
+
 impl<'a> AsRef<[f64]> for VolatilityRatioAdaptiveRsxInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             VolatilityRatioAdaptiveRsxData::Slice(slice) => slice,
             VolatilityRatioAdaptiveRsxData::Candles { candles, source } => {
-                source_type(candles, source)
+                source_slice(candles, source)
             }
         }
     }
@@ -68,8 +87,8 @@ pub struct VolatilityRatioAdaptiveRsxParams {
 impl Default for VolatilityRatioAdaptiveRsxParams {
     fn default() -> Self {
         Self {
-            period: Some(14),
-            speed: Some(0.5),
+            period: Some(DEFAULT_PERIOD),
+            speed: Some(DEFAULT_SPEED),
         }
     }
 }
@@ -105,19 +124,19 @@ impl<'a> VolatilityRatioAdaptiveRsxInput<'a> {
     pub fn with_default_candles(candles: &'a Candles) -> Self {
         Self::from_candles(
             candles,
-            "close",
+            DEFAULT_SOURCE,
             VolatilityRatioAdaptiveRsxParams::default(),
         )
     }
 
     #[inline]
     pub fn get_period(&self) -> usize {
-        self.params.period.unwrap_or(14)
+        self.params.period.unwrap_or(DEFAULT_PERIOD)
     }
 
     #[inline]
     pub fn get_speed(&self) -> f64 {
-        self.params.speed.unwrap_or(0.5)
+        self.params.speed.unwrap_or(DEFAULT_SPEED)
     }
 }
 
@@ -171,7 +190,7 @@ impl VolatilityRatioAdaptiveRsxBuilder {
             period: self.period,
             speed: self.speed,
         };
-        let input = VolatilityRatioAdaptiveRsxInput::from_candles(candles, "close", params);
+        let input = VolatilityRatioAdaptiveRsxInput::from_candles(candles, DEFAULT_SOURCE, params);
         volatility_ratio_adaptive_rsx_with_kernel(&input, self.kernel)
     }
 
@@ -631,10 +650,7 @@ fn vrarsx_prepare<'a>(
         return Err(VolatilityRatioAdaptiveRsxError::NotEnoughValidData { needed, valid });
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other.to_non_batch(),
-    };
+    let chosen = kernel.to_non_batch();
     Ok((data, period, speed, first, chosen))
 }
 
@@ -651,8 +667,9 @@ pub fn volatility_ratio_adaptive_rsx_with_kernel(
     kernel: Kernel,
 ) -> Result<VolatilityRatioAdaptiveRsxOutput, VolatilityRatioAdaptiveRsxError> {
     let (data, period, speed, first, _chosen) = vrarsx_prepare(input, kernel)?;
-    let mut line = alloc_with_nan_prefix(data.len(), line_warmup(period, first));
-    let mut signal = alloc_with_nan_prefix(data.len(), signal_warmup(period, first));
+    let _ = (line_warmup(period, first), signal_warmup(period, first));
+    let mut line = alloc_uninit_f64(data.len());
+    let mut signal = alloc_uninit_f64(data.len());
     vrarsx_compute_into(data, period, speed, &mut line, &mut signal);
     Ok(VolatilityRatioAdaptiveRsxOutput { line, signal })
 }
@@ -671,8 +688,6 @@ pub fn volatility_ratio_adaptive_rsx_into_slice(
             got: dst_line.len().max(dst_signal.len()),
         });
     }
-    dst_line.fill(f64::NAN);
-    dst_signal.fill(f64::NAN);
     vrarsx_compute_into(data, period, speed, dst_line, dst_signal);
     Ok(())
 }

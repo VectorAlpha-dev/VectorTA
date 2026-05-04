@@ -33,10 +33,26 @@ use thiserror::Error;
 impl<'a> AsRef<[f64]> for MabInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
-        match &self.data {
-            MabData::Slice(slice) => slice,
-            MabData::Candles { candles, source } => source_type(candles, source),
-        }
+        mab_data_slice(&self.data)
+    }
+}
+
+#[inline(always)]
+fn mab_data_slice<'a>(data: &'a MabData<'a>) -> &'a [f64] {
+    match data {
+        MabData::Slice(slice) => slice,
+        MabData::Candles { candles, source } => match *source {
+            "open" => &candles.open,
+            "high" => &candles.high,
+            "low" => &candles.low,
+            "close" => &candles.close,
+            "volume" => &candles.volume,
+            "hl2" => &candles.hl2,
+            "hlc3" => &candles.hlc3,
+            "ohlc4" => &candles.ohlc4,
+            "hlcc4" | "hlcc" => &candles.hlcc4,
+            _ => source_type(candles, source),
+        },
     }
 }
 
@@ -305,6 +321,30 @@ pub fn mab_into_slice(
     let fast_ma_type = input.get_fast_ma_type();
     let slow_ma_type = input.get_slow_ma_type();
 
+    let warmup_end = (warmup + 1).min(n);
+    for dst in [&mut *upper_dst, &mut *middle_dst, &mut *lower_dst] {
+        for v in &mut dst[..warmup_end] {
+            *v = f64::NAN;
+        }
+    }
+
+    if fast_ma_type == "sma" && slow_ma_type == "sma" {
+        unsafe {
+            mab_sma_sma_into(
+                data,
+                first,
+                fast_period,
+                slow_period,
+                devup,
+                devdn,
+                upper_dst,
+                middle_dst,
+                lower_dst,
+            );
+        }
+        return Ok(());
+    }
+
     let fast_ma = match fast_ma_type {
         "ema" => {
             let params = EmaParams {
@@ -355,13 +395,6 @@ pub fn mab_into_slice(
         }
     };
 
-    let warmup_end = (warmup + 1).min(n);
-    for dst in [&mut *upper_dst, &mut *middle_dst, &mut *lower_dst] {
-        for v in &mut dst[..warmup_end] {
-            *v = f64::NAN;
-        }
-    }
-
     mab_compute_into(
         &fast_ma,
         &slow_ma,
@@ -389,8 +422,7 @@ pub fn mab_into(
 }
 
 pub fn mab(input: &MabInput) -> Result<MabOutput, MabError> {
-    let (_data, _warmup, kernel, _fast, _slow, _devup, _devdn) = mab_prepare(input, Kernel::Auto)?;
-    mab_with_kernel(input, kernel)
+    mab_with_kernel(input, Kernel::Auto)
 }
 
 pub fn mab_with_kernel(input: &MabInput, kernel: Kernel) -> Result<MabOutput, MabError> {
@@ -474,6 +506,100 @@ mod into_parity_tests {
                 base.lowerband[i],
                 lo[i]
             );
+        }
+    }
+}
+
+#[inline(always)]
+unsafe fn mab_sma_sma_into(
+    data: &[f64],
+    first: usize,
+    fast_period: usize,
+    slow_period: usize,
+    devup: f64,
+    devdn: f64,
+    upper: &mut [f64],
+    mid: &mut [f64],
+    lower: &mut [f64],
+) {
+    let n = data.len();
+    let max_period = fast_period.max(slow_period);
+    let diff_start = first + max_period;
+    let first_output = diff_start + fast_period - 1;
+    if diff_start >= n {
+        return;
+    }
+
+    let dp = data.as_ptr();
+    let up = upper.as_mut_ptr();
+    let mp = mid.as_mut_ptr();
+    let lo = lower.as_mut_ptr();
+
+    let mut fast_sum = 0.0;
+    let mut k = 0usize;
+    while k < fast_period {
+        fast_sum += *dp.add(first + k);
+        k += 1;
+    }
+
+    let mut slow_sum = 0.0;
+    k = 0;
+    while k < slow_period {
+        slow_sum += *dp.add(first + k);
+        k += 1;
+    }
+
+    let mut fast_idx = first + fast_period - 1;
+    while fast_idx < diff_start {
+        fast_idx += 1;
+        fast_sum += *dp.add(fast_idx) - *dp.add(fast_idx - fast_period);
+    }
+
+    let mut slow_idx = first + slow_period - 1;
+    while slow_idx < diff_start {
+        slow_idx += 1;
+        slow_sum += *dp.add(slow_idx) - *dp.add(slow_idx - slow_period);
+    }
+
+    let inv_fast = 1.0 / fast_period as f64;
+    let inv_slow = 1.0 / slow_period as f64;
+    let mut sq_ring = vec![0.0f64; fast_period];
+    let mut sq_count = 0usize;
+    let mut sq_head = 0usize;
+    let mut sum_sq = 0.0;
+
+    let mut i = diff_start;
+    while i < n {
+        let fast = fast_sum * inv_fast;
+        let slow = slow_sum * inv_slow;
+        let diff = fast - slow;
+        let sq = diff * diff;
+
+        if sq_count < fast_period {
+            *sq_ring.get_unchecked_mut(sq_count) = sq;
+            sum_sq += sq;
+            sq_count += 1;
+        } else {
+            let old = *sq_ring.get_unchecked(sq_head);
+            *sq_ring.get_unchecked_mut(sq_head) = sq;
+            sum_sq += sq - old;
+            sq_head += 1;
+            if sq_head == fast_period {
+                sq_head = 0;
+            }
+        }
+
+        if i >= first_output {
+            let dev = (sum_sq * inv_fast).sqrt();
+            *mp.add(i) = fast;
+            *up.add(i) = slow + devup * dev;
+            *lo.add(i) = slow - devdn * dev;
+        }
+
+        i += 1;
+        if i < n {
+            fast_sum += *dp.add(i) - *dp.add(i - fast_period);
+            slow_sum += *dp.add(i) - *dp.add(i - slow_period);
         }
     }
 }

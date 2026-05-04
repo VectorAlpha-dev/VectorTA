@@ -34,8 +34,24 @@ impl<'a> AsRef<[f64]> for AlligatorInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             AlligatorData::Slice(slice) => slice,
-            AlligatorData::Candles { candles, source } => source_type(candles, source),
+            AlligatorData::Candles { candles, source } => alligator_source(candles, source),
         }
+    }
+}
+
+#[inline(always)]
+fn alligator_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => candles.open.as_slice(),
+        "high" => candles.high.as_slice(),
+        "low" => candles.low.as_slice(),
+        "close" => candles.close.as_slice(),
+        "volume" => candles.volume.as_slice(),
+        "hl2" => candles.hl2.as_slice(),
+        "hlc3" => candles.hlc3.as_slice(),
+        "ohlc4" => candles.ohlc4.as_slice(),
+        "hlcc4" | "hlcc" => candles.hlcc4.as_slice(),
+        _ => source_type(candles, source),
     }
 }
 
@@ -53,6 +69,13 @@ pub struct AlligatorOutput {
     pub jaw: Vec<f64>,
     pub teeth: Vec<f64>,
     pub lips: Vec<f64>,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum AlligatorOutputField {
+    Jaw,
+    Teeth,
+    Lips,
 }
 
 #[derive(Debug, Clone)]
@@ -279,7 +302,7 @@ pub fn alligator_with_kernel(
     kernel: Kernel,
 ) -> Result<AlligatorOutput, AlligatorError> {
     let data: &[f64] = match &input.data {
-        AlligatorData::Candles { candles, source } => source_type(candles, source),
+        AlligatorData::Candles { candles, source } => alligator_source(candles, source),
         AlligatorData::Slice(sl) => sl,
     };
     if data.is_empty() {
@@ -341,6 +364,8 @@ pub fn alligator_with_kernel(
 
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Scalar,
         other => other,
     };
     unsafe {
@@ -384,6 +409,145 @@ pub fn alligator_with_kernel(
         }
     }
 }
+
+#[inline(always)]
+unsafe fn alligator_smma_one_scalar(
+    data: &[f64],
+    period: usize,
+    offset: usize,
+    first: usize,
+    len: usize,
+    dst: &mut [f64],
+) -> f64 {
+    let mut sum = 0.0;
+    let mut value = 0.0;
+    let mut ready = false;
+    let scale = (period - 1) as f64;
+    let inv_period = 1.0 / period as f64;
+
+    for i in first..len {
+        let data_point = data[i];
+        if !ready {
+            if i < first + period {
+                sum += data_point;
+                if i == first + period - 1 {
+                    value = sum / period as f64;
+                    ready = true;
+                    let shifted_index = i + offset;
+                    if shifted_index < len {
+                        dst[shifted_index] = value;
+                    }
+                }
+            }
+        } else {
+            value = (value * scale + data_point) * inv_period;
+            let shifted_index = i + offset;
+            if shifted_index < len {
+                dst[shifted_index] = value;
+            }
+        }
+    }
+
+    value
+}
+
+#[inline]
+pub fn alligator_output_into_slice(
+    dst: &mut [f64],
+    input: &AlligatorInput,
+    kern: Kernel,
+    field: AlligatorOutputField,
+) -> Result<(), AlligatorError> {
+    let data: &[f64] = input.as_ref();
+    if data.is_empty() {
+        return Err(AlligatorError::EmptyInputData);
+    }
+    let len = data.len();
+    if dst.len() != len {
+        return Err(AlligatorError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
+        });
+    }
+
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(AlligatorError::AllValuesNaN)?;
+    let jp = input.get_jaw_period();
+    let jo = input.get_jaw_offset();
+    let tp = input.get_teeth_period();
+    let to = input.get_teeth_offset();
+    let lp = input.get_lips_period();
+    let lo = input.get_lips_offset();
+
+    if jp == 0 || jp > len {
+        return Err(AlligatorError::InvalidJawPeriod {
+            period: jp,
+            data_len: len,
+        });
+    }
+    if jo > len {
+        return Err(AlligatorError::InvalidJawOffset {
+            offset: jo,
+            data_len: len,
+        });
+    }
+    if tp == 0 || tp > len {
+        return Err(AlligatorError::InvalidTeethPeriod {
+            period: tp,
+            data_len: len,
+        });
+    }
+    if to > len {
+        return Err(AlligatorError::InvalidTeethOffset {
+            offset: to,
+            data_len: len,
+        });
+    }
+    if lp == 0 || lp > len {
+        return Err(AlligatorError::InvalidLipsPeriod {
+            period: lp,
+            data_len: len,
+        });
+    }
+    if lo > len {
+        return Err(AlligatorError::InvalidLipsOffset {
+            offset: lo,
+            data_len: len,
+        });
+    }
+
+    let needed = jp.max(tp).max(lp);
+    let valid = len - first;
+    if valid < needed {
+        return Err(AlligatorError::NotEnoughValidData { needed, valid });
+    }
+
+    let (period, offset) = match field {
+        AlligatorOutputField::Jaw => (jp, jo),
+        AlligatorOutputField::Teeth => (tp, to),
+        AlligatorOutputField::Lips => (lp, lo),
+    };
+
+    let warmup = first + period - 1 + offset;
+    for v in &mut dst[..warmup.min(len)] {
+        *v = f64::NAN;
+    }
+
+    let _chosen = match kern {
+        Kernel::Auto => Kernel::Scalar,
+        Kernel::Scalar | Kernel::ScalarBatch => Kernel::Scalar,
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Scalar,
+    };
+
+    unsafe {
+        let _ = alligator_smma_one_scalar(data, period, offset, first, len, dst);
+    }
+
+    Ok(())
+}
+
 #[inline]
 pub unsafe fn alligator_scalar(
     data: &[f64],
@@ -2833,7 +2997,7 @@ pub fn alligator_into_slice(
     kern: Kernel,
 ) -> Result<(), AlligatorError> {
     let data: &[f64] = match &input.data {
-        AlligatorData::Candles { candles, source } => source_type(candles, source),
+        AlligatorData::Candles { candles, source } => alligator_source(candles, source),
         AlligatorData::Slice(sl) => sl,
     };
 
@@ -3208,6 +3372,8 @@ pub fn alligator_into_slices(
 
     let chosen = match kern {
         Kernel::Auto => Kernel::Scalar,
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Scalar,
         k => k,
     };
 

@@ -15,8 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -32,7 +31,11 @@ impl<'a> AsRef<[f64]> for RollingSkewnessKurtosisInput<'a> {
         match &self.data {
             RollingSkewnessKurtosisData::Slice(slice) => slice,
             RollingSkewnessKurtosisData::Candles { candles, source } => {
-                source_type(candles, source)
+                if *source == "close" {
+                    &candles.close
+                } else {
+                    source_type(candles, source)
+                }
             }
         }
     }
@@ -363,18 +366,21 @@ impl RollingSkewnessKurtosisStream {
             return None;
         }
 
+        if self.count == self.length {
+            self.sum1 += value - self.source_buf[self.head];
+        } else {
+            self.count += 1;
+            self.sum1 += value;
+        }
         self.source_buf[self.head] = value;
         self.head = (self.head + 1) % self.length;
-        if self.count < self.length {
-            self.count += 1;
-        }
 
         if self.count < self.length {
             return None;
         }
 
         let n = self.length as f64;
-        let mean = self.source_buf.iter().take(self.length).sum::<f64>() / n;
+        let mean = self.sum1 / n;
         let mut m2 = 0.0;
         let mut m3 = 0.0;
         let mut m4 = 0.0;
@@ -455,7 +461,7 @@ fn validate_common(
     data: &[f64],
     length: usize,
     smooth_length: usize,
-) -> Result<(), RollingSkewnessKurtosisError> {
+) -> Result<usize, RollingSkewnessKurtosisError> {
     if data.is_empty() {
         return Err(RollingSkewnessKurtosisError::EmptyInputData);
     }
@@ -471,7 +477,126 @@ fn validate_common(
             valid: max_run,
         });
     }
-    Ok(())
+    Ok(max_run)
+}
+
+#[inline(always)]
+fn update_sma3(
+    value: f64,
+    buf: &mut [f64; 3],
+    head: &mut usize,
+    count: &mut usize,
+    sum: &mut f64,
+) -> Option<f64> {
+    if *count < 3 {
+        buf[*head] = value;
+        *head += 1;
+        if *head == 3 {
+            *head = 0;
+        }
+        *count += 1;
+        *sum += value;
+        if *count < 3 {
+            None
+        } else {
+            Some(*sum / 3.0)
+        }
+    } else {
+        let old = buf[*head];
+        buf[*head] = value;
+        *head += 1;
+        if *head == 3 {
+            *head = 0;
+        }
+        *sum += value - old;
+        Some(*sum / 3.0)
+    }
+}
+
+#[inline(always)]
+fn compute_row_50_3_all_finite(data: &[f64], out_skewness: &mut [f64], out_kurtosis: &mut [f64]) {
+    let prefix = warmup_prefix(50, 3).min(data.len());
+    out_skewness[..prefix].fill(f64::NAN);
+    out_kurtosis[..prefix].fill(f64::NAN);
+
+    let mut source_buf = [0.0; 50];
+    let mut head = 0usize;
+    let mut count = 0usize;
+    let mut sum1 = 0.0;
+    let mut skew_buf = [0.0; 3];
+    let mut kurt_buf = [0.0; 3];
+    let mut skew_head = 0usize;
+    let mut kurt_head = 0usize;
+    let mut skew_count = 0usize;
+    let mut kurt_count = 0usize;
+    let mut skew_sum = 0.0;
+    let mut kurt_sum = 0.0;
+
+    for i in 0..data.len() {
+        let value = data[i];
+        if count == 50 {
+            sum1 += value - source_buf[head];
+        } else {
+            count += 1;
+            sum1 += value;
+        }
+        source_buf[head] = value;
+        head += 1;
+        if head == 50 {
+            head = 0;
+        }
+
+        if count < 50 {
+            continue;
+        }
+
+        let mean = sum1 / 50.0;
+        let mut m2 = 0.0;
+        let mut m3 = 0.0;
+        let mut m4 = 0.0;
+        for &window_value in &source_buf {
+            let dev = window_value - mean;
+            let dev2 = dev * dev;
+            m2 += dev2;
+            m3 += dev2 * dev;
+            m4 += dev2 * dev2;
+        }
+        m2 /= 50.0;
+        if !m2.is_finite() || m2 <= f64::EPSILON {
+            skew_head = 0;
+            kurt_head = 0;
+            skew_count = 0;
+            kurt_count = 0;
+            skew_sum = 0.0;
+            kurt_sum = 0.0;
+            if i >= prefix {
+                out_skewness[i] = f64::NAN;
+                out_kurtosis[i] = f64::NAN;
+            }
+            continue;
+        }
+        let sigma = m2.sqrt();
+        let skew_raw = (m3 / 50.0) / (sigma * sigma * sigma);
+        let kurt_raw = (m4 / 50.0) / (m2 * m2) - 3.0;
+        let skewness = update_sma3(
+            skew_raw,
+            &mut skew_buf,
+            &mut skew_head,
+            &mut skew_count,
+            &mut skew_sum,
+        );
+        let kurtosis = update_sma3(
+            kurt_raw,
+            &mut kurt_buf,
+            &mut kurt_head,
+            &mut kurt_count,
+            &mut kurt_sum,
+        );
+        if let (Some(skewness), Some(kurtosis)) = (skewness, kurtosis) {
+            out_skewness[i] = skewness;
+            out_kurtosis[i] = kurtosis;
+        }
+    }
 }
 
 #[inline(always)]
@@ -479,11 +604,23 @@ fn compute_row(
     data: &[f64],
     length: usize,
     smooth_length: usize,
+    all_finite: bool,
     out_skewness: &mut [f64],
     out_kurtosis: &mut [f64],
 ) {
-    out_skewness.fill(f64::NAN);
-    out_kurtosis.fill(f64::NAN);
+    if all_finite && length == 50 && smooth_length == 3 {
+        compute_row_50_3_all_finite(data, out_skewness, out_kurtosis);
+        return;
+    }
+
+    if all_finite {
+        let prefix = warmup_prefix(length, smooth_length).min(data.len());
+        out_skewness[..prefix].fill(f64::NAN);
+        out_kurtosis[..prefix].fill(f64::NAN);
+    } else {
+        out_skewness.fill(f64::NAN);
+        out_kurtosis.fill(f64::NAN);
+    }
     let mut stream = RollingSkewnessKurtosisStream::try_new(RollingSkewnessKurtosisParams {
         length: Some(length),
         smooth_length: Some(smooth_length),
@@ -494,6 +631,9 @@ fn compute_row(
         if let Some((skewness, kurtosis)) = stream.update(data[i]) {
             out_skewness[i] = skewness;
             out_kurtosis[i] = kurtosis;
+        } else if all_finite && i >= warmup_prefix(length, smooth_length) {
+            out_skewness[i] = f64::NAN;
+            out_kurtosis[i] = f64::NAN;
         }
     }
 }
@@ -511,17 +651,24 @@ pub fn rolling_skewness_kurtosis_with_kernel(
     let data = input.as_ref();
     let length = input.get_length();
     let smooth_length = input.get_smooth_length();
-    validate_common(data, length, smooth_length)?;
+    let max_run = validate_common(data, length, smooth_length)?;
 
     let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
     let prefix = warmup_prefix(length, smooth_length);
     let mut skewness = alloc_with_nan_prefix(data.len(), prefix);
     let mut kurtosis = alloc_with_nan_prefix(data.len(), prefix);
-    compute_row(data, length, smooth_length, &mut skewness, &mut kurtosis);
+    compute_row(
+        data,
+        length,
+        smooth_length,
+        max_run == data.len(),
+        &mut skewness,
+        &mut kurtosis,
+    );
     Ok(RollingSkewnessKurtosisOutput { skewness, kurtosis })
 }
 
@@ -534,7 +681,7 @@ pub fn rolling_skewness_kurtosis_into_slice(
     let data = input.as_ref();
     let length = input.get_length();
     let smooth_length = input.get_smooth_length();
-    validate_common(data, length, smooth_length)?;
+    let max_run = validate_common(data, length, smooth_length)?;
     if dst_skewness.len() != data.len() {
         return Err(RollingSkewnessKurtosisError::OutputLengthMismatch {
             expected: data.len(),
@@ -549,11 +696,18 @@ pub fn rolling_skewness_kurtosis_into_slice(
     }
 
     let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
-    compute_row(data, length, smooth_length, dst_skewness, dst_kurtosis);
+    compute_row(
+        data,
+        length,
+        smooth_length,
+        max_run == data.len(),
+        dst_skewness,
+        dst_kurtosis,
+    );
     Ok(())
 }
 
@@ -916,6 +1070,7 @@ fn rolling_skewness_kurtosis_batch_inner_into(
             data,
             params.length.unwrap_or(50),
             params.smooth_length.unwrap_or(3),
+            max_run == data.len(),
             dst_skewness,
             dst_kurtosis,
         );
@@ -1404,6 +1559,25 @@ mod tests {
         rolling_skewness_kurtosis_into_slice(&mut skew, &mut kurt, &input, Kernel::Auto)?;
         assert_series_close(&base.skewness, &skew, 1e-12);
         assert_series_close(&base.kurtosis, &kurt, 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn rolling_skewness_kurtosis_into_overwrites_stale_constant_data() -> Result<(), Box<dyn Error>>
+    {
+        let data = vec![42.0; 96];
+        let input = RollingSkewnessKurtosisInput::from_slice(
+            &data,
+            RollingSkewnessKurtosisParams {
+                length: Some(50),
+                smooth_length: Some(3),
+            },
+        );
+        let mut skew = vec![123.0; data.len()];
+        let mut kurt = vec![456.0; data.len()];
+        rolling_skewness_kurtosis_into_slice(&mut skew, &mut kurt, &input, Kernel::Auto)?;
+        assert!(skew.iter().all(|v| v.is_nan()));
+        assert!(kurt.iter().all(|v| v.is_nan()));
         Ok(())
     }
 

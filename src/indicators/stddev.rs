@@ -39,6 +39,7 @@ impl<'a> AsRef<[f64]> for StdDevInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             StdDevData::Slice(slice) => slice,
+            StdDevData::Candles { candles, source } if *source == "close" => &candles.close,
             StdDevData::Candles { candles, source } => source_type(candles, source),
         }
     }
@@ -253,7 +254,7 @@ pub fn stddev_with_kernel(
     let mut out = alloc_with_nan_prefix(len, warmup);
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -327,7 +328,7 @@ pub fn stddev_into_slice(
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     unsafe {
@@ -356,6 +357,11 @@ pub fn stddev_into(input: &StdDevInput, out: &mut [f64]) -> Result<(), StdDevErr
 
 #[inline]
 pub fn stddev_scalar(data: &[f64], period: usize, first: usize, nbdev: f64, out: &mut [f64]) {
+    if nbdev == 1.0 {
+        stddev_scalar_nbdev1(data, period, first, out);
+        return;
+    }
+
     let den = period as f64;
     let inv_den = 1.0 / den;
 
@@ -399,6 +405,55 @@ pub fn stddev_scalar(data: &[f64], period: usize, first: usize, nbdev: f64, out:
             let mean = sum * inv_den;
             let var = (sum_sqr * inv_den) - (mean * mean);
             *out_ptr = if var <= 0.0 { 0.0 } else { var.sqrt() * nbdev };
+
+            in_new = in_new.add(1);
+            in_old = in_old.add(1);
+            out_ptr = out_ptr.add(1);
+        }
+    }
+}
+
+#[inline]
+fn stddev_scalar_nbdev1(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    let den = period as f64;
+    let inv_den = 1.0 / den;
+
+    let len = data.len();
+
+    let mut sum = 0.0;
+    let mut sum_sqr = 0.0;
+
+    unsafe {
+        let mut ptr = data.as_ptr().add(first);
+        let end = ptr.add(period);
+        while ptr < end {
+            let val = *ptr;
+            sum += val;
+            sum_sqr += val * val;
+            ptr = ptr.add(1);
+        }
+    }
+
+    let idx0 = first + period - 1;
+    let mean0 = sum * inv_den;
+    let var0 = (sum_sqr * inv_den) - (mean0 * mean0);
+    out[idx0] = if var0 <= 0.0 { 0.0 } else { var0.sqrt() };
+
+    unsafe {
+        let mut out_ptr = out.as_mut_ptr().add(idx0 + 1);
+        let mut in_new = data.as_ptr().add(first + period);
+        let mut in_old = data.as_ptr().add(first);
+        let end = data.as_ptr().add(len);
+
+        while in_new < end {
+            let old = *in_old;
+            let new = *in_new;
+            sum += new - old;
+            sum_sqr += new * new - old * old;
+
+            let mean = sum * inv_den;
+            let var = (sum_sqr * inv_den) - (mean * mean);
+            *out_ptr = if var <= 0.0 { 0.0 } else { var.sqrt() };
 
             in_new = in_new.add(1);
             in_old = in_old.add(1);

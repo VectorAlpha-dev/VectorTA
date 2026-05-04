@@ -358,6 +358,11 @@ fn sama_compute_into(
     kernel: Kernel,
     out: &mut [f64],
 ) {
+    if data.len() >= 50_000 && length == 200 && maj_length == 14 && min_length == 6 {
+        sama_scalar_default_200_14_6(data, first, out);
+        return;
+    }
+
     unsafe {
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
@@ -385,6 +390,122 @@ fn sama_compute_into(
             }
             _ => unreachable!(),
         }
+    }
+}
+
+#[inline(never)]
+fn sama_scalar_default_200_14_6(data: &[f64], first: usize, out: &mut [f64]) {
+    let n = data.len();
+    if n == 0 {
+        return;
+    }
+
+    const LENGTH: usize = 200;
+    const CAP: usize = LENGTH + 1;
+    let maj_alpha = 2.0 / 15.0;
+    let min_alpha = 2.0 / 7.0;
+    let delta = min_alpha - maj_alpha;
+
+    let mut max_idx = [0usize; CAP];
+    let mut min_idx = [0usize; CAP];
+    let mut max_head = 0usize;
+    let mut min_head = 0usize;
+    let mut max_len = 0usize;
+    let mut min_len = 0usize;
+
+    let mut sama_val = f64::NAN;
+
+    for i in first..n {
+        let p = data[i];
+        if p.is_nan() {
+            out[i] = f64::NAN;
+            continue;
+        }
+
+        let wstart = i.saturating_sub(LENGTH);
+
+        while max_len > 0 {
+            let idx = max_idx[max_head];
+            if idx >= wstart {
+                break;
+            }
+            max_head += 1;
+            if max_head == CAP {
+                max_head = 0;
+            }
+            max_len -= 1;
+        }
+
+        while min_len > 0 {
+            let idx = min_idx[min_head];
+            if idx >= wstart {
+                break;
+            }
+            min_head += 1;
+            if min_head == CAP {
+                min_head = 0;
+            }
+            min_len -= 1;
+        }
+
+        while max_len > 0 {
+            let mut last_pos = max_head + max_len - 1;
+            if last_pos >= CAP {
+                last_pos -= CAP;
+            }
+            let last_idx = max_idx[last_pos];
+            let last_val = data[last_idx];
+            if last_val <= p {
+                max_len -= 1;
+            } else {
+                break;
+            }
+        }
+        let mut ins_pos_max = max_head + max_len;
+        if ins_pos_max >= CAP {
+            ins_pos_max -= CAP;
+        }
+        max_idx[ins_pos_max] = i;
+        max_len += 1;
+
+        while min_len > 0 {
+            let mut last_pos = min_head + min_len - 1;
+            if last_pos >= CAP {
+                last_pos -= CAP;
+            }
+            let last_idx = min_idx[last_pos];
+            let last_val = data[last_idx];
+            if last_val >= p {
+                min_len -= 1;
+            } else {
+                break;
+            }
+        }
+        let mut ins_pos_min = min_head + min_len;
+        if ins_pos_min >= CAP {
+            ins_pos_min -= CAP;
+        }
+        min_idx[ins_pos_min] = i;
+        min_len += 1;
+
+        let hh = data[max_idx[max_head]];
+        let ll = data[min_idx[min_head]];
+
+        let denom = hh - ll;
+        let c = (p + p) - (hh + ll);
+        let mult = if denom > 0.0 { c.abs() / denom } else { 0.0 };
+
+        let a = mult.mul_add(delta, maj_alpha);
+        let alpha = a * a;
+
+        if sama_val.is_nan() {
+            sama_val = p;
+        } else {
+            let diff = p - sama_val;
+            sama_val = diff.mul_add(alpha, sama_val);
+        }
+
+        out[i] = sama_val;
     }
 }
 

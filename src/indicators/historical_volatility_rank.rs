@@ -49,6 +49,12 @@ pub struct HistoricalVolatilityRankOutput {
     pub hv: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoricalVolatilityRankOutputField {
+    Hvr,
+    Hv,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -721,6 +727,48 @@ pub fn historical_volatility_rank_into_slice(
     let scale = (annualization_days / bar_days).sqrt();
     compute_hv_row_from_prefixes(&prefixes, len, hv_length, scale, dst_hv);
     compute_hvr_row_from_hv(dst_hv, rank_length, dst_hvr);
+    Ok(())
+}
+
+pub fn historical_volatility_rank_output_into_slice(
+    out: &mut [f64],
+    input: &HistoricalVolatilityRankInput,
+    kernel: Kernel,
+    field: HistoricalVolatilityRankOutputField,
+) -> Result<(), HistoricalVolatilityRankError> {
+    let data: &[f64] = input.as_ref();
+    let len = data.len();
+    if out.len() != len {
+        return Err(HistoricalVolatilityRankError::MismatchedOutputLen {
+            dst_len: out.len(),
+            expected_len: len,
+        });
+    }
+
+    let hv_length = input.get_hv_length();
+    let rank_length = input.get_rank_length();
+    let annualization_days = input.get_annualization_days();
+    let bar_days = input.get_bar_days();
+    validate_common(data, hv_length, rank_length, annualization_days, bar_days)?;
+
+    let _chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    out.fill(f64::NAN);
+    let prefixes = build_return_prefixes(data);
+    let scale = (annualization_days / bar_days).sqrt();
+    match field {
+        HistoricalVolatilityRankOutputField::Hv => {
+            compute_hv_row_from_prefixes(&prefixes, len, hv_length, scale, out);
+        }
+        HistoricalVolatilityRankOutputField::Hvr => {
+            let mut hv = alloc_with_nan_prefix(len, hv_length);
+            compute_hv_row_from_prefixes(&prefixes, len, hv_length, scale, &mut hv);
+            compute_hvr_row_from_hv(&hv, rank_length, out);
+        }
+    }
     Ok(())
 }
 

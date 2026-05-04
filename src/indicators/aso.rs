@@ -53,6 +53,12 @@ pub struct AsoOutput {
     pub bears: Vec<f64>,
 }
 
+#[derive(Copy, Clone, Debug)]
+pub enum AsoOutputField {
+    Bulls,
+    Bears,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -334,6 +340,32 @@ pub fn aso_into_slices(
     Ok(())
 }
 
+#[inline]
+pub fn aso_output_into_slice(
+    dst: &mut [f64],
+    input: &AsoInput,
+    kern: Kernel,
+    field: AsoOutputField,
+) -> Result<(), AsoError> {
+    let (open, high, low, close, period, mode, first, _chosen) = aso_prepare(input, kern)?;
+
+    if dst.len() != close.len() {
+        return Err(AsoError::OutputLengthMismatch {
+            expected: close.len(),
+            got: dst.len(),
+        });
+    }
+
+    aso_compute_output_into(open, high, low, close, period, mode, first, field, dst);
+
+    let warm = first + period - 1;
+    for v in &mut dst[..warm.min(close.len())] {
+        *v = f64::NAN;
+    }
+
+    Ok(())
+}
+
 #[inline(always)]
 fn aso_prepare<'a>(
     input: &'a AsoInput,
@@ -450,6 +482,276 @@ fn aso_compute_into(
                 open, high, low, close, period, mode, first, out_bulls, out_bears,
             ),
             _ => unreachable!(),
+        }
+    }
+}
+
+#[inline(always)]
+fn aso_selected_value<const BULLS: bool>(
+    oi: f64,
+    hi: f64,
+    li: f64,
+    ci: f64,
+    gl: f64,
+    gh: f64,
+    gopen: f64,
+    mode: usize,
+) -> f64 {
+    let intrarange = hi - li;
+    let k1 = if intrarange == 0.0 { 1.0 } else { intrarange };
+    let gr = gh - gl;
+    let k2 = if gr == 0.0 { 1.0 } else { gr };
+
+    if BULLS {
+        let intrabar = (((ci - li) + (hi - oi)) * 50.0) / k1;
+        let group = (((ci - gl) + (gh - gopen)) * 50.0) / k2;
+        match mode {
+            0 => 0.5 * (intrabar + group),
+            1 => intrabar,
+            2 => group,
+            _ => 0.5 * (intrabar + group),
+        }
+    } else {
+        let intrabar = (((hi - ci) + (oi - li)) * 50.0) / k1;
+        let group = (((gh - ci) + (gopen - gl)) * 50.0) / k2;
+        match mode {
+            0 => 0.5 * (intrabar + group),
+            1 => intrabar,
+            2 => group,
+            _ => 0.5 * (intrabar + group),
+        }
+    }
+}
+
+#[inline]
+fn aso_scalar_output_selected<const BULLS: bool>(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    mode: usize,
+    first_val: usize,
+    out: &mut [f64],
+) {
+    let len = close.len();
+    if len == 0 {
+        return;
+    }
+
+    let warm = first_val + period - 1;
+
+    const DEQUE_THRESHOLD: usize = 64;
+    if period <= DEQUE_THRESHOLD {
+        let mut ring = vec![0.0; period];
+        let mut sum = 0.0;
+        let mut head = 0usize;
+        let mut filled = 0usize;
+
+        for i in first_val..len {
+            if i >= warm {
+                let start = i + 1 - period;
+
+                let mut gl = f64::MAX;
+                let mut gh = f64::MIN;
+                for j in start..=i {
+                    let lj = unsafe { *low.get_unchecked(j) };
+                    let hj = unsafe { *high.get_unchecked(j) };
+                    if lj < gl {
+                        gl = lj;
+                    }
+                    if hj > gh {
+                        gh = hj;
+                    }
+                }
+
+                let v = aso_selected_value::<BULLS>(
+                    unsafe { *open.get_unchecked(i) },
+                    unsafe { *high.get_unchecked(i) },
+                    unsafe { *low.get_unchecked(i) },
+                    unsafe { *close.get_unchecked(i) },
+                    gl,
+                    gh,
+                    unsafe { *open.get_unchecked(start) },
+                    mode,
+                );
+
+                let old = if filled == period { ring[head] } else { 0.0 };
+                sum += v - old;
+                ring[head] = v;
+                head = (head + 1) % period;
+                if filled < period {
+                    filled += 1;
+                }
+
+                unsafe {
+                    *out.get_unchecked_mut(i) = sum / filled as f64;
+                }
+            }
+        }
+        return;
+    }
+
+    let mut ring = vec![0.0f64; period];
+    let mut sum = 0.0f64;
+    let mut rhead = 0usize;
+    let mut filled = 0usize;
+
+    let mut dq_min = vec![0usize; period];
+    let mut dq_max = vec![0usize; period];
+    let mut min_head = 0usize;
+    let mut min_tail = 0usize;
+    let mut min_len = 0usize;
+    let mut max_head = 0usize;
+    let mut max_tail = 0usize;
+    let mut max_len = 0usize;
+
+    for i in first_val..len {
+        let hi = unsafe { *high.get_unchecked(i) };
+        let li = unsafe { *low.get_unchecked(i) };
+
+        while min_len > 0 {
+            let back = if min_tail == 0 {
+                period - 1
+            } else {
+                min_tail - 1
+            };
+            let j = unsafe { *dq_min.get_unchecked(back) };
+            let lj = unsafe { *low.get_unchecked(j) };
+            if li <= lj {
+                min_tail = back;
+                min_len -= 1;
+            } else {
+                break;
+            }
+        }
+        if min_len == period {
+            min_head += 1;
+            if min_head == period {
+                min_head = 0;
+            }
+            min_len -= 1;
+        }
+        unsafe {
+            *dq_min.get_unchecked_mut(min_tail) = i;
+        }
+        min_tail += 1;
+        if min_tail == period {
+            min_tail = 0;
+        }
+        min_len += 1;
+
+        while max_len > 0 {
+            let back = if max_tail == 0 {
+                period - 1
+            } else {
+                max_tail - 1
+            };
+            let j = unsafe { *dq_max.get_unchecked(back) };
+            let hj = unsafe { *high.get_unchecked(j) };
+            if hi >= hj {
+                max_tail = back;
+                max_len -= 1;
+            } else {
+                break;
+            }
+        }
+        if max_len == period {
+            max_head += 1;
+            if max_head == period {
+                max_head = 0;
+            }
+            max_len -= 1;
+        }
+        unsafe {
+            *dq_max.get_unchecked_mut(max_tail) = i;
+        }
+        max_tail += 1;
+        if max_tail == period {
+            max_tail = 0;
+        }
+        max_len += 1;
+
+        if i >= warm {
+            let start = i + 1 - period;
+
+            while min_len > 0 && unsafe { *dq_min.get_unchecked(min_head) } < start {
+                min_head += 1;
+                if min_head == period {
+                    min_head = 0;
+                }
+                min_len -= 1;
+            }
+            while max_len > 0 && unsafe { *dq_max.get_unchecked(max_head) } < start {
+                max_head += 1;
+                if max_head == period {
+                    max_head = 0;
+                }
+                max_len -= 1;
+            }
+
+            let gl = unsafe {
+                let idx = *dq_min.get_unchecked(min_head);
+                *low.get_unchecked(idx)
+            };
+            let gh = unsafe {
+                let idx = *dq_max.get_unchecked(max_head);
+                *high.get_unchecked(idx)
+            };
+
+            let v = aso_selected_value::<BULLS>(
+                unsafe { *open.get_unchecked(i) },
+                hi,
+                li,
+                unsafe { *close.get_unchecked(i) },
+                gl,
+                gh,
+                unsafe { *open.get_unchecked(start) },
+                mode,
+            );
+
+            let old = if filled == period {
+                unsafe { *ring.get_unchecked(rhead) }
+            } else {
+                0.0
+            };
+            sum += v - old;
+            unsafe {
+                *ring.get_unchecked_mut(rhead) = v;
+            }
+            rhead += 1;
+            if rhead == period {
+                rhead = 0;
+            }
+            if filled < period {
+                filled += 1;
+            }
+
+            unsafe {
+                *out.get_unchecked_mut(i) = sum / filled as f64;
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn aso_compute_output_into(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    mode: usize,
+    first: usize,
+    field: AsoOutputField,
+    out: &mut [f64],
+) {
+    match field {
+        AsoOutputField::Bulls => {
+            aso_scalar_output_selected::<true>(open, high, low, close, period, mode, first, out)
+        }
+        AsoOutputField::Bears => {
+            aso_scalar_output_selected::<false>(open, high, low, close, period, mode, first, out)
         }
     }
 }

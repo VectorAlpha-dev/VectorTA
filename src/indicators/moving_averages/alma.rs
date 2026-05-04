@@ -34,12 +34,21 @@ use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
+#[inline(always)]
+fn alma_candle_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    if source.eq_ignore_ascii_case("close") {
+        &candles.close
+    } else {
+        source_type(candles, source)
+    }
+}
+
 impl<'a> AsRef<[f64]> for AlmaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             AlmaData::Slice(slice) => slice,
-            AlmaData::Candles { candles, source } => source_type(candles, source),
+            AlmaData::Candles { candles, source } => alma_candle_source(candles, source),
         }
     }
 }
@@ -247,6 +256,16 @@ fn alma_compute_into(
     kernel: Kernel,
     out: &mut [f64],
 ) {
+    if period == 9
+        && matches!(
+            kernel,
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch
+        )
+    {
+        alma_scalar_period9(data, weights, first, inv_n, out);
+        return;
+    }
+
     unsafe {
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
@@ -332,7 +351,22 @@ fn alma_prepare<'a>(
     let inv_norm = 1.0 / norm;
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto if period == 9 => Kernel::Scalar,
+        Kernel::Auto => {
+            let detected = detect_best_kernel();
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            {
+                if matches!(detected, Kernel::Avx512) && len >= 262_144 {
+                    Kernel::Avx2
+                } else {
+                    detected
+                }
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            {
+                detected
+            }
+        }
         k => k,
     };
 
@@ -423,6 +457,38 @@ pub fn alma_avx512(
 }
 
 #[inline(always)]
+fn alma_scalar_period9(
+    data: &[f64],
+    weights: &[f64],
+    first_val: usize,
+    inv_norm: f64,
+    out: &mut [f64],
+) {
+    let w0 = weights[0];
+    let w1 = weights[1];
+    let w2 = weights[2];
+    let w3 = weights[3];
+    let w4 = weights[4];
+    let w5 = weights[5];
+    let w6 = weights[6];
+    let w7 = weights[7];
+    let w8 = weights[8];
+
+    for i in (first_val + 8)..data.len() {
+        let start = i - 8;
+        let sum =
+            data[start] * w0 + data[start + 1] * w1 + data[start + 2] * w2 + data[start + 3] * w3;
+        let sum = sum
+            + (data[start + 4] * w4
+                + data[start + 5] * w5
+                + data[start + 6] * w6
+                + data[start + 7] * w7);
+        let sum = sum + data[start + 8] * w8;
+        out[i] = sum * inv_norm;
+    }
+}
+
+#[inline(always)]
 pub fn alma_scalar(
     data: &[f64],
     weights: &[f64],
@@ -439,6 +505,11 @@ pub fn alma_scalar(
         out.len() >= data.len(),
         "`out` must be at least as long as `data`"
     );
+
+    if period == 9 {
+        alma_scalar_period9(data, weights, first_val, inv_norm, out);
+        return;
+    }
 
     let p4 = period & !3;
 
@@ -1139,7 +1210,7 @@ impl AlmaBatchBuilder {
     }
 
     pub fn apply_candles(self, c: &Candles, src: &str) -> Result<AlmaBatchOutput, AlmaError> {
-        let slice = source_type(c, src);
+        let slice = alma_candle_source(c, src);
         self.apply_slice(slice)
     }
 
@@ -1510,6 +1581,12 @@ unsafe fn alma_row_scalar(
     inv_n: f64,
     out: &mut [f64],
 ) {
+    if period == 9 {
+        let weights = std::slice::from_raw_parts(w_ptr, 9);
+        alma_scalar_period9(data, weights, first, inv_n, out);
+        return;
+    }
+
     let p4 = period & !3;
     for i in (first + period - 1)..data.len() {
         let start = i + 1 - period;

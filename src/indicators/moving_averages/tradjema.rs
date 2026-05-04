@@ -241,16 +241,7 @@ fn tradjema_prepare<'a>(
 ) -> Result<(&'a [f64], &'a [f64], &'a [f64], usize, usize, f64, Kernel), TradjemaError> {
     let (high, low, close) = match &input.data {
         TradjemaData::Candles { candles } => {
-            let h = candles
-                .select_candle_field("high")
-                .map_err(|_| TradjemaError::EmptyInputData)?;
-            let l = candles
-                .select_candle_field("low")
-                .map_err(|_| TradjemaError::EmptyInputData)?;
-            let c = candles
-                .select_candle_field("close")
-                .map_err(|_| TradjemaError::EmptyInputData)?;
-            (h, l, c)
+            (&candles.high[..], &candles.low[..], &candles.close[..])
         }
         TradjemaData::Slices { high, low, close } => {
             if high.len() != low.len() || low.len() != close.len() {
@@ -289,6 +280,9 @@ fn tradjema_prepare<'a>(
     }
 
     let chosen = match kernel {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Auto => detect_best_kernel(),
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
@@ -373,6 +367,10 @@ fn tradjema_compute_into_scalar(
     let n = out.len();
     let warm = first + length - 1;
     if warm >= n {
+        return;
+    }
+    if length == 40 {
+        tradjema_compute_into_scalar_len40(high, low, close, mult, first, out);
         return;
     }
 
@@ -558,6 +556,203 @@ fn tradjema_compute_into_scalar(
             &mut max_head,
             &mut max_tail,
             cap,
+        );
+
+        let lo_tr = unsafe { *min_vals.get_unchecked(min_head) };
+        let hi_tr = unsafe { *max_vals.get_unchecked(max_head) };
+        let den = hi_tr - lo_tr;
+        let tr_adj = if den != 0.0 { (tr - lo_tr) / den } else { 0.0 };
+        let a = alpha * (1.0 + tr_adj * mult);
+        let src = pc1;
+        y = (src - y).mul_add(a, y);
+        unsafe {
+            *out.get_unchecked_mut(i) = y;
+        }
+
+        i += 1;
+    }
+}
+
+#[inline(always)]
+fn tradjema_compute_into_scalar_len40(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    mult: f64,
+    first: usize,
+    out: &mut [f64],
+) {
+    let n = out.len();
+    let warm = first + 39;
+    if warm >= n {
+        return;
+    }
+
+    let alpha = 2.0 / 41.0;
+    let mut min_vals = [0.0f64; 40];
+    let mut min_idx = [0usize; 40];
+    let mut max_vals = [0.0f64; 40];
+    let mut max_idx = [0usize; 40];
+    let (mut min_head, mut min_tail) = (0usize, 0usize);
+    let (mut max_head, mut max_tail) = (0usize, 0usize);
+
+    #[inline(always)]
+    fn inc(i: &mut usize) {
+        *i += 1;
+        if *i == 40 {
+            *i = 0;
+        }
+    }
+    #[inline(always)]
+    fn dec(i: usize) -> usize {
+        if i == 0 {
+            39
+        } else {
+            i - 1
+        }
+    }
+    #[inline(always)]
+    fn minq_push(
+        v: f64,
+        idx: usize,
+        vals: &mut [f64; 40],
+        id: &mut [usize; 40],
+        head: &mut usize,
+        tail: &mut usize,
+    ) {
+        let mut back = dec(*tail);
+        while *tail != *head && unsafe { *vals.get_unchecked(back) } > v {
+            *tail = back;
+            back = dec(*tail);
+        }
+        unsafe {
+            *vals.get_unchecked_mut(*tail) = v;
+            *id.get_unchecked_mut(*tail) = idx;
+        }
+        inc(tail);
+    }
+    #[inline(always)]
+    fn maxq_push(
+        v: f64,
+        idx: usize,
+        vals: &mut [f64; 40],
+        id: &mut [usize; 40],
+        head: &mut usize,
+        tail: &mut usize,
+    ) {
+        let mut back = dec(*tail);
+        while *tail != *head && unsafe { *vals.get_unchecked(back) } < v {
+            *tail = back;
+            back = dec(*tail);
+        }
+        unsafe {
+            *vals.get_unchecked_mut(*tail) = v;
+            *id.get_unchecked_mut(*tail) = idx;
+        }
+        inc(tail);
+    }
+    #[inline(always)]
+    fn q_expire(cur: usize, id: &mut [usize; 40], head: &mut usize, tail: &mut usize) {
+        let lim = cur.saturating_sub(40);
+        while *head != *tail && unsafe { *id.get_unchecked(*head) } <= lim {
+            inc(head);
+        }
+    }
+
+    #[inline(always)]
+    fn max3(a: f64, b: f64, c: f64) -> f64 {
+        let m = if a > b { a } else { b };
+        if m > c {
+            m
+        } else {
+            c
+        }
+    }
+
+    let tr0 = unsafe { *high.get_unchecked(first) - *low.get_unchecked(first) };
+    minq_push(
+        tr0,
+        first,
+        &mut min_vals,
+        &mut min_idx,
+        &mut min_head,
+        &mut min_tail,
+    );
+    maxq_push(
+        tr0,
+        first,
+        &mut max_vals,
+        &mut max_idx,
+        &mut max_head,
+        &mut max_tail,
+    );
+    let mut last_tr = tr0;
+
+    let mut i = first + 1;
+    while i <= warm {
+        let hi = unsafe { *high.get_unchecked(i) };
+        let lo = unsafe { *low.get_unchecked(i) };
+        let pc1 = unsafe { *close.get_unchecked(i - 1) };
+        let tr = max3(hi - lo, (hi - pc1).abs(), (lo - pc1).abs());
+        minq_push(
+            tr,
+            i,
+            &mut min_vals,
+            &mut min_idx,
+            &mut min_head,
+            &mut min_tail,
+        );
+        maxq_push(
+            tr,
+            i,
+            &mut max_vals,
+            &mut max_idx,
+            &mut max_head,
+            &mut max_tail,
+        );
+        last_tr = tr;
+        i += 1;
+    }
+
+    let tr_low = unsafe { *min_vals.get_unchecked(min_head) };
+    let tr_high = unsafe { *max_vals.get_unchecked(max_head) };
+    let denom = tr_high - tr_low;
+    let tr_adj0 = if denom != 0.0 {
+        (last_tr - tr_low) / denom
+    } else {
+        0.0
+    };
+    let a0 = alpha * (1.0 + tr_adj0 * mult);
+    let src0 = unsafe { *close.get_unchecked(warm - 1) };
+    let mut y = src0.mul_add(a0, 0.0);
+    unsafe {
+        *out.get_unchecked_mut(warm) = y;
+    }
+
+    i = warm + 1;
+    while i < n {
+        q_expire(i, &mut min_idx, &mut min_head, &mut min_tail);
+        q_expire(i, &mut max_idx, &mut max_head, &mut max_tail);
+
+        let hi = unsafe { *high.get_unchecked(i) };
+        let lo = unsafe { *low.get_unchecked(i) };
+        let pc1 = unsafe { *close.get_unchecked(i - 1) };
+        let tr = max3(hi - lo, (hi - pc1).abs(), (lo - pc1).abs());
+        minq_push(
+            tr,
+            i,
+            &mut min_vals,
+            &mut min_idx,
+            &mut min_head,
+            &mut min_tail,
+        );
+        maxq_push(
+            tr,
+            i,
+            &mut max_vals,
+            &mut max_idx,
+            &mut max_head,
+            &mut max_tail,
         );
 
         let lo_tr = unsafe { *min_vals.get_unchecked(min_head) };

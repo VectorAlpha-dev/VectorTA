@@ -47,6 +47,12 @@ pub struct VpciOutput {
     pub vpcis: Vec<f64>,
 }
 
+#[derive(Copy, Clone, Debug)]
+pub enum VpciOutputField {
+    Vpci,
+    Vpcis,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -580,6 +586,205 @@ fn vpci_scalar_into_from_psums(
 }
 
 #[inline(always)]
+fn vpci_selected_vpci_from_psums(
+    close: &[f64],
+    volume: &[f64],
+    first: usize,
+    short: usize,
+    long: usize,
+    ps_close: &[f64],
+    ps_vol: &[f64],
+    ps_cv: &[f64],
+    vpci_out: &mut [f64],
+) {
+    debug_assert_eq!(close.len(), volume.len());
+    let n = close.len();
+    let warmup = first + long - 1;
+    if warmup >= n {
+        return;
+    }
+
+    let inv_long = 1.0 / (long as f64);
+    let inv_short = 1.0 / (short as f64);
+
+    unsafe {
+        let pc = ps_close.as_ptr();
+        let pv = ps_vol.as_ptr();
+        let pcv = ps_cv.as_ptr();
+        let vpci_ptr = vpci_out.as_mut_ptr();
+
+        let mut i = warmup;
+        while i < n {
+            let end = i + 1;
+            let long_start = end.saturating_sub(long);
+            let short_start = end.saturating_sub(short);
+
+            let sc_l = *pc.add(end) - *pc.add(long_start);
+            let sv_l = *pv.add(end) - *pv.add(long_start);
+            let scv_l = *pcv.add(end) - *pcv.add(long_start);
+
+            let sc_s = *pc.add(end) - *pc.add(short_start);
+            let sv_s = *pv.add(end) - *pv.add(short_start);
+            let scv_s = *pcv.add(end) - *pcv.add(short_start);
+
+            let sma_l = sc_l * inv_long;
+            let sma_s = sc_s * inv_short;
+            let sma_v_l = sv_l * inv_long;
+            let sma_v_s = sv_s * inv_short;
+
+            let vwma_l = if sv_l != 0.0 { scv_l / sv_l } else { f64::NAN };
+            let vwma_s = if sv_s != 0.0 { scv_s / sv_s } else { f64::NAN };
+
+            let vpc = vwma_l - sma_l;
+            let vpr = if sma_s != 0.0 {
+                vwma_s / sma_s
+            } else {
+                f64::NAN
+            };
+            let vm = if sma_v_l != 0.0 {
+                sma_v_s / sma_v_l
+            } else {
+                f64::NAN
+            };
+
+            *vpci_ptr.add(i) = vpc * vpr * vm;
+            i += 1;
+        }
+    }
+}
+
+#[inline(always)]
+fn vpci_selected_vpcis_from_psums(
+    close: &[f64],
+    volume: &[f64],
+    first: usize,
+    short: usize,
+    long: usize,
+    ps_close: &[f64],
+    ps_vol: &[f64],
+    ps_cv: &[f64],
+    vpcis_out: &mut [f64],
+) {
+    debug_assert_eq!(close.len(), volume.len());
+    let n = close.len();
+    let warmup = first + long - 1;
+    if warmup >= n {
+        return;
+    }
+
+    #[inline(always)]
+    fn zf(x: f64) -> f64 {
+        if x.is_finite() {
+            x
+        } else {
+            0.0
+        }
+    }
+
+    let inv_long = 1.0 / (long as f64);
+    let inv_short = 1.0 / (short as f64);
+    let mut sum_vpci_vol_short = 0.0;
+    let mut ring = vec![0.0f64; short];
+    let mut ring_pos = 0usize;
+
+    unsafe {
+        let pc = ps_close.as_ptr();
+        let pv = ps_vol.as_ptr();
+        let pcv = ps_cv.as_ptr();
+        let vptr = volume.as_ptr();
+        let vpcis_ptr = vpcis_out.as_mut_ptr();
+
+        let mut i = warmup;
+        while i < n {
+            let end = i + 1;
+            let long_start = end.saturating_sub(long);
+            let short_start = end.saturating_sub(short);
+
+            let sc_l = *pc.add(end) - *pc.add(long_start);
+            let sv_l = *pv.add(end) - *pv.add(long_start);
+            let scv_l = *pcv.add(end) - *pcv.add(long_start);
+
+            let sc_s = *pc.add(end) - *pc.add(short_start);
+            let sv_s = *pv.add(end) - *pv.add(short_start);
+            let scv_s = *pcv.add(end) - *pcv.add(short_start);
+
+            let sma_l = sc_l * inv_long;
+            let sma_s = sc_s * inv_short;
+            let sma_v_l = sv_l * inv_long;
+            let sma_v_s = sv_s * inv_short;
+
+            let vwma_l = if sv_l != 0.0 { scv_l / sv_l } else { f64::NAN };
+            let vwma_s = if sv_s != 0.0 { scv_s / sv_s } else { f64::NAN };
+
+            let vpc = vwma_l - sma_l;
+            let vpr = if sma_s != 0.0 {
+                vwma_s / sma_s
+            } else {
+                f64::NAN
+            };
+            let vm = if sma_v_l != 0.0 {
+                sma_v_s / sma_v_l
+            } else {
+                f64::NAN
+            };
+
+            let vpci = vpc * vpr * vm;
+            let contrib = zf(vpci) * zf(*vptr.add(i));
+            sum_vpci_vol_short += contrib;
+            if i >= warmup + short {
+                sum_vpci_vol_short -= ring[ring_pos];
+            }
+            ring[ring_pos] = contrib;
+            ring_pos += 1;
+            if ring_pos == short {
+                ring_pos = 0;
+            }
+
+            let denom = sma_v_s;
+            *vpcis_ptr.add(i) = if denom != 0.0 && denom.is_finite() {
+                (sum_vpci_vol_short * inv_short) / denom
+            } else {
+                f64::NAN
+            };
+
+            i += 1;
+        }
+    }
+}
+
+#[inline]
+pub fn vpci_output_into_slice(
+    dst: &mut [f64],
+    input: &VpciInput,
+    kernel: Kernel,
+    field: VpciOutputField,
+) -> Result<(), VpciError> {
+    let (close, volume, first, short, long, chosen) = vpci_prepare(input, kernel)?;
+    let _ = chosen;
+    if dst.len() != close.len() {
+        return Err(VpciError::OutputLengthMismatch {
+            expected: close.len(),
+            got: dst.len(),
+        });
+    }
+    let warmup = first + long - 1;
+    let warm_limit = warmup.min(dst.len());
+    for value in &mut dst[..warm_limit] {
+        *value = f64::NAN;
+    }
+    let (ps_c, ps_v, ps_cv) = build_prefix_sums(close, volume);
+    match field {
+        VpciOutputField::Vpci => vpci_selected_vpci_from_psums(
+            close, volume, first, short, long, &ps_c, &ps_v, &ps_cv, dst,
+        ),
+        VpciOutputField::Vpcis => vpci_selected_vpcis_from_psums(
+            close, volume, first, short, long, &ps_c, &ps_v, &ps_cv, dst,
+        ),
+    }
+    Ok(())
+}
+
+#[inline(always)]
 fn vpci_compute_into(
     close: &[f64],
     volume: &[f64],
@@ -592,19 +797,13 @@ fn vpci_compute_into(
 ) {
     let (ps_c, ps_v, ps_cv) = build_prefix_sums(close, volume);
     match kernel {
-        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx512 => unsafe {
-            vpci_avx512_into_from_psums(
-                close, volume, first, short, long, &ps_c, &ps_v, &ps_cv, vpci_out, vpcis_out,
-            );
-        },
-        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx2 => unsafe {
-            vpci_avx2_into_from_psums(
-                close, volume, first, short, long, &ps_c, &ps_v, &ps_cv, vpci_out, vpcis_out,
-            );
-        },
-        _ => {
+        Kernel::Scalar
+        | Kernel::ScalarBatch
+        | Kernel::Auto
+        | Kernel::Avx2
+        | Kernel::Avx2Batch
+        | Kernel::Avx512
+        | Kernel::Avx512Batch => {
             vpci_scalar_into_from_psums(
                 close, volume, first, short, long, &ps_c, &ps_v, &ps_cv, vpci_out, vpcis_out,
             );

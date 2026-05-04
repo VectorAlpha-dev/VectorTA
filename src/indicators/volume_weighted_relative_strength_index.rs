@@ -17,7 +17,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
+    alloc_uninit_f64, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -255,6 +255,15 @@ struct VolumeWeightedRelativeStrengthIndexPoint {
     rsi_ma: f64,
     bearish_tp: f64,
     bullish_tp: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum VolumeWeightedRelativeStrengthIndexOutputField {
+    Rsi,
+    ConsolidationStrength,
+    RsiMa,
+    BearishTp,
+    BullishTp,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -832,17 +841,26 @@ impl VolumeWeightedRelativeStrengthIndexCore {
 fn normalize_ma_type(
     ma_type: &str,
 ) -> Result<VolumeWeightedRelativeStrengthIndexMaKind, VolumeWeightedRelativeStrengthIndexError> {
-    let normalized = ma_type.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "ema" => Ok(VolumeWeightedRelativeStrengthIndexMaKind::Ema),
-        "sma" => Ok(VolumeWeightedRelativeStrengthIndexMaKind::Sma),
-        "hma" => Ok(VolumeWeightedRelativeStrengthIndexMaKind::Hma),
-        "smma (rma)" | "smma" | "rma" => Ok(VolumeWeightedRelativeStrengthIndexMaKind::Rma),
-        "wma" => Ok(VolumeWeightedRelativeStrengthIndexMaKind::Wma),
-        "vwma" => Ok(VolumeWeightedRelativeStrengthIndexMaKind::Vwma),
-        _ => Err(VolumeWeightedRelativeStrengthIndexError::InvalidMaType {
+    let value = ma_type.trim();
+    if value.eq_ignore_ascii_case("ema") {
+        Ok(VolumeWeightedRelativeStrengthIndexMaKind::Ema)
+    } else if value.eq_ignore_ascii_case("sma") {
+        Ok(VolumeWeightedRelativeStrengthIndexMaKind::Sma)
+    } else if value.eq_ignore_ascii_case("hma") {
+        Ok(VolumeWeightedRelativeStrengthIndexMaKind::Hma)
+    } else if value.eq_ignore_ascii_case("smma (rma)")
+        || value.eq_ignore_ascii_case("smma")
+        || value.eq_ignore_ascii_case("rma")
+    {
+        Ok(VolumeWeightedRelativeStrengthIndexMaKind::Rma)
+    } else if value.eq_ignore_ascii_case("wma") {
+        Ok(VolumeWeightedRelativeStrengthIndexMaKind::Wma)
+    } else if value.eq_ignore_ascii_case("vwma") {
+        Ok(VolumeWeightedRelativeStrengthIndexMaKind::Vwma)
+    } else {
+        Err(VolumeWeightedRelativeStrengthIndexError::InvalidMaType {
             ma_type: ma_type.to_string(),
-        }),
+        })
     }
 }
 
@@ -851,9 +869,14 @@ fn extract_source_volume<'a>(
     input: &'a VolumeWeightedRelativeStrengthIndexInput<'a>,
 ) -> Result<(&'a [f64], &'a [f64]), VolumeWeightedRelativeStrengthIndexError> {
     let (source, volume) = match &input.data {
-        VolumeWeightedRelativeStrengthIndexData::Candles { candles, source } => {
-            (source_type(candles, source), candles.volume.as_slice())
-        }
+        VolumeWeightedRelativeStrengthIndexData::Candles { candles, source } => (
+            if source.eq_ignore_ascii_case(DEFAULT_SOURCE) {
+                candles.close.as_slice()
+            } else {
+                source_type(candles, source)
+            },
+            candles.volume.as_slice(),
+        ),
         VolumeWeightedRelativeStrengthIndexData::Slices { source, volume } => (*source, *volume),
     };
     if source.is_empty() || volume.is_empty() {
@@ -882,12 +905,8 @@ fn prepare_input<'a>(
     let rsi_length = input.params.rsi_length.unwrap_or(DEFAULT_RSI_LENGTH);
     let range_length = input.params.range_length.unwrap_or(DEFAULT_RANGE_LENGTH);
     let ma_length = input.params.ma_length.unwrap_or(DEFAULT_MA_LENGTH);
-    let ma_type = input
-        .params
-        .ma_type
-        .clone()
-        .unwrap_or_else(|| DEFAULT_MA_TYPE.to_string());
-    let ma_kind = normalize_ma_type(&ma_type)?;
+    let ma_type = input.params.ma_type.as_deref().unwrap_or(DEFAULT_MA_TYPE);
+    let ma_kind = normalize_ma_type(ma_type)?;
 
     if rsi_length == 0 || rsi_length > len {
         return Err(VolumeWeightedRelativeStrengthIndexError::InvalidRsiLength {
@@ -966,20 +985,19 @@ pub fn volume_weighted_relative_strength_index_with_kernel(
     _kernel: Kernel,
 ) -> Result<VolumeWeightedRelativeStrengthIndexOutput, VolumeWeightedRelativeStrengthIndexError> {
     let prepared = prepare_input(input)?;
-    let mut rsi = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut consolidation_strength = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut rsi_ma = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut bearish_tp = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut bullish_tp = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    volume_weighted_relative_strength_index_into_slices(
-        input,
-        Kernel::Scalar,
+    let mut rsi = alloc_uninit_f64(prepared.len);
+    let mut consolidation_strength = alloc_uninit_f64(prepared.len);
+    let mut rsi_ma = alloc_uninit_f64(prepared.len);
+    let mut bearish_tp = alloc_uninit_f64(prepared.len);
+    let mut bullish_tp = alloc_uninit_f64(prepared.len);
+    volume_weighted_relative_strength_index_write_prepared(
+        &prepared,
         &mut rsi,
         &mut consolidation_strength,
         &mut rsi_ma,
         &mut bearish_tp,
         &mut bullish_tp,
-    )?;
+    );
     Ok(VolumeWeightedRelativeStrengthIndexOutput {
         rsi,
         consolidation_strength,
@@ -1040,25 +1058,142 @@ pub fn volume_weighted_relative_strength_index_into_slices(
         );
     }
 
-    dst_rsi.fill(f64::NAN);
-    dst_consolidation_strength.fill(f64::NAN);
-    dst_rsi_ma.fill(f64::NAN);
-    dst_bearish_tp.fill(f64::NAN);
-    dst_bullish_tp.fill(f64::NAN);
+    volume_weighted_relative_strength_index_write_prepared(
+        &prepared,
+        dst_rsi,
+        dst_consolidation_strength,
+        dst_rsi_ma,
+        dst_bearish_tp,
+        dst_bullish_tp,
+    );
+
+    Ok(())
+}
+
+#[inline(always)]
+fn volume_weighted_relative_strength_index_write_prepared(
+    prepared: &PreparedInput<'_>,
+    dst_rsi: &mut [f64],
+    dst_consolidation_strength: &mut [f64],
+    dst_rsi_ma: &mut [f64],
+    dst_bearish_tp: &mut [f64],
+    dst_bullish_tp: &mut [f64],
+) {
+    let mut core = VolumeWeightedRelativeStrengthIndexCore::new(prepared.params);
+    for i in 0..prepared.len {
+        if let Some(point) = core.update(prepared.source[i], prepared.volume[i]) {
+            dst_rsi[i] = point.rsi;
+            dst_consolidation_strength[i] = point.consolidation_strength;
+            dst_rsi_ma[i] = point.rsi_ma;
+            dst_bearish_tp[i] = point.bearish_tp;
+            dst_bullish_tp[i] = point.bullish_tp;
+        } else {
+            dst_rsi[i] = f64::NAN;
+            dst_consolidation_strength[i] = f64::NAN;
+            dst_rsi_ma[i] = f64::NAN;
+            dst_bearish_tp[i] = f64::NAN;
+            dst_bullish_tp[i] = f64::NAN;
+        }
+    }
+}
+
+#[inline]
+pub(crate) fn volume_weighted_relative_strength_index_output_into_slice(
+    input: &VolumeWeightedRelativeStrengthIndexInput,
+    _kernel: Kernel,
+    field: VolumeWeightedRelativeStrengthIndexOutputField,
+    dst: &mut [f64],
+) -> Result<(), VolumeWeightedRelativeStrengthIndexError> {
+    let prepared = prepare_input(input)?;
+    if dst.len() != prepared.len {
+        return Err(
+            VolumeWeightedRelativeStrengthIndexError::OutputLengthMismatch {
+                expected: prepared.len,
+                got: dst.len(),
+            },
+        );
+    }
+
+    if matches!(field, VolumeWeightedRelativeStrengthIndexOutputField::Rsi) {
+        volume_weighted_relative_strength_index_rsi_only_into(&prepared, dst);
+        return Ok(());
+    }
 
     let mut core = VolumeWeightedRelativeStrengthIndexCore::new(prepared.params);
     for i in 0..prepared.len {
-        let Some(point) = core.update(prepared.source[i], prepared.volume[i]) else {
-            continue;
+        let value = if let Some(point) = core.update(prepared.source[i], prepared.volume[i]) {
+            match field {
+                VolumeWeightedRelativeStrengthIndexOutputField::Rsi => point.rsi,
+                VolumeWeightedRelativeStrengthIndexOutputField::ConsolidationStrength => {
+                    point.consolidation_strength
+                }
+                VolumeWeightedRelativeStrengthIndexOutputField::RsiMa => point.rsi_ma,
+                VolumeWeightedRelativeStrengthIndexOutputField::BearishTp => point.bearish_tp,
+                VolumeWeightedRelativeStrengthIndexOutputField::BullishTp => point.bullish_tp,
+            }
+        } else {
+            f64::NAN
         };
-        dst_rsi[i] = point.rsi;
-        dst_consolidation_strength[i] = point.consolidation_strength;
-        dst_rsi_ma[i] = point.rsi_ma;
-        dst_bearish_tp[i] = point.bearish_tp;
-        dst_bullish_tp[i] = point.bullish_tp;
+        dst[i] = value;
     }
 
     Ok(())
+}
+
+#[inline(always)]
+fn volume_weighted_relative_strength_index_rsi_only_into(
+    prepared: &PreparedInput<'_>,
+    dst: &mut [f64],
+) {
+    let mut prev_source = None;
+    let mut up_rma = RmaState::new(prepared.params.rsi_length);
+    let mut down_rma = RmaState::new(prepared.params.rsi_length);
+    let mut volume_rma = RmaState::new(prepared.params.rsi_length);
+
+    for (i, out) in dst.iter_mut().enumerate().take(prepared.len) {
+        let source = prepared.source[i];
+        let volume = prepared.volume[i];
+        if !source.is_finite() || !volume.is_finite() {
+            prev_source = None;
+            up_rma.reset();
+            down_rma.reset();
+            volume_rma.reset();
+            *out = f64::NAN;
+            continue;
+        }
+
+        let Some(prev) = prev_source else {
+            prev_source = Some(source);
+            *out = f64::NAN;
+            continue;
+        };
+        prev_source = Some(source);
+
+        let delta = source - prev;
+        let gain = delta.max(0.0) * volume;
+        let loss = (-delta).max(0.0) * volume;
+        let up_num = up_rma.update(gain);
+        let down_num = down_rma.update(loss);
+        let vol_avg = volume_rma.update(volume);
+        let (Some(up_num), Some(down_num), Some(vol_avg)) = (up_num, down_num, vol_avg) else {
+            *out = f64::NAN;
+            continue;
+        };
+        if vol_avg.abs() <= EPS {
+            *out = f64::NAN;
+            continue;
+        }
+
+        let up = up_num / vol_avg;
+        let down = down_num / vol_avg;
+        *out = if down.abs() <= EPS {
+            100.0
+        } else if up.abs() <= EPS {
+            0.0
+        } else {
+            100.0 - (100.0 / (1.0 + up / down))
+        };
+    }
 }
 
 impl VolumeWeightedRelativeStrengthIndexBuilder {

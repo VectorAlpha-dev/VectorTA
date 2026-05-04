@@ -18,9 +18,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, make_uninit_matrix,
-};
+use crate::utilities::helpers::{alloc_uninit_f64, detect_best_batch_kernel, make_uninit_matrix};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
@@ -303,7 +301,17 @@ fn prepare_input<'a>(
         return Err(EmaDeviationCorrectedT3Error::AllValuesNaN);
     }
 
-    let period = input.get_period();
+    let (period, hot, mode) = validate_params_for_len(&input.params, len)?;
+
+    Ok((data, period, hot, mode))
+}
+
+#[inline(always)]
+fn validate_params_for_len(
+    params: &EmaDeviationCorrectedT3Params,
+    len: usize,
+) -> Result<(usize, f64, usize), EmaDeviationCorrectedT3Error> {
+    let period = params.period.unwrap_or(DEFAULT_PERIOD);
     if period == 0 || period > len {
         return Err(EmaDeviationCorrectedT3Error::InvalidPeriod {
             period,
@@ -311,15 +319,15 @@ fn prepare_input<'a>(
         });
     }
 
-    let hot = input.get_hot();
+    let hot = params.hot.unwrap_or(DEFAULT_HOT);
     if !hot.is_finite() {
         return Err(EmaDeviationCorrectedT3Error::InvalidHot { hot });
     }
 
-    let mode = input.get_t3_mode();
+    let mode = params.t3_mode.unwrap_or(DEFAULT_T3_MODE);
     let _ = alpha_t3(period, mode)?;
 
-    Ok((data, period, hot, mode))
+    Ok((period, hot, mode))
 }
 
 #[inline(always)]
@@ -333,17 +341,89 @@ pub fn ema_deviation_corrected_t3_with_kernel(
     input: &EmaDeviationCorrectedT3Input,
     _kernel: Kernel,
 ) -> Result<EmaDeviationCorrectedT3Output, EmaDeviationCorrectedT3Error> {
-    let (data, _, _, _) = prepare_input(input)?;
+    let (data, period, hot, mode) = prepare_input(input)?;
     let len = data.len();
-    let mut corrected = alloc_with_nan_prefix(len, 0);
-    let mut t3 = alloc_with_nan_prefix(len, 0);
-    ema_deviation_corrected_t3_into_slices_with_kernel(
-        &mut corrected,
-        &mut t3,
-        input,
-        Kernel::Scalar,
-    )?;
+    let mut corrected = alloc_uninit_f64(len);
+    let mut t3 = alloc_uninit_f64(len);
+    compute_into_slices(data, period, hot, mode, &mut corrected, &mut t3)?;
     Ok(EmaDeviationCorrectedT3Output { corrected, t3 })
+}
+
+#[inline(always)]
+fn compute_into_slices(
+    data: &[f64],
+    period: usize,
+    hot: f64,
+    mode: usize,
+    corrected: &mut [f64],
+    t3: &mut [f64],
+) -> Result<(), EmaDeviationCorrectedT3Error> {
+    let alpha_t3 = alpha_t3(period, mode)?;
+    let alpha_ema = 2.0 / (1.0 + period as f64);
+    let variance_scale = correction_variance_scale(period);
+    let (c1, c2, c3, c4) = compute_coefficients(hot);
+
+    let mut t0 = 0.0;
+    let mut t1 = 0.0;
+    let mut t2 = 0.0;
+    let mut t3s = 0.0;
+    let mut t4 = 0.0;
+    let mut t5 = 0.0;
+    let mut ema0 = 0.0;
+    let mut ema1 = 0.0;
+    let mut corr = 0.0;
+    let mut seeded_ema = false;
+
+    for i in 0..data.len() {
+        let value = data[i];
+        if !value.is_finite() {
+            t0 = 0.0;
+            t1 = 0.0;
+            t2 = 0.0;
+            t3s = 0.0;
+            t4 = 0.0;
+            t5 = 0.0;
+            ema0 = 0.0;
+            ema1 = 0.0;
+            corr = 0.0;
+            seeded_ema = false;
+            corrected[i] = f64::NAN;
+            t3[i] = f64::NAN;
+            continue;
+        }
+
+        t0 += alpha_t3 * (value - t0);
+        t1 += alpha_t3 * (t0 - t1);
+        t2 += alpha_t3 * (t1 - t2);
+        t3s += alpha_t3 * (t2 - t3s);
+        t4 += alpha_t3 * (t3s - t4);
+        t5 += alpha_t3 * (t4 - t5);
+
+        let t3_value = c1 * t5 + c2 * t4 + c3 * t3s + c4 * t2;
+
+        let price_sq = value * value;
+        if seeded_ema {
+            ema0 += alpha_ema * (value - ema0);
+            ema1 += alpha_ema * (price_sq - ema1);
+        } else {
+            ema0 = value;
+            ema1 = price_sq;
+            seeded_ema = true;
+        }
+
+        let variance_sq = (ema1 - ema0 * ema0).max(0.0) * variance_scale;
+        let v2 = (corr - t3_value) * (corr - t3_value);
+        let c = if v2 < variance_sq || v2 == 0.0 {
+            0.0
+        } else {
+            1.0 - variance_sq / v2
+        };
+        corr += c * (t3_value - corr);
+
+        corrected[i] = corr;
+        t3[i] = t3_value;
+    }
+    Ok(())
 }
 
 #[inline]
@@ -362,26 +442,7 @@ pub fn ema_deviation_corrected_t3_into_slices_with_kernel(
         });
     }
 
-    let mut stream = EmaDeviationCorrectedT3Stream::try_new(EmaDeviationCorrectedT3Params {
-        period: Some(period),
-        hot: Some(hot),
-        t3_mode: Some(mode),
-    })?;
-
-    for i in 0..len {
-        match stream.update(data[i]) {
-            Some((t3_value, corrected_value)) => {
-                corrected[i] = corrected_value;
-                t3[i] = t3_value;
-            }
-            None => {
-                corrected[i] = f64::NAN;
-                t3[i] = f64::NAN;
-            }
-        }
-    }
-
-    Ok(())
+    compute_into_slices(data, period, hot, mode, corrected, t3)
 }
 
 #[inline]
@@ -753,6 +814,9 @@ fn ema_deviation_corrected_t3_batch_inner(
     let combos = expand_grid_ema_deviation_corrected_t3(range)?;
     let rows = combos.len();
     let cols = data.len();
+    for combo in &combos {
+        let _ = validate_params_for_len(combo, cols)?;
+    }
 
     let mut corrected_mu = make_uninit_matrix(rows, cols);
     let mut t3_mu = make_uninit_matrix(rows, cols);
@@ -764,13 +828,10 @@ fn ema_deviation_corrected_t3_batch_inner(
             unsafe { std::slice::from_raw_parts_mut(corrected_dst.as_mut_ptr() as *mut f64, cols) };
         let t3_out =
             unsafe { std::slice::from_raw_parts_mut(t3_dst.as_mut_ptr() as *mut f64, cols) };
-        let input = EmaDeviationCorrectedT3Input::from_slice(data, combos[row].clone());
-        let _ = ema_deviation_corrected_t3_into_slices_with_kernel(
-            corrected_out,
-            t3_out,
-            &input,
-            Kernel::Scalar,
-        );
+        let (period, hot, mode) =
+            validate_params_for_len(&combos[row], cols).expect("validated batch params");
+        compute_into_slices(data, period, hot, mode, corrected_out, t3_out)
+            .expect("validated batch params");
     };
 
     if parallel {
@@ -849,6 +910,9 @@ pub fn ema_deviation_corrected_t3_batch_inner_into(
     let combos = expand_grid_ema_deviation_corrected_t3(range)?;
     let rows = combos.len();
     let cols = data.len();
+    for combo in &combos {
+        let _ = validate_params_for_len(combo, cols)?;
+    }
     let expected = rows.saturating_mul(cols);
     if corrected_out.len() != expected || t3_out.len() != expected {
         return Err(EmaDeviationCorrectedT3Error::OutputLengthMismatch {
@@ -865,13 +929,10 @@ pub fn ema_deviation_corrected_t3_batch_inner_into(
                 .zip(t3_out.par_chunks_mut(cols))
                 .enumerate()
                 .for_each(|(row, (corrected_slice, t3_slice))| {
-                    let input = EmaDeviationCorrectedT3Input::from_slice(data, combos[row].clone());
-                    let _ = ema_deviation_corrected_t3_into_slices_with_kernel(
-                        corrected_slice,
-                        t3_slice,
-                        &input,
-                        Kernel::Scalar,
-                    );
+                    let (period, hot, mode) = validate_params_for_len(&combos[row], cols)
+                        .expect("validated batch params");
+                    compute_into_slices(data, period, hot, mode, corrected_slice, t3_slice)
+                        .expect("validated batch params");
                 });
         }
         #[cfg(target_arch = "wasm32")]
@@ -881,13 +942,8 @@ pub fn ema_deviation_corrected_t3_batch_inner_into(
                 .zip(t3_out.chunks_mut(cols))
                 .enumerate()
             {
-                let input = EmaDeviationCorrectedT3Input::from_slice(data, combos[row].clone());
-                ema_deviation_corrected_t3_into_slices_with_kernel(
-                    corrected_slice,
-                    t3_slice,
-                    &input,
-                    Kernel::Scalar,
-                )?;
+                let (period, hot, mode) = validate_params_for_len(&combos[row], cols)?;
+                compute_into_slices(data, period, hot, mode, corrected_slice, t3_slice)?;
             }
         }
     } else {
@@ -896,13 +952,8 @@ pub fn ema_deviation_corrected_t3_batch_inner_into(
             .zip(t3_out.chunks_mut(cols))
             .enumerate()
         {
-            let input = EmaDeviationCorrectedT3Input::from_slice(data, combos[row].clone());
-            ema_deviation_corrected_t3_into_slices_with_kernel(
-                corrected_slice,
-                t3_slice,
-                &input,
-                Kernel::Scalar,
-            )?;
+            let (period, hot, mode) = validate_params_for_len(&combos[row], cols)?;
+            compute_into_slices(data, period, hot, mode, corrected_slice, t3_slice)?;
         }
     }
 

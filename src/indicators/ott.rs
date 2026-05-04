@@ -54,7 +54,10 @@ impl<'a> AsRef<[f64]> for OttInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             OttData::Slice(slice) => slice,
-            OttData::Candles { candles, source } => source_type(candles, source),
+            OttData::Candles { candles, source } => match *source {
+                "close" => candles.close.as_slice(),
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -268,24 +271,17 @@ pub enum OttError {
     InvalidBatchKernel,
 }
 
-#[inline]
+#[inline(always)]
 pub fn ott(input: &OttInput) -> Result<OttOutput, OttError> {
-    ott_with_kernel(input, Kernel::Auto)
+    ott_with_kernel(input, Kernel::Scalar)
 }
 
 pub fn ott_with_kernel(input: &OttInput, kernel: Kernel) -> Result<OttOutput, OttError> {
     let (data, period, percent, ma_type, first, chosen) = ott_prepare(input, kernel)?;
 
-    if false
-        && chosen == Kernel::Scalar
-        && period == 2
-        && percent == 1.4
-        && ma_type.to_uppercase() == "VAR"
-    {
-        let mut out = vec![f64::NAN; data.len()];
-        unsafe {
-            ott_scalar_classic(data, period, percent, first, &mut out)?;
-        }
+    if period == 2 && percent == 1.4 && ma_type == "VAR" {
+        let mut out = alloc_with_nan_prefix(data.len(), first);
+        ott_default_var_2_1_4_into(data, first, &mut out);
         return Ok(OttOutput { values: out });
     }
 
@@ -320,6 +316,11 @@ pub fn ott_into_slice(dst: &mut [f64], input: &OttInput, kern: Kernel) -> Result
             expected: data.len(),
             got: dst.len(),
         });
+    }
+
+    if period == 2 && percent == 1.4 && ma_type == "VAR" {
+        ott_default_var_2_1_4_into(data, first, dst);
+        return Ok(());
     }
 
     let ma_values = calculate_moving_average(data, period, ma_type, chosen)?;
@@ -381,6 +382,122 @@ fn ott_prepare<'a>(
     };
 
     Ok((data, period, percent, ma_type, first, chosen))
+}
+
+#[inline(always)]
+fn ott_default_var_2_1_4_into(data: &[f64], first: usize, out: &mut [f64]) {
+    for v in &mut out[..first] {
+        *v = f64::NAN;
+    }
+
+    let len = data.len();
+    if first >= len {
+        return;
+    }
+
+    let valpha = 2.0 / 3.0;
+    let fark = 0.014;
+    let scale_minus = 0.993;
+
+    let mut ring_u = [0.0f64; 9];
+    let mut ring_d = [0.0f64; 9];
+    let mut u_sum = 0.0;
+    let mut d_sum = 0.0;
+    let mut idx = 0usize;
+
+    let mut var = 0.0;
+    let mut long_stop = 0.0;
+    let mut short_stop = 0.0;
+    let mut dir = 1i32;
+
+    out[first] = 0.0;
+
+    let start = first + 1;
+    let pre_end = (first + 8).min(len.saturating_sub(1));
+    for i in start..=pre_end {
+        let a = data[i - 1];
+        let b = data[i];
+        if !a.is_nan() && !b.is_nan() {
+            let up = (b - a).max(0.0);
+            let down = (a - b).max(0.0);
+            ring_u[idx] = up;
+            u_sum += up;
+            ring_d[idx] = down;
+            d_sum += down;
+            idx = (idx + 1) % 9;
+            out[i] = 0.0;
+        }
+    }
+
+    if len - first <= 9 {
+        return;
+    }
+
+    for i in (first + 9)..len {
+        let a = data[i - 1];
+        let b = data[i];
+        if a.is_nan() || b.is_nan() {
+            continue;
+        }
+
+        let old_u = ring_u[idx];
+        let old_d = ring_d[idx];
+        let up = (b - a).max(0.0);
+        let down = (a - b).max(0.0);
+
+        u_sum += up - old_u;
+        d_sum += down - old_d;
+
+        ring_u[idx] = up;
+        ring_d[idx] = down;
+        idx = (idx + 1) % 9;
+
+        let denom = u_sum + d_sum;
+        let vcmo = if denom != 0.0 {
+            (u_sum - d_sum) / denom
+        } else {
+            0.0
+        };
+        let vcmo_abs = vcmo.abs();
+
+        var = valpha * vcmo_abs * b + (1.0 - valpha * vcmo_abs) * var;
+
+        let cand_long = var.mul_add(-fark, var);
+        let cand_short = var.mul_add(fark, var);
+
+        let lprev = long_stop;
+        let sprev = short_stop;
+
+        if var > lprev {
+            long_stop = if cand_long > lprev { cand_long } else { lprev };
+        } else {
+            long_stop = cand_long;
+        }
+
+        if var < sprev {
+            short_stop = if cand_short < sprev {
+                cand_short
+            } else {
+                sprev
+            };
+        } else {
+            short_stop = cand_short;
+        }
+
+        if dir == -1 && var > sprev {
+            dir = 1;
+        } else if dir == 1 && var < lprev {
+            dir = -1;
+        }
+
+        let mt = if dir == 1 { long_stop } else { short_stop };
+        let scale = if var > mt {
+            scale_minus + fark
+        } else {
+            scale_minus
+        };
+        out[i] = mt * scale;
+    }
 }
 
 fn calculate_moving_average(

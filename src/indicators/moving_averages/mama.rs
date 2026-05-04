@@ -219,6 +219,17 @@ fn mama_prepare<'a>(
     }
 
     let chosen = match kernel {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Auto => {
+            if std::arch::is_x86_feature_detected!("avx2")
+                && std::arch::is_x86_feature_detected!("fma")
+            {
+                Kernel::Avx2
+            } else {
+                Kernel::Scalar
+            }
+        }
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
@@ -272,7 +283,7 @@ pub fn mama_with_kernel(input: &MamaInput, kernel: Kernel) -> Result<MamaOutput,
 
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                mama_scalar_inplace(
+                mama_avx2_inplace(
                     data,
                     fast_limit,
                     slow_limit,
@@ -293,7 +304,7 @@ pub fn mama_with_kernel(input: &MamaInput, kernel: Kernel) -> Result<MamaOutput,
 
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                mama_scalar_inplace(
+                mama_avx512_inplace(
                     data,
                     fast_limit,
                     slow_limit,
@@ -626,6 +637,7 @@ unsafe fn hilbert4_avx2(x0: f64, x2: f64, x4: f64, x6: f64) -> f64 {
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
 #[inline]
 pub unsafe fn mama_avx2_inplace(
     data: &[f64],

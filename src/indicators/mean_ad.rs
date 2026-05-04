@@ -262,61 +262,9 @@ pub fn mean_ad_scalar(
         return Ok(MeanAdOutput { values: out });
     }
 
-    let inv_p = 1.0f64 / (period as f64);
-
     let warmup_end = first + (period << 1) - 2;
     let mut out = alloc_with_nan_prefix(n, warmup_end.min(n));
-
-    let mut sum = 0.0f64;
-    for i in first..(first + period) {
-        sum += data[i];
-    }
-    let mut sma = sum * inv_p;
-
-    let mut residual_buffer = vec![0.0f64; period];
-    let mut buffer_index = 0usize;
-    let mut residual_sum = 0.0f64;
-
-    let start_t = first + period - 1;
-    let fill_t_end = (start_t + period - 1).min(n.saturating_sub(1));
-    for t in start_t..=fill_t_end {
-        let residual = (data[t] - sma).abs();
-        residual_buffer[buffer_index] = residual;
-        residual_sum += residual;
-        buffer_index += 1;
-        if buffer_index == period {
-            buffer_index = 0;
-        }
-        if t + 1 < n {
-            sum += data[t + 1] - data[t + 1 - period];
-            sma = sum * inv_p;
-        }
-    }
-
-    if warmup_end < n {
-        out[warmup_end] = residual_sum * inv_p;
-    }
-
-    let mut t = start_t + period;
-    while t < n {
-        let residual = (data[t] - sma).abs();
-
-        let old = residual_buffer[buffer_index];
-        residual_sum += residual - old;
-        residual_buffer[buffer_index] = residual;
-        buffer_index += 1;
-        if buffer_index == period {
-            buffer_index = 0;
-        }
-
-        out[t] = residual_sum * inv_p;
-
-        if t + 1 < n {
-            sum += data[t + 1] - data[t + 1 - period];
-            sma = sum * inv_p;
-        }
-        t += 1;
-    }
+    mean_ad_row_scalar(data, first, period, &mut out);
 
     Ok(MeanAdOutput { values: out })
 }

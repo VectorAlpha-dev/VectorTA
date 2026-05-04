@@ -21,6 +21,18 @@ use thiserror::Error;
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
+#[inline(always)]
+fn edcf_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "close" => &candles.close,
+        "volume" => &candles.volume,
+        _ => source_type(candles, source),
+    }
+}
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -40,7 +52,7 @@ impl<'a> AsRef<[f64]> for EdcfInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             EdcfData::Slice(slice) => slice,
-            EdcfData::Candles { candles, source } => source_type(candles, source),
+            EdcfData::Candles { candles, source } => edcf_source(candles, source),
         }
     }
 }
@@ -246,6 +258,10 @@ fn edcf_compute_into(data: &[f64], period: usize, first: usize, chosen: Kernel, 
             Kernel::Avx2 | Kernel::Avx2Batch => edcf_avx2(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => edcf_avx512(data, period, first, out),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                edcf_scalar(data, period, first, out)
+            }
             _ => unreachable!(),
         }
     }
@@ -588,7 +604,7 @@ impl EdcfBatchBuilder {
         EdcfBatchBuilder::new().kernel(k).apply_slice(data)
     }
     pub fn apply_candles(self, c: &Candles, src: &str) -> Result<EdcfBatchOutput, EdcfError> {
-        let slice = source_type(c, src);
+        let slice = edcf_source(c, src);
         self.apply_slice(slice)
     }
     pub fn with_default_candles(c: &Candles) -> Result<EdcfBatchOutput, EdcfError> {
@@ -617,6 +633,8 @@ pub fn edcf_batch_with_kernel(
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Avx2Batch | Kernel::Avx512Batch => Kernel::Scalar,
         _ => unreachable!(),
     };
     edcf_batch_par_slice(data, sweep, simd)

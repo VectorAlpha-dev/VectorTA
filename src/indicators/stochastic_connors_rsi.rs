@@ -15,7 +15,8 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
+    alloc_uninit_f64, alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -35,6 +36,9 @@ impl<'a> AsRef<[f64]> for StochasticConnorsRsiInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             StochasticConnorsRsiData::Slice(slice) => slice,
+            StochasticConnorsRsiData::Candles { candles, source } if *source == "close" => {
+                &candles.close
+            }
             StochasticConnorsRsiData::Candles { candles, source } => source_type(candles, source),
         }
     }
@@ -765,9 +769,9 @@ pub fn stochastic_connors_rsi_with_kernel(
 ) -> Result<StochasticConnorsRsiOutput, StochasticConnorsRsiError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
-    let first = stochastic_connors_rsi_prepare(input)?;
-    let mut k = alloc_with_nan_prefix(len, k_warmup(first, input).min(len));
-    let mut d = alloc_with_nan_prefix(len, d_warmup(first, input).min(len));
+    stochastic_connors_rsi_prepare(input)?;
+    let mut k = alloc_uninit_f64(len);
+    let mut d = alloc_uninit_f64(len);
     stochastic_connors_rsi_compute_into(data, &input.params, &mut k, &mut d);
     Ok(StochasticConnorsRsiOutput { k, d })
 }
@@ -796,17 +800,7 @@ pub fn stochastic_connors_rsi_into_slice(
             d_len: out_d.len(),
         });
     }
-    let first = stochastic_connors_rsi_prepare(input)?;
-    out_k.fill(f64::NAN);
-    out_d.fill(f64::NAN);
-    let kw = k_warmup(first, input).min(len);
-    let dw = d_warmup(first, input).min(len);
-    for value in &mut out_k[..kw] {
-        *value = f64::NAN;
-    }
-    for value in &mut out_d[..dw] {
-        *value = f64::NAN;
-    }
+    stochastic_connors_rsi_prepare(input)?;
     stochastic_connors_rsi_compute_into(data, &input.params, out_k, out_d);
     Ok(())
 }

@@ -17,13 +17,14 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
+    detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::mem::ManuallyDrop;
+use std::sync::OnceLock;
 use thiserror::Error;
 
 const DEFAULT_DOMESTIC_CYCLE_LENGTH: usize = 15;
@@ -175,8 +176,42 @@ struct ResolvedParams {
     domestic_cycle_length: usize,
     cos_angle: f64,
     sin_angle: f64,
-    cos_weights: Vec<f64>,
-    sin_weights: Vec<f64>,
+    cos_weights: WeightSlice,
+    sin_weights: WeightSlice,
+}
+
+#[derive(Clone, Debug)]
+enum WeightSlice {
+    Static(&'static [f64]),
+    Owned(Vec<f64>),
+}
+
+impl WeightSlice {
+    #[inline(always)]
+    fn as_slice(&self) -> &[f64] {
+        match self {
+            Self::Static(values) => values,
+            Self::Owned(values) => values.as_slice(),
+        }
+    }
+}
+
+static DEFAULT_WEIGHTS: OnceLock<(Vec<f64>, Vec<f64>)> = OnceLock::new();
+
+#[inline(always)]
+fn default_weight_slices() -> (&'static [f64], &'static [f64]) {
+    let weights = DEFAULT_WEIGHTS.get_or_init(|| {
+        let angle = 2.0 * std::f64::consts::PI / DEFAULT_DOMESTIC_CYCLE_LENGTH as f64;
+        let mut cos_weights = Vec::with_capacity(DEFAULT_DOMESTIC_CYCLE_LENGTH);
+        let mut sin_weights = Vec::with_capacity(DEFAULT_DOMESTIC_CYCLE_LENGTH);
+        for j in 0..DEFAULT_DOMESTIC_CYCLE_LENGTH {
+            let theta = angle * j as f64;
+            cos_weights.push(theta.cos());
+            sin_weights.push(theta.sin());
+        }
+        (cos_weights, sin_weights)
+    });
+    (weights.0.as_slice(), weights.1.as_slice())
 }
 
 #[inline(always)]
@@ -209,13 +244,25 @@ fn resolve_params(params: &L1EhlersPhasorParams) -> Result<ResolvedParams, L1Ehl
     let angle = 2.0 * std::f64::consts::PI / domestic_cycle_length as f64;
     let cos_angle = angle.cos();
     let sin_angle = angle.sin();
-    let mut cos_weights = Vec::with_capacity(domestic_cycle_length);
-    let mut sin_weights = Vec::with_capacity(domestic_cycle_length);
-    for j in 0..domestic_cycle_length {
-        let theta = angle * j as f64;
-        cos_weights.push(theta.cos());
-        sin_weights.push(theta.sin());
-    }
+    let (cos_weights, sin_weights) = if domestic_cycle_length == DEFAULT_DOMESTIC_CYCLE_LENGTH {
+        let (cos_weights, sin_weights) = default_weight_slices();
+        (
+            WeightSlice::Static(cos_weights),
+            WeightSlice::Static(sin_weights),
+        )
+    } else {
+        let mut cos_weights = Vec::with_capacity(domestic_cycle_length);
+        let mut sin_weights = Vec::with_capacity(domestic_cycle_length);
+        for j in 0..domestic_cycle_length {
+            let theta = angle * j as f64;
+            cos_weights.push(theta.cos());
+            sin_weights.push(theta.sin());
+        }
+        (
+            WeightSlice::Owned(cos_weights),
+            WeightSlice::Owned(sin_weights),
+        )
+    };
     Ok(ResolvedParams {
         domestic_cycle_length,
         cos_angle,
@@ -307,10 +354,12 @@ impl L1EhlersPhasorCore {
         let len = self.params.domestic_cycle_length;
         let mut real_component = 0.0;
         let mut imaginary_component = 0.0;
+        let cos_weights = self.params.cos_weights.as_slice();
+        let sin_weights = self.params.sin_weights.as_slice();
         for j in 0..len {
             let value = self.ring_get_lag(current_idx, j);
-            real_component += self.params.cos_weights[j] * value;
-            imaginary_component += self.params.sin_weights[j] * value;
+            real_component += cos_weights[j] * value;
+            imaginary_component += sin_weights[j] * value;
         }
         self.real = real_component;
         self.imaginary = imaginary_component;
@@ -369,6 +418,7 @@ impl L1EhlersPhasorCore {
 fn compute_l1_ehlers_phasor_into(
     data: &[f64],
     params: ResolvedParams,
+    first: usize,
     out: &mut [f64],
 ) -> Result<(), L1EhlersPhasorError> {
     if out.len() != data.len() {
@@ -377,11 +427,65 @@ fn compute_l1_ehlers_phasor_into(
             got: out.len(),
         });
     }
+    if compute_l1_ehlers_phasor_clean(data, &params, first, out) {
+        return Ok(());
+    }
     let mut core = L1EhlersPhasorCore::new(params);
     for (dst, &value) in out.iter_mut().zip(data.iter()) {
         *dst = core.update(value);
     }
     Ok(())
+}
+
+#[inline(always)]
+fn compute_l1_ehlers_phasor_clean(
+    data: &[f64],
+    params: &ResolvedParams,
+    first: usize,
+    out: &mut [f64],
+) -> bool {
+    let len = params.domestic_cycle_length;
+    let warm = first + len - 1;
+    for value in &mut out[..warm] {
+        *value = f64::NAN;
+    }
+
+    let mut real = 0.0;
+    let mut imaginary = 0.0;
+    let cos_weights = params.cos_weights.as_slice();
+    let sin_weights = params.sin_weights.as_slice();
+    for j in 0..len {
+        let value = data[warm - j];
+        if !value.is_finite() {
+            return false;
+        }
+        real += cos_weights[j] * value;
+        imaginary += sin_weights[j] * value;
+    }
+    out[warm] = compute_phase_angle(real, imaginary);
+
+    for i in (warm + 1)..data.len() {
+        let value = data[i];
+        let removed = data[i - len];
+        if !value.is_finite() || !removed.is_finite() {
+            return false;
+        }
+        let prev_real = real;
+        let prev_imaginary = imaginary;
+        real = params.cos_angle * prev_real - params.sin_angle * prev_imaginary + value - removed;
+        imaginary = params.sin_angle * prev_real + params.cos_angle * prev_imaginary;
+        out[i] = compute_phase_angle(real, imaginary);
+    }
+    true
+}
+
+#[inline(always)]
+fn alloc_l1_output(len: usize) -> Vec<f64> {
+    let mut out = Vec::with_capacity(len);
+    unsafe {
+        out.set_len(len);
+    }
+    out
 }
 
 #[inline]
@@ -397,11 +501,8 @@ pub fn l1_ehlers_phasor_with_kernel(
     kernel: Kernel,
 ) -> Result<L1EhlersPhasorOutput, L1EhlersPhasorError> {
     let (data, params, first, _kernel) = validate_input(input, kernel)?;
-    let mut out = alloc_with_nan_prefix(
-        data.len(),
-        (first + params.domestic_cycle_length.saturating_sub(1)).min(data.len()),
-    );
-    compute_l1_ehlers_phasor_into(data, params, &mut out)?;
+    let mut out = alloc_l1_output(data.len());
+    compute_l1_ehlers_phasor_into(data, params, first, &mut out)?;
     Ok(L1EhlersPhasorOutput { values: out })
 }
 
@@ -421,9 +522,8 @@ pub fn l1_ehlers_phasor_into_slice(
     input: &L1EhlersPhasorInput,
     kernel: Kernel,
 ) -> Result<(), L1EhlersPhasorError> {
-    let (data, params, _first, _kernel) = validate_input(input, kernel)?;
-    out.fill(f64::NAN);
-    compute_l1_ehlers_phasor_into(data, params, out)
+    let (data, params, first, _kernel) = validate_input(input, kernel)?;
+    compute_l1_ehlers_phasor_into(data, params, first, out)
 }
 
 #[derive(Clone, Debug)]
@@ -706,8 +806,7 @@ fn l1_ehlers_phasor_batch_inner_into(
 
     let do_row = |row: usize, dst: &mut [f64]| -> Result<(), L1EhlersPhasorError> {
         let params = resolve_params(&combos[row])?;
-        dst.fill(f64::NAN);
-        compute_l1_ehlers_phasor_into(data, params, dst)
+        compute_l1_ehlers_phasor_into(data, params, first, dst)
     };
 
     if parallel {

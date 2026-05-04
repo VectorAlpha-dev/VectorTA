@@ -53,6 +53,16 @@ pub struct CyberpunkValueTrendAnalyzerOutput {
     pub sell_signal: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CyberpunkValueTrendAnalyzerOutputField {
+    ValueTrend,
+    ValueTrendLag,
+    DeviationIndex,
+    OverboughtSignal,
+    BuySignal,
+    SellSignal,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -752,6 +762,40 @@ pub fn cyberpunk_value_trend_analyzer_into(
         input,
         Kernel::Auto,
     )
+}
+
+pub fn cyberpunk_value_trend_analyzer_output_into_slice(
+    dst: &mut [f64],
+    input: &CyberpunkValueTrendAnalyzerInput,
+    kernel: Kernel,
+    field: CyberpunkValueTrendAnalyzerOutputField,
+) -> Result<(), CyberpunkValueTrendAnalyzerError> {
+    let (open, high, low, close) = input_slices(input);
+    let entry_level = input.get_entry_level();
+    let exit_level = input.get_exit_level();
+    validate_common(open, high, low, close, entry_level, exit_level)?;
+    let _chosen = normalize_single_kernel(kernel)?;
+    if dst.len() != close.len() {
+        return Err(CyberpunkValueTrendAnalyzerError::OutputLengthMismatch {
+            expected: close.len(),
+            got: dst.len(),
+        });
+    }
+    dst.fill(f64::NAN);
+    let mut stream = CyberpunkValueTrendAnalyzerStream::try_new(input.params.clone())?;
+    for i in 0..close.len() {
+        if let Some(point) = stream.update(open[i], high[i], low[i], close[i]) {
+            dst[i] = match field {
+                CyberpunkValueTrendAnalyzerOutputField::ValueTrend => point.0,
+                CyberpunkValueTrendAnalyzerOutputField::ValueTrendLag => point.1,
+                CyberpunkValueTrendAnalyzerOutputField::DeviationIndex => point.2,
+                CyberpunkValueTrendAnalyzerOutputField::OverboughtSignal => point.3,
+                CyberpunkValueTrendAnalyzerOutputField::BuySignal => point.4,
+                CyberpunkValueTrendAnalyzerOutputField::SellSignal => point.5,
+            };
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]

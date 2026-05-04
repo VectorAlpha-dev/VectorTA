@@ -172,15 +172,34 @@ pub fn emv(input: &EmvInput) -> Result<EmvOutput, EmvError> {
     emv_with_kernel(input, Kernel::Auto)
 }
 
+#[inline(always)]
+fn normalize_emv_kernel(kernel: Kernel, len: usize) -> Kernel {
+    match kernel {
+        Kernel::Auto => {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            {
+                if len >= 500_000
+                    && std::arch::is_x86_feature_detected!("avx2")
+                    && std::arch::is_x86_feature_detected!("fma")
+                {
+                    return Kernel::Avx2;
+                }
+            }
+            Kernel::Scalar
+        }
+        value if value.is_batch() => value.to_non_batch(),
+        other => other,
+    }
+}
+
 pub fn emv_with_kernel(input: &EmvInput, kernel: Kernel) -> Result<EmvOutput, EmvError> {
     let (high, low, _close, volume) = match &input.data {
-        EmvData::Candles { candles } => {
-            let high = source_type(candles, "high");
-            let low = source_type(candles, "low");
-            let close = source_type(candles, "close");
-            let volume = source_type(candles, "volume");
-            (high, low, close, volume)
-        }
+        EmvData::Candles { candles } => (
+            &candles.high[..],
+            &candles.low[..],
+            &candles.close[..],
+            &candles.volume[..],
+        ),
         EmvData::Slices {
             high,
             low,
@@ -214,10 +233,7 @@ pub fn emv_with_kernel(input: &EmvInput, kernel: Kernel) -> Result<EmvOutput, Em
     }
 
     let mut out = alloc_with_nan_prefix(len, first + 1);
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = normalize_emv_kernel(kernel, len);
 
     unsafe {
         match chosen {
@@ -226,6 +242,10 @@ pub fn emv_with_kernel(input: &EmvInput, kernel: Kernel) -> Result<EmvOutput, Em
             Kernel::Avx2 | Kernel::Avx2Batch => emv_avx2(high, low, volume, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => emv_avx512(high, low, volume, first, &mut out),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                emv_scalar(high, low, volume, first, &mut out)
+            }
             _ => unreachable!(),
         }
     }
@@ -241,13 +261,12 @@ pub fn emv_into(input: &EmvInput, out: &mut [f64]) -> Result<(), EmvError> {
 #[inline]
 pub fn emv_into_slice(dst: &mut [f64], input: &EmvInput, kern: Kernel) -> Result<(), EmvError> {
     let (high, low, _close, volume) = match &input.data {
-        EmvData::Candles { candles } => {
-            let high = source_type(candles, "high");
-            let low = source_type(candles, "low");
-            let close = source_type(candles, "close");
-            let volume = source_type(candles, "volume");
-            (high, low, close, volume)
-        }
+        EmvData::Candles { candles } => (
+            &candles.high[..],
+            &candles.low[..],
+            &candles.close[..],
+            &candles.volume[..],
+        ),
         EmvData::Slices {
             high,
             low,
@@ -293,10 +312,7 @@ pub fn emv_into_slice(dst: &mut [f64], input: &EmvInput, kern: Kernel) -> Result
         *v = qnan;
     }
 
-    let chosen = match kern {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = normalize_emv_kernel(kern, len);
 
     unsafe {
         match chosen {
@@ -305,6 +321,10 @@ pub fn emv_into_slice(dst: &mut [f64], input: &EmvInput, kern: Kernel) -> Result
             Kernel::Avx2 | Kernel::Avx2Batch => emv_avx2(high, low, volume, first, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => emv_avx512(high, low, volume, first, dst),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                emv_scalar(high, low, volume, first, dst)
+            }
             _ => unreachable!(),
         }
     }
@@ -343,9 +363,8 @@ pub fn emv_scalar(high: &[f64], low: &[f64], volume: &[f64], first: usize, out: 
                 continue;
             }
 
-            let br = v / 10000.0 / range;
             let dmid = current_mid - last_mid;
-            *o_ptr.add(i) = dmid / br;
+            *o_ptr.add(i) = dmid * range * 10_000.0 / v;
             last_mid = current_mid;
 
             i += 1;
@@ -354,13 +373,13 @@ pub fn emv_scalar(high: &[f64], low: &[f64], volume: &[f64], first: usize, out: 
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
+#[target_feature(enable = "avx512f,avx2,fma")]
 pub fn emv_avx512(high: &[f64], low: &[f64], volume: &[f64], first: usize, out: &mut [f64]) {
     emv_avx2(high, low, volume, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline]
+#[target_feature(enable = "avx2,fma")]
 pub fn emv_avx2(high: &[f64], low: &[f64], volume: &[f64], first: usize, out: &mut [f64]) {
     let len = high.len().min(low.len()).min(volume.len());
     let mut last_mid = 0.5 * (high[first] + low[first]);
@@ -384,9 +403,8 @@ pub fn emv_avx2(high: &[f64], low: &[f64], volume: &[f64], first: usize, out: &m
                     *o_ptr.add(i) = f64::NAN;
                     last_mid = current_mid;
                 } else {
-                    let br = (v / 10000.0) / range;
                     let dmid = current_mid - last_mid;
-                    *o_ptr.add(i) = dmid / br;
+                    *o_ptr.add(i) = dmid * range * 10_000.0 / v;
                     last_mid = current_mid;
                 }
             } else {
@@ -448,8 +466,7 @@ impl EmvStream {
             self.last_mid = Some(current_mid);
             return None;
         }
-        let br = volume / 10000.0 / range;
-        let out = (current_mid - last_mid) / br;
+        let out = (current_mid - last_mid) * range * 10_000.0 / volume;
         self.last_mid = Some(current_mid);
         Some(out)
     }
@@ -551,11 +568,7 @@ impl EmvBatchBuilder {
     }
 
     pub fn apply_candles(self, c: &Candles) -> Result<EmvBatchOutput, EmvError> {
-        let high = source_type(c, "high");
-        let low = source_type(c, "low");
-        let close = source_type(c, "close");
-        let volume = source_type(c, "volume");
-        self.apply_slices(high, low, close, volume)
+        self.apply_slices(&c.high, &c.low, &c.close, &c.volume)
     }
 
     pub fn with_default_candles(c: &Candles, k: Kernel) -> Result<EmvBatchOutput, EmvError> {
@@ -723,7 +736,7 @@ pub fn emv_row_avx512(
     _inv_n: f64,
     out: &mut [f64],
 ) {
-    emv_avx512(high, low, volume, first, out);
+    unsafe { emv_avx512(high, low, volume, first, out) };
 }
 
 #[inline(always)]

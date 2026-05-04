@@ -16,8 +16,7 @@ use crate::indicators::atr::{AtrParams, AtrStream};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -129,11 +128,21 @@ impl<'a> SuperTrendOscillatorInput<'a> {
     #[inline]
     pub fn as_refs(&'a self) -> (&'a [f64], &'a [f64], &'a [f64]) {
         match &self.data {
-            SuperTrendOscillatorData::Candles { candles, source } => (
-                candles.high.as_slice(),
-                candles.low.as_slice(),
-                source_type(candles, source),
-            ),
+            SuperTrendOscillatorData::Candles { candles, source } => {
+                let source = match *source {
+                    "open" => candles.open.as_slice(),
+                    "high" => candles.high.as_slice(),
+                    "low" => candles.low.as_slice(),
+                    "close" => candles.close.as_slice(),
+                    "volume" => candles.volume.as_slice(),
+                    "hl2" => candles.hl2.as_slice(),
+                    "hlc3" => candles.hlc3.as_slice(),
+                    "ohlc4" => candles.ohlc4.as_slice(),
+                    "hlcc4" | "hlcc" => candles.hlcc4.as_slice(),
+                    _ => source_type(candles, source),
+                };
+                (candles.high.as_slice(), candles.low.as_slice(), source)
+            }
             SuperTrendOscillatorData::Slices { high, low, source } => (*high, *low, *source),
         }
     }
@@ -307,12 +316,74 @@ fn max_valid_run(high: &[f64], low: &[f64], source: &[f64]) -> usize {
 }
 
 #[inline(always)]
+fn valid_bar_stats(high: &[f64], low: &[f64], source: &[f64]) -> (Option<usize>, usize) {
+    let mut first = None;
+    let mut best = 0usize;
+    let mut cur = 0usize;
+    for i in 0..source.len() {
+        if valid_bar(high[i], low[i], source[i]) {
+            if first.is_none() {
+                first = Some(i);
+            }
+            cur += 1;
+            if cur > best {
+                best = cur;
+            }
+        } else {
+            cur = 0;
+        }
+    }
+    (first, best)
+}
+
+#[inline(always)]
 fn normalized_kernel(kernel: Kernel) -> Kernel {
     match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            {
+                if std::arch::is_x86_feature_detected!("avx2")
+                    && std::arch::is_x86_feature_detected!("fma")
+                {
+                    return Kernel::Avx2;
+                }
+                if std::arch::is_x86_feature_detected!("avx512f")
+                    && std::arch::is_x86_feature_detected!("fma")
+                {
+                    return Kernel::Avx512;
+                }
+                Kernel::Scalar
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            {
+                Kernel::Scalar
+            }
+        }
         other if other.is_batch() => other.to_non_batch(),
         other => other,
     }
+}
+
+#[inline(always)]
+fn write_nan3(oscillator: &mut [f64], signal: &mut [f64], histogram: &mut [f64], index: usize) {
+    oscillator[index] = f64::NAN;
+    signal[index] = f64::NAN;
+    histogram[index] = f64::NAN;
+}
+
+#[inline(always)]
+fn write_oscillator_values(
+    oscillator: &mut [f64],
+    signal: &mut [f64],
+    histogram: &mut [f64],
+    index: usize,
+    osc: f64,
+    ama: f64,
+    hist: f64,
+) {
+    oscillator[index] = osc * OUTPUT_SCALE;
+    signal[index] = ama * OUTPUT_SCALE;
+    histogram[index] = hist * OUTPUT_SCALE;
 }
 
 #[inline(always)]
@@ -323,6 +394,447 @@ fn clamp_unit(value: f64) -> f64 {
 #[inline(always)]
 fn warmup_end(first_valid: usize, length: usize) -> usize {
     first_valid.saturating_add(length.saturating_sub(1))
+}
+
+#[inline(always)]
+fn supertrend_oscillator_compute_into(
+    high: &[f64],
+    low: &[f64],
+    source: &[f64],
+    length: usize,
+    mult: f64,
+    smooth: usize,
+    all_valid: bool,
+    kernel: Kernel,
+    out_oscillator: &mut [f64],
+    out_signal: &mut [f64],
+    out_histogram: &mut [f64],
+) {
+    unsafe {
+        match kernel {
+            Kernel::Scalar | Kernel::ScalarBatch => supertrend_oscillator_row_fused(
+                high,
+                low,
+                source,
+                length,
+                mult,
+                smooth,
+                all_valid,
+                out_oscillator,
+                out_signal,
+                out_histogram,
+            ),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                supertrend_oscillator_row_fused(
+                    high,
+                    low,
+                    source,
+                    length,
+                    mult,
+                    smooth,
+                    all_valid,
+                    out_oscillator,
+                    out_signal,
+                    out_histogram,
+                )
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => supertrend_oscillator_row_fused_avx2(
+                high,
+                low,
+                source,
+                length,
+                mult,
+                smooth,
+                all_valid,
+                out_oscillator,
+                out_signal,
+                out_histogram,
+            ),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => supertrend_oscillator_row_fused_avx512(
+                high,
+                low,
+                source,
+                length,
+                mult,
+                smooth,
+                all_valid,
+                out_oscillator,
+                out_signal,
+                out_histogram,
+            ),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[inline(always)]
+unsafe fn supertrend_oscillator_row_fused(
+    high: &[f64],
+    low: &[f64],
+    source: &[f64],
+    length: usize,
+    mult: f64,
+    smooth: usize,
+    all_valid: bool,
+    out_oscillator: &mut [f64],
+    out_signal: &mut [f64],
+    out_histogram: &mut [f64],
+) {
+    if all_valid {
+        supertrend_oscillator_row_fused_all_valid(
+            high,
+            low,
+            source,
+            length,
+            mult,
+            smooth,
+            out_oscillator,
+            out_signal,
+            out_histogram,
+        );
+    } else {
+        supertrend_oscillator_row_fused_checked(
+            high,
+            low,
+            source,
+            length,
+            mult,
+            smooth,
+            out_oscillator,
+            out_signal,
+            out_histogram,
+        );
+    }
+}
+
+#[inline(always)]
+unsafe fn supertrend_oscillator_row_fused_all_valid(
+    high: &[f64],
+    low: &[f64],
+    source: &[f64],
+    length: usize,
+    mult: f64,
+    smooth: usize,
+    out_oscillator: &mut [f64],
+    out_signal: &mut [f64],
+    out_histogram: &mut [f64],
+) {
+    let len = source.len();
+    let atr_alpha = 1.0 / (length as f64);
+    let hist_alpha = 2.0 / (smooth as f64 + 1.0);
+    let length_f64 = length as f64;
+
+    let mut prev_close = f64::NAN;
+    let mut atr = f64::NAN;
+    let mut warm_sum = 0.0;
+    let mut warm_count = 0usize;
+    let mut seeded = false;
+
+    let mut prev_source = f64::NAN;
+    let mut prev_upper = f64::NAN;
+    let mut prev_lower = f64::NAN;
+    let mut prev_trend = 0.0;
+    let mut ama_seeded = false;
+    let mut hist_seeded = false;
+    let mut ama_prev = 0.0;
+    let mut hist_prev = 0.0;
+
+    let h_ptr = high.as_ptr();
+    let l_ptr = low.as_ptr();
+    let s_ptr = source.as_ptr();
+
+    let mut i = 0usize;
+    while i < len {
+        let hi = *h_ptr.add(i);
+        let lo = *l_ptr.add(i);
+        let src = *s_ptr.add(i);
+        let true_range = if prev_close.is_nan() {
+            hi - lo
+        } else {
+            let up = if hi > prev_close { hi } else { prev_close };
+            let dn = if lo < prev_close { lo } else { prev_close };
+            up - dn
+        };
+        prev_close = src;
+
+        if !seeded {
+            warm_sum += true_range;
+            warm_count += 1;
+            if warm_count == length {
+                atr = warm_sum * atr_alpha;
+                seeded = true;
+            } else {
+                write_nan3(out_oscillator, out_signal, out_histogram, i);
+                prev_source = src;
+                i += 1;
+                continue;
+            }
+        } else {
+            atr = atr_alpha.mul_add(true_range - atr, atr);
+        }
+
+        let mid = 0.5 * (hi + lo);
+        let band = atr * mult;
+        let up = mid + band;
+        let dn = mid - band;
+
+        let upper = if prev_source.is_finite() && prev_upper.is_finite() && prev_source < prev_upper
+        {
+            up.min(prev_upper)
+        } else {
+            up
+        };
+        let lower = if prev_source.is_finite() && prev_lower.is_finite() && prev_source > prev_lower
+        {
+            dn.max(prev_lower)
+        } else {
+            dn
+        };
+
+        let trend = if prev_upper.is_finite() && src > prev_upper {
+            1.0
+        } else if prev_lower.is_finite() && src < prev_lower {
+            0.0
+        } else {
+            prev_trend
+        };
+
+        let supertrend = trend * lower + (1.0 - trend) * upper;
+        let width = upper - lower;
+        let osc = if width.is_finite() && width != 0.0 {
+            clamp_unit((src - supertrend) / width)
+        } else {
+            0.0
+        };
+        let alpha = (osc * osc) / length_f64;
+        let ama = if ama_seeded {
+            ama_prev + alpha * (osc - ama_prev)
+        } else {
+            ama_seeded = true;
+            osc
+        };
+        let diff = osc - ama;
+        let hist = if hist_seeded {
+            hist_prev + hist_alpha * (diff - hist_prev)
+        } else {
+            hist_seeded = true;
+            diff
+        };
+
+        write_oscillator_values(out_oscillator, out_signal, out_histogram, i, osc, ama, hist);
+
+        prev_source = src;
+        prev_upper = upper;
+        prev_lower = lower;
+        prev_trend = trend;
+        ama_prev = ama;
+        hist_prev = hist;
+        i += 1;
+    }
+}
+
+#[inline(always)]
+unsafe fn supertrend_oscillator_row_fused_checked(
+    high: &[f64],
+    low: &[f64],
+    source: &[f64],
+    length: usize,
+    mult: f64,
+    smooth: usize,
+    out_oscillator: &mut [f64],
+    out_signal: &mut [f64],
+    out_histogram: &mut [f64],
+) {
+    let len = source.len();
+    let atr_alpha = 1.0 / (length as f64);
+    let hist_alpha = 2.0 / (smooth as f64 + 1.0);
+    let length_f64 = length as f64;
+
+    let mut prev_close = f64::NAN;
+    let mut atr = f64::NAN;
+    let mut warm_sum = 0.0;
+    let mut warm_count = 0usize;
+    let mut seeded = false;
+
+    let mut prev_source = f64::NAN;
+    let mut prev_upper = f64::NAN;
+    let mut prev_lower = f64::NAN;
+    let mut prev_trend = 0.0;
+    let mut ama_seeded = false;
+    let mut hist_seeded = false;
+    let mut ama_prev = 0.0;
+    let mut hist_prev = 0.0;
+
+    let h_ptr = high.as_ptr();
+    let l_ptr = low.as_ptr();
+    let s_ptr = source.as_ptr();
+
+    let mut i = 0usize;
+    while i < len {
+        let hi = *h_ptr.add(i);
+        let lo = *l_ptr.add(i);
+        let src = *s_ptr.add(i);
+        if !valid_bar(hi, lo, src) {
+            write_nan3(out_oscillator, out_signal, out_histogram, i);
+            prev_close = f64::NAN;
+            atr = f64::NAN;
+            warm_sum = 0.0;
+            warm_count = 0;
+            seeded = false;
+            prev_source = f64::NAN;
+            prev_upper = f64::NAN;
+            prev_lower = f64::NAN;
+            prev_trend = 0.0;
+            ama_seeded = false;
+            hist_seeded = false;
+            ama_prev = 0.0;
+            hist_prev = 0.0;
+            i += 1;
+            continue;
+        }
+
+        let true_range = if prev_close.is_nan() {
+            hi - lo
+        } else {
+            let up = if hi > prev_close { hi } else { prev_close };
+            let dn = if lo < prev_close { lo } else { prev_close };
+            up - dn
+        };
+        prev_close = src;
+
+        if !seeded {
+            warm_sum += true_range;
+            warm_count += 1;
+            if warm_count == length {
+                atr = warm_sum * atr_alpha;
+                seeded = true;
+            } else {
+                write_nan3(out_oscillator, out_signal, out_histogram, i);
+                prev_source = src;
+                i += 1;
+                continue;
+            }
+        } else {
+            atr = atr_alpha.mul_add(true_range - atr, atr);
+        }
+
+        let mid = 0.5 * (hi + lo);
+        let band = atr * mult;
+        let up = mid + band;
+        let dn = mid - band;
+
+        let upper = if prev_source.is_finite() && prev_upper.is_finite() && prev_source < prev_upper
+        {
+            up.min(prev_upper)
+        } else {
+            up
+        };
+        let lower = if prev_source.is_finite() && prev_lower.is_finite() && prev_source > prev_lower
+        {
+            dn.max(prev_lower)
+        } else {
+            dn
+        };
+
+        let trend = if prev_upper.is_finite() && src > prev_upper {
+            1.0
+        } else if prev_lower.is_finite() && src < prev_lower {
+            0.0
+        } else {
+            prev_trend
+        };
+
+        let supertrend = trend * lower + (1.0 - trend) * upper;
+        let width = upper - lower;
+        let osc = if width.is_finite() && width != 0.0 {
+            clamp_unit((src - supertrend) / width)
+        } else {
+            0.0
+        };
+        let alpha = (osc * osc) / length_f64;
+        let ama = if ama_seeded {
+            ama_prev + alpha * (osc - ama_prev)
+        } else {
+            ama_seeded = true;
+            osc
+        };
+        let diff = osc - ama;
+        let hist = if hist_seeded {
+            hist_prev + hist_alpha * (diff - hist_prev)
+        } else {
+            hist_seeded = true;
+            diff
+        };
+
+        write_oscillator_values(out_oscillator, out_signal, out_histogram, i, osc, ama, hist);
+
+        prev_source = src;
+        prev_upper = upper;
+        prev_lower = lower;
+        prev_trend = trend;
+        ama_prev = ama;
+        hist_prev = hist;
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn supertrend_oscillator_row_fused_avx2(
+    high: &[f64],
+    low: &[f64],
+    source: &[f64],
+    length: usize,
+    mult: f64,
+    smooth: usize,
+    all_valid: bool,
+    out_oscillator: &mut [f64],
+    out_signal: &mut [f64],
+    out_histogram: &mut [f64],
+) {
+    supertrend_oscillator_row_fused(
+        high,
+        low,
+        source,
+        length,
+        mult,
+        smooth,
+        all_valid,
+        out_oscillator,
+        out_signal,
+        out_histogram,
+    );
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,fma")]
+unsafe fn supertrend_oscillator_row_fused_avx512(
+    high: &[f64],
+    low: &[f64],
+    source: &[f64],
+    length: usize,
+    mult: f64,
+    smooth: usize,
+    all_valid: bool,
+    out_oscillator: &mut [f64],
+    out_signal: &mut [f64],
+    out_histogram: &mut [f64],
+) {
+    supertrend_oscillator_row_fused(
+        high,
+        low,
+        source,
+        length,
+        mult,
+        smooth,
+        all_valid,
+        out_oscillator,
+        out_signal,
+        out_histogram,
+    );
 }
 
 #[inline(always)]
@@ -500,7 +1012,7 @@ fn supertrend_oscillator_prepare<'a>(
         f64,
         usize,
         usize,
-        Vec<f64>,
+        bool,
         Kernel,
     ),
     SuperTrendOscillatorError,
@@ -513,9 +1025,8 @@ fn supertrend_oscillator_prepare<'a>(
     let smooth = input.get_smooth();
     validate_params(length, mult, smooth, source.len())?;
 
-    let first_valid =
-        first_valid_bar(high, low, source).ok_or(SuperTrendOscillatorError::AllValuesNaN)?;
-    let max_run = max_valid_run(high, low, source);
+    let (first_valid, max_run) = valid_bar_stats(high, low, source);
+    let first_valid = first_valid.ok_or(SuperTrendOscillatorError::AllValuesNaN)?;
     if max_run < length {
         return Err(SuperTrendOscillatorError::NotEnoughValidData {
             needed: length,
@@ -523,7 +1034,7 @@ fn supertrend_oscillator_prepare<'a>(
         });
     }
 
-    let atr_values = compute_atr_series(high, low, source, length);
+    let all_valid = max_run == source.len();
 
     Ok((
         high,
@@ -533,7 +1044,7 @@ fn supertrend_oscillator_prepare<'a>(
         mult,
         smooth,
         first_valid,
-        atr_values,
+        all_valid,
         normalized_kernel(kernel),
     ))
 }
@@ -550,23 +1061,23 @@ pub fn supertrend_oscillator_with_kernel(
     input: &SuperTrendOscillatorInput,
     kernel: Kernel,
 ) -> Result<SuperTrendOscillatorOutput, SuperTrendOscillatorError> {
-    let (high, low, source, length, mult, smooth, first_valid, atr_values, _chosen) =
+    let (high, low, source, length, mult, smooth, _first_valid, all_valid, chosen) =
         supertrend_oscillator_prepare(input, kernel)?;
 
     let len = source.len();
-    let warmup = warmup_end(first_valid, length);
-    let mut oscillator = alloc_with_nan_prefix(len, warmup);
-    let mut signal = alloc_with_nan_prefix(len, warmup);
-    let mut histogram = alloc_with_nan_prefix(len, warmup);
+    let mut oscillator = alloc_uninit_f64(len);
+    let mut signal = alloc_uninit_f64(len);
+    let mut histogram = alloc_uninit_f64(len);
 
-    supertrend_oscillator_row_scalar(
+    supertrend_oscillator_compute_into(
         high,
         low,
         source,
         length,
         mult,
         smooth,
-        &atr_values,
+        all_valid,
+        chosen,
         &mut oscillator,
         &mut signal,
         &mut histogram,
@@ -587,7 +1098,7 @@ pub fn supertrend_oscillator_into_slice(
     input: &SuperTrendOscillatorInput,
     kernel: Kernel,
 ) -> Result<(), SuperTrendOscillatorError> {
-    let (high, low, source, length, mult, smooth, _first_valid, atr_values, _chosen) =
+    let (high, low, source, length, mult, smooth, _first_valid, all_valid, chosen) =
         supertrend_oscillator_prepare(input, kernel)?;
     let len = source.len();
     if out_oscillator.len() != len || out_signal.len() != len || out_histogram.len() != len {
@@ -600,14 +1111,15 @@ pub fn supertrend_oscillator_into_slice(
         });
     }
 
-    supertrend_oscillator_row_scalar(
+    supertrend_oscillator_compute_into(
         high,
         low,
         source,
         length,
         mult,
         smooth,
-        &atr_values,
+        all_valid,
+        chosen,
         out_oscillator,
         out_signal,
         out_histogram,

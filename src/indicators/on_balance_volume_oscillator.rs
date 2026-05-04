@@ -27,9 +27,10 @@ impl<'a> AsRef<[f64]> for OnBalanceVolumeOscillatorInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
-            OnBalanceVolumeOscillatorData::Candles { candles, source } => {
-                source_type(candles, source)
-            }
+            OnBalanceVolumeOscillatorData::Candles { candles, source } => match *source {
+                "close" => candles.close.as_slice(),
+                _ => source_type(candles, source),
+            },
             OnBalanceVolumeOscillatorData::Slices { source, .. } => source,
         }
     }
@@ -121,9 +122,13 @@ impl<'a> OnBalanceVolumeOscillatorInput<'a> {
     #[inline]
     pub fn as_refs(&'a self) -> (&'a [f64], &'a [f64]) {
         match &self.data {
-            OnBalanceVolumeOscillatorData::Candles { candles, source } => {
-                (source_type(candles, source), source_type(candles, "volume"))
-            }
+            OnBalanceVolumeOscillatorData::Candles { candles, source } => (
+                match *source {
+                    "close" => candles.close.as_slice(),
+                    _ => source_type(candles, source),
+                },
+                candles.volume.as_slice(),
+            ),
             OnBalanceVolumeOscillatorData::Slices { source, volume } => (*source, *volume),
         }
     }
@@ -266,25 +271,41 @@ fn is_valid_bar(source: f64, volume: f64) -> bool {
 }
 
 #[inline(always)]
+fn first_and_valid_run_until(
+    source: &[f64],
+    volume: &[f64],
+    needed: usize,
+) -> (Option<usize>, usize) {
+    let mut first = None;
+    let mut best = 0usize;
+    let mut run = 0usize;
+    for i in 0..source.len() {
+        if is_valid_bar(source[i], volume[i]) {
+            if first.is_none() {
+                first = Some(i);
+            }
+            run += 1;
+            if run > best {
+                best = run;
+                if best >= needed {
+                    break;
+                }
+            }
+        } else {
+            run = 0;
+        }
+    }
+    (first, best)
+}
+
+#[inline(always)]
 fn first_valid_bar(source: &[f64], volume: &[f64]) -> Option<usize> {
     (0..source.len()).find(|&i| is_valid_bar(source[i], volume[i]))
 }
 
 #[inline(always)]
 fn max_valid_run_length(source: &[f64], volume: &[f64]) -> usize {
-    let mut best = 0usize;
-    let mut run = 0usize;
-    for i in 0..source.len() {
-        if is_valid_bar(source[i], volume[i]) {
-            run += 1;
-            if run > best {
-                best = run;
-            }
-        } else {
-            run = 0;
-        }
-    }
-    best
+    first_and_valid_run_until(source, volume, usize::MAX).1
 }
 
 #[inline(always)]
@@ -486,9 +507,8 @@ fn on_balance_volume_oscillator_prepare<'a>(
         return Err(OnBalanceVolumeOscillatorError::InvalidEmaLength { ema_length });
     }
 
-    let first =
-        first_valid_bar(source, volume).ok_or(OnBalanceVolumeOscillatorError::AllValuesNaN)?;
-    let valid = max_valid_run_length(source, volume);
+    let (first, valid) = first_and_valid_run_until(source, volume, obv_length);
+    let first = first.ok_or(OnBalanceVolumeOscillatorError::AllValuesNaN)?;
     if valid < obv_length {
         return Err(OnBalanceVolumeOscillatorError::NotEnoughValidData {
             needed: obv_length,
@@ -497,6 +517,107 @@ fn on_balance_volume_oscillator_prepare<'a>(
     }
 
     Ok((source, volume, obv_length, ema_length, first))
+}
+
+#[inline(always)]
+fn on_balance_volume_oscillator_compute_default_20_9_into(
+    source: &[f64],
+    volume: &[f64],
+    out_line: &mut [f64],
+    out_signal: &mut [f64],
+) {
+    let mut prev_source = f64::NAN;
+    let mut has_prev_source = false;
+    let mut signed_buffer = [0.0f64; 20];
+    let mut volume_buffer = [0.0f64; 20];
+    let mut count = 0usize;
+    let mut head = 0usize;
+    let mut signed_sum = 0.0;
+    let mut volume_sum = 0.0;
+    let mut ema_value = f64::NAN;
+    let mut ema_initialized = false;
+
+    let mut i = 0usize;
+    while i < source.len() {
+        let value = unsafe { *source.get_unchecked(i) };
+        let vol = unsafe { *volume.get_unchecked(i) };
+        if !is_valid_bar(value, vol) {
+            prev_source = f64::NAN;
+            has_prev_source = false;
+            count = 0;
+            head = 0;
+            signed_sum = 0.0;
+            volume_sum = 0.0;
+            ema_value = f64::NAN;
+            ema_initialized = false;
+            unsafe {
+                *out_line.get_unchecked_mut(i) = f64::NAN;
+                *out_signal.get_unchecked_mut(i) = f64::NAN;
+            }
+            i += 1;
+            continue;
+        }
+
+        let signed_volume = if has_prev_source {
+            let sign = ((value > prev_source) as i32 - (value < prev_source) as i32) as f64;
+            prev_source = value;
+            vol * sign
+        } else {
+            prev_source = value;
+            has_prev_source = true;
+            0.0
+        };
+
+        let ready = if count < 20 {
+            signed_buffer[count] = signed_volume;
+            volume_buffer[count] = vol;
+            signed_sum += signed_volume;
+            volume_sum += vol;
+            count += 1;
+            count == 20
+        } else {
+            let old_signed = signed_buffer[head];
+            let old_volume = volume_buffer[head];
+            signed_buffer[head] = signed_volume;
+            volume_buffer[head] = vol;
+            signed_sum += signed_volume - old_signed;
+            volume_sum += vol - old_volume;
+            head += 1;
+            if head == 20 {
+                head = 0;
+            }
+            true
+        };
+
+        if ready {
+            let line = if volume_sum == 0.0 {
+                f64::NAN
+            } else {
+                signed_sum / volume_sum
+            };
+            let signal = if line.is_finite() {
+                if ema_initialized {
+                    ema_value += 0.2 * (line - ema_value);
+                } else {
+                    ema_value = line;
+                    ema_initialized = true;
+                }
+                ema_value
+            } else {
+                f64::NAN
+            };
+            unsafe {
+                *out_line.get_unchecked_mut(i) = line;
+                *out_signal.get_unchecked_mut(i) = signal;
+            }
+        } else {
+            unsafe {
+                *out_line.get_unchecked_mut(i) = f64::NAN;
+                *out_signal.get_unchecked_mut(i) = f64::NAN;
+            }
+        }
+        i += 1;
+    }
 }
 
 #[inline(always)]
@@ -509,6 +630,13 @@ fn on_balance_volume_oscillator_compute_into(
     out_line: &mut [f64],
     out_signal: &mut [f64],
 ) {
+    if obv_length == 20 && ema_length == 9 {
+        on_balance_volume_oscillator_compute_default_20_9_into(
+            source, volume, out_line, out_signal,
+        );
+        return;
+    }
+
     let mut stream = OnBalanceVolumeOscillatorStream::from_parts(obv_length, ema_length);
     for i in 0..source.len() {
         match stream.update_reset_on_nan(source[i], volume[i]) {
@@ -524,11 +652,11 @@ fn on_balance_volume_oscillator_compute_into(
     }
 }
 
-#[inline]
+#[inline(always)]
 pub fn on_balance_volume_oscillator(
     input: &OnBalanceVolumeOscillatorInput,
 ) -> Result<OnBalanceVolumeOscillatorOutput, OnBalanceVolumeOscillatorError> {
-    on_balance_volume_oscillator_with_kernel(input, Kernel::Auto)
+    on_balance_volume_oscillator_with_kernel(input, Kernel::Scalar)
 }
 
 pub fn on_balance_volume_oscillator_with_kernel(
@@ -538,14 +666,8 @@ pub fn on_balance_volume_oscillator_with_kernel(
     let (source, volume, obv_length, ema_length, first) =
         on_balance_volume_oscillator_prepare(input)?;
 
-    let mut line = alloc_with_nan_prefix(
-        source.len(),
-        line_warmup(obv_length, first).min(source.len()),
-    );
-    let mut signal = alloc_with_nan_prefix(
-        source.len(),
-        signal_warmup(obv_length, first).min(source.len()),
-    );
+    let mut line = alloc_with_nan_prefix(source.len(), 0);
+    let mut signal = alloc_with_nan_prefix(source.len(), 0);
     on_balance_volume_oscillator_compute_into(
         source,
         volume,

@@ -24,8 +24,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -102,13 +101,7 @@ impl<'a> ParkinsonVolatilityInput<'a> {
     pub fn as_refs(&'a self) -> Result<(&'a [f64], &'a [f64]), ParkinsonVolatilityError> {
         match &self.data {
             ParkinsonVolatilityData::Candles { candles } => {
-                let high = candles
-                    .select_candle_field("high")
-                    .map_err(|_| ParkinsonVolatilityError::CandleFieldError { field: "high" })?;
-                let low = candles
-                    .select_candle_field("low")
-                    .map_err(|_| ParkinsonVolatilityError::CandleFieldError { field: "low" })?;
-                Ok((high, low))
+                Ok((candles.high.as_slice(), candles.low.as_slice()))
             }
             ParkinsonVolatilityData::Slices { high, low } => Ok((*high, *low)),
         }
@@ -271,7 +264,7 @@ fn parkinson_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other.to_non_batch(),
     };
     Ok((high, low, period, first, chosen))
@@ -294,9 +287,70 @@ fn parkinson_compute_into(
     let mut invalid = 0usize;
     let mut sum_log_sq = 0.0f64;
 
-    for i in first..=warm {
+    if period == 8 {
+        let mut ring = [f64::NAN; 8];
+        for j in 0..8 {
+            let i = first + j;
+            if is_valid_high_low(high[i], low[i]) {
+                let value = log_range_sq(high[i], low[i]);
+                ring[j] = value;
+                sum_log_sq += value;
+            } else {
+                invalid += 1;
+            }
+        }
+
+        if invalid == 0 {
+            let (vol, var) = outputs_from_sum(sum_log_sq, period);
+            out_volatility[warm] = vol;
+            out_variance[warm] = var;
+        } else {
+            out_volatility[warm] = f64::NAN;
+            out_variance[warm] = f64::NAN;
+        }
+
+        let mut head = 0usize;
+        for i in (warm + 1)..high.len() {
+            let old = ring[head];
+            if old.is_nan() {
+                invalid -= 1;
+            } else {
+                sum_log_sq -= old;
+            }
+
+            if is_valid_high_low(high[i], low[i]) {
+                let value = log_range_sq(high[i], low[i]);
+                ring[head] = value;
+                sum_log_sq += value;
+            } else {
+                ring[head] = f64::NAN;
+                invalid += 1;
+            }
+
+            head += 1;
+            if head == 8 {
+                head = 0;
+            }
+
+            if invalid == 0 {
+                let (vol, var) = outputs_from_sum(sum_log_sq, period);
+                out_volatility[i] = vol;
+                out_variance[i] = var;
+            } else {
+                out_volatility[i] = f64::NAN;
+                out_variance[i] = f64::NAN;
+            }
+        }
+        return;
+    }
+
+    let mut ring = vec![f64::NAN; period];
+    for j in 0..period {
+        let i = first + j;
         if is_valid_high_low(high[i], low[i]) {
-            sum_log_sq += log_range_sq(high[i], low[i]);
+            let value = log_range_sq(high[i], low[i]);
+            ring[j] = value;
+            sum_log_sq += value;
         } else {
             invalid += 1;
         }
@@ -306,26 +360,41 @@ fn parkinson_compute_into(
         let (vol, var) = outputs_from_sum(sum_log_sq, period);
         out_volatility[warm] = vol;
         out_variance[warm] = var;
+    } else {
+        out_volatility[warm] = f64::NAN;
+        out_variance[warm] = f64::NAN;
     }
 
+    let mut head = 0usize;
     for i in (warm + 1)..high.len() {
-        let old_idx = i - period;
-        if is_valid_high_low(high[old_idx], low[old_idx]) {
-            sum_log_sq -= log_range_sq(high[old_idx], low[old_idx]);
-        } else {
+        let old = ring[head];
+        if old.is_nan() {
             invalid -= 1;
+        } else {
+            sum_log_sq -= old;
         }
 
         if is_valid_high_low(high[i], low[i]) {
-            sum_log_sq += log_range_sq(high[i], low[i]);
+            let value = log_range_sq(high[i], low[i]);
+            ring[head] = value;
+            sum_log_sq += value;
         } else {
+            ring[head] = f64::NAN;
             invalid += 1;
+        }
+
+        head += 1;
+        if head == period {
+            head = 0;
         }
 
         if invalid == 0 {
             let (vol, var) = outputs_from_sum(sum_log_sq, period);
             out_volatility[i] = vol;
             out_variance[i] = var;
+        } else {
+            out_volatility[i] = f64::NAN;
+            out_variance[i] = f64::NAN;
         }
     }
 }
@@ -362,8 +431,13 @@ pub fn parkinson_volatility_into_slice(
         });
     }
 
-    dst_volatility.fill(f64::NAN);
-    dst_variance.fill(f64::NAN);
+    let warm = first + period - 1;
+    for v in &mut dst_volatility[..warm] {
+        *v = f64::NAN;
+    }
+    for v in &mut dst_variance[..warm] {
+        *v = f64::NAN;
+    }
     parkinson_compute_into(high, low, period, first, dst_volatility, dst_variance);
     Ok(())
 }

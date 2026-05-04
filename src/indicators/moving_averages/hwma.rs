@@ -6,8 +6,7 @@ use crate::cuda::{
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -116,7 +115,18 @@ impl<'a> AsRef<[f64]> for HwmaInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             HwmaData::Slice(slice) => slice,
-            HwmaData::Candles { candles, source } => source_type(candles, source),
+            HwmaData::Candles { candles, source } => match *source {
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -326,10 +336,7 @@ pub fn hwma_with_kernel(input: &HwmaInput, kernel: Kernel) -> Result<HwmaOutput,
         return Err(HwmaError::InvalidParams { na, nb, nc });
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = choose_hwma_kernel(kernel);
 
     let mut out = alloc_with_nan_prefix(len, first);
     unsafe {
@@ -341,8 +348,17 @@ pub fn hwma_with_kernel(input: &HwmaInput, kernel: Kernel) -> Result<HwmaOutput,
             }
         }
 
+        let default_params = is_default_hwma_params(na, nb, nc);
+
         match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch if default_params => {
+                hwma_scalar_default(data, first, &mut out)
+            }
             Kernel::Scalar | Kernel::ScalarBatch => hwma_scalar(data, na, nb, nc, first, &mut out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch if default_params => {
+                hwma_avx2_default(data, first, &mut out)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => hwma_avx2(data, na, nb, nc, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -392,13 +408,22 @@ pub fn hwma_with_kernel_into(
         return Err(HwmaError::InvalidParams { na, nb, nc });
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = choose_hwma_kernel(kernel);
 
     unsafe {
+        let default_params = is_default_hwma_params(na, nb, nc);
+
         match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch if default_params => {
+                #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+                {
+                    hwma_simd128(data, na, nb, nc, first, out);
+                }
+                #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+                {
+                    hwma_scalar_default(data, first, out);
+                }
+            }
             Kernel::Scalar | Kernel::ScalarBatch => {
                 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
                 {
@@ -408,6 +433,10 @@ pub fn hwma_with_kernel_into(
                 {
                     hwma_scalar(data, na, nb, nc, first, out);
                 }
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch if default_params => {
+                hwma_avx2_default(data, first, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => hwma_avx2(data, na, nb, nc, first, out),
@@ -432,6 +461,29 @@ pub fn hwma_with_kernel_into(
     }
 
     Ok(())
+}
+
+#[inline(always)]
+fn choose_hwma_kernel(kernel: Kernel) -> Kernel {
+    match kernel {
+        Kernel::Auto => {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            {
+                if std::arch::is_x86_feature_detected!("avx2")
+                    && std::arch::is_x86_feature_detected!("fma")
+                {
+                    return Kernel::Avx2;
+                }
+            }
+            Kernel::Scalar
+        }
+        other => other,
+    }
+}
+
+#[inline(always)]
+fn is_default_hwma_params(na: f64, nb: f64, nc: f64) -> bool {
+    na == 0.2 && nb == 0.1 && nc == 0.1
 }
 
 #[inline(always)]
@@ -497,6 +549,90 @@ pub fn hwma_scalar(data: &[f64], na: f64, nb: f64, nc: f64, first_valid: usize, 
     }
 }
 
+#[inline(always)]
+pub fn hwma_scalar_default(data: &[f64], first_valid: usize, out: &mut [f64]) {
+    unsafe {
+        hwma_default_core(data, first_valid, out);
+    }
+}
+
+#[inline(always)]
+unsafe fn hwma_default_core(data: &[f64], first_valid: usize, out: &mut [f64]) {
+    debug_assert_eq!(data.len(), out.len());
+    let len = data.len();
+    if first_valid >= len {
+        return;
+    }
+
+    const NA: f64 = 0.2;
+    const NB: f64 = 0.1;
+    const NC: f64 = 0.1;
+    const ONE_M_NA: f64 = 1.0 - NA;
+    const ONE_M_NB: f64 = 1.0 - NB;
+    const ONE_M_NC: f64 = 1.0 - NC;
+    const HALF: f64 = 0.5;
+
+    let mut f = *data.get_unchecked(first_valid);
+    let mut v = 0.0;
+    let mut a = 0.0;
+
+    let mut dp = data.as_ptr().add(first_valid);
+    let mut op = out.as_mut_ptr().add(first_valid);
+    let end = out.as_mut_ptr().add(len);
+
+    while op.add(3) < end {
+        let x0 = *dp;
+        let s_prev = HALF.mul_add(a, f + v);
+        let f0 = ONE_M_NA.mul_add(s_prev, NA * x0);
+        let v0 = NB.mul_add(f0 - f, ONE_M_NB * (v + a));
+        let a0 = NC.mul_add(v0 - v, ONE_M_NC * a);
+        let s0 = HALF.mul_add(a0, f0 + v0);
+        *op = s0;
+
+        let x1 = *dp.add(1);
+        let f1 = ONE_M_NA.mul_add(s0, NA * x1);
+        let v1 = NB.mul_add(f1 - f0, ONE_M_NB * (v0 + a0));
+        let a1 = NC.mul_add(v1 - v0, ONE_M_NC * a0);
+        let s1 = HALF.mul_add(a1, f1 + v1);
+        *op.add(1) = s1;
+
+        let x2 = *dp.add(2);
+        let f2 = ONE_M_NA.mul_add(s1, NA * x2);
+        let v2 = NB.mul_add(f2 - f1, ONE_M_NB * (v1 + a1));
+        let a2 = NC.mul_add(v2 - v1, ONE_M_NC * a1);
+        let s2 = HALF.mul_add(a2, f2 + v2);
+        *op.add(2) = s2;
+
+        let x3 = *dp.add(3);
+        let f3 = ONE_M_NA.mul_add(s2, NA * x3);
+        let v3 = NB.mul_add(f3 - f2, ONE_M_NB * (v2 + a2));
+        let a3 = NC.mul_add(v3 - v2, ONE_M_NC * a2);
+        let s3 = HALF.mul_add(a3, f3 + v3);
+        *op.add(3) = s3;
+
+        f = f3;
+        v = v3;
+        a = a3;
+        dp = dp.add(4);
+        op = op.add(4);
+    }
+
+    while op < end {
+        let x = *dp;
+        let s_prev = HALF.mul_add(a, f + v);
+        let f_new = ONE_M_NA.mul_add(s_prev, NA * x);
+        let v_new = NB.mul_add(f_new - f, ONE_M_NB * (v + a));
+        let a_new = NC.mul_add(v_new - v, ONE_M_NC * a);
+        *op = HALF.mul_add(a_new, f_new + v_new);
+
+        f = f_new;
+        v = v_new;
+        a = a_new;
+        dp = dp.add(1);
+        op = op.add(1);
+    }
+}
+
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
 unsafe fn hwma_simd128(data: &[f64], na: f64, nb: f64, nc: f64, first: usize, out: &mut [f64]) {
@@ -556,6 +692,13 @@ pub unsafe fn hwma_avx2(data: &[f64], na: f64, nb: f64, nc: f64, first: usize, o
         let a_new = nc.mul_add(v_new - v, one_m_nc * a);
         *op = HALF.mul_add(a_new, f_new + v_new);
     }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+#[inline]
+pub unsafe fn hwma_avx2_default(data: &[f64], first: usize, out: &mut [f64]) {
+    hwma_default_core(data, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

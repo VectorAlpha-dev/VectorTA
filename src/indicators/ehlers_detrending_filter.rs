@@ -14,9 +14,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
-};
+use crate::utilities::helpers::{alloc_uninit_f64, detect_best_batch_kernel, detect_best_kernel};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 
@@ -323,15 +321,19 @@ impl EhlersDetrendingFilterStream {
 
     #[inline(always)]
     fn weighted_filter(&self) -> f64 {
-        let latest = if self.head == 0 {
-            self.length - 1
-        } else {
-            self.head - 1
-        };
         let mut sum = 0.0;
-        for offset in 0..self.count {
-            let idx = (latest + self.length - offset) % self.length;
+        let mut offset = 0usize;
+        let mut idx = self.head;
+        while offset < self.count && idx > 0 {
+            idx -= 1;
             sum += self.weights[offset] * self.ring[idx];
+            offset += 1;
+        }
+        idx = self.length;
+        while offset < self.count {
+            idx -= 1;
+            sum += self.weights[offset] * self.ring[idx];
+            offset += 1;
         }
         if self.weight_sum != 0.0 {
             sum / self.weight_sum
@@ -444,8 +446,9 @@ pub fn ehlers_detrending_filter_with_kernel(
     kernel: Kernel,
 ) -> Result<EhlersDetrendingFilterOutput, EhlersDetrendingFilterError> {
     let (data, length, _, warmup) = ehlers_detrending_filter_prepare(input)?;
-    let mut edf = alloc_with_nan_prefix(data.len(), warmup);
-    let mut signal = alloc_with_nan_prefix(data.len(), warmup);
+    let _ = warmup;
+    let mut edf = alloc_uninit_f64(data.len());
+    let mut signal = alloc_uninit_f64(data.len());
     ehlers_detrending_filter_compute_into(
         data,
         length,

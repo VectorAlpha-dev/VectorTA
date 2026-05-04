@@ -53,6 +53,12 @@ pub struct AdaptiveSchaffTrendCycleOutput {
     pub histogram: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdaptiveSchaffTrendCycleOutputField {
+    Stc,
+    Histogram,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -766,6 +772,38 @@ fn adaptive_schaff_trend_cycle_row_scalar(
 }
 
 #[inline]
+fn adaptive_schaff_trend_cycle_output_row_scalar(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    adaptive_length: usize,
+    stc_length: usize,
+    smoothing_factor: f64,
+    fast_length: usize,
+    slow_length: usize,
+    field: AdaptiveSchaffTrendCycleOutputField,
+    out: &mut [f64],
+) {
+    let mut core = AdaptiveSchaffTrendCycleCore::new(
+        adaptive_length,
+        stc_length,
+        smoothing_factor,
+        fast_length,
+        slow_length,
+    );
+
+    for i in 0..close.len() {
+        out[i] = match core.update(high[i], low[i], close[i]) {
+            Some((stc, histogram)) => match field {
+                AdaptiveSchaffTrendCycleOutputField::Stc => stc,
+                AdaptiveSchaffTrendCycleOutputField::Histogram => histogram,
+            },
+            None => f64::NAN,
+        };
+    }
+}
+
+#[inline]
 pub fn adaptive_schaff_trend_cycle(
     input: &AdaptiveSchaffTrendCycleInput,
 ) -> Result<AdaptiveSchaffTrendCycleOutput, AdaptiveSchaffTrendCycleError> {
@@ -866,6 +904,52 @@ pub fn adaptive_schaff_trend_cycle_into_slice(
         slow_length,
         out_stc,
         out_histogram,
+    );
+    Ok(())
+}
+
+pub fn adaptive_schaff_trend_cycle_output_into_slice(
+    out: &mut [f64],
+    input: &AdaptiveSchaffTrendCycleInput,
+    kernel: Kernel,
+    field: AdaptiveSchaffTrendCycleOutputField,
+) -> Result<(), AdaptiveSchaffTrendCycleError> {
+    let (high, low, close) = input.as_refs();
+    validate_lengths(high, low, close)?;
+    let len = close.len();
+    if out.len() != len {
+        return Err(AdaptiveSchaffTrendCycleError::OutputLengthMismatch {
+            expected: len,
+            got: out.len(),
+        });
+    }
+
+    let adaptive_length = input.get_adaptive_length();
+    let stc_length = input.get_stc_length();
+    let smoothing_factor = input.get_smoothing_factor();
+    let fast_length = input.get_fast_length();
+    let slow_length = input.get_slow_length();
+    validate_params(
+        adaptive_length,
+        stc_length,
+        smoothing_factor,
+        fast_length,
+        slow_length,
+        len,
+    )?;
+
+    let _kernel = normalize_kernel(kernel);
+    adaptive_schaff_trend_cycle_output_row_scalar(
+        high,
+        low,
+        close,
+        adaptive_length,
+        stc_length,
+        smoothing_factor,
+        fast_length,
+        slow_length,
+        field,
+        out,
     );
     Ok(())
 }

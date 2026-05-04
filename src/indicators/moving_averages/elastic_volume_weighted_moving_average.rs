@@ -362,6 +362,7 @@ fn compute_absolute_into(
     out: &mut [f64],
 ) {
     let mut prev = f64::NAN;
+    let inv_absolute_volume = 1.0 / absolute_volume;
     for index in first_valid..prices.len() {
         let price = prices[index];
         let volume = volumes[index];
@@ -371,7 +372,7 @@ fn compute_absolute_into(
             continue;
         }
         let base = if prev.is_finite() { prev } else { price };
-        let value = ((absolute_volume - volume) * base + volume * price) / absolute_volume;
+        let value = base + volume * inv_absolute_volume * (price - base);
         out[index] = value;
         prev = value;
     }

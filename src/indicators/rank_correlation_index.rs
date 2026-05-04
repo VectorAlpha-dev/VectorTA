@@ -26,11 +26,24 @@ use std::convert::AsRef;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
 
+const DEFAULT_LENGTH: usize = 12;
+
 impl<'a> AsRef<[f64]> for RankCorrelationIndexInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
-            RankCorrelationIndexData::Candles { candles, source } => source_type(candles, source),
+            RankCorrelationIndexData::Candles { candles, source } => match *source {
+                "open" => candles.open.as_slice(),
+                "high" => candles.high.as_slice(),
+                "low" => candles.low.as_slice(),
+                "close" => candles.close.as_slice(),
+                "volume" => candles.volume.as_slice(),
+                "hl2" => candles.hl2.as_slice(),
+                "hlc3" => candles.hlc3.as_slice(),
+                "ohlc4" => candles.ohlc4.as_slice(),
+                "hlcc4" => candles.hlcc4.as_slice(),
+                _ => source_type(candles, source),
+            },
             RankCorrelationIndexData::Slice(slice) => slice,
         }
     }
@@ -61,7 +74,9 @@ pub struct RankCorrelationIndexParams {
 
 impl Default for RankCorrelationIndexParams {
     fn default() -> Self {
-        Self { length: Some(12) }
+        Self {
+            length: Some(DEFAULT_LENGTH),
+        }
     }
 }
 
@@ -99,7 +114,7 @@ impl<'a> RankCorrelationIndexInput<'a> {
 
     #[inline]
     pub fn get_length(&self) -> usize {
-        self.params.length.unwrap_or(12)
+        self.params.length.unwrap_or(DEFAULT_LENGTH)
     }
 }
 
@@ -208,7 +223,7 @@ fn is_fast_path_clean(data: &[f64], first: usize) -> bool {
 #[inline(always)]
 fn rank_correlation_index_prepare<'a>(
     input: &'a RankCorrelationIndexInput,
-) -> Result<(&'a [f64], usize, usize), RankCorrelationIndexError> {
+) -> Result<(&'a [f64], usize, usize, bool), RankCorrelationIndexError> {
     let data = input.as_ref();
     let data_len = data.len();
     if data_len == 0 {
@@ -229,7 +244,7 @@ fn rank_correlation_index_prepare<'a>(
         });
     }
 
-    Ok((data, length, first))
+    Ok((data, length, first, is_fast_path_clean(data, first)))
 }
 
 #[inline(always)]
@@ -260,7 +275,63 @@ fn compute_window_rci(window: &[f64]) -> f64 {
 }
 
 #[inline(always)]
+fn compute_window_rci_12(data: &[f64], start: usize) -> f64 {
+    let values = [
+        data[start],
+        data[start + 1],
+        data[start + 2],
+        data[start + 3],
+        data[start + 4],
+        data[start + 5],
+        data[start + 6],
+        data[start + 7],
+        data[start + 8],
+        data[start + 9],
+        data[start + 10],
+        data[start + 11],
+    ];
+    let mut ranks = [1.0; DEFAULT_LENGTH];
+
+    for i in 0..DEFAULT_LENGTH {
+        let a = values[i];
+        for j in i + 1..DEFAULT_LENGTH {
+            let b = values[j];
+            if a < b {
+                ranks[i] += 1.0;
+            } else if a > b {
+                ranks[j] += 1.0;
+            } else {
+                ranks[i] += 0.5;
+                ranks[j] += 0.5;
+            }
+        }
+    }
+
+    let mut sum = 0.0;
+    for c in 0..DEFAULT_LENGTH {
+        let time_rank = (DEFAULT_LENGTH - c) as f64;
+        let diff = time_rank - ranks[c];
+        sum += diff * diff;
+    }
+
+    (1.0 - 6.0 * sum / 1716.0) * 100.0
+}
+
+#[inline(always)]
+fn rank_correlation_index_compute_fast_default(data: &[f64], first: usize, out: &mut [f64]) {
+    let warmup = first + DEFAULT_LENGTH - 1;
+    for i in warmup..data.len() {
+        out[i] = compute_window_rci_12(data, i + 1 - DEFAULT_LENGTH);
+    }
+}
+
+#[inline(always)]
 fn rank_correlation_index_compute_fast(data: &[f64], length: usize, first: usize, out: &mut [f64]) {
+    if length == DEFAULT_LENGTH {
+        rank_correlation_index_compute_fast_default(data, first, out);
+        return;
+    }
+
     let warmup = first + length - 1;
     for i in warmup..data.len() {
         out[i] = compute_window_rci(&data[i + 1 - length..=i]);
@@ -285,10 +356,11 @@ fn rank_correlation_index_compute_into(
     data: &[f64],
     length: usize,
     first: usize,
+    clean: bool,
     _kernel: Kernel,
     out: &mut [f64],
 ) {
-    if is_fast_path_clean(data, first) {
+    if clean {
         rank_correlation_index_compute_fast(data, length, first, out);
     } else {
         rank_correlation_index_compute_fallback(data, length, first, out);
@@ -306,10 +378,10 @@ pub fn rank_correlation_index_with_kernel(
     input: &RankCorrelationIndexInput,
     kernel: Kernel,
 ) -> Result<RankCorrelationIndexOutput, RankCorrelationIndexError> {
-    let (data, length, first) = rank_correlation_index_prepare(input)?;
+    let (data, length, first, clean) = rank_correlation_index_prepare(input)?;
     let warmup = first + length - 1;
     let mut out = alloc_with_nan_prefix(data.len(), warmup);
-    rank_correlation_index_compute_into(data, length, first, kernel, &mut out);
+    rank_correlation_index_compute_into(data, length, first, clean, kernel, &mut out);
     Ok(RankCorrelationIndexOutput { values: out })
 }
 
@@ -327,7 +399,7 @@ pub fn rank_correlation_index_into_slice(
     input: &RankCorrelationIndexInput,
     kernel: Kernel,
 ) -> Result<(), RankCorrelationIndexError> {
-    let (data, length, first) = rank_correlation_index_prepare(input)?;
+    let (data, length, first, clean) = rank_correlation_index_prepare(input)?;
     if out.len() != data.len() {
         return Err(RankCorrelationIndexError::OutputLengthMismatch {
             expected: data.len(),
@@ -335,8 +407,12 @@ pub fn rank_correlation_index_into_slice(
         });
     }
 
-    out.fill(f64::NAN);
-    rank_correlation_index_compute_into(data, length, first, kernel, out);
+    if clean {
+        out[..first + length - 1].fill(f64::NAN);
+    } else {
+        out.fill(f64::NAN);
+    }
+    rank_correlation_index_compute_into(data, length, first, clean, kernel, out);
     Ok(())
 }
 
@@ -361,7 +437,7 @@ impl RankCorrelationIndexStream {
 
     #[inline]
     pub fn try_new(params: RankCorrelationIndexParams) -> Result<Self, RankCorrelationIndexError> {
-        let length = params.length.unwrap_or(12);
+        let length = params.length.unwrap_or(DEFAULT_LENGTH);
         if length < 2 {
             return Err(RankCorrelationIndexError::InvalidLength {
                 length,
@@ -448,7 +524,7 @@ pub struct RankCorrelationIndexBatchRange {
 impl Default for RankCorrelationIndexBatchRange {
     fn default() -> Self {
         Self {
-            length: (12, 200, 1),
+            length: (DEFAULT_LENGTH, 200, 1),
         }
     }
 }
@@ -507,9 +583,9 @@ pub struct RankCorrelationIndexBatchOutput {
 
 impl RankCorrelationIndexBatchOutput {
     pub fn row_for_params(&self, params: &RankCorrelationIndexParams) -> Option<usize> {
-        self.combos
-            .iter()
-            .position(|combo| combo.length.unwrap_or(12) == params.length.unwrap_or(12))
+        self.combos.iter().position(|combo| {
+            combo.length.unwrap_or(DEFAULT_LENGTH) == params.length.unwrap_or(DEFAULT_LENGTH)
+        })
     }
 
     pub fn values_for(&self, params: &RankCorrelationIndexParams) -> Option<&[f64]> {
@@ -612,11 +688,12 @@ fn rank_correlation_index_batch_impl(
     }
 
     let first = first_valid_index(data).ok_or(RankCorrelationIndexError::AllValuesNaN)?;
+    let clean = is_fast_path_clean(data, first);
     let max_length = combos
         .iter()
-        .map(|params| params.length.unwrap_or(12))
+        .map(|params| params.length.unwrap_or(DEFAULT_LENGTH))
         .max()
-        .unwrap_or(12);
+        .unwrap_or(DEFAULT_LENGTH);
     let valid = cols - first;
     if valid < max_length {
         return Err(RankCorrelationIndexError::NotEnoughValidData {
@@ -628,7 +705,7 @@ fn rank_correlation_index_batch_impl(
     let mut matrix = make_uninit_matrix(rows, cols);
     let warmups: Vec<usize> = combos
         .iter()
-        .map(|params| first + params.length.unwrap_or(12) - 1)
+        .map(|params| first + params.length.unwrap_or(DEFAULT_LENGTH) - 1)
         .collect();
     init_matrix_prefixes(&mut matrix, cols, &warmups);
 
@@ -637,11 +714,11 @@ fn rank_correlation_index_batch_impl(
         unsafe { std::slice::from_raw_parts_mut(guard.as_mut_ptr(), guard.len()) };
 
     let do_row = |row: usize, row_mu: &mut [MaybeUninit<f64>]| {
-        let length = combos[row].length.unwrap_or(12);
+        let length = combos[row].length.unwrap_or(DEFAULT_LENGTH);
         let dst = unsafe {
             std::slice::from_raw_parts_mut(row_mu.as_mut_ptr() as *mut f64, row_mu.len())
         };
-        rank_correlation_index_compute_into(data, length, first, kernel, dst);
+        rank_correlation_index_compute_into(data, length, first, clean, kernel, dst);
     };
 
     if parallel {
@@ -694,10 +771,15 @@ fn rank_correlation_index_batch_inner_into(
     }
 
     let first = first_valid_index(data).ok_or(RankCorrelationIndexError::AllValuesNaN)?;
+    let clean = is_fast_path_clean(data, first);
     for (row, params) in combos.iter().enumerate() {
-        let length = params.length.unwrap_or(12);
+        let length = params.length.unwrap_or(DEFAULT_LENGTH);
         let row_out = &mut out[row * cols..(row + 1) * cols];
-        row_out.fill(f64::NAN);
+        if clean {
+            row_out[..first + length - 1].fill(f64::NAN);
+        } else {
+            row_out.fill(f64::NAN);
+        }
         if cols - first < length {
             return Err(RankCorrelationIndexError::NotEnoughValidData {
                 needed: length,
@@ -707,8 +789,8 @@ fn rank_correlation_index_batch_inner_into(
     }
 
     let do_row = |row: usize, row_out: &mut [f64]| {
-        let length = combos[row].length.unwrap_or(12);
-        rank_correlation_index_compute_into(data, length, first, kernel, row_out);
+        let length = combos[row].length.unwrap_or(DEFAULT_LENGTH);
+        rank_correlation_index_compute_into(data, length, first, clean, kernel, row_out);
     };
 
     if parallel {
@@ -821,7 +903,7 @@ pub fn rank_correlation_index_batch_py<'py>(
         "lengths",
         combos
             .iter()
-            .map(|params| params.length.unwrap_or(12) as u64)
+            .map(|params| params.length.unwrap_or(DEFAULT_LENGTH) as u64)
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;

@@ -617,39 +617,10 @@ pub fn mod_god_mode_with_kernel(
 
     let kern = match kernel {
         Kernel::Auto => Kernel::Scalar,
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Scalar,
         k => k,
     };
-
-    if false
-        && kern == Kernel::Scalar
-        && input.get_n1() == 17
-        && input.get_n2() == 6
-        && input.get_n3() == 4
-        && input.get_mode() == ModGodModeMode::TraditionMg
-    {
-        unsafe {
-            mod_god_mode_scalar_classic_tradition_mg(
-                high,
-                low,
-                close,
-                volume,
-                17,
-                6,
-                4,
-                first,
-                warm,
-                input.get_use_volume(),
-                &mut wt,
-                &mut sig,
-                &mut hist,
-            )?;
-        }
-        return Ok(ModGodModeOutput {
-            wavetrend: wt,
-            signal: sig,
-            histogram: hist,
-        });
-    }
 
     mod_god_mode_into_slices(&mut wt, &mut sig, &mut hist, input, kern)?;
 

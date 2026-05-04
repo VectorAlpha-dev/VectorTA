@@ -105,6 +105,12 @@ pub struct AroonOutput {
 }
 
 #[derive(Copy, Clone, Debug)]
+pub enum AroonOutputField {
+    Up,
+    Down,
+}
+
+#[derive(Copy, Clone, Debug)]
 pub struct AroonBuilder {
     length: Option<usize>,
     kernel: Kernel,
@@ -196,9 +202,7 @@ pub fn aroon(input: &AroonInput) -> Result<AroonOutput, AroonError> {
 
 pub fn aroon_with_kernel(input: &AroonInput, kernel: Kernel) -> Result<AroonOutput, AroonError> {
     let (high, low): (&[f64], &[f64]) = match &input.data {
-        AroonData::Candles { candles } => {
-            (source_type(candles, "high"), source_type(candles, "low"))
-        }
+        AroonData::Candles { candles } => (candles.high.as_slice(), candles.low.as_slice()),
         AroonData::SlicesHL { high, low } => (*high, *low),
     };
     if high.is_empty() || low.is_empty() {
@@ -228,6 +232,8 @@ pub fn aroon_with_kernel(input: &AroonInput, kernel: Kernel) -> Result<AroonOutp
 
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Scalar,
         other => other,
     };
 
@@ -273,6 +279,244 @@ pub fn aroon_into(
     out_down: &mut [f64],
 ) -> Result<(), AroonError> {
     aroon_into_slice(out_up, out_down, input, Kernel::Auto)
+}
+
+#[inline(always)]
+fn aroon_pair_is_finite(h: f64, l: f64) -> bool {
+    const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
+    (h.to_bits() & EXP_MASK) != EXP_MASK && (l.to_bits() & EXP_MASK) != EXP_MASK
+}
+
+#[inline(always)]
+fn aroon_percent(dist: usize, scale_100: f64) -> f64 {
+    let v = 100.0 - (dist as f64) * scale_100;
+    v.max(0.0)
+}
+
+#[inline(always)]
+fn aroon_better<const HIGH: bool>(value: f64, current: f64) -> bool {
+    if HIGH {
+        value > current
+    } else {
+        value < current
+    }
+}
+
+#[inline]
+fn aroon_scalar_output_selected<const HIGH: bool>(
+    high: &[f64],
+    low: &[f64],
+    length: usize,
+    dst: &mut [f64],
+) {
+    let len = high.len();
+    let scale_100 = 100.0 / (length as f64);
+    let src = if HIGH { high } else { low };
+
+    let mut all_finite = true;
+    unsafe {
+        let hp = high.as_ptr();
+        let lp = low.as_ptr();
+        let mut i = 0usize;
+        while i < len {
+            if !aroon_pair_is_finite(*hp.add(i), *lp.add(i)) {
+                all_finite = false;
+                break;
+            }
+            i += 1;
+        }
+    }
+
+    if all_finite {
+        unsafe {
+            let sp = src.as_ptr();
+            let dst_ptr = dst.as_mut_ptr();
+
+            if length < len {
+                let i0 = length;
+                let mut best_idx = 0usize;
+                let mut best = *sp;
+
+                let mut j = 1usize;
+                while j <= i0 {
+                    let v = *sp.add(j);
+                    if aroon_better::<HIGH>(v, best) {
+                        best = v;
+                        best_idx = j;
+                    }
+                    j += 1;
+                }
+
+                *dst_ptr.add(i0) = aroon_percent(i0 - best_idx, scale_100);
+
+                let mut i = i0 + 1;
+                while i < len {
+                    let start = i - length;
+                    let v = *sp.add(i);
+
+                    if best_idx < start {
+                        best_idx = start;
+                        best = *sp.add(best_idx);
+                        let mut j = start + 1;
+                        while j <= i {
+                            let candidate = *sp.add(j);
+                            if aroon_better::<HIGH>(candidate, best) {
+                                best = candidate;
+                                best_idx = j;
+                            }
+                            j += 1;
+                        }
+                    } else if aroon_better::<HIGH>(v, best) {
+                        best_idx = i;
+                        best = v;
+                    }
+
+                    *dst_ptr.add(i) = aroon_percent(i - best_idx, scale_100);
+
+                    i += 1;
+                }
+            }
+        }
+
+        return;
+    }
+
+    let window = length + 1;
+    let mut invalid_count: usize = 0;
+    let mut have_extreme = false;
+    let mut best_idx: usize = 0;
+    let mut best = 0.0f64;
+
+    for i in 0..len {
+        let h = high[i];
+        let l = low[i];
+        if !aroon_pair_is_finite(h, l) {
+            invalid_count += 1;
+        }
+        if i >= window {
+            let leave = i - window;
+            if !aroon_pair_is_finite(high[leave], low[leave]) {
+                invalid_count -= 1;
+            }
+        }
+
+        if i < length {
+            continue;
+        }
+
+        if invalid_count != 0 {
+            dst[i] = f64::NAN;
+            have_extreme = false;
+            continue;
+        }
+
+        let start = i - length;
+
+        if !have_extreme {
+            best_idx = start;
+            best = src[start];
+            for j in (start + 1)..=i {
+                let v = src[j];
+                if aroon_better::<HIGH>(v, best) {
+                    best = v;
+                    best_idx = j;
+                }
+            }
+            have_extreme = true;
+        } else {
+            let v = src[i];
+            if best_idx < start {
+                best_idx = start;
+                best = src[best_idx];
+                for j in (start + 1)..=i {
+                    let candidate = src[j];
+                    if aroon_better::<HIGH>(candidate, best) {
+                        best = candidate;
+                        best_idx = j;
+                    }
+                }
+            } else if aroon_better::<HIGH>(v, best) {
+                best_idx = i;
+                best = v;
+            }
+        }
+
+        dst[i] = aroon_percent(i - best_idx, scale_100);
+    }
+}
+
+#[inline]
+pub fn aroon_output_into_slice(
+    dst: &mut [f64],
+    input: &AroonInput,
+    kern: Kernel,
+    field: AroonOutputField,
+) -> Result<(), AroonError> {
+    let (high, low): (&[f64], &[f64]) = match &input.data {
+        AroonData::Candles { candles } => (candles.high.as_slice(), candles.low.as_slice()),
+        AroonData::SlicesHL { high, low } => (*high, *low),
+    };
+    if high.is_empty() || low.is_empty() {
+        return Err(AroonError::EmptyInputData);
+    }
+    if high.len() != low.len() {
+        return Err(AroonError::MismatchSliceLength {
+            high_len: high.len(),
+            low_len: low.len(),
+        });
+    }
+    let len = high.len();
+    let length = input.get_length();
+    if length == 0 || length > len {
+        return Err(AroonError::InvalidLength {
+            length,
+            data_len: len,
+        });
+    }
+    if dst.len() != len {
+        return Err(AroonError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
+        });
+    }
+
+    let first = first_valid_pair(high, low).ok_or(AroonError::AllValuesNaN)?;
+    let warm = first + length;
+
+    let chosen = match kern {
+        Kernel::Auto => Kernel::Scalar,
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Scalar,
+        k => k,
+    };
+
+    match chosen {
+        Kernel::Scalar | Kernel::ScalarBatch => match field {
+            AroonOutputField::Up => aroon_scalar_output_selected::<true>(high, low, length, dst),
+            AroonOutputField::Down => aroon_scalar_output_selected::<false>(high, low, length, dst),
+        },
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx2 | Kernel::Avx2Batch => {
+            let mut sibling = vec![f64::NAN; len];
+            match field {
+                AroonOutputField::Up => aroon_avx2(high, low, length, dst, &mut sibling),
+                AroonOutputField::Down => aroon_avx2(high, low, length, &mut sibling, dst),
+            }
+        }
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx512 | Kernel::Avx512Batch => {
+            let mut sibling = vec![f64::NAN; len];
+            match field {
+                AroonOutputField::Up => aroon_avx512(high, low, length, dst, &mut sibling),
+                AroonOutputField::Down => aroon_avx512(high, low, length, &mut sibling, dst),
+            }
+        }
+        _ => unreachable!(),
+    }
+    for v in &mut dst[..warm.min(len)] {
+        *v = f64::NAN;
+    }
+    Ok(())
 }
 
 #[inline]
@@ -2739,9 +2983,7 @@ pub fn aroon_into_slice(
     kern: Kernel,
 ) -> Result<(), AroonError> {
     let (high, low): (&[f64], &[f64]) = match &input.data {
-        AroonData::Candles { candles } => {
-            (source_type(candles, "high"), source_type(candles, "low"))
-        }
+        AroonData::Candles { candles } => (candles.high.as_slice(), candles.low.as_slice()),
         AroonData::SlicesHL { high, low } => (*high, *low),
     };
     if high.is_empty() || low.is_empty() {
@@ -2773,6 +3015,8 @@ pub fn aroon_into_slice(
 
     let chosen = match kern {
         Kernel::Auto => Kernel::Scalar,
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Scalar,
         k => k,
     };
     unsafe {

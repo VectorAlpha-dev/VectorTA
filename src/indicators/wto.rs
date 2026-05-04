@@ -57,6 +57,13 @@ pub struct WtoOutput {
     pub histogram: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WtoOutputField {
+    Wavetrend1,
+    Wavetrend2,
+    Histogram,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -120,7 +127,13 @@ impl<'a> AsRef<[f64]> for WtoInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             WtoData::Slice(slice) => slice,
-            WtoData::Candles { candles, source } => source_type(candles, source),
+            WtoData::Candles { candles, source } => {
+                if source.eq_ignore_ascii_case("close") {
+                    candles.close.as_slice()
+                } else {
+                    source_type(candles, source)
+                }
+            }
         }
     }
 }
@@ -446,6 +459,289 @@ fn wto_compute_into(
             _ => unreachable!(),
         }
     }
+}
+
+#[inline(always)]
+fn wto_compute_output_into(
+    data: &[f64],
+    channel_length: usize,
+    average_length: usize,
+    first_val: usize,
+    dst: &mut [f64],
+    field: WtoOutputField,
+) {
+    match field {
+        WtoOutputField::Wavetrend1 => {
+            wto_compute_wt1_into(data, channel_length, average_length, first_val, dst)
+        }
+        WtoOutputField::Wavetrend2 => {
+            wto_compute_wt2_hist_into::<false>(data, channel_length, average_length, first_val, dst)
+        }
+        WtoOutputField::Histogram => {
+            wto_compute_wt2_hist_into::<true>(data, channel_length, average_length, first_val, dst)
+        }
+    }
+}
+
+#[inline(always)]
+fn wto_compute_wt1_into(
+    data: &[f64],
+    channel_length: usize,
+    average_length: usize,
+    first_val: usize,
+    dst: &mut [f64],
+) {
+    #[inline(always)]
+    fn fast_abs(x: f64) -> f64 {
+        f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
+    }
+
+    let len = data.len();
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    if len == 0 || first_val >= len {
+        for v in dst {
+            *v = qnan;
+        }
+        return;
+    }
+
+    let ci_start = first_val + channel_length.saturating_sub(1);
+    for v in &mut dst[..ci_start.min(len)] {
+        *v = qnan;
+    }
+    if ci_start >= len {
+        return;
+    }
+
+    let alpha_e = 2.0 / (channel_length as f64 + 1.0);
+    let beta_e = 1.0 - alpha_e;
+    let alpha_t = 2.0 / (average_length as f64 + 1.0);
+    let beta_t = 1.0 - alpha_t;
+
+    let mut esa = data[first_val];
+    let mut i = first_val + 1;
+    while i < ci_start {
+        let x = data[i];
+        if x.is_finite() {
+            esa = beta_e.mul_add(esa, alpha_e * x);
+        }
+        i += 1;
+    }
+
+    let mut d: f64;
+    let mut tci: f64;
+
+    let k015 = 0.015_f64;
+
+    {
+        let x = data[ci_start];
+        if x.is_finite() {
+            esa = beta_e.mul_add(esa, alpha_e * x);
+        }
+        let abs_diff = if x.is_finite() {
+            fast_abs(x - esa)
+        } else {
+            f64::NAN
+        };
+        d = abs_diff;
+
+        let denom = k015 * d;
+        let ci = if denom != 0.0 && denom.is_finite() {
+            if x.is_finite() {
+                (x - esa) / denom
+            } else {
+                f64::NAN
+            }
+        } else {
+            0.0
+        };
+
+        tci = ci;
+        dst[ci_start] = tci;
+    }
+
+    i = ci_start + 1;
+    while i < len {
+        let x = data[i];
+        let x_fin = x.is_finite();
+
+        if x_fin {
+            esa = beta_e.mul_add(esa, alpha_e * x);
+            let ad = fast_abs(x - esa);
+            d = beta_e.mul_add(d, alpha_e * ad);
+        }
+
+        let mut ci = 0.0_f64;
+        if x_fin {
+            let denom = k015 * d;
+            if denom != 0.0 && denom.is_finite() {
+                ci = (x - esa) / denom;
+            }
+        } else {
+            ci = f64::NAN;
+        }
+
+        if ci.is_finite() {
+            tci = beta_t.mul_add(tci, alpha_t * ci);
+        }
+
+        dst[i] = tci;
+        i += 1;
+    }
+}
+
+#[inline(always)]
+fn wto_compute_wt2_hist_into<const HIST: bool>(
+    data: &[f64],
+    channel_length: usize,
+    average_length: usize,
+    first_val: usize,
+    dst: &mut [f64],
+) {
+    #[inline(always)]
+    fn fast_abs(x: f64) -> f64 {
+        f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
+    }
+
+    let len = data.len();
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    if len == 0 || first_val >= len {
+        for v in dst {
+            *v = qnan;
+        }
+        return;
+    }
+
+    let ci_start = first_val + channel_length.saturating_sub(1);
+    let warmup = ci_start.saturating_add(3);
+    for v in &mut dst[..warmup.min(len)] {
+        *v = qnan;
+    }
+    if ci_start >= len {
+        return;
+    }
+
+    let alpha_e = 2.0 / (channel_length as f64 + 1.0);
+    let beta_e = 1.0 - alpha_e;
+    let alpha_t = 2.0 / (average_length as f64 + 1.0);
+    let beta_t = 1.0 - alpha_t;
+
+    let mut esa = data[first_val];
+    let mut i = first_val + 1;
+    while i < ci_start {
+        let x = data[i];
+        if x.is_finite() {
+            esa = beta_e.mul_add(esa, alpha_e * x);
+        }
+        i += 1;
+    }
+
+    let mut d: f64;
+    let mut tci: f64;
+
+    let mut ring = [0.0_f64; 4];
+    let mut rsum: f64;
+    let mut rpos: usize;
+    let mut rlen: usize;
+
+    let k015 = 0.015_f64;
+    let inv4 = 0.25_f64;
+
+    {
+        let x = data[ci_start];
+        if x.is_finite() {
+            esa = beta_e.mul_add(esa, alpha_e * x);
+        }
+        let abs_diff = if x.is_finite() {
+            fast_abs(x - esa)
+        } else {
+            f64::NAN
+        };
+        d = abs_diff;
+
+        let denom = k015 * d;
+        let ci = if denom != 0.0 && denom.is_finite() {
+            if x.is_finite() {
+                (x - esa) / denom
+            } else {
+                f64::NAN
+            }
+        } else {
+            0.0
+        };
+
+        tci = ci;
+
+        ring[0] = tci;
+        rsum = tci;
+        rlen = 1;
+        rpos = 1;
+    }
+
+    i = ci_start + 1;
+    while i < len {
+        let x = data[i];
+        let x_fin = x.is_finite();
+
+        if x_fin {
+            esa = beta_e.mul_add(esa, alpha_e * x);
+            let ad = fast_abs(x - esa);
+            d = beta_e.mul_add(d, alpha_e * ad);
+        }
+
+        let mut ci = 0.0_f64;
+        if x_fin {
+            let denom = k015 * d;
+            if denom != 0.0 && denom.is_finite() {
+                ci = (x - esa) / denom;
+            }
+        } else {
+            ci = f64::NAN;
+        }
+
+        if ci.is_finite() {
+            tci = beta_t.mul_add(tci, alpha_t * ci);
+        }
+
+        if rlen < 4 {
+            ring[rlen] = tci;
+            rsum += tci;
+            rlen += 1;
+        } else {
+            rsum += tci - ring[rpos];
+            ring[rpos] = tci;
+            rpos = (rpos + 1) & 3;
+        }
+
+        if rlen == 4 {
+            let sig = inv4 * rsum;
+            dst[i] = if HIST { tci - sig } else { sig };
+        }
+
+        i += 1;
+    }
+}
+
+#[inline]
+pub fn wto_output_into_slice(
+    dst: &mut [f64],
+    input: &WtoInput,
+    kernel: Kernel,
+    field: WtoOutputField,
+) -> Result<(), WtoError> {
+    let _ = kernel;
+    let (data, channel_length, average_length, first, _) = wto_prepare(input, Kernel::Scalar)?;
+
+    if dst.len() != data.len() {
+        return Err(WtoError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
+        });
+    }
+
+    wto_compute_output_into(data, channel_length, average_length, first, dst, field);
+
+    Ok(())
 }
 
 #[inline(always)]

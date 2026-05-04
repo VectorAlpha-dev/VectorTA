@@ -31,10 +31,19 @@ impl<'a> AsRef<[f64]> for KeltnerChannelWidthOscillatorInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             KeltnerChannelWidthOscillatorData::Candles { candles, source } => {
-                source_type(candles, source)
+                kcwo_source(candles, source)
             }
             KeltnerChannelWidthOscillatorData::Slices { source, .. } => source,
         }
+    }
+}
+
+#[inline(always)]
+fn kcwo_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    if source.eq_ignore_ascii_case("close") {
+        &candles.close
+    } else {
+        source_type(candles, source)
     }
 }
 
@@ -165,7 +174,7 @@ impl<'a> KeltnerChannelWidthOscillatorInput<'a> {
                 candles.high.as_slice(),
                 candles.low.as_slice(),
                 candles.close.as_slice(),
-                source_type(candles, source),
+                kcwo_source(candles, source),
             ),
             KeltnerChannelWidthOscillatorData::Slices {
                 high,
@@ -820,6 +829,23 @@ fn keltner_channel_width_oscillator_compute_into(
     out_kbw: &mut [f64],
     out_kbw_sma: &mut [f64],
 ) {
+    if use_exponential
+        && bands_style == KeltnerWidthBandsStyle::AverageTrueRange
+        && length == 20
+        && atr_length == 10
+    {
+        keltner_channel_width_oscillator_default_ema_atr_into(
+            high,
+            low,
+            close,
+            source,
+            multiplier,
+            out_kbw,
+            out_kbw_sma,
+        );
+        return;
+    }
+
     let mut stream = KeltnerChannelWidthOscillatorStream {
         multiplier,
         center_use_exponential: use_exponential,
@@ -839,6 +865,146 @@ fn keltner_channel_width_oscillator_compute_into(
             out_kbw[i] = kbw;
             out_kbw_sma[i] = kbw_sma;
         }
+    }
+}
+
+#[inline]
+fn keltner_channel_width_oscillator_default_ema_atr_into(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    source: &[f64],
+    multiplier: f64,
+    out_kbw: &mut [f64],
+    out_kbw_sma: &mut [f64],
+) {
+    let len = source.len();
+    let ema_alpha = 2.0f64 / 21.0;
+    let rma_alpha = 0.1f64;
+    let width_scale = 2.0 * multiplier;
+
+    let mut ema_count = 0usize;
+    let mut ema_sum = 0.0;
+    let mut ema_value = f64::NAN;
+    let mut ema_seeded = false;
+
+    let mut atr_count = 0usize;
+    let mut atr_sum = 0.0;
+    let mut atr_value = f64::NAN;
+    let mut atr_seeded = false;
+
+    let mut width_buffer = [0.0f64; 20];
+    let mut width_count = 0usize;
+    let mut width_head = 0usize;
+    let mut width_sum = 0.0;
+
+    let mut prev_close = f64::NAN;
+    let mut has_prev_close = false;
+
+    let mut i = 0usize;
+    while i < len {
+        let high_value = high[i];
+        let low_value = low[i];
+        let close_value = close[i];
+        let source_value = source[i];
+
+        if !is_valid_bar(high_value, low_value, close_value, source_value) {
+            ema_count = 0;
+            ema_sum = 0.0;
+            ema_value = f64::NAN;
+            ema_seeded = false;
+            atr_count = 0;
+            atr_sum = 0.0;
+            atr_value = f64::NAN;
+            atr_seeded = false;
+            width_count = 0;
+            width_head = 0;
+            width_sum = 0.0;
+            width_buffer.fill(0.0);
+            prev_close = f64::NAN;
+            has_prev_close = false;
+            i += 1;
+            continue;
+        }
+
+        let middle = if !ema_seeded {
+            ema_sum += source_value;
+            ema_count += 1;
+            if ema_count == 20 {
+                ema_value = ema_sum / 20.0;
+                ema_seeded = true;
+                Some(ema_value)
+            } else {
+                None
+            }
+        } else {
+            ema_value = ema_alpha.mul_add(source_value - ema_value, ema_value);
+            Some(ema_value)
+        };
+
+        let tr = if has_prev_close {
+            let up = if high_value > prev_close {
+                high_value
+            } else {
+                prev_close
+            };
+            let dn = if low_value < prev_close {
+                low_value
+            } else {
+                prev_close
+            };
+            up - dn
+        } else {
+            high_value - low_value
+        };
+        prev_close = close_value;
+        has_prev_close = true;
+
+        let range = if !atr_seeded {
+            atr_sum += tr;
+            atr_count += 1;
+            if atr_count == 10 {
+                atr_value = atr_sum / 10.0;
+                atr_seeded = true;
+                Some(atr_value)
+            } else {
+                None
+            }
+        } else {
+            atr_value = rma_alpha.mul_add(tr - atr_value, atr_value);
+            Some(atr_value)
+        };
+
+        if let (Some(middle), Some(range)) = (middle, range) {
+            let kbw = if middle.is_finite() && range.is_finite() && middle != 0.0 {
+                (width_scale * range) / middle
+            } else {
+                f64::NAN
+            };
+            out_kbw[i] = kbw;
+
+            if width_count < 20 {
+                width_buffer[width_count] = kbw;
+                width_sum += kbw;
+                width_count += 1;
+                out_kbw_sma[i] = if width_count == 20 {
+                    width_sum / 20.0
+                } else {
+                    f64::NAN
+                };
+            } else {
+                let old = width_buffer[width_head];
+                width_buffer[width_head] = kbw;
+                width_sum += kbw - old;
+                width_head += 1;
+                if width_head == 20 {
+                    width_head = 0;
+                }
+                out_kbw_sma[i] = width_sum / 20.0;
+            }
+        }
+
+        i += 1;
     }
 }
 

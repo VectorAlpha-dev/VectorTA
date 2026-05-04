@@ -110,21 +110,34 @@ impl<'a> MacdInput<'a> {
         self.params.signal_period.unwrap_or(9)
     }
     #[inline]
-    pub fn get_ma_type(&self) -> String {
-        self.params
-            .ma_type
-            .clone()
-            .unwrap_or_else(|| "ema".to_string())
+    pub fn get_ma_type(&self) -> &str {
+        self.params.ma_type.as_deref().unwrap_or("ema")
     }
 }
 
 impl<'a> AsRef<[f64]> for MacdInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
-        match &self.data {
-            MacdData::Slice(s) => s,
-            MacdData::Candles { candles, source } => source_type(candles, source),
-        }
+        macd_data_slice(&self.data)
+    }
+}
+
+#[inline(always)]
+fn macd_data_slice<'a>(data: &'a MacdData<'a>) -> &'a [f64] {
+    match data {
+        MacdData::Slice(slice) => slice,
+        MacdData::Candles { candles, source } => match *source {
+            "open" => &candles.open,
+            "high" => &candles.high,
+            "low" => &candles.low,
+            "close" => &candles.close,
+            "volume" => &candles.volume,
+            "hl2" => &candles.hl2,
+            "hlc3" => &candles.hlc3,
+            "ohlc4" => &candles.ohlc4,
+            "hlcc4" | "hlcc" => &candles.hlcc4,
+            _ => source_type(candles, source),
+        },
     }
 }
 
@@ -563,7 +576,19 @@ pub fn macd(input: &MacdInput) -> Result<MacdOutput, MacdError> {
 fn macd_prepare<'a>(
     input: &'a MacdInput,
     kernel: Kernel,
-) -> Result<(&'a [f64], usize, usize, usize, String, usize, usize, Kernel), MacdError> {
+) -> Result<
+    (
+        &'a [f64],
+        usize,
+        usize,
+        usize,
+        &'a str,
+        usize,
+        usize,
+        Kernel,
+    ),
+    MacdError,
+> {
     let data = input.as_ref();
     let len = data.len();
     if len == 0 {
@@ -624,6 +649,15 @@ fn macd_compute_into_classic_ema(
     signal_out: &mut [f64],
     hist_out: &mut [f64],
 ) -> Result<(), MacdError> {
+    if fast <= slow {
+        unsafe {
+            macd_compute_into_classic_ema_fast(
+                data, fast, slow, signal, first, macd_out, signal_out, hist_out,
+            );
+        }
+        return Ok(());
+    }
+
     let len = data.len();
     let macd_warmup = first + slow - 1;
     let signal_warmup = first + slow + signal - 2;
@@ -721,6 +755,114 @@ fn macd_compute_into_classic_ema(
     }
 
     Ok(())
+}
+
+#[inline(always)]
+unsafe fn macd_compute_into_classic_ema_fast(
+    data: &[f64],
+    fast: usize,
+    slow: usize,
+    signal: usize,
+    first: usize,
+    macd_out: &mut [f64],
+    signal_out: &mut [f64],
+    hist_out: &mut [f64],
+) {
+    let len = data.len();
+    let macd_warmup = first + slow - 1;
+    let signal_warmup = first + slow + signal - 2;
+
+    let af = 2.0 / (fast as f64 + 1.0);
+    let aslow = 2.0 / (slow as f64 + 1.0);
+    let asig = 2.0 / (signal as f64 + 1.0);
+    let omf = 1.0 - af;
+    let oms = 1.0 - aslow;
+    let omsi = 1.0 - asig;
+
+    let dp = data.as_ptr();
+    let mp = macd_out.as_mut_ptr();
+    let sp = signal_out.as_mut_ptr();
+    let hp = hist_out.as_mut_ptr();
+
+    let mut fsum = 0.0;
+    let mut k = 0usize;
+    while k < fast {
+        fsum += *dp.add(first + k);
+        k += 1;
+    }
+
+    let mut ssum = 0.0;
+    k = 0;
+    while k < slow {
+        ssum += *dp.add(first + k);
+        k += 1;
+    }
+
+    let mut fast_ema = fsum / fast as f64;
+    let mut slow_ema = ssum / slow as f64;
+
+    let mut t = first + fast;
+    while t <= macd_warmup {
+        let x = *dp.add(t);
+        fast_ema = x.mul_add(af, omf * fast_ema);
+        t += 1;
+    }
+
+    let mut m = fast_ema - slow_ema;
+    *mp.add(macd_warmup) = m;
+
+    if signal == 1 {
+        let mut se = m;
+        if signal_warmup < len {
+            *sp.add(signal_warmup) = se;
+            *hp.add(signal_warmup) = m - se;
+        }
+
+        let mut i = macd_warmup + 1;
+        while i < len {
+            let x = *dp.add(i);
+            fast_ema = x.mul_add(af, omf * fast_ema);
+            slow_ema = x.mul_add(aslow, oms * slow_ema);
+            m = fast_ema - slow_ema;
+            *mp.add(i) = m;
+            se = m.mul_add(asig, omsi * se);
+            *sp.add(i) = se;
+            *hp.add(i) = m - se;
+            i += 1;
+        }
+        return;
+    }
+
+    let mut sig_accum = m;
+    let mut i = macd_warmup + 1;
+    while i < len && i <= signal_warmup {
+        let x = *dp.add(i);
+        fast_ema = x.mul_add(af, omf * fast_ema);
+        slow_ema = x.mul_add(aslow, oms * slow_ema);
+        m = fast_ema - slow_ema;
+        *mp.add(i) = m;
+        sig_accum += m;
+        i += 1;
+    }
+
+    if signal_warmup < len {
+        let mut se = sig_accum / signal as f64;
+        let seed_m = *mp.add(signal_warmup);
+        *sp.add(signal_warmup) = se;
+        *hp.add(signal_warmup) = seed_m - se;
+
+        while i < len {
+            let x = *dp.add(i);
+            fast_ema = x.mul_add(af, omf * fast_ema);
+            slow_ema = x.mul_add(aslow, oms * slow_ema);
+            m = fast_ema - slow_ema;
+            *mp.add(i) = m;
+            se = m.mul_add(asig, omsi * se);
+            *sp.add(i) = se;
+            *hp.add(i) = m - se;
+            i += 1;
+        }
+    }
 }
 
 fn macd_compute_into(

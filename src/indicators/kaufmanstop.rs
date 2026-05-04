@@ -113,9 +113,7 @@ impl<'a> AsRef<[f64]> for KaufmanstopInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
-            KaufmanstopData::Candles { candles } => {
-                candles.select_candle_field("high").unwrap_or(&[])
-            }
+            KaufmanstopData::Candles { candles } => &candles.high,
             KaufmanstopData::Slices { high, .. } => high,
         }
     }
@@ -251,12 +249,22 @@ pub fn kaufmanstop_with_kernel(
     input: &KaufmanstopInput,
     kernel: Kernel,
 ) -> Result<KaufmanstopOutput, KaufmanstopError> {
-    let (high, low, period, first_valid_idx, _mult, _direction, _ma_type) =
+    let (high, low, period, first_valid_idx, mult, direction, ma_type) =
         kaufmanstop_prepare(input)?;
 
     let mut out = alloc_with_nan_prefix(high.len(), first_valid_idx + period - 1);
 
-    kaufmanstop_compute_into(input, kernel, &mut out)?;
+    kaufmanstop_compute_prepared_into(
+        high,
+        low,
+        period,
+        first_valid_idx,
+        mult,
+        direction,
+        ma_type,
+        kernel,
+        &mut out,
+    )?;
     Ok(KaufmanstopOutput { values: out })
 }
 
@@ -265,15 +273,7 @@ fn kaufmanstop_prepare<'a>(
     input: &'a KaufmanstopInput,
 ) -> Result<(&'a [f64], &'a [f64], usize, usize, f64, &'a str, &'a str), KaufmanstopError> {
     let (high, low) = match &input.data {
-        KaufmanstopData::Candles { candles } => {
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|_| KaufmanstopError::EmptyInputData)?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|_| KaufmanstopError::EmptyInputData)?;
-            (high, low)
-        }
+        KaufmanstopData::Candles { candles } => (&candles.high[..], &candles.low[..]),
         KaufmanstopData::Slices { high, low } => {
             if high.is_empty() || low.is_empty() {
                 return Err(KaufmanstopError::EmptyInputData);
@@ -284,6 +284,12 @@ fn kaufmanstop_prepare<'a>(
 
     if high.is_empty() || low.is_empty() {
         return Err(KaufmanstopError::EmptyInputData);
+    }
+    if high.len() != low.len() {
+        return Err(KaufmanstopError::InvalidPeriod {
+            period: input.get_period(),
+            data_len: high.len().min(low.len()),
+        });
     }
 
     let period = input.get_period();
@@ -323,6 +329,31 @@ fn kaufmanstop_compute_into(
     let (high, low, period, first_valid_idx, mult, direction, ma_type) =
         kaufmanstop_prepare(input)?;
 
+    kaufmanstop_compute_prepared_into(
+        high,
+        low,
+        period,
+        first_valid_idx,
+        mult,
+        direction,
+        ma_type,
+        kernel,
+        out,
+    )
+}
+
+#[inline(always)]
+fn kaufmanstop_compute_prepared_into(
+    high: &[f64],
+    low: &[f64],
+    period: usize,
+    first_valid_idx: usize,
+    mult: f64,
+    direction: &str,
+    ma_type: &str,
+    kernel: Kernel,
+    out: &mut [f64],
+) -> Result<(), KaufmanstopError> {
     if out.len() != high.len() {
         return Err(KaufmanstopError::OutputLengthMismatch {
             expected: high.len(),
@@ -332,7 +363,7 @@ fn kaufmanstop_compute_into(
 
     if ma_type.eq_ignore_ascii_case("sma") {
         unsafe {
-            kaufmanstop_scalar_classic_sma(
+            kaufmanstop_scalar_classic_sma_fast(
                 high,
                 low,
                 period,
@@ -424,7 +455,7 @@ fn kaufmanstop_compute_into(
 #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn kaufmanstop_into(input: &KaufmanstopInput, out: &mut [f64]) -> Result<(), KaufmanstopError> {
-    let (high, _low, period, first_valid_idx, _mult, _direction, _ma_type) =
+    let (high, low, period, first_valid_idx, mult, direction, ma_type) =
         kaufmanstop_prepare(input)?;
     if out.len() != high.len() {
         return Err(KaufmanstopError::OutputLengthMismatch {
@@ -439,7 +470,17 @@ pub fn kaufmanstop_into(input: &KaufmanstopInput, out: &mut [f64]) -> Result<(),
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    kaufmanstop_compute_into(input, Kernel::Auto, out)
+    kaufmanstop_compute_prepared_into(
+        high,
+        low,
+        period,
+        first_valid_idx,
+        mult,
+        direction,
+        ma_type,
+        Kernel::Auto,
+        out,
+    )
 }
 
 #[inline]
@@ -2110,6 +2151,83 @@ pub unsafe fn kaufmanstop_scalar_classic_sma(
         } else {
             out[i] = high[i] + sma * mult;
         }
+    }
+
+    Ok(())
+}
+
+#[inline]
+unsafe fn kaufmanstop_scalar_classic_sma_fast(
+    high: &[f64],
+    low: &[f64],
+    period: usize,
+    first_valid_idx: usize,
+    mult: f64,
+    direction: &str,
+    out: &mut [f64],
+) -> Result<(), KaufmanstopError> {
+    let start_idx = first_valid_idx + period - 1;
+    let is_long = direction.eq_ignore_ascii_case("long");
+    let period_f = period as f64;
+
+    let mut sum = 0.0;
+    let mut idx = first_valid_idx;
+    while idx <= start_idx {
+        let high_value = high[idx];
+        let low_value = low[idx];
+        if high_value.is_nan() || low_value.is_nan() {
+            return kaufmanstop_scalar_classic_sma(
+                high,
+                low,
+                period,
+                first_valid_idx,
+                mult,
+                direction,
+                out,
+            );
+        }
+        sum += high_value - low_value;
+        idx += 1;
+    }
+
+    let mut sma = sum / period_f;
+    if is_long {
+        out[start_idx] = low[start_idx] - sma * mult;
+    } else {
+        out[start_idx] = high[start_idx] + sma * mult;
+    }
+
+    let mut i = start_idx + 1;
+    while i < high.len() {
+        let old_idx = i - period;
+        let old_high = high[old_idx];
+        let old_low = low[old_idx];
+        let new_high = high[i];
+        let new_low = low[i];
+        if old_high.is_nan() || old_low.is_nan() || new_high.is_nan() || new_low.is_nan() {
+            return kaufmanstop_scalar_classic_sma(
+                high,
+                low,
+                period,
+                first_valid_idx,
+                mult,
+                direction,
+                out,
+            );
+        }
+
+        let old_range = old_high - old_low;
+        let new_range = new_high - new_low;
+        sum -= old_range;
+        sum += new_range;
+        sma = sum / period_f;
+
+        if is_long {
+            out[i] = new_low - sma * mult;
+        } else {
+            out[i] = new_high + sma * mult;
+        }
+        i += 1;
     }
 
     Ok(())

@@ -48,7 +48,10 @@ impl<'a> AsRef<[f64]> for OttoInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             OttoData::Slice(slice) => slice,
-            OttoData::Candles { candles, source } => source_type(candles, source),
+            OttoData::Candles { candles, source } => match *source {
+                "close" => candles.close.as_slice(),
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -1073,7 +1076,7 @@ fn calculate_ma(data: &[f64], period: usize, ma_type: &str) -> Result<Vec<f64>, 
 #[inline]
 fn resolve_single_kernel(k: Kernel) -> Kernel {
     match k {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     }
 }
@@ -1090,22 +1093,32 @@ fn resolve_batch_kernel(k: Kernel) -> Result<Kernel, OttoError> {
 }
 
 #[inline]
-fn first_valid_idx(d: &[f64]) -> Result<usize, OttoError> {
-    d.iter()
-        .position(|x| !x.is_nan())
+fn first_valid_idx_and_all_finite(d: &[f64]) -> Result<(usize, bool), OttoError> {
+    let mut first = None;
+    let mut all_finite = true;
+    for (i, &value) in d.iter().enumerate() {
+        if !value.is_finite() {
+            all_finite = false;
+        }
+        if first.is_none() && !value.is_nan() {
+            first = Some(i);
+        }
+    }
+    first
+        .map(|idx| (idx, all_finite))
         .ok_or(OttoError::AllValuesNaN)
 }
 
 #[inline]
 fn otto_prepare<'a>(
     input: &'a OttoInput,
-) -> Result<(&'a [f64], usize, usize, usize, f64, String), OttoError> {
+) -> Result<(&'a [f64], usize, usize, usize, f64, &'a str, bool), OttoError> {
     let data = input.as_ref();
     if data.is_empty() {
         return Err(OttoError::EmptyInputData);
     }
 
-    let first = first_valid_idx(data)?;
+    let (first, all_finite) = first_valid_idx_and_all_finite(data)?;
     let ott_period = input.get_ott_period();
     if ott_period == 0 || ott_period > data.len() {
         return Err(OttoError::InvalidPeriod {
@@ -1115,7 +1128,7 @@ fn otto_prepare<'a>(
     }
 
     let ott_percent = input.get_ott_percent();
-    let ma_type = input.get_ma_type().to_string();
+    let ma_type = input.get_ma_type();
 
     let slow = input.get_slow_vidya_length();
     let fast = input.get_fast_vidya_length();
@@ -1126,7 +1139,15 @@ fn otto_prepare<'a>(
         return Err(OttoError::NotEnoughValidData { needed, valid });
     }
 
-    Ok((data, first, ott_period, needed, ott_percent, ma_type))
+    Ok((
+        data,
+        first,
+        ott_period,
+        needed,
+        ott_percent,
+        ma_type,
+        all_finite,
+    ))
 }
 
 #[inline]
@@ -1136,7 +1157,7 @@ pub fn otto_into_slices(
     input: &OttoInput,
     _kern: Kernel,
 ) -> Result<(), OttoError> {
-    let (data, _first, ott_p, _needed, ott_percent, ma_type) = otto_prepare(input)?;
+    let (data, _first, ott_p, _needed, ott_percent, ma_type, all_finite) = otto_prepare(input)?;
     let n = data.len();
     if hott_dst.len() != n || lott_dst.len() != n {
         let expected = n;
@@ -1158,6 +1179,21 @@ pub fn otto_into_slices(
     }
 
     let coco = input.get_correcting_constant();
+
+    if ma_type == "VAR" && all_finite {
+        otto_var_clean_two_pass_into_slices(
+            data,
+            hott_dst,
+            lott_dst,
+            p1,
+            p2,
+            p3,
+            coco,
+            ott_p,
+            ott_percent,
+        );
+        return Ok(());
+    }
 
     let a1_base = 2.0 / (p1 as f64 + 1.0);
     let a2_base = 2.0 / (p2 as f64 + 1.0);
@@ -1326,7 +1362,7 @@ pub fn otto_into_slices(
             }
         }
     } else {
-        let mavg = calculate_ma(lott_dst, ott_p, &ma_type)?;
+        let mavg = calculate_ma(lott_dst, ott_p, ma_type)?;
 
         let mut long_stop_prev = f64::NAN;
         let mut short_stop_prev = f64::NAN;
@@ -1387,6 +1423,179 @@ pub fn otto_into_slices(
     Ok(())
 }
 
+#[inline(always)]
+fn otto_var_clean_two_pass_into_slices(
+    data: &[f64],
+    hott_dst: &mut [f64],
+    lott_dst: &mut [f64],
+    p1: usize,
+    p2: usize,
+    p3: usize,
+    coco: f64,
+    ott_p: usize,
+    ott_percent: f64,
+) {
+    let n = data.len();
+
+    let a1_base = 2.0 / (p1 as f64 + 1.0);
+    let a2_base = 2.0 / (p2 as f64 + 1.0);
+    let a3_base = 2.0 / (p3 as f64 + 1.0);
+
+    const CMO_P: usize = 9;
+    let mut ring_up = [0.0f64; CMO_P];
+    let mut ring_dn = [0.0f64; CMO_P];
+    let mut sum_up = 0.0f64;
+    let mut sum_dn = 0.0f64;
+    let mut head = 0usize;
+
+    let mut v1 = 0.0f64;
+    let mut v2 = 0.0f64;
+    let mut v3 = 0.0f64;
+    let mut prev_x = data[0];
+
+    for i in 0..n {
+        let x = data[i];
+
+        if i > 0 {
+            let d = x - prev_x;
+
+            if i >= CMO_P {
+                sum_up -= ring_up[head];
+                sum_dn -= ring_dn[head];
+            }
+
+            let (up, dn) = if d > 0.0 { (d, 0.0) } else { (0.0, -d) };
+            ring_up[head] = up;
+            ring_dn[head] = dn;
+            sum_up += up;
+            sum_dn += dn;
+
+            head += 1;
+            if head == CMO_P {
+                head = 0;
+            }
+
+            prev_x = x;
+        }
+
+        let cmo_abs = if i >= CMO_P {
+            let denom = sum_up + sum_dn;
+            if denom != 0.0 {
+                ((sum_up - sum_dn) / denom).abs()
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        let a1 = a1_base * cmo_abs;
+        let a2 = a2_base * cmo_abs;
+        let a3 = a3_base * cmo_abs;
+        v1 = a1 * x + (1.0 - a1) * v1;
+        v2 = a2 * x + (1.0 - a2) * v2;
+        v3 = a3 * x + (1.0 - a3) * v3;
+
+        let denom_l = (v2 - v3) + coco;
+        lott_dst[i] = v1 / denom_l;
+    }
+
+    let fark = ott_percent * 0.01;
+    let scale_up = (200.0 + ott_percent) / 200.0;
+    let scale_dn = (200.0 - ott_percent) / 200.0;
+
+    const CMO_P2: usize = 9;
+    let mut ring_up2 = [0.0f64; CMO_P2];
+    let mut ring_dn2 = [0.0f64; CMO_P2];
+    let mut sum_up2 = 0.0f64;
+    let mut sum_dn2 = 0.0f64;
+    let mut head2 = 0usize;
+    let mut prev_lott = lott_dst[0];
+
+    let a_base = 2.0 / (ott_p as f64 + 1.0);
+    let mut ma_prev = 0.0f64;
+
+    let mut long_stop_prev = f64::NAN;
+    let mut short_stop_prev = f64::NAN;
+    let mut dir_prev = 1i32;
+
+    for i in 0..n {
+        if i > 0 {
+            let x = lott_dst[i];
+            let d = x - prev_lott;
+            if i >= CMO_P2 {
+                sum_up2 -= ring_up2[head2];
+                sum_dn2 -= ring_dn2[head2];
+            }
+            let (up, dn) = if d > 0.0 { (d, 0.0) } else { (0.0, -d) };
+            ring_up2[head2] = up;
+            ring_dn2[head2] = dn;
+            sum_up2 += up;
+            sum_dn2 += dn;
+            head2 += 1;
+            if head2 == CMO_P2 {
+                head2 = 0;
+            }
+            prev_lott = x;
+        }
+
+        let c_abs = if i >= CMO_P2 {
+            let denom = sum_up2 + sum_dn2;
+            if denom != 0.0 {
+                ((sum_up2 - sum_dn2) / denom).abs()
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        let a = a_base * c_abs;
+        let ma = a * lott_dst[i] + (1.0 - a) * ma_prev;
+        ma_prev = ma;
+
+        if i == 0 {
+            long_stop_prev = ma * (1.0 - fark);
+            short_stop_prev = ma * (1.0 + fark);
+            let mt = long_stop_prev;
+            hott_dst[i] = if ma > mt {
+                mt * scale_up
+            } else {
+                mt * scale_dn
+            };
+        } else {
+            let ls = ma * (1.0 - fark);
+            let ss = ma * (1.0 + fark);
+            let long_stop = if ma > long_stop_prev {
+                ls.max(long_stop_prev)
+            } else {
+                ls
+            };
+            let short_stop = if ma < short_stop_prev {
+                ss.min(short_stop_prev)
+            } else {
+                ss
+            };
+            let dir = if dir_prev == -1 && ma > short_stop_prev {
+                1
+            } else if dir_prev == 1 && ma < long_stop_prev {
+                -1
+            } else {
+                dir_prev
+            };
+            let mt = if dir == 1 { long_stop } else { short_stop };
+            hott_dst[i] = if ma > mt {
+                mt * scale_up
+            } else {
+                mt * scale_dn
+            };
+            long_stop_prev = long_stop;
+            short_stop_prev = short_stop;
+            dir_prev = dir;
+        }
+    }
+}
+
 pub fn otto_with_kernel(input: &OttoInput, kern: Kernel) -> Result<OttoOutput, OttoError> {
     let chosen = resolve_single_kernel(kern);
     let data = input.as_ref();
@@ -1401,9 +1610,9 @@ pub fn otto_with_kernel(input: &OttoInput, kern: Kernel) -> Result<OttoOutput, O
     Ok(OttoOutput { hott, lott })
 }
 
-#[inline]
+#[inline(always)]
 pub fn otto(input: &OttoInput) -> Result<OttoOutput, OttoError> {
-    otto_with_kernel(input, Kernel::Auto)
+    otto_with_kernel(input, Kernel::Scalar)
 }
 
 #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
@@ -1706,7 +1915,7 @@ pub fn otto_batch_with_kernel(
     for (row, prm) in combos.iter().enumerate() {
         let input = OttoInput::from_slice(data, prm.clone());
 
-        let (_d, _first, ott_p, _needed, ott_percent, ma_type) = otto_prepare(&input)?;
+        let (_d, _first, ott_p, _needed, ott_percent, ma_type, _all_finite) = otto_prepare(&input)?;
 
         let n = data.len();
         let slow = input.get_slow_vidya_length();

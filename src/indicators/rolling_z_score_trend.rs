@@ -15,8 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -30,7 +29,13 @@ impl<'a> AsRef<[f64]> for RollingZScoreTrendInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             RollingZScoreTrendData::Slice(slice) => slice,
-            RollingZScoreTrendData::Candles { candles, source } => source_type(candles, source),
+            RollingZScoreTrendData::Candles { candles, source } => {
+                if *source == "close" {
+                    &candles.close
+                } else {
+                    source_type(candles, source)
+                }
+            }
         }
     }
 }
@@ -249,7 +254,7 @@ fn validate_params(lookback_period: usize, data_len: usize) -> Result<(), Rollin
 }
 
 #[inline(always)]
-fn validate_common(data: &[f64], lookback_period: usize) -> Result<(), RollingZScoreTrendError> {
+fn validate_common(data: &[f64], lookback_period: usize) -> Result<usize, RollingZScoreTrendError> {
     if data.is_empty() {
         return Err(RollingZScoreTrendError::EmptyInputData);
     }
@@ -264,7 +269,7 @@ fn validate_common(data: &[f64], lookback_period: usize) -> Result<(), RollingZS
             valid: max_run,
         });
     }
-    Ok(())
+    Ok(max_run)
 }
 
 #[inline(always)]
@@ -275,6 +280,73 @@ fn zscore_warmup_prefix(lookback_period: usize) -> usize {
 #[inline(always)]
 fn momentum_warmup_prefix(lookback_period: usize) -> usize {
     lookback_period
+}
+
+#[inline(always)]
+fn compute_row_all_finite(
+    data: &[f64],
+    lookback_period: usize,
+    out_zscore: &mut [f64],
+    out_momentum: &mut [f64],
+) {
+    out_zscore[..zscore_warmup_prefix(lookback_period).min(data.len())].fill(f64::NAN);
+    out_momentum[..momentum_warmup_prefix(lookback_period).min(data.len())].fill(f64::NAN);
+
+    let mut window = vec![0.0; lookback_period];
+    let mut head = 0usize;
+    let mut count = 0usize;
+    let mut sum = 0.0;
+    let mut sumsq = 0.0;
+    let mut smoothed = 0.0;
+    let mut has_smoothed = false;
+    let n = lookback_period as f64;
+
+    for i in 0..data.len() {
+        let value = data[i];
+        if count < lookback_period {
+            window[head] = value;
+            head += 1;
+            if head == lookback_period {
+                head = 0;
+            }
+            count += 1;
+            sum += value;
+            sumsq += value * value;
+        } else {
+            let old = window[head];
+            window[head] = value;
+            head += 1;
+            if head == lookback_period {
+                head = 0;
+            }
+            sum += value - old;
+            sumsq += value * value - old * old;
+        }
+
+        if count < lookback_period {
+            continue;
+        }
+
+        let mean = sum / n;
+        let variance = (sumsq / n - mean * mean).max(0.0);
+        let stddev = variance.sqrt();
+        let raw_zscore = if stddev > f64::EPSILON {
+            (value - mean) / stddev
+        } else {
+            0.0
+        };
+
+        if !has_smoothed {
+            smoothed = raw_zscore;
+            has_smoothed = true;
+            out_zscore[i] = smoothed;
+        } else {
+            let prev_smoothed = smoothed;
+            smoothed = 0.5 * raw_zscore + 0.5 * prev_smoothed;
+            out_zscore[i] = smoothed;
+            out_momentum[i] = smoothed - prev_smoothed;
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -372,11 +444,17 @@ impl RollingZScoreTrendStream {
 fn compute_row(
     data: &[f64],
     lookback_period: usize,
+    all_finite: bool,
     out_zscore: &mut [f64],
     out_momentum: &mut [f64],
 ) {
-    out_zscore.fill(f64::NAN);
-    out_momentum.fill(f64::NAN);
+    if all_finite {
+        compute_row_all_finite(data, lookback_period, out_zscore, out_momentum);
+        return;
+    } else {
+        out_zscore.fill(f64::NAN);
+        out_momentum.fill(f64::NAN);
+    }
     let mut stream = RollingZScoreTrendStream::try_new(RollingZScoreTrendParams {
         lookback_period: Some(lookback_period),
     })
@@ -402,16 +480,22 @@ pub fn rolling_z_score_trend_with_kernel(
 ) -> Result<RollingZScoreTrendOutput, RollingZScoreTrendError> {
     let data = input.as_ref();
     let lookback_period = input.get_lookback_period();
-    validate_common(data, lookback_period)?;
+    let max_run = validate_common(data, lookback_period)?;
 
     let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
     let mut zscore = alloc_with_nan_prefix(data.len(), zscore_warmup_prefix(lookback_period));
     let mut momentum = alloc_with_nan_prefix(data.len(), momentum_warmup_prefix(lookback_period));
-    compute_row(data, lookback_period, &mut zscore, &mut momentum);
+    compute_row(
+        data,
+        lookback_period,
+        max_run == data.len(),
+        &mut zscore,
+        &mut momentum,
+    );
     Ok(RollingZScoreTrendOutput { zscore, momentum })
 }
 
@@ -423,7 +507,7 @@ pub fn rolling_z_score_trend_into_slice(
 ) -> Result<(), RollingZScoreTrendError> {
     let data = input.as_ref();
     let lookback_period = input.get_lookback_period();
-    validate_common(data, lookback_period)?;
+    let max_run = validate_common(data, lookback_period)?;
     if dst_zscore.len() != data.len() {
         return Err(RollingZScoreTrendError::OutputLengthMismatch {
             expected: data.len(),
@@ -438,11 +522,17 @@ pub fn rolling_z_score_trend_into_slice(
     }
 
     let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
-    compute_row(data, lookback_period, dst_zscore, dst_momentum);
+    compute_row(
+        data,
+        lookback_period,
+        max_run == data.len(),
+        dst_zscore,
+        dst_momentum,
+    );
     Ok(())
 }
 
@@ -786,6 +876,7 @@ fn rolling_z_score_trend_batch_inner_into(
         compute_row(
             data,
             params.lookback_period.unwrap_or(20),
+            max_run == data.len(),
             dst_zscore,
             dst_momentum,
         );
@@ -1206,6 +1297,26 @@ mod tests {
         rolling_z_score_trend_into_slice(&mut zscore, &mut momentum, &input, Kernel::Auto)?;
         assert_series_close(&base.zscore, &zscore, 1e-12);
         assert_series_close(&base.momentum, &momentum, 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn rolling_z_score_trend_into_overwrites_stale_constant_data() -> Result<(), Box<dyn Error>> {
+        let data = vec![42.0; 64];
+        let input = RollingZScoreTrendInput::from_slice(
+            &data,
+            RollingZScoreTrendParams {
+                lookback_period: Some(20),
+            },
+        );
+        let mut zscore = vec![123.0; data.len()];
+        let mut momentum = vec![456.0; data.len()];
+        rolling_z_score_trend_into_slice(&mut zscore, &mut momentum, &input, Kernel::Auto)?;
+
+        assert!(zscore[..19].iter().all(|v| v.is_nan()));
+        assert!(zscore[19..].iter().all(|v| *v == 0.0));
+        assert!(momentum[..20].iter().all(|v| v.is_nan()));
+        assert!(momentum[20..].iter().all(|v| *v == 0.0));
         Ok(())
     }
 

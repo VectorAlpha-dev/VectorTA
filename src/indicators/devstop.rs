@@ -3,8 +3,8 @@ use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+    init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -13,6 +13,22 @@ use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use thiserror::Error;
+
+#[inline(always)]
+fn devstop_source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "close" => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
+    }
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -293,8 +309,8 @@ fn devstop_prepare<'a>(
             source_high,
             source_low,
         } => (
-            source_type(candles, source_high),
-            source_type(candles, source_low),
+            devstop_source_type(candles, source_high),
+            devstop_source_type(candles, source_low),
         ),
         DevStopData::SliceHL(h, l) => (*h, *l),
     };
@@ -352,8 +368,8 @@ pub fn devstop_into_slice(
             source_high,
             source_low,
         } => (
-            source_type(candles, source_high),
-            source_type(candles, source_low),
+            devstop_source_type(candles, source_high),
+            devstop_source_type(candles, source_low),
         ),
         DevStopData::SliceHL(h, l) => (*h, *l),
     };
@@ -500,8 +516,8 @@ pub fn devstop_with_kernel(
             source_high,
             source_low,
         } => (
-            source_type(candles, source_high),
-            source_type(candles, source_low),
+            devstop_source_type(candles, source_high),
+            devstop_source_type(candles, source_low),
         ),
         DevStopData::SliceHL(h, l) => (*h, *l),
     };
@@ -535,8 +551,7 @@ pub fn devstop_with_kernel(
         k => k,
     };
 
-    let _warm = devstop_warmup(first, period);
-    let mut out = vec![0.0; len];
+    let mut out = alloc_uninit_f64(len);
 
     unsafe {
         match chosen {

@@ -296,7 +296,7 @@ pub fn chop_with_kernel(input: &ChopInput, kernel: Kernel) -> Result<ChopOutput,
     let mut out = alloc_with_nan_prefix(len, warmup_period);
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -399,7 +399,7 @@ pub fn chop_into_slice(dst: &mut [f64], input: &ChopInput, kern: Kernel) -> Resu
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -479,6 +479,11 @@ pub unsafe fn chop_scalar(
     debug_assert!(high.len() == low.len() && low.len() == close.len());
     let len = close.len();
     if len == 0 {
+        return;
+    }
+
+    if period == 14 && drift == 1 {
+        chop_scalar_period_14_drift_1(high, low, close, scalar, first_valid_idx, out);
         return;
     }
 
@@ -587,6 +592,134 @@ pub unsafe fn chop_scalar(
                 out[i] = (scalar * (rolling_sum_atr.log10() - range.log10())) / logp;
             } else {
                 out[i] = f64::NAN;
+            }
+        }
+    }
+}
+
+#[inline]
+unsafe fn chop_scalar_period_14_drift_1(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    scalar: f64,
+    first_valid_idx: usize,
+    out: &mut [f64],
+) {
+    const PERIOD: usize = 14;
+    const CAP: usize = 16;
+    const MASK: usize = CAP - 1;
+
+    #[inline(always)]
+    fn rb_inc(idx: usize) -> usize {
+        (idx + 1) & MASK
+    }
+
+    #[inline(always)]
+    fn rb_dec(idx: usize) -> usize {
+        idx.wrapping_sub(1) & MASK
+    }
+
+    let len = close.len();
+    let scale_ln = scalar / (PERIOD as f64).ln();
+
+    let mut atr_ring = [0.0_f64; PERIOD];
+    let mut atr_ring_idx: usize = 0;
+    let mut rolling_sum_atr: f64 = 0.0;
+
+    let mut h_idx = [0usize; CAP];
+    let mut h_val = [0.0_f64; CAP];
+    let mut h_head: usize = 0;
+    let mut h_tail: usize = 0;
+
+    let mut l_idx = [0usize; CAP];
+    let mut l_val = [0.0_f64; CAP];
+    let mut l_head: usize = 0;
+    let mut l_tail: usize = 0;
+
+    let mut prev_close = *close.get_unchecked(first_valid_idx);
+
+    for i in first_valid_idx..len {
+        let hi = *high.get_unchecked(i);
+        let lo = *low.get_unchecked(i);
+        let hl = hi - lo;
+        let tr = if i == first_valid_idx {
+            hl
+        } else {
+            let hc = (hi - prev_close).abs();
+            let lc = (lo - prev_close).abs();
+            hl.max(hc).max(lc)
+        };
+        prev_close = *close.get_unchecked(i);
+
+        rolling_sum_atr -= atr_ring[atr_ring_idx];
+        atr_ring[atr_ring_idx] = tr;
+        rolling_sum_atr += tr;
+        atr_ring_idx += 1;
+        if atr_ring_idx == PERIOD {
+            atr_ring_idx = 0;
+        }
+
+        while h_head != h_tail {
+            let front_i = h_idx[h_head];
+            if front_i + PERIOD <= i {
+                h_head = rb_inc(h_head);
+            } else {
+                break;
+            }
+        }
+        while l_head != l_tail {
+            let front_i = l_idx[l_head];
+            if front_i + PERIOD <= i {
+                l_head = rb_inc(l_head);
+            } else {
+                break;
+            }
+        }
+
+        while h_head != h_tail {
+            let last = rb_dec(h_tail);
+            if h_val[last] <= hi {
+                h_tail = last;
+            } else {
+                break;
+            }
+        }
+        let next_tail = rb_inc(h_tail);
+        if next_tail == h_head {
+            h_head = rb_inc(h_head);
+        }
+        h_idx[h_tail] = i;
+        h_val[h_tail] = hi;
+        h_tail = next_tail;
+
+        while l_head != l_tail {
+            let last = rb_dec(l_tail);
+            if l_val[last] >= lo {
+                l_tail = last;
+            } else {
+                break;
+            }
+        }
+        let next_tail = rb_inc(l_tail);
+        if next_tail == l_head {
+            l_head = rb_inc(l_head);
+        }
+        l_idx[l_tail] = i;
+        l_val[l_tail] = lo;
+        l_tail = next_tail;
+
+        if i - first_valid_idx >= PERIOD - 1 {
+            let range = h_val[h_head] - l_val[l_head];
+            if range > 0.0 && rolling_sum_atr > 0.0 {
+                let ratio = rolling_sum_atr / range;
+                *out.get_unchecked_mut(i) = if (ratio - 1.0).abs() < 1e-8 {
+                    scale_ln * (ratio - 1.0).ln_1p()
+                } else {
+                    scale_ln * ratio.ln()
+                };
+            } else {
+                *out.get_unchecked_mut(i) = f64::NAN;
             }
         }
     }

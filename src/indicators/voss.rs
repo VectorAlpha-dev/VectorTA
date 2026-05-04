@@ -63,6 +63,12 @@ pub struct VossOutput {
     pub filt: Vec<f64>,
 }
 
+#[derive(Copy, Clone, Debug)]
+pub enum VossOutputField {
+    Voss,
+    Filt,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -374,6 +380,38 @@ pub fn voss_into_slice(
     voss_compute_into(
         data, period, predict, bandwidth, first, min_index, chosen, voss_dst, filt_dst,
     );
+
+    Ok(())
+}
+
+#[inline]
+pub fn voss_output_into_slice(
+    dst: &mut [f64],
+    input: &VossInput,
+    kern: Kernel,
+    field: VossOutputField,
+) -> Result<(), VossError> {
+    let (data, period, predict, bandwidth, first, min_index, chosen) = voss_prepare(input, kern)?;
+    let _ = chosen;
+
+    if dst.len() != data.len() {
+        return Err(VossError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
+        });
+    }
+
+    let warmup_end = first + min_index;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let warm_limit = warmup_end.min(dst.len());
+    for value in &mut dst[..warm_limit] {
+        *value = qnan;
+    }
+
+    match field {
+        VossOutputField::Voss => voss_selected_voss(data, period, predict, bandwidth, first, dst),
+        VossOutputField::Filt => voss_selected_filt(data, period, predict, bandwidth, first, dst),
+    }
 
     Ok(())
 }
@@ -1169,6 +1207,122 @@ fn voss_batch_inner(
         rows,
         cols,
     })
+}
+
+#[inline(always)]
+fn voss_coeffs(
+    period: usize,
+    predict: usize,
+    bandwidth: f64,
+) -> (usize, usize, f64, f64, f64, f64) {
+    use std::f64::consts::PI;
+
+    let order = 3 * predict;
+    let min_index = period.max(5).max(order);
+    let w0 = 2.0 * PI / period as f64;
+    let f1 = w0.cos();
+    let g1 = (bandwidth * w0).cos();
+    let s1 = 1.0 / g1 - (1.0 / (g1 * g1) - 1.0).sqrt();
+    let c1 = 0.5 * (1.0 - s1);
+    let c2 = f1 * (1.0 + s1);
+    let c3 = -s1;
+    let scale = 0.5 * (3 + order) as f64;
+    (order, min_index, c1, c2, c3, scale)
+}
+
+#[inline(always)]
+fn voss_selected_filt(
+    data: &[f64],
+    period: usize,
+    predict: usize,
+    bandwidth: f64,
+    first: usize,
+    filt: &mut [f64],
+) {
+    let (_, min_index, c1, c2, c3, _) = voss_coeffs(period, predict, bandwidth);
+    let start = first + min_index;
+    if start >= data.len() {
+        return;
+    }
+
+    if start >= 2 {
+        filt[start - 2] = 0.0;
+        filt[start - 1] = 0.0;
+    }
+
+    let mut prev_f1 = 0.0f64;
+    let mut prev_f2 = 0.0f64;
+    for i in start..data.len() {
+        let diff = data[i] - data[i - 2];
+        let t = c3.mul_add(prev_f2, c1 * diff);
+        let f = c2.mul_add(prev_f1, t);
+        filt[i] = f;
+        prev_f2 = prev_f1;
+        prev_f1 = f;
+    }
+}
+
+#[inline(always)]
+fn voss_selected_voss(
+    data: &[f64],
+    period: usize,
+    predict: usize,
+    bandwidth: f64,
+    first: usize,
+    voss: &mut [f64],
+) {
+    let (order, min_index, c1, c2, c3, scale) = voss_coeffs(period, predict, bandwidth);
+    let start = first + min_index;
+    if start >= data.len() {
+        return;
+    }
+
+    let mut prev_f1 = 0.0f64;
+    let mut prev_f2 = 0.0f64;
+
+    if order == 0 {
+        for i in start..data.len() {
+            let diff = data[i] - data[i - 2];
+            let t = c3.mul_add(prev_f2, c1 * diff);
+            let f = c2.mul_add(prev_f1, t);
+            voss[i] = scale * f;
+            prev_f2 = prev_f1;
+            prev_f1 = f;
+        }
+        return;
+    }
+
+    let ord_f = order as f64;
+    let inv_order = 1.0 / ord_f;
+    let mut a_sum = 0.0f64;
+    let mut d_sum = 0.0f64;
+    let mut ring = vec![0.0f64; order];
+    let mut rpos = 0usize;
+
+    for i in start..data.len() {
+        let diff = data[i] - data[i - 2];
+        let t = c3.mul_add(prev_f2, c1 * diff);
+        let f = c2.mul_add(prev_f1, t);
+        prev_f2 = prev_f1;
+        prev_f1 = f;
+
+        let sumc = d_sum * inv_order;
+        let vi = scale.mul_add(f, -sumc);
+        voss[i] = vi;
+
+        let v_new_nz = if vi.is_nan() { 0.0 } else { vi };
+        let v_old = ring[rpos];
+
+        let a_prev = a_sum;
+        a_sum = a_prev - v_old + v_new_nz;
+        d_sum = ord_f.mul_add(v_new_nz, d_sum - a_prev);
+
+        ring[rpos] = v_new_nz;
+        rpos += 1;
+        if rpos == order {
+            rpos = 0;
+        }
+    }
 }
 
 #[inline(always)]

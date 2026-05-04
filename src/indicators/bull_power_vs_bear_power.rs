@@ -15,8 +15,8 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+    init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -320,6 +320,21 @@ fn count_valid_ohlc(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> u
 }
 
 #[inline(always)]
+fn first_and_valid_ohlc(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> (usize, usize) {
+    let mut first = close.len();
+    let mut count = 0usize;
+    for i in 0..close.len() {
+        if valid_ohlc_bar(open[i], high[i], low[i], close[i]) {
+            if first == close.len() {
+                first = i;
+            }
+            count += 1;
+        }
+    }
+    (first, count)
+}
+
+#[inline(always)]
 fn build_raw_series(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> (Vec<f64>, Vec<u8>) {
     let len = close.len();
     let mut values = vec![0.0; len];
@@ -331,6 +346,43 @@ fn build_raw_series(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> (
         }
     }
     (values, valid)
+}
+
+#[inline(always)]
+fn bbpower_row_from_ohlc(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    out: &mut [f64],
+) {
+    let alpha = 2.0 / (period as f64 + 1.0);
+    let beta = 1.0 - alpha;
+    let mut count = 0usize;
+    let mut mean = f64::NAN;
+
+    for i in 0..close.len() {
+        if !valid_ohlc_bar(open[i], high[i], low[i], close[i]) {
+            out[i] = f64::NAN;
+            count = 0;
+            mean = f64::NAN;
+            continue;
+        }
+
+        let value = bbpower_value(open[i], high[i], low[i], close[i]);
+        count += 1;
+        if count == 1 {
+            mean = value;
+        } else if count <= period {
+            let c = count as f64;
+            mean = ((c - 1.0) * mean + value) / c;
+        } else {
+            mean = beta.mul_add(mean, alpha * value);
+        }
+
+        out[i] = if count >= period { mean } else { f64::NAN };
+    }
 }
 
 #[inline(always)]
@@ -404,7 +456,7 @@ fn bull_power_vs_bear_power_prepare<'a>(
         });
     }
 
-    let first = first_valid_ohlc(open, high, low, close);
+    let (first, valid) = first_and_valid_ohlc(open, high, low, close);
     if first >= len {
         return Err(BullPowerVsBearPowerError::AllValuesNaN);
     }
@@ -417,7 +469,6 @@ fn bull_power_vs_bear_power_prepare<'a>(
         });
     }
 
-    let valid = count_valid_ohlc(open, high, low, close);
     if valid < period {
         return Err(BullPowerVsBearPowerError::NotEnoughValidData {
             needed: period,
@@ -441,10 +492,9 @@ pub fn bull_power_vs_bear_power_with_kernel(
     let (open, high, low, close, period, first, _chosen) =
         bull_power_vs_bear_power_prepare(input, kernel)?;
     let len = close.len();
-    let warmup = first.saturating_add(period.saturating_sub(1));
-    let mut values = alloc_with_nan_prefix(len, warmup);
-    let (raw, valid) = build_raw_series(open, high, low, close);
-    bbpower_row_from_raw(&raw, &valid, period, &mut values);
+    let _warmup = first.saturating_add(period.saturating_sub(1));
+    let mut values = alloc_uninit_f64(len);
+    bbpower_row_from_ohlc(open, high, low, close, period, &mut values);
     Ok(BullPowerVsBearPowerOutput { values })
 }
 
@@ -463,8 +513,7 @@ pub fn bull_power_vs_bear_power_into_slice(
             got: dst.len(),
         });
     }
-    let (raw, valid) = build_raw_series(open, high, low, close);
-    bbpower_row_from_raw(&raw, &valid, period, dst);
+    bbpower_row_from_ohlc(open, high, low, close, period, dst);
     Ok(())
 }
 

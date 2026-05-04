@@ -17,8 +17,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -40,7 +39,10 @@ impl<'a> AsRef<[f64]> for VelocityInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             VelocityData::Slice(slice) => slice,
-            VelocityData::Candles { candles, source } => source_type(candles, source),
+            VelocityData::Candles { candles, source } => match *source {
+                "hlcc4" => candles.hlcc4.as_slice(),
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -347,7 +349,7 @@ impl VelocityCore {
 #[inline(always)]
 fn normalize_single_kernel(kernel: Kernel) -> Kernel {
     match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         Kernel::ScalarBatch => Kernel::Scalar,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -404,7 +406,97 @@ fn velocity_prepare<'a>(
 }
 
 #[inline(always)]
+fn compute_velocity_default_into(data: &[f64], first_valid: usize, out: &mut [f64]) {
+    let mut harmonic = 0.0;
+    for lag in 1..=DEFAULT_LENGTH {
+        harmonic += 1.0 / lag as f64;
+    }
+    let harmonic_over_length = harmonic / DEFAULT_LENGTH as f64;
+    let mut history = [f64::NAN; DEFAULT_LENGTH];
+    let mut history_head = 0usize;
+    let mut history_count = 0usize;
+    let mut raw_ring = [f64::NAN; DEFAULT_SMOOTH_LENGTH];
+    let mut raw_head = 0usize;
+    let mut raw_count = 0usize;
+    let raw_denom = (DEFAULT_SMOOTH_LENGTH * (DEFAULT_SMOOTH_LENGTH + 1) / 2) as f64;
+
+    for idx in first_valid..data.len() {
+        let value = data[idx];
+        let raw = if value.is_finite() {
+            let mut weighted_past = 0.0;
+            for lag in 1..=DEFAULT_LENGTH {
+                let hist = if lag <= history_count {
+                    let mut hist_idx = history_head + DEFAULT_LENGTH - lag;
+                    if hist_idx >= DEFAULT_LENGTH {
+                        hist_idx -= DEFAULT_LENGTH;
+                    }
+                    let past = history[hist_idx];
+                    if past.is_finite() {
+                        past
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
+                weighted_past += hist / lag as f64;
+            }
+            value * harmonic_over_length - weighted_past / DEFAULT_LENGTH as f64
+        } else {
+            f64::NAN
+        };
+
+        history[history_head] = value;
+        history_head += 1;
+        if history_head == DEFAULT_LENGTH {
+            history_head = 0;
+        }
+        if history_count < DEFAULT_LENGTH {
+            history_count += 1;
+        }
+
+        raw_ring[raw_head] = raw;
+        raw_head += 1;
+        if raw_head == DEFAULT_SMOOTH_LENGTH {
+            raw_head = 0;
+        }
+        if raw_count < DEFAULT_SMOOTH_LENGTH {
+            raw_count += 1;
+        }
+        if raw_count < DEFAULT_SMOOTH_LENGTH {
+            out[idx] = f64::NAN;
+            continue;
+        }
+
+        let mut weighted = 0.0;
+        let mut valid = true;
+        for offset in 0..DEFAULT_SMOOTH_LENGTH {
+            let mut raw_idx = raw_head + offset;
+            if raw_idx >= DEFAULT_SMOOTH_LENGTH {
+                raw_idx -= DEFAULT_SMOOTH_LENGTH;
+            }
+            let raw_value = raw_ring[raw_idx];
+            if !raw_value.is_finite() {
+                valid = false;
+                break;
+            }
+            weighted += (offset + 1) as f64 * raw_value;
+        }
+        out[idx] = if valid {
+            weighted / raw_denom
+        } else {
+            f64::NAN
+        };
+    }
+}
+
+#[inline(always)]
 fn compute_velocity_into(prepared: PreparedVelocity<'_>, out: &mut [f64]) {
+    if prepared.length == DEFAULT_LENGTH && prepared.smooth_length == DEFAULT_SMOOTH_LENGTH {
+        compute_velocity_default_into(prepared.data, prepared.first_valid, out);
+        return;
+    }
+
     let mut core = VelocityCore::new(prepared.length, prepared.smooth_length);
     for idx in prepared.first_valid..prepared.data.len() {
         out[idx] = match core.update(prepared.data[idx]) {

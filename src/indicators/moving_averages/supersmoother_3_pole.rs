@@ -7,7 +7,7 @@ use crate::cuda::moving_averages::CudaSupersmoother3Pole;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    alloc_uninit_f64, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -34,7 +34,17 @@ impl<'a> AsRef<[f64]> for SuperSmoother3PoleInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             SuperSmoother3PoleData::Slice(slice) => slice,
-            SuperSmoother3PoleData::Candles { candles, source } => source_type(candles, source),
+            SuperSmoother3PoleData::Candles { candles, source } => match *source {
+                "close" => candles.close.as_slice(),
+                "open" => candles.open.as_slice(),
+                "high" => candles.high.as_slice(),
+                "low" => candles.low.as_slice(),
+                "hl2" => candles.hl2.as_slice(),
+                "hlc3" => candles.hlc3.as_slice(),
+                "ohlc4" => candles.ohlc4.as_slice(),
+                "hlcc4" => candles.hlcc4.as_slice(),
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -178,6 +188,19 @@ pub fn supersmoother_3_pole(
     supersmoother_3_pole_with_kernel(input, Kernel::Auto)
 }
 
+#[inline(always)]
+fn resolve_single_kernel(kernel: Kernel) -> Kernel {
+    match kernel {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Auto => detect_best_kernel(),
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Auto | Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+            Kernel::Scalar
+        }
+        other => other,
+    }
+}
+
 pub fn supersmoother_3_pole_with_kernel(
     input: &SuperSmoother3PoleInput,
     kernel: Kernel,
@@ -207,12 +230,9 @@ pub fn supersmoother_3_pole_with_kernel(
         });
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = resolve_single_kernel(kernel);
 
-    let mut out = alloc_with_nan_prefix(len, first);
+    let mut out = alloc_uninit_f64(len);
 
     unsafe {
         match chosen {
@@ -231,6 +251,10 @@ pub fn supersmoother_3_pole_with_kernel(
         }
     }
 
+    for v in &mut out[..first] {
+        *v = f64::NAN;
+    }
+
     Ok(SuperSmoother3PoleOutput { values: out })
 }
 
@@ -240,42 +264,6 @@ pub fn supersmoother_3_pole_into(
     input: &SuperSmoother3PoleInput,
     out: &mut [f64],
 ) -> Result<(), SuperSmoother3PoleError> {
-    let data: &[f64] = input.as_ref();
-    let len = data.len();
-    if len == 0 {
-        return Err(SuperSmoother3PoleError::EmptyInputData);
-    }
-
-    if out.len() != len {
-        return Err(SuperSmoother3PoleError::OutputLengthMismatch {
-            expected: len,
-            got: out.len(),
-        });
-    }
-
-    let first = data
-        .iter()
-        .position(|x| !x.is_nan())
-        .ok_or(SuperSmoother3PoleError::AllValuesNaN)?;
-    let period = input.get_period();
-
-    if period == 0 || period > len {
-        return Err(SuperSmoother3PoleError::InvalidPeriod {
-            period,
-            data_len: len,
-        });
-    }
-    if (len - first) < period {
-        return Err(SuperSmoother3PoleError::NotEnoughValidData {
-            needed: period,
-            valid: len - first,
-        });
-    }
-
-    for v in &mut out[..first] {
-        *v = f64::from_bits(0x7ff8_0000_0000_0000);
-    }
-
     supersmoother_3_pole_into_slice(out, input, Kernel::Auto)
 }
 
@@ -320,7 +308,7 @@ pub unsafe fn supersmoother_3_pole_compute_into(
     let mut y1 = *out.get_unchecked(first + 1);
     let mut y2 = *out.get_unchecked(first + 2);
 
-    while i + 1 < n {
+    while i + 3 < n {
         let di = *data.get_unchecked(i);
         let t0 = coef_prev1.mul_add(y2, coef_source * di);
         let t1 = coef_prev2.mul_add(y1, t0);
@@ -342,14 +330,40 @@ pub unsafe fn supersmoother_3_pole_compute_into(
         y1 = y2;
         y2 = y4;
         i += 1;
+
+        let di2 = *data.get_unchecked(i);
+        let t0c = coef_prev1.mul_add(y2, coef_source * di2);
+        let t1c = coef_prev2.mul_add(y1, t0c);
+        let y5 = coef_prev3.mul_add(y0, t1c);
+        *out.get_unchecked_mut(i) = y5;
+
+        y0 = y1;
+        y1 = y2;
+        y2 = y5;
+        i += 1;
+
+        let di3 = *data.get_unchecked(i);
+        let t0d = coef_prev1.mul_add(y2, coef_source * di3);
+        let t1d = coef_prev2.mul_add(y1, t0d);
+        let y6 = coef_prev3.mul_add(y0, t1d);
+        *out.get_unchecked_mut(i) = y6;
+
+        y0 = y1;
+        y1 = y2;
+        y2 = y6;
+        i += 1;
     }
 
-    if i < n {
+    while i < n {
         let di = *data.get_unchecked(i);
         let t0 = coef_prev1.mul_add(y2, coef_source * di);
         let t1 = coef_prev2.mul_add(y1, t0);
         let y3 = coef_prev3.mul_add(y0, t1);
         *out.get_unchecked_mut(i) = y3;
+        y0 = y1;
+        y1 = y2;
+        y2 = y3;
+        i += 1;
     }
 }
 
@@ -1795,10 +1809,7 @@ pub fn supersmoother_3_pole_into_slice(
         });
     }
 
-    let chosen = match kern {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = resolve_single_kernel(kern);
 
     unsafe {
         match chosen {
@@ -1813,6 +1824,10 @@ pub fn supersmoother_3_pole_into_slice(
             }
             _ => unreachable!(),
         }
+    }
+
+    for v in &mut dst[..first] {
+        *v = f64::NAN;
     }
 
     Ok(())

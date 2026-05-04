@@ -15,8 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -48,9 +47,7 @@ impl<'a> FisherInput<'a> {
     #[inline(always)]
     pub fn as_ref(&self) -> (&'a [f64], &'a [f64]) {
         match &self.data {
-            FisherData::Candles { candles } => {
-                (source_type(candles, "high"), source_type(candles, "low"))
-            }
+            FisherData::Candles { candles } => (&candles.high, &candles.low),
             FisherData::Slices { high, low } => (*high, *low),
         }
     }
@@ -101,11 +98,7 @@ impl<'a> FisherInput<'a> {
     #[inline(always)]
     pub fn get_high_low(&self) -> (&'a [f64], &'a [f64]) {
         match &self.data {
-            FisherData::Candles { candles } => {
-                let high = source_type(candles, "high");
-                let low = source_type(candles, "low");
-                (high, low)
-            }
+            FisherData::Candles { candles } => (&candles.high, &candles.low),
             FisherData::Slices { high, low } => (*high, *low),
         }
     }
@@ -213,11 +206,12 @@ pub enum FisherError {
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
 
-#[inline]
+#[inline(always)]
 pub fn fisher(input: &FisherInput) -> Result<FisherOutput, FisherError> {
     fisher_with_kernel(input, Kernel::Auto)
 }
 
+#[inline(always)]
 pub fn fisher_with_kernel(
     input: &FisherInput,
     kernel: Kernel,
@@ -257,7 +251,7 @@ pub fn fisher_with_kernel(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -268,6 +262,10 @@ pub fn fisher_with_kernel(
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
+                fisher_scalar_into(high, low, period, first, &mut fisher_vals, &mut signal_vals)
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
                 fisher_scalar_into(high, low, period, first, &mut fisher_vals, &mut signal_vals)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -311,6 +309,10 @@ pub fn fisher_scalar_into(
     if period == 0 || first >= len {
         return;
     }
+    if period == 9 {
+        fisher_scalar_period9_into(high, low, first, fisher_out, signal_out);
+        return;
+    }
 
     let mut prev_fish = 0.0f64;
     let mut val1 = 0.0f64;
@@ -329,6 +331,72 @@ pub fn fisher_scalar_into(
                 min_val = midpoint;
             }
         }
+
+        let range = (max_val - min_val).max(0.001);
+        let hl = 0.5 * (high[i] + low[i]);
+        val1 = 0.67f64.mul_add(val1, 0.66 * ((hl - min_val) / range - 0.5));
+        if val1 > 0.99 {
+            val1 = 0.999;
+        } else if val1 < -0.99 {
+            val1 = -0.999;
+        }
+        signal_out[i] = prev_fish;
+        let new_fish = 0.5f64.mul_add(((1.0 + val1) / (1.0 - val1)).ln(), 0.5 * prev_fish);
+        fisher_out[i] = new_fish;
+        prev_fish = new_fish;
+    }
+}
+
+#[inline(always)]
+fn fisher_update_min_max(midpoint: f64, min_val: &mut f64, max_val: &mut f64) {
+    if midpoint > *max_val {
+        *max_val = midpoint;
+    }
+    if midpoint < *min_val {
+        *min_val = midpoint;
+    }
+}
+
+#[inline(always)]
+fn fisher_scalar_period9_into(
+    high: &[f64],
+    low: &[f64],
+    first: usize,
+    fisher_out: &mut [f64],
+    signal_out: &mut [f64],
+) {
+    let len = high.len().min(low.len());
+    if first >= len {
+        return;
+    }
+
+    let mut prev_fish = 0.0f64;
+    let mut val1 = 0.0f64;
+    let warm = first + 8;
+
+    for i in warm..len {
+        let start = i - 8;
+        let mut min_val = f64::MAX;
+        let mut max_val = f64::MIN;
+
+        let midpoint = 0.5 * (high[start] + low[start]);
+        fisher_update_min_max(midpoint, &mut min_val, &mut max_val);
+        let midpoint = 0.5 * (high[start + 1] + low[start + 1]);
+        fisher_update_min_max(midpoint, &mut min_val, &mut max_val);
+        let midpoint = 0.5 * (high[start + 2] + low[start + 2]);
+        fisher_update_min_max(midpoint, &mut min_val, &mut max_val);
+        let midpoint = 0.5 * (high[start + 3] + low[start + 3]);
+        fisher_update_min_max(midpoint, &mut min_val, &mut max_val);
+        let midpoint = 0.5 * (high[start + 4] + low[start + 4]);
+        fisher_update_min_max(midpoint, &mut min_val, &mut max_val);
+        let midpoint = 0.5 * (high[start + 5] + low[start + 5]);
+        fisher_update_min_max(midpoint, &mut min_val, &mut max_val);
+        let midpoint = 0.5 * (high[start + 6] + low[start + 6]);
+        fisher_update_min_max(midpoint, &mut min_val, &mut max_val);
+        let midpoint = 0.5 * (high[start + 7] + low[start + 7]);
+        fisher_update_min_max(midpoint, &mut min_val, &mut max_val);
+        let midpoint = 0.5 * (high[start + 8] + low[start + 8]);
+        fisher_update_min_max(midpoint, &mut min_val, &mut max_val);
 
         let range = (max_val - min_val).max(0.001);
         let hl = 0.5 * (high[i] + low[i]);
@@ -412,13 +480,17 @@ pub fn fisher_into_slice(
     }
 
     let chosen = if kern == Kernel::Auto {
-        detect_best_kernel()
+        Kernel::Scalar
     } else {
         kern
     };
 
     match chosen {
         Kernel::Scalar | Kernel::ScalarBatch => {
+            fisher_scalar_into(high, low, period, first, fisher_dst, signal_dst)
+        }
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
             fisher_scalar_into(high, low, period, first, fisher_dst, signal_dst)
         }
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -510,9 +582,7 @@ impl FisherBatchBuilder {
         FisherBatchBuilder::new().kernel(k).apply_slices(high, low)
     }
     pub fn apply_candles(self, c: &Candles) -> Result<FisherBatchOutput, FisherError> {
-        let high = source_type(c, "high");
-        let low = source_type(c, "low");
-        self.apply_slices(high, low)
+        self.apply_slices(&c.high, &c.low)
     }
     pub fn with_default_candles(c: &Candles) -> Result<FisherBatchOutput, FisherError> {
         FisherBatchBuilder::new()
@@ -2403,7 +2473,7 @@ pub fn fisher_js(high: &[f64], low: &[f64], period: usize) -> Result<FisherResul
     let mut out = vec![0.0_f64; total];
     let (fisher_out, signal_out) = out.split_at_mut(len);
 
-    fisher_into_slice(fisher_out, signal_out, &input, detect_best_kernel())
+    fisher_into_slice(fisher_out, signal_out, &input, Kernel::Scalar)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(FisherResult {
@@ -2442,7 +2512,7 @@ pub fn fisher_into(
         };
         let input = FisherInput::from_slices(high, low, params);
 
-        fisher_into_slice(fisher_out, signal_out, &input, detect_best_kernel())
+        fisher_into_slice(fisher_out, signal_out, &input, Kernel::Scalar)
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }
@@ -2512,7 +2582,7 @@ pub fn fisher_batch_unified_js(
         high,
         low,
         &sweep,
-        detect_best_kernel(),
+        Kernel::Scalar,
         false,
         &mut fisher,
         &mut signal,
@@ -2608,7 +2678,7 @@ impl FisherContext {
 
         Ok(FisherContext {
             period,
-            kernel: detect_best_kernel(),
+            kernel: Kernel::Scalar,
         })
     }
 

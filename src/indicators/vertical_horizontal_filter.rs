@@ -15,7 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    alloc_uninit_f64, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
 #[cfg(feature = "python")]
@@ -27,14 +27,26 @@ use std::convert::AsRef;
 use std::mem::ManuallyDrop;
 use thiserror::Error;
 
+const DEFAULT_LENGTH: usize = 28;
+const DEFAULT_SOURCE: &str = "close";
+
 impl<'a> AsRef<[f64]> for VerticalHorizontalFilterInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             VerticalHorizontalFilterData::Slice(slice) => slice,
-            VerticalHorizontalFilterData::Candles { candles, source } => {
-                source_type(candles, source)
-            }
+            VerticalHorizontalFilterData::Candles { candles, source } => match *source {
+                DEFAULT_SOURCE => &candles.close,
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -64,7 +76,9 @@ pub struct VerticalHorizontalFilterParams {
 
 impl Default for VerticalHorizontalFilterParams {
     fn default() -> Self {
-        Self { length: Some(28) }
+        Self {
+            length: Some(DEFAULT_LENGTH),
+        }
     }
 }
 
@@ -97,12 +111,16 @@ impl<'a> VerticalHorizontalFilterInput<'a> {
 
     #[inline]
     pub fn with_default_candles(candles: &'a Candles) -> Self {
-        Self::from_candles(candles, "close", VerticalHorizontalFilterParams::default())
+        Self::from_candles(
+            candles,
+            DEFAULT_SOURCE,
+            VerticalHorizontalFilterParams::default(),
+        )
     }
 
     #[inline]
     pub fn get_length(&self) -> usize {
-        self.params.length.unwrap_or(28)
+        self.params.length.unwrap_or(DEFAULT_LENGTH)
     }
 }
 
@@ -231,7 +249,7 @@ impl VerticalHorizontalFilterStream {
     pub fn try_new(
         params: VerticalHorizontalFilterParams,
     ) -> Result<VerticalHorizontalFilterStream, VerticalHorizontalFilterError> {
-        let length = params.length.unwrap_or(28);
+        let length = params.length.unwrap_or(DEFAULT_LENGTH);
         if length == 0 {
             return Err(VerticalHorizontalFilterError::InvalidLength {
                 length,
@@ -420,6 +438,35 @@ fn first_valid_value(data: &[f64]) -> usize {
 }
 
 #[inline(always)]
+fn scan_validity(data: &[f64]) -> (usize, usize, usize, bool) {
+    let len = data.len();
+    let mut first_source = len;
+    let mut first_change = len;
+    let mut valid_changes = 0usize;
+    let mut all_valid = true;
+
+    for i in 0..len {
+        let is_valid = valid_value(data[i]);
+        if is_valid {
+            if first_source == len {
+                first_source = i;
+            }
+        } else {
+            all_valid = false;
+        }
+
+        if i > 0 && valid_change(data[i - 1], data[i]) {
+            if first_change == len {
+                first_change = i;
+            }
+            valid_changes += 1;
+        }
+    }
+
+    (first_source, first_change, valid_changes, all_valid)
+}
+
+#[inline(always)]
 fn first_valid_change(data: &[f64]) -> usize {
     if data.len() < 2 {
         return data.len();
@@ -449,31 +496,36 @@ fn count_valid_changes(data: &[f64]) -> usize {
 }
 
 #[inline(always)]
-fn build_source_prefix(data: &[f64]) -> Vec<u32> {
+fn build_prefixes(data: &[f64]) -> (Vec<u32>, Vec<u32>, Vec<f64>) {
     let len = data.len();
-    let mut prefix = vec![0u32; len + 1];
-    for i in 0..len {
-        prefix[i + 1] = prefix[i] + if valid_value(data[i]) { 1 } else { 0 };
-    }
-    prefix
-}
-
-#[inline(always)]
-fn build_change_prefixes(data: &[f64]) -> (Vec<u32>, Vec<f64>) {
-    let len = data.len();
-    let mut prefix_valid = vec![0u32; len + 1];
-    let mut prefix_sum = vec![0.0; len + 1];
+    let mut prefix_source = vec![0u32; len + 1];
+    let mut prefix_change_valid = vec![0u32; len + 1];
+    let mut prefix_change_sum = vec![0.0; len + 1];
 
     for i in 0..len {
-        prefix_valid[i + 1] = prefix_valid[i];
-        prefix_sum[i + 1] = prefix_sum[i];
+        prefix_source[i + 1] = prefix_source[i] + if valid_value(data[i]) { 1 } else { 0 };
+        prefix_change_valid[i + 1] = prefix_change_valid[i];
+        prefix_change_sum[i + 1] = prefix_change_sum[i];
         if i > 0 && valid_change(data[i - 1], data[i]) {
-            prefix_valid[i + 1] += 1;
-            prefix_sum[i + 1] += (data[i] - data[i - 1]).abs();
+            prefix_change_valid[i + 1] += 1;
+            prefix_change_sum[i + 1] += (data[i] - data[i - 1]).abs();
         }
     }
 
-    (prefix_valid, prefix_sum)
+    (prefix_source, prefix_change_valid, prefix_change_sum)
+}
+
+#[inline(always)]
+fn build_change_sum_prefix_all_finite(data: &[f64]) -> Vec<f64> {
+    let len = data.len();
+    let mut prefix_sum = vec![0.0; len + 1];
+    for i in 0..len {
+        prefix_sum[i + 1] = prefix_sum[i];
+        if i > 0 {
+            prefix_sum[i + 1] += (data[i] - data[i - 1]).abs();
+        }
+    }
+    prefix_sum
 }
 
 #[inline(always)]
@@ -495,9 +547,10 @@ fn vhf_row_from_slice(
     let mut dq_min = VecDeque::<usize>::with_capacity(length + 1);
 
     for i in first_source..data.len() {
-        if valid_value(data[i]) {
+        let value = data[i];
+        if valid_value(value) {
             while let Some(&j) = dq_max.back() {
-                if data[j] <= data[i] {
+                if data[j] <= value {
                     dq_max.pop_back();
                 } else {
                     break;
@@ -506,7 +559,7 @@ fn vhf_row_from_slice(
             dq_max.push_back(i);
 
             while let Some(&j) = dq_min.back() {
-                if data[j] >= data[i] {
+                if data[j] >= value {
                     dq_min.pop_back();
                 } else {
                     break;
@@ -556,17 +609,75 @@ fn vhf_row_from_slice(
 }
 
 #[inline(always)]
+fn vhf_row_all_finite(data: &[f64], prefix_change_sum: &[f64], length: usize, out: &mut [f64]) {
+    out.fill(f64::NAN);
+
+    let mut dq_max = VecDeque::<usize>::with_capacity(length + 1);
+    let mut dq_min = VecDeque::<usize>::with_capacity(length + 1);
+
+    for i in 0..data.len() {
+        let value = data[i];
+
+        while let Some(&j) = dq_max.back() {
+            if data[j] <= value {
+                dq_max.pop_back();
+            } else {
+                break;
+            }
+        }
+        dq_max.push_back(i);
+
+        while let Some(&j) = dq_min.back() {
+            if data[j] >= value {
+                dq_min.pop_back();
+            } else {
+                break;
+            }
+        }
+        dq_min.push_back(i);
+
+        if i < length {
+            continue;
+        }
+
+        let start = i + 1 - length;
+        while let Some(&j) = dq_max.front() {
+            if j < start {
+                dq_max.pop_front();
+            } else {
+                break;
+            }
+        }
+        while let Some(&j) = dq_min.front() {
+            if j < start {
+                dq_min.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        let highest = dq_max
+            .front()
+            .map(|&j| data[j])
+            .unwrap_or(f64::NEG_INFINITY);
+        let lowest = dq_min.front().map(|&j| data[j]).unwrap_or(f64::INFINITY);
+        let denom = prefix_change_sum[i + 1] - prefix_change_sum[start];
+        out[i] = vhf_value(highest, lowest, denom);
+    }
+}
+
+#[inline(always)]
 fn vertical_horizontal_filter_prepare<'a>(
     input: &'a VerticalHorizontalFilterInput,
     kernel: Kernel,
-) -> Result<(&'a [f64], usize, usize, usize, Kernel), VerticalHorizontalFilterError> {
+) -> Result<(&'a [f64], usize, usize, usize, bool, Kernel), VerticalHorizontalFilterError> {
     let data = input.as_ref();
     let len = data.len();
     if len == 0 {
         return Err(VerticalHorizontalFilterError::EmptyInputData);
     }
 
-    let first_source = first_valid_value(data);
+    let (first_source, first_change, valid, all_valid) = scan_validity(data);
     if first_source >= len {
         return Err(VerticalHorizontalFilterError::AllValuesNaN);
     }
@@ -579,7 +690,6 @@ fn vertical_horizontal_filter_prepare<'a>(
         });
     }
 
-    let valid = count_valid_changes(data);
     if valid < length {
         return Err(VerticalHorizontalFilterError::NotEnoughValidData {
             needed: length,
@@ -587,13 +697,12 @@ fn vertical_horizontal_filter_prepare<'a>(
         });
     }
 
-    let first_change = first_valid_change(data);
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other.to_non_batch(),
     };
 
-    Ok((data, length, first_source, first_change, chosen))
+    Ok((data, length, first_source, first_change, all_valid, chosen))
 }
 
 #[inline]
@@ -601,24 +710,25 @@ pub fn vertical_horizontal_filter_with_kernel(
     input: &VerticalHorizontalFilterInput,
     kernel: Kernel,
 ) -> Result<VerticalHorizontalFilterOutput, VerticalHorizontalFilterError> {
-    let (data, length, first_source, first_change, _chosen) =
+    let (data, length, first_source, first_change, all_valid, _chosen) =
         vertical_horizontal_filter_prepare(input, kernel)?;
-    let mut values = alloc_with_nan_prefix(
-        data.len(),
-        first_change.saturating_add(length.saturating_sub(1)),
-    );
-    let prefix_source = build_source_prefix(data);
-    let (prefix_change_valid, prefix_change_sum) = build_change_prefixes(data);
-    vhf_row_from_slice(
-        data,
-        &prefix_source,
-        &prefix_change_valid,
-        &prefix_change_sum,
-        length,
-        first_source,
-        first_change,
-        &mut values,
-    );
+    let mut values = alloc_uninit_f64(data.len());
+    if all_valid {
+        let prefix_change_sum = build_change_sum_prefix_all_finite(data);
+        vhf_row_all_finite(data, &prefix_change_sum, length, &mut values);
+    } else {
+        let (prefix_source, prefix_change_valid, prefix_change_sum) = build_prefixes(data);
+        vhf_row_from_slice(
+            data,
+            &prefix_source,
+            &prefix_change_valid,
+            &prefix_change_sum,
+            length,
+            first_source,
+            first_change,
+            &mut values,
+        );
+    }
     Ok(VerticalHorizontalFilterOutput { values })
 }
 
@@ -628,7 +738,7 @@ pub fn vertical_horizontal_filter_into_slice(
     input: &VerticalHorizontalFilterInput,
     kernel: Kernel,
 ) -> Result<(), VerticalHorizontalFilterError> {
-    let (data, length, first_source, first_change, _chosen) =
+    let (data, length, first_source, first_change, all_valid, _chosen) =
         vertical_horizontal_filter_prepare(input, kernel)?;
     if dst.len() != data.len() {
         return Err(VerticalHorizontalFilterError::OutputLengthMismatch {
@@ -636,18 +746,22 @@ pub fn vertical_horizontal_filter_into_slice(
             got: dst.len(),
         });
     }
-    let prefix_source = build_source_prefix(data);
-    let (prefix_change_valid, prefix_change_sum) = build_change_prefixes(data);
-    vhf_row_from_slice(
-        data,
-        &prefix_source,
-        &prefix_change_valid,
-        &prefix_change_sum,
-        length,
-        first_source,
-        first_change,
-        dst,
-    );
+    if all_valid {
+        let prefix_change_sum = build_change_sum_prefix_all_finite(data);
+        vhf_row_all_finite(data, &prefix_change_sum, length, dst);
+    } else {
+        let (prefix_source, prefix_change_valid, prefix_change_sum) = build_prefixes(data);
+        vhf_row_from_slice(
+            data,
+            &prefix_source,
+            &prefix_change_valid,
+            &prefix_change_sum,
+            length,
+            first_source,
+            first_change,
+            dst,
+        );
+    }
     Ok(())
 }
 
@@ -668,7 +782,7 @@ pub struct VerticalHorizontalFilterBatchRange {
 impl Default for VerticalHorizontalFilterBatchRange {
     fn default() -> Self {
         Self {
-            length: (28, 252, 1),
+            length: (DEFAULT_LENGTH, 252, 1),
         }
     }
 }
@@ -740,9 +854,9 @@ pub struct VerticalHorizontalFilterBatchOutput {
 
 impl VerticalHorizontalFilterBatchOutput {
     pub fn row_for_params(&self, params: &VerticalHorizontalFilterParams) -> Option<usize> {
-        self.combos
-            .iter()
-            .position(|combo| combo.length.unwrap_or(28) == params.length.unwrap_or(28))
+        self.combos.iter().position(|combo| {
+            combo.length.unwrap_or(DEFAULT_LENGTH) == params.length.unwrap_or(DEFAULT_LENGTH)
+        })
     }
 
     pub fn values_for(&self, params: &VerticalHorizontalFilterParams) -> Option<&[f64]> {
@@ -867,7 +981,7 @@ fn vertical_horizontal_filter_batch_inner(
     let valid = count_valid_changes(data);
     let max_length = combos
         .iter()
-        .map(|combo| combo.length.unwrap_or(28))
+        .map(|combo| combo.length.unwrap_or(DEFAULT_LENGTH))
         .max()
         .unwrap_or(0);
     if valid < max_length {
@@ -877,13 +991,14 @@ fn vertical_horizontal_filter_batch_inner(
         });
     }
     let first_change = first_valid_change(data);
-    let prefix_source = build_source_prefix(data);
-    let (prefix_change_valid, prefix_change_sum) = build_change_prefixes(data);
+    let (prefix_source, prefix_change_valid, prefix_change_sum) = build_prefixes(data);
 
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warmups: Vec<usize> = combos
         .iter()
-        .map(|combo| first_change.saturating_add(combo.length.unwrap_or(28).saturating_sub(1)))
+        .map(|combo| {
+            first_change.saturating_add(combo.length.unwrap_or(DEFAULT_LENGTH).saturating_sub(1))
+        })
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warmups);
 
@@ -902,7 +1017,7 @@ fn vertical_horizontal_filter_batch_inner(
                     &prefix_source,
                     &prefix_change_valid,
                     &prefix_change_sum,
-                    combo.length.unwrap_or(28),
+                    combo.length.unwrap_or(DEFAULT_LENGTH),
                     first_source,
                     first_change,
                     out_row,
@@ -917,7 +1032,7 @@ fn vertical_horizontal_filter_batch_inner(
                 &prefix_source,
                 &prefix_change_valid,
                 &prefix_change_sum,
-                combo.length.unwrap_or(28),
+                combo.length.unwrap_or(DEFAULT_LENGTH),
                 first_source,
                 first_change,
                 out_row,
@@ -931,7 +1046,7 @@ fn vertical_horizontal_filter_batch_inner(
                 &prefix_source,
                 &prefix_change_valid,
                 &prefix_change_sum,
-                combo.length.unwrap_or(28),
+                combo.length.unwrap_or(DEFAULT_LENGTH),
                 first_source,
                 first_change,
                 out_row,
@@ -989,7 +1104,7 @@ pub fn vertical_horizontal_filter_batch_inner_into(
     let valid = count_valid_changes(data);
     let max_length = combos
         .iter()
-        .map(|combo| combo.length.unwrap_or(28))
+        .map(|combo| combo.length.unwrap_or(DEFAULT_LENGTH))
         .max()
         .unwrap_or(0);
     if valid < max_length {
@@ -1000,8 +1115,7 @@ pub fn vertical_horizontal_filter_batch_inner_into(
     }
 
     let first_change = first_valid_change(data);
-    let prefix_source = build_source_prefix(data);
-    let (prefix_change_valid, prefix_change_sum) = build_change_prefixes(data);
+    let (prefix_source, prefix_change_valid, prefix_change_sum) = build_prefixes(data);
 
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
@@ -1014,7 +1128,7 @@ pub fn vertical_horizontal_filter_batch_inner_into(
                     &prefix_source,
                     &prefix_change_valid,
                     &prefix_change_sum,
-                    combo.length.unwrap_or(28),
+                    combo.length.unwrap_or(DEFAULT_LENGTH),
                     first_source,
                     first_change,
                     out_row,
@@ -1029,7 +1143,7 @@ pub fn vertical_horizontal_filter_batch_inner_into(
                 &prefix_source,
                 &prefix_change_valid,
                 &prefix_change_sum,
-                combo.length.unwrap_or(28),
+                combo.length.unwrap_or(DEFAULT_LENGTH),
                 first_source,
                 first_change,
                 out_row,
@@ -1043,7 +1157,7 @@ pub fn vertical_horizontal_filter_batch_inner_into(
                 &prefix_source,
                 &prefix_change_valid,
                 &prefix_change_sum,
-                combo.length.unwrap_or(28),
+                combo.length.unwrap_or(DEFAULT_LENGTH),
                 first_source,
                 first_change,
                 out_row,
@@ -1148,7 +1262,7 @@ pub fn vertical_horizontal_filter_batch_py<'py>(
         "lengths",
         combos
             .iter()
-            .map(|combo| combo.length.unwrap_or(28) as u64)
+            .map(|combo| combo.length.unwrap_or(DEFAULT_LENGTH) as u64)
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
@@ -1273,7 +1387,7 @@ pub fn vertical_horizontal_filter_batch_js(
         lengths: output
             .combos
             .iter()
-            .map(|combo| combo.length.unwrap_or(28))
+            .map(|combo| combo.length.unwrap_or(DEFAULT_LENGTH))
             .collect(),
         values: output.values,
         combos: output.combos,

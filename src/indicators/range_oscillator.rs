@@ -15,8 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -237,9 +236,11 @@ struct PreparedInput<'a> {
     low: &'a [f64],
     close: &'a [f64],
     len: usize,
+    first: usize,
     length: usize,
     mult: f64,
     warmup: usize,
+    all_valid_from_first: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -337,19 +338,18 @@ pub fn range_oscillator_with_kernel(
     kernel: Kernel,
 ) -> Result<RangeOscillatorOutput, RangeOscillatorError> {
     let prepared = prepare_input(input, kernel)?;
-    let mut oscillator = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut ma = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut upper_band = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut lower_band = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut range_width = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut in_range = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut trend = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut break_up = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut break_down = alloc_with_nan_prefix(prepared.len, prepared.warmup);
+    let mut oscillator = alloc_with_nan_prefix(prepared.len, 0);
+    let mut ma = alloc_with_nan_prefix(prepared.len, 0);
+    let mut upper_band = alloc_with_nan_prefix(prepared.len, 0);
+    let mut lower_band = alloc_with_nan_prefix(prepared.len, 0);
+    let mut range_width = alloc_with_nan_prefix(prepared.len, 0);
+    let mut in_range = alloc_with_nan_prefix(prepared.len, 0);
+    let mut trend = alloc_with_nan_prefix(prepared.len, 0);
+    let mut break_up = alloc_with_nan_prefix(prepared.len, 0);
+    let mut break_down = alloc_with_nan_prefix(prepared.len, 0);
 
-    range_oscillator_into_slices(
-        input,
-        kernel,
+    compute_into_slices(
+        &prepared,
         &mut oscillator,
         &mut ma,
         &mut upper_band,
@@ -488,7 +488,7 @@ fn resolve_data<'a>(
 #[inline]
 fn prepare_input<'a>(
     input: &'a RangeOscillatorInput<'a>,
-    kernel: Kernel,
+    _kernel: Kernel,
 ) -> Result<PreparedInput<'a>, RangeOscillatorError> {
     let (high, low, close) = resolve_data(input)?;
     let len = close.len();
@@ -520,19 +520,16 @@ fn prepare_input<'a>(
         return Err(RangeOscillatorError::NotEnoughValidData { needed, valid });
     }
 
-    let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        value => value,
-    };
-
     Ok(PreparedInput {
         high,
         low,
         close,
         len,
+        first,
         length,
         mult,
         warmup: first + length.max(ATR_FALLBACK_PERIOD - 1),
+        all_valid_from_first: valid == len - first,
     })
 }
 
@@ -612,6 +609,368 @@ fn compute_point(
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
+fn write_nan_row(
+    i: usize,
+    dst_oscillator: &mut [f64],
+    dst_ma: &mut [f64],
+    dst_upper_band: &mut [f64],
+    dst_lower_band: &mut [f64],
+    dst_range_width: &mut [f64],
+    dst_in_range: &mut [f64],
+    dst_trend: &mut [f64],
+    dst_break_up: &mut [f64],
+    dst_break_down: &mut [f64],
+) {
+    dst_oscillator[i] = f64::NAN;
+    dst_ma[i] = f64::NAN;
+    dst_upper_band[i] = f64::NAN;
+    dst_lower_band[i] = f64::NAN;
+    dst_range_width[i] = f64::NAN;
+    dst_in_range[i] = f64::NAN;
+    dst_trend[i] = f64::NAN;
+    dst_break_up[i] = f64::NAN;
+    dst_break_down[i] = f64::NAN;
+}
+
+#[inline(always)]
+fn default_ring_index(head: usize, offset_from_latest: usize) -> usize {
+    let idx = head + DEFAULT_LENGTH - offset_from_latest;
+    if idx > DEFAULT_LENGTH {
+        idx - (DEFAULT_LENGTH + 1)
+    } else {
+        idx
+    }
+}
+
+#[inline(always)]
+fn compute_default_point(
+    closes: &[f64; DEFAULT_LENGTH + 1],
+    head: usize,
+    current_close: f64,
+    range_width: f64,
+    trend_state: &mut f64,
+) -> Option<RangeOscillatorStreamOutput> {
+    let mut sum_weighted = 0.0;
+    let mut sum_weights = 0.0;
+    for i in 0..DEFAULT_LENGTH {
+        let curr = closes[default_ring_index(head, i)];
+        let prev = closes[default_ring_index(head, i + 1)];
+        if prev.abs() <= ZERO_EPS {
+            continue;
+        }
+        let delta = (curr - prev).abs();
+        let w = delta / prev;
+        sum_weighted += curr * w;
+        sum_weights += w;
+    }
+    if sum_weights.abs() <= ZERO_EPS {
+        return None;
+    }
+
+    let ma = sum_weighted / sum_weights;
+    let mut max_dist = 0.0;
+    for i in 0..DEFAULT_LENGTH {
+        let value = closes[default_ring_index(head, i)];
+        let dist = (value - ma).abs();
+        if dist > max_dist {
+            max_dist = dist;
+        }
+    }
+
+    if current_close > ma {
+        *trend_state = 1.0;
+    } else if current_close < ma {
+        *trend_state = -1.0;
+    }
+
+    let upper_band = ma + range_width;
+    let lower_band = ma - range_width;
+    let break_up = if current_close > upper_band { 1.0 } else { 0.0 };
+    let break_down = if current_close < lower_band { 1.0 } else { 0.0 };
+    let oscillator = if range_width.abs() <= ZERO_EPS {
+        f64::NAN
+    } else {
+        100.0 * (current_close - ma) / range_width
+    };
+
+    Some(RangeOscillatorStreamOutput {
+        oscillator,
+        ma,
+        upper_band,
+        lower_band,
+        range_width,
+        in_range: if max_dist <= range_width { 1.0 } else { 0.0 },
+        trend: *trend_state,
+        break_up,
+        break_down,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn compute_default_into_slices(
+    prepared: &PreparedInput<'_>,
+    dst_oscillator: &mut [f64],
+    dst_ma: &mut [f64],
+    dst_upper_band: &mut [f64],
+    dst_lower_band: &mut [f64],
+    dst_range_width: &mut [f64],
+    dst_in_range: &mut [f64],
+    dst_trend: &mut [f64],
+    dst_break_up: &mut [f64],
+    dst_break_down: &mut [f64],
+) {
+    if prepared.all_valid_from_first {
+        compute_default_clean_into_slices(
+            prepared,
+            dst_oscillator,
+            dst_ma,
+            dst_upper_band,
+            dst_lower_band,
+            dst_range_width,
+            dst_in_range,
+            dst_trend,
+            dst_break_up,
+            dst_break_down,
+        );
+        return;
+    }
+
+    let mut atr_fallback = AtrState::new(ATR_FALLBACK_PERIOD);
+    let mut atr_primary = AtrState::new(ATR_PRIMARY_PERIOD);
+    let mut closes = [0.0; DEFAULT_LENGTH + 1];
+    let mut close_count = 0usize;
+    let mut close_head = 0usize;
+    let mut trend_state = 0.0;
+
+    for i in 0..prepared.len {
+        let high = prepared.high[i];
+        let low = prepared.low[i];
+        let close = prepared.close[i];
+        if !high.is_finite() || !low.is_finite() || !close.is_finite() {
+            atr_fallback.reset();
+            atr_primary.reset();
+            close_count = 0;
+            close_head = 0;
+            trend_state = 0.0;
+            write_nan_row(
+                i,
+                dst_oscillator,
+                dst_ma,
+                dst_upper_band,
+                dst_lower_band,
+                dst_range_width,
+                dst_in_range,
+                dst_trend,
+                dst_break_up,
+                dst_break_down,
+            );
+            continue;
+        }
+
+        let atr200 = atr_fallback.update(high, low, close);
+        let atr2000 = atr_primary.update(high, low, close);
+        let atr_raw = atr2000.or(atr200);
+
+        if close_count < DEFAULT_LENGTH + 1 {
+            closes[close_count] = close;
+            close_count += 1;
+            if close_count == DEFAULT_LENGTH + 1 {
+                close_head = 0;
+            }
+        } else {
+            closes[close_head] = close;
+            close_head += 1;
+            if close_head == DEFAULT_LENGTH + 1 {
+                close_head = 0;
+            }
+        }
+
+        let Some(atr_raw) = atr_raw else {
+            write_nan_row(
+                i,
+                dst_oscillator,
+                dst_ma,
+                dst_upper_band,
+                dst_lower_band,
+                dst_range_width,
+                dst_in_range,
+                dst_trend,
+                dst_break_up,
+                dst_break_down,
+            );
+            continue;
+        };
+        if close_count < DEFAULT_LENGTH + 1 {
+            write_nan_row(
+                i,
+                dst_oscillator,
+                dst_ma,
+                dst_upper_band,
+                dst_lower_band,
+                dst_range_width,
+                dst_in_range,
+                dst_trend,
+                dst_break_up,
+                dst_break_down,
+            );
+            continue;
+        }
+
+        let range_width = atr_raw * DEFAULT_MULT;
+        let Some(point) =
+            compute_default_point(&closes, close_head, close, range_width, &mut trend_state)
+        else {
+            write_nan_row(
+                i,
+                dst_oscillator,
+                dst_ma,
+                dst_upper_band,
+                dst_lower_band,
+                dst_range_width,
+                dst_in_range,
+                dst_trend,
+                dst_break_up,
+                dst_break_down,
+            );
+            continue;
+        };
+
+        dst_oscillator[i] = point.oscillator;
+        dst_ma[i] = point.ma;
+        dst_upper_band[i] = point.upper_band;
+        dst_lower_band[i] = point.lower_band;
+        dst_range_width[i] = point.range_width;
+        dst_in_range[i] = point.in_range;
+        dst_trend[i] = point.trend;
+        dst_break_up[i] = point.break_up;
+        dst_break_down[i] = point.break_down;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn compute_default_clean_into_slices(
+    prepared: &PreparedInput<'_>,
+    dst_oscillator: &mut [f64],
+    dst_ma: &mut [f64],
+    dst_upper_band: &mut [f64],
+    dst_lower_band: &mut [f64],
+    dst_range_width: &mut [f64],
+    dst_in_range: &mut [f64],
+    dst_trend: &mut [f64],
+    dst_break_up: &mut [f64],
+    dst_break_down: &mut [f64],
+) {
+    for i in 0..prepared.first {
+        write_nan_row(
+            i,
+            dst_oscillator,
+            dst_ma,
+            dst_upper_band,
+            dst_lower_band,
+            dst_range_width,
+            dst_in_range,
+            dst_trend,
+            dst_break_up,
+            dst_break_down,
+        );
+    }
+
+    let mut atr_fallback = AtrState::new(ATR_FALLBACK_PERIOD);
+    let mut atr_primary = AtrState::new(ATR_PRIMARY_PERIOD);
+    let mut closes = [0.0; DEFAULT_LENGTH + 1];
+    let mut close_count = 0usize;
+    let mut close_head = 0usize;
+    let mut trend_state = 0.0;
+
+    for i in prepared.first..prepared.len {
+        let high = prepared.high[i];
+        let low = prepared.low[i];
+        let close = prepared.close[i];
+
+        let atr200 = atr_fallback.update(high, low, close);
+        let atr2000 = atr_primary.update(high, low, close);
+        let atr_raw = atr2000.or(atr200);
+
+        if close_count < DEFAULT_LENGTH + 1 {
+            closes[close_count] = close;
+            close_count += 1;
+            if close_count == DEFAULT_LENGTH + 1 {
+                close_head = 0;
+            }
+        } else {
+            closes[close_head] = close;
+            close_head += 1;
+            if close_head == DEFAULT_LENGTH + 1 {
+                close_head = 0;
+            }
+        }
+
+        let Some(atr_raw) = atr_raw else {
+            write_nan_row(
+                i,
+                dst_oscillator,
+                dst_ma,
+                dst_upper_band,
+                dst_lower_band,
+                dst_range_width,
+                dst_in_range,
+                dst_trend,
+                dst_break_up,
+                dst_break_down,
+            );
+            continue;
+        };
+        if close_count < DEFAULT_LENGTH + 1 {
+            write_nan_row(
+                i,
+                dst_oscillator,
+                dst_ma,
+                dst_upper_band,
+                dst_lower_band,
+                dst_range_width,
+                dst_in_range,
+                dst_trend,
+                dst_break_up,
+                dst_break_down,
+            );
+            continue;
+        }
+
+        let range_width = atr_raw * DEFAULT_MULT;
+        let Some(point) =
+            compute_default_point(&closes, close_head, close, range_width, &mut trend_state)
+        else {
+            write_nan_row(
+                i,
+                dst_oscillator,
+                dst_ma,
+                dst_upper_band,
+                dst_lower_band,
+                dst_range_width,
+                dst_in_range,
+                dst_trend,
+                dst_break_up,
+                dst_break_down,
+            );
+            continue;
+        };
+
+        dst_oscillator[i] = point.oscillator;
+        dst_ma[i] = point.ma;
+        dst_upper_band[i] = point.upper_band;
+        dst_lower_band[i] = point.lower_band;
+        dst_range_width[i] = point.range_width;
+        dst_in_range[i] = point.in_range;
+        dst_trend[i] = point.trend;
+        dst_break_up[i] = point.break_up;
+        dst_break_down[i] = point.break_down;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
 fn compute_into_slices(
     prepared: &PreparedInput<'_>,
     dst_oscillator: &mut [f64],
@@ -654,15 +1013,21 @@ fn compute_into_slices(
         });
     }
 
-    dst_oscillator.fill(f64::NAN);
-    dst_ma.fill(f64::NAN);
-    dst_upper_band.fill(f64::NAN);
-    dst_lower_band.fill(f64::NAN);
-    dst_range_width.fill(f64::NAN);
-    dst_in_range.fill(f64::NAN);
-    dst_trend.fill(f64::NAN);
-    dst_break_up.fill(f64::NAN);
-    dst_break_down.fill(f64::NAN);
+    if prepared.length == DEFAULT_LENGTH && prepared.mult == DEFAULT_MULT {
+        compute_default_into_slices(
+            prepared,
+            dst_oscillator,
+            dst_ma,
+            dst_upper_band,
+            dst_lower_band,
+            dst_range_width,
+            dst_in_range,
+            dst_trend,
+            dst_break_up,
+            dst_break_down,
+        );
+        return Ok(());
+    }
 
     let mut atr_fallback = AtrState::new(ATR_FALLBACK_PERIOD);
     let mut atr_primary = AtrState::new(ATR_PRIMARY_PERIOD);
@@ -678,6 +1043,18 @@ fn compute_into_slices(
             atr_primary.reset();
             closes.clear();
             trend_state = 0.0;
+            write_nan_row(
+                i,
+                dst_oscillator,
+                dst_ma,
+                dst_upper_band,
+                dst_lower_band,
+                dst_range_width,
+                dst_in_range,
+                dst_trend,
+                dst_break_up,
+                dst_break_down,
+            );
             continue;
         }
 
@@ -691,14 +1068,50 @@ fn compute_into_slices(
         closes.push_back(close);
 
         let Some(atr_raw) = atr_raw else {
+            write_nan_row(
+                i,
+                dst_oscillator,
+                dst_ma,
+                dst_upper_band,
+                dst_lower_band,
+                dst_range_width,
+                dst_in_range,
+                dst_trend,
+                dst_break_up,
+                dst_break_down,
+            );
             continue;
         };
         if closes.len() < prepared.length + 1 {
+            write_nan_row(
+                i,
+                dst_oscillator,
+                dst_ma,
+                dst_upper_band,
+                dst_lower_band,
+                dst_range_width,
+                dst_in_range,
+                dst_trend,
+                dst_break_up,
+                dst_break_down,
+            );
             continue;
         }
 
         let range_width = atr_raw * prepared.mult;
         let Some(point) = compute_point(&closes, close, range_width, &mut trend_state) else {
+            write_nan_row(
+                i,
+                dst_oscillator,
+                dst_ma,
+                dst_upper_band,
+                dst_lower_band,
+                dst_range_width,
+                dst_in_range,
+                dst_trend,
+                dst_break_up,
+                dst_break_down,
+            );
             continue;
         };
 
@@ -1571,6 +1984,56 @@ mod tests {
             assert!((point.trend - out.trend[i]).abs() <= 1e-12);
             assert!((point.break_up - out.break_up[i]).abs() <= 1e-12);
             assert!((point.break_down - out.break_down[i]).abs() <= 1e-12);
+        }
+    }
+
+    #[test]
+    fn range_oscillator_into_overwrites_flat_rows_with_nan() {
+        let len = 260;
+        let high = vec![101.0; len];
+        let low = vec![99.0; len];
+        let close = vec![100.0; len];
+        let input = RangeOscillatorInput::from_slices(
+            &high,
+            &low,
+            &close,
+            RangeOscillatorParams::default(),
+        );
+        let mut oscillator = vec![42.0; len];
+        let mut ma = vec![42.0; len];
+        let mut upper = vec![42.0; len];
+        let mut lower = vec![42.0; len];
+        let mut width = vec![42.0; len];
+        let mut in_range = vec![42.0; len];
+        let mut trend = vec![42.0; len];
+        let mut break_up = vec![42.0; len];
+        let mut break_down = vec![42.0; len];
+
+        range_oscillator_into_slices(
+            &input,
+            Kernel::Scalar,
+            &mut oscillator,
+            &mut ma,
+            &mut upper,
+            &mut lower,
+            &mut width,
+            &mut in_range,
+            &mut trend,
+            &mut break_up,
+            &mut break_down,
+        )
+        .expect("into");
+
+        for i in 0..len {
+            assert!(oscillator[i].is_nan());
+            assert!(ma[i].is_nan());
+            assert!(upper[i].is_nan());
+            assert!(lower[i].is_nan());
+            assert!(width[i].is_nan());
+            assert!(in_range[i].is_nan());
+            assert!(trend[i].is_nan());
+            assert!(break_up[i].is_nan());
+            assert!(break_down[i].is_nan());
         }
     }
 

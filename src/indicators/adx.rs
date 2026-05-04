@@ -197,6 +197,33 @@ fn first_valid_triple(high: &[f64], low: &[f64], close: &[f64]) -> usize {
     fh.max(fl).max(fc)
 }
 
+#[inline(always)]
+fn first_valid_triple_checked(high: &[f64], low: &[f64], close: &[f64]) -> Result<usize, AdxError> {
+    let len = high.len();
+    let mut fh = len;
+    let mut fl = len;
+    let mut fc = len;
+    for i in 0..len {
+        if fh == len && !high[i].is_nan() {
+            fh = i;
+        }
+        if fl == len && !low[i].is_nan() {
+            fl = i;
+        }
+        if fc == len && !close[i].is_nan() {
+            fc = i;
+        }
+        if fh != len && fl != len && fc != len {
+            return Ok(fh.max(fl).max(fc));
+        }
+    }
+    if fh == len || fl == len || fc == len {
+        Err(AdxError::AllValuesNaN)
+    } else {
+        Ok(fh.max(fl).max(fc))
+    }
+}
+
 #[inline]
 pub fn adx(input: &AdxInput) -> Result<AdxOutput, AdxError> {
     adx_with_kernel(input, Kernel::Auto)
@@ -210,18 +237,7 @@ pub fn adx_into(input: &AdxInput, out: &mut [f64]) -> Result<(), AdxError> {
 
 pub fn adx_with_kernel(input: &AdxInput, kernel: Kernel) -> Result<AdxOutput, AdxError> {
     let (high, low, close) = match &input.data {
-        AdxData::Candles { candles } => {
-            let h = candles
-                .select_candle_field("high")
-                .map_err(|_| AdxError::CandleFieldError { field: "high" })?;
-            let l = candles
-                .select_candle_field("low")
-                .map_err(|_| AdxError::CandleFieldError { field: "low" })?;
-            let c = candles
-                .select_candle_field("close")
-                .map_err(|_| AdxError::CandleFieldError { field: "close" })?;
-            (h, l, c)
-        }
+        AdxData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
         AdxData::Slices { high, low, close } => (*high, *low, *close),
     };
 
@@ -241,14 +257,7 @@ pub fn adx_with_kernel(input: &AdxInput, kernel: Kernel) -> Result<AdxOutput, Ad
         });
     }
 
-    if high.iter().all(|x| x.is_nan())
-        || low.iter().all(|x| x.is_nan())
-        || close.iter().all(|x| x.is_nan())
-    {
-        return Err(AdxError::AllValuesNaN);
-    }
-
-    let first = first_valid_triple(high, low, close);
+    let first = first_valid_triple_checked(high, low, close)?;
     if len - first < period + 1 {
         return Err(AdxError::NotEnoughValidData {
             needed: period + 1,
@@ -259,10 +268,14 @@ pub fn adx_with_kernel(input: &AdxInput, kernel: Kernel) -> Result<AdxOutput, Ad
     let warm_end = first + (2 * period - 1);
     let mut out = alloc_with_nan_prefix(len, warm_end);
 
-    let chosen = match kernel {
+    let mut chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         k => k,
     };
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    if matches!(kernel, Kernel::Auto) && matches!(chosen, Kernel::Avx512 | Kernel::Avx512Batch) {
+        chosen = Kernel::Avx2;
+    }
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => adx_scalar(
@@ -422,6 +435,12 @@ pub fn adx_scalar(high: &[f64], low: &[f64], close: &[f64], period: usize, out: 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn adx_avx2(high: &[f64], low: &[f64], close: &[f64], period: usize, out: &mut [f64]) {
+    unsafe { adx_avx2_inner(high, low, close, period, out) }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn adx_avx2_inner(high: &[f64], low: &[f64], close: &[f64], period: usize, out: &mut [f64]) {
     use core::arch::x86_64::*;
     let len = close.len();
     if len <= period {
@@ -606,6 +625,18 @@ pub fn adx_avx2(high: &[f64], low: &[f64], close: &[f64], period: usize, out: &m
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn adx_avx512(high: &[f64], low: &[f64], close: &[f64], period: usize, out: &mut [f64]) {
+    unsafe { adx_avx512_inner(high, low, close, period, out) }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn adx_avx512_inner(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    out: &mut [f64],
+) {
     use core::arch::x86_64::*;
     let len = close.len();
     if len <= period {
@@ -3241,18 +3272,7 @@ pub fn adx_batch_unified_js(
 #[inline]
 pub fn adx_into_slice(dst: &mut [f64], input: &AdxInput, kern: Kernel) -> Result<(), AdxError> {
     let (high, low, close) = match &input.data {
-        AdxData::Candles { candles } => {
-            let h = candles
-                .select_candle_field("high")
-                .map_err(|_| AdxError::CandleFieldError { field: "high" })?;
-            let l = candles
-                .select_candle_field("low")
-                .map_err(|_| AdxError::CandleFieldError { field: "low" })?;
-            let c = candles
-                .select_candle_field("close")
-                .map_err(|_| AdxError::CandleFieldError { field: "close" })?;
-            (h, l, c)
-        }
+        AdxData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
         AdxData::Slices { high, low, close } => (*high, *low, *close),
     };
 
@@ -3277,14 +3297,7 @@ pub fn adx_into_slice(dst: &mut [f64], input: &AdxInput, kern: Kernel) -> Result
             data_len: len,
         });
     }
-    if high.iter().all(|x| x.is_nan())
-        || low.iter().all(|x| x.is_nan())
-        || close.iter().all(|x| x.is_nan())
-    {
-        return Err(AdxError::AllValuesNaN);
-    }
-
-    let first = first_valid_triple(high, low, close);
+    let first = first_valid_triple_checked(high, low, close)?;
     if len - first < period + 1 {
         return Err(AdxError::NotEnoughValidData {
             needed: period + 1,
@@ -3297,10 +3310,14 @@ pub fn adx_into_slice(dst: &mut [f64], input: &AdxInput, kern: Kernel) -> Result
         *v = f64::NAN;
     }
 
-    let chosen = match kern {
+    let mut chosen = match kern {
         Kernel::Auto => detect_best_kernel(),
         k => k,
     };
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    if matches!(kern, Kernel::Auto) && matches!(chosen, Kernel::Avx512 | Kernel::Avx512Batch) {
+        chosen = Kernel::Avx2;
+    }
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => adx_scalar(

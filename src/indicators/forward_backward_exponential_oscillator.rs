@@ -15,8 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -36,7 +35,14 @@ impl<'a> AsRef<[f64]> for ForwardBackwardExponentialOscillatorInput<'a> {
         match &self.data {
             ForwardBackwardExponentialOscillatorData::Slice(slice) => slice,
             ForwardBackwardExponentialOscillatorData::Candles { candles, source } => {
-                source_type(candles, source)
+                match *source {
+                    "open" => &candles.open,
+                    "high" => &candles.high,
+                    "low" => &candles.low,
+                    "close" => &candles.close,
+                    "volume" => &candles.volume,
+                    _ => source_type(candles, source),
+                }
             }
         }
     }
@@ -360,10 +366,9 @@ pub fn forward_backward_exponential_oscillator_with_kernel(
     kernel: Kernel,
 ) -> Result<ForwardBackwardExponentialOscillatorOutput, ForwardBackwardExponentialOscillatorError> {
     let prepared = prepare_input(input, kernel)?;
-    let mut forward_backward =
-        alloc_with_nan_prefix(prepared.len, prepared.warmup_forward_backward);
-    let mut backward = alloc_with_nan_prefix(prepared.len, prepared.warmup_backward);
-    let mut histogram = alloc_with_nan_prefix(prepared.len, prepared.warmup_backward);
+    let mut forward_backward = alloc_uninit_f64(prepared.len);
+    let mut backward = alloc_uninit_f64(prepared.len);
+    let mut histogram = alloc_uninit_f64(prepared.len);
     compute_into_slices(
         &prepared,
         &mut forward_backward,
@@ -451,21 +456,23 @@ fn prepare_input<'a>(
         });
     }
 
-    let valid = data[first..]
-        .iter()
-        .filter(|value| value.is_finite())
-        .count();
     let needed = length.max(2);
+    let mut valid = 0usize;
+    for value in &data[first..] {
+        if value.is_finite() {
+            valid += 1;
+            if valid >= needed {
+                break;
+            }
+        }
+    }
     if valid < needed {
         return Err(
             ForwardBackwardExponentialOscillatorError::NotEnoughValidData { needed, valid },
         );
     }
 
-    let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        value => value,
-    };
+    let _ = kernel;
 
     Ok(PreparedInput {
         data,
@@ -503,10 +510,6 @@ fn compute_into_slices(
         );
     }
 
-    dst_forward_backward.fill(f64::NAN);
-    dst_backward.fill(f64::NAN);
-    dst_histogram.fill(f64::NAN);
-
     let mut ema1_state = None;
     let mut ema2_state = None;
     let mut prev_ema2 = None;
@@ -515,39 +518,45 @@ fn compute_into_slices(
 
     for i in 0..prepared.len {
         let value = prepared.data[i];
-        if !value.is_finite() {
+        let mut forward_backward_value = f64::NAN;
+        let mut backward_value = f64::NAN;
+        let mut histogram_value = f64::NAN;
+
+        if value.is_finite() {
+            let ema1 = ema_step(&mut ema1_state, value, prepared.alpha);
+            push_window(&mut ema1_window, prepared.length, ema1);
+
+            if ema1_window.len() == prepared.length {
+                let fb = compute_forward_backward_value(&ema1_window, prepared.alpha);
+                if fb.is_finite() {
+                    forward_backward_value = fb;
+                }
+            }
+
+            let ema2 = ema_step(&mut ema2_state, ema1, prepared.alpha);
+            if let Some(last_ema2) = prev_ema2 {
+                if let Some((num, den)) = diff_window.update(ema2 - last_ema2) {
+                    if den != 0.0 {
+                        let bw = num / den * 50.0 + 50.0;
+                        backward_value = bw;
+                        if forward_backward_value.is_finite() {
+                            histogram_value = (forward_backward_value - bw) * 0.25 + 50.0;
+                        }
+                    }
+                }
+            }
+            prev_ema2 = Some(ema2);
+        } else {
             ema1_state = None;
             ema2_state = None;
             prev_ema2 = None;
             ema1_window.clear();
             diff_window.clear();
-            continue;
         }
 
-        let ema1 = ema_step(&mut ema1_state, value, prepared.alpha);
-        push_window(&mut ema1_window, prepared.length, ema1);
-
-        if ema1_window.len() == prepared.length {
-            let fb = compute_forward_backward_value(&ema1_window, prepared.alpha);
-            if fb.is_finite() {
-                dst_forward_backward[i] = fb;
-            }
-        }
-
-        let ema2 = ema_step(&mut ema2_state, ema1, prepared.alpha);
-        if let Some(last_ema2) = prev_ema2 {
-            if let Some((num, den)) = diff_window.update(ema2 - last_ema2) {
-                if den != 0.0 {
-                    let bw = num / den * 50.0 + 50.0;
-                    dst_backward[i] = bw;
-                    let fb = dst_forward_backward[i];
-                    if fb.is_finite() {
-                        dst_histogram[i] = (fb - bw) * 0.25 + 50.0;
-                    }
-                }
-            }
-        }
-        prev_ema2 = Some(ema2);
+        dst_forward_backward[i] = forward_backward_value;
+        dst_backward[i] = backward_value;
+        dst_histogram[i] = histogram_value;
     }
 
     Ok(())

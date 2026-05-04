@@ -116,6 +116,14 @@ pub struct VwapDeviationOscillatorOutput {
     pub std3: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VwapDeviationOscillatorOutputField {
+    Osc,
+    Std1,
+    Std2,
+    Std3,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -752,17 +760,27 @@ fn validate_raw_slices(
     Ok(())
 }
 
-fn compute_base_series(
+fn compute_base_series_filtered(
     timestamps: &[i64],
     high: &[f64],
     low: &[f64],
     close: &[f64],
     volume: &[f64],
     key: BaseKey,
+    need_abs: bool,
+    need_pct: bool,
 ) -> BaseSeries {
     let len = close.len();
-    let mut resid_abs = vec![f64::NAN; len];
-    let mut resid_pct = vec![f64::NAN; len];
+    let mut resid_abs = if need_abs {
+        vec![f64::NAN; len]
+    } else {
+        Vec::new()
+    };
+    let mut resid_pct = if need_pct {
+        vec![f64::NAN; len]
+    } else {
+        Vec::new()
+    };
 
     match key.session_mode {
         VwapDeviationSessionMode::RollingBars => {
@@ -799,8 +817,11 @@ fn compute_base_series(
                     f64::NAN
                 };
                 if pr.is_finite() && vwap.is_finite() {
-                    resid_abs[i] = pr - vwap;
-                    if vwap != 0.0 {
+                    let residual = pr - vwap;
+                    if need_abs {
+                        resid_abs[i] = residual;
+                    }
+                    if need_pct && vwap != 0.0 {
                         resid_pct[i] = 100.0 * (pr / vwap - 1.0);
                     }
                 }
@@ -838,8 +859,11 @@ fn compute_base_series(
                     f64::NAN
                 };
                 if pr.is_finite() && vwap.is_finite() {
-                    resid_abs[i] = pr - vwap;
-                    if vwap != 0.0 {
+                    let residual = pr - vwap;
+                    if need_abs {
+                        resid_abs[i] = residual;
+                    }
+                    if need_pct && vwap != 0.0 {
                         resid_pct[i] = 100.0 * (pr / vwap - 1.0);
                     }
                 }
@@ -869,8 +893,11 @@ fn compute_base_series(
                     f64::NAN
                 };
                 if pr.is_finite() && vwap.is_finite() {
-                    resid_abs[i] = pr - vwap;
-                    if vwap != 0.0 {
+                    let residual = pr - vwap;
+                    if need_abs {
+                        resid_abs[i] = residual;
+                    }
+                    if need_pct && vwap != 0.0 {
                         resid_pct[i] = 100.0 * (pr / vwap - 1.0);
                     }
                 }
@@ -881,6 +908,25 @@ fn compute_base_series(
     BaseSeries {
         resid_abs,
         resid_pct,
+    }
+}
+
+fn compute_base_series(
+    timestamps: &[i64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    key: BaseKey,
+) -> BaseSeries {
+    compute_base_series_filtered(timestamps, high, low, close, volume, key, true, true)
+}
+
+#[inline(always)]
+fn base_residual_needs(deviation_mode: VwapDeviationMode) -> (bool, bool) {
+    match deviation_mode {
+        VwapDeviationMode::Percent => (false, true),
+        VwapDeviationMode::Absolute | VwapDeviationMode::ZScore => (true, false),
     }
 }
 
@@ -927,6 +973,71 @@ fn compute_outputs_from_base(
     }
 }
 
+fn compute_output_field_from_base(
+    base: &BaseSeries,
+    params: &NormalizedParams,
+    out: &mut [f64],
+    field: VwapDeviationOscillatorOutputField,
+) {
+    match params.deviation_mode {
+        VwapDeviationMode::Absolute => match field {
+            VwapDeviationOscillatorOutputField::Osc => out.copy_from_slice(&base.resid_abs),
+            VwapDeviationOscillatorOutputField::Std1
+            | VwapDeviationOscillatorOutputField::Std2
+            | VwapDeviationOscillatorOutputField::Std3 => {
+                let factor = match field {
+                    VwapDeviationOscillatorOutputField::Std1 => 1.0,
+                    VwapDeviationOscillatorOutputField::Std2 => 2.0,
+                    VwapDeviationOscillatorOutputField::Std3 => 3.0,
+                    VwapDeviationOscillatorOutputField::Osc => unreachable!(),
+                };
+                let mut stats = RollingFiniteWindow::new(params.abs_vol_lookback);
+                for i in 0..base.resid_abs.len() {
+                    let std1 = guarded_sigma(&mut stats, base.resid_abs[i], 1.0);
+                    out[i] = if factor == 1.0 {
+                        std1
+                    } else {
+                        scale_or_nan(std1, factor)
+                    };
+                }
+            }
+        },
+        VwapDeviationMode::Percent => match field {
+            VwapDeviationOscillatorOutputField::Osc => out.copy_from_slice(&base.resid_pct),
+            VwapDeviationOscillatorOutputField::Std1
+            | VwapDeviationOscillatorOutputField::Std2
+            | VwapDeviationOscillatorOutputField::Std3 => {
+                let factor = match field {
+                    VwapDeviationOscillatorOutputField::Std1 => 1.0,
+                    VwapDeviationOscillatorOutputField::Std2 => 2.0,
+                    VwapDeviationOscillatorOutputField::Std3 => 3.0,
+                    VwapDeviationOscillatorOutputField::Osc => unreachable!(),
+                };
+                let mut stats = RollingFiniteWindow::new(params.pct_vol_lookback);
+                for i in 0..base.resid_pct.len() {
+                    let std1 = guarded_sigma(&mut stats, base.resid_pct[i], params.pct_min_sigma);
+                    out[i] = if factor == 1.0 {
+                        std1
+                    } else {
+                        scale_or_nan(std1, factor)
+                    };
+                }
+            }
+        },
+        VwapDeviationMode::ZScore => match field {
+            VwapDeviationOscillatorOutputField::Osc => {
+                let mut stats = RollingFiniteWindow::new(params.z_window);
+                for i in 0..base.resid_abs.len() {
+                    out[i] = zscore_value(&mut stats, base.resid_abs[i]);
+                }
+            }
+            VwapDeviationOscillatorOutputField::Std1 => out.fill(1.0),
+            VwapDeviationOscillatorOutputField::Std2 => out.fill(2.0),
+            VwapDeviationOscillatorOutputField::Std3 => out.fill(3.0),
+        },
+    }
+}
+
 #[inline]
 pub fn vwap_deviation_oscillator(
     input: &VwapDeviationOscillatorInput,
@@ -949,7 +1060,17 @@ pub fn vwap_deviation_oscillator_with_kernel(
     let mut std1 = vec![f64::NAN; len];
     let mut std2 = vec![f64::NAN; len];
     let mut std3 = vec![f64::NAN; len];
-    let base = compute_base_series(timestamps, high, low, close, volume, params.base_key());
+    let (need_abs, need_pct) = base_residual_needs(params.deviation_mode);
+    let base = compute_base_series_filtered(
+        timestamps,
+        high,
+        low,
+        close,
+        volume,
+        params.base_key(),
+        need_abs,
+        need_pct,
+    );
     compute_outputs_from_base(&base, &params, &mut osc, &mut std1, &mut std2, &mut std3);
     Ok(VwapDeviationOscillatorOutput {
         osc,
@@ -1017,8 +1138,69 @@ pub fn vwap_deviation_oscillator_into_slice(
             got: out_std3.len(),
         });
     }
-    let base = compute_base_series(timestamps, high, low, close, volume, params.base_key());
+    let (need_abs, need_pct) = base_residual_needs(params.deviation_mode);
+    let base = compute_base_series_filtered(
+        timestamps,
+        high,
+        low,
+        close,
+        volume,
+        params.base_key(),
+        need_abs,
+        need_pct,
+    );
     compute_outputs_from_base(&base, &params, out_osc, out_std1, out_std2, out_std3);
+    Ok(())
+}
+
+pub fn vwap_deviation_oscillator_output_into_slice(
+    out: &mut [f64],
+    input: &VwapDeviationOscillatorInput,
+    kernel: Kernel,
+    field: VwapDeviationOscillatorOutputField,
+) -> Result<(), VwapDeviationOscillatorError> {
+    let (timestamps, high, low, close, volume) = extract_input(input)?;
+    let params = NormalizedParams::from_input(input)?;
+    let _chosen = match kernel {
+        Kernel::Auto => Kernel::Scalar,
+        other => other.to_non_batch(),
+    };
+    let len = close.len();
+    if out.len() != len {
+        return Err(VwapDeviationOscillatorError::OutputLengthMismatch {
+            expected: len,
+            got: out.len(),
+        });
+    }
+    if params.deviation_mode == VwapDeviationMode::ZScore {
+        match field {
+            VwapDeviationOscillatorOutputField::Std1 => {
+                out.fill(1.0);
+                return Ok(());
+            }
+            VwapDeviationOscillatorOutputField::Std2 => {
+                out.fill(2.0);
+                return Ok(());
+            }
+            VwapDeviationOscillatorOutputField::Std3 => {
+                out.fill(3.0);
+                return Ok(());
+            }
+            VwapDeviationOscillatorOutputField::Osc => {}
+        }
+    }
+    let (need_abs, need_pct) = base_residual_needs(params.deviation_mode);
+    let base = compute_base_series_filtered(
+        timestamps,
+        high,
+        low,
+        close,
+        volume,
+        params.base_key(),
+        need_abs,
+        need_pct,
+    );
+    compute_output_field_from_base(&base, &params, out, field);
     Ok(())
 }
 

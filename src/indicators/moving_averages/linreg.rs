@@ -66,8 +66,24 @@ impl<'a> AsRef<[f64]> for LinRegInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             LinRegData::Slice(slice) => slice,
-            LinRegData::Candles { candles, source } => source_type(candles, source),
+            LinRegData::Candles { candles, source } => linreg_source_type(candles, source),
         }
+    }
+}
+
+#[inline(always)]
+fn linreg_source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "close" => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
     }
 }
 
@@ -184,6 +200,19 @@ pub fn linreg(input: &LinRegInput) -> Result<LinRegOutput, LinRegError> {
 }
 
 #[inline(always)]
+fn normalize_single_kernel(kernel: Kernel) -> Kernel {
+    match kernel {
+        Kernel::Auto
+        | Kernel::Scalar
+        | Kernel::ScalarBatch
+        | Kernel::Avx2
+        | Kernel::Avx2Batch
+        | Kernel::Avx512
+        | Kernel::Avx512Batch => Kernel::Scalar,
+    }
+}
+
+#[inline(always)]
 fn linreg_prepare<'a>(
     input: &'a LinRegInput,
     kernel: Kernel,
@@ -212,10 +241,7 @@ fn linreg_prepare<'a>(
         });
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = normalize_single_kernel(kernel);
 
     Ok((data, period, first, chosen))
 }
@@ -284,10 +310,7 @@ pub fn linreg_compute_into(
         });
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = normalize_single_kernel(kernel);
 
     let warm = first + period;
 
@@ -314,6 +337,9 @@ fn linreg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let x2_sum = ((period * (period + 1) * (2 * period + 1)) / 6) as f64;
     let denom_inv = 1.0 / (period_f * x2_sum - x_sum * x_sum);
     let inv_period = 1.0 / period_f;
+    let b_scale = period_f - x_sum * inv_period;
+    let xy_coeff = period_f * denom_inv * b_scale;
+    let y_coeff = inv_period - x_sum * denom_inv * b_scale;
 
     let mut y_sum = 0.0;
     let mut xy_sum = 0.0;
@@ -334,9 +360,7 @@ fn linreg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
             y_sum += new_val;
             xy_sum += new_val * period_f;
 
-            let b = (period_f * xy_sum - x_sum * y_sum) * denom_inv;
-            let a = (y_sum - b * x_sum) * inv_period;
-            *out.get_unchecked_mut(idx) = a + b * period_f;
+            *out.get_unchecked_mut(idx) = xy_sum * xy_coeff + y_sum * y_coeff;
 
             xy_sum -= y_sum;
             y_sum -= *data.get_unchecked(old_idx);

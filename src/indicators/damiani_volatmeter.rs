@@ -34,8 +34,26 @@ impl<'a> AsRef<[f64]> for DamianiVolatmeterInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             DamianiVolatmeterData::Slice(slice) => slice,
-            DamianiVolatmeterData::Candles { candles, source } => source_type(candles, source),
+            DamianiVolatmeterData::Candles { candles, source } => {
+                damiani_source_type(candles, source)
+            }
         }
+    }
+}
+
+#[inline(always)]
+fn damiani_source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "close" => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
     }
 }
 
@@ -297,9 +315,9 @@ fn damiani_volatmeter_prepare<'a>(
 > {
     let (high, low, close): (&[f64], &[f64], &[f64]) = match &input.data {
         DamianiVolatmeterData::Candles { candles, source } => {
-            let h = source_type(candles, "high");
-            let l = source_type(candles, "low");
-            let c = source_type(candles, source);
+            let h = &candles.high[..];
+            let l = &candles.low[..];
+            let c = damiani_source_type(candles, source);
             (h, l, c)
         }
         DamianiVolatmeterData::Slice(slice) => (slice, slice, slice),

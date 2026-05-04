@@ -15,7 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    alloc_uninit_f64, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
 #[cfg(feature = "python")]
@@ -34,9 +34,18 @@ impl<'a> AsRef<[f64]> for MomentumRatioOscillatorInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             MomentumRatioOscillatorData::Slice(slice) => slice,
-            MomentumRatioOscillatorData::Candles { candles, source } => {
-                source_type(candles, source)
-            }
+            MomentumRatioOscillatorData::Candles { candles, source } => match *source {
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -230,6 +239,28 @@ fn count_valid_from(data: &[f64], start: usize) -> usize {
 }
 
 #[inline(always)]
+fn first_valid_with_second(data: &[f64]) -> Option<(usize, bool)> {
+    let mut first = 0usize;
+    let mut found = 0usize;
+    for (i, value) in data.iter().enumerate() {
+        if value.is_finite() {
+            if found == 0 {
+                first = i;
+            }
+            found += 1;
+            if found == 2 {
+                return Some((first, true));
+            }
+        }
+    }
+    if found == 0 {
+        None
+    } else {
+        Some((first, false))
+    }
+}
+
+#[inline(always)]
 fn line_warmup(first: usize) -> usize {
     first.saturating_add(1)
 }
@@ -266,9 +297,12 @@ fn momentum_ratio_oscillator_compute_into(
     out_signal: &mut [f64],
 ) {
     let alpha = 2.0 / period as f64;
-    let mut ema_prev: Option<f64> = None;
-    let mut emaa_prev: Option<f64> = None;
-    let mut emab_prev: Option<f64> = None;
+    let mut ema_prev = 0.0;
+    let mut emaa_prev = 0.0;
+    let mut emab_prev = 0.0;
+    let mut has_ema = false;
+    let mut has_emaa = false;
+    let mut has_emab = false;
     let mut val_prev = f64::NAN;
 
     for i in 0..data.len() {
@@ -276,21 +310,25 @@ fn momentum_ratio_oscillator_compute_into(
         if !value.is_finite() {
             out_line[i] = f64::NAN;
             out_signal[i] = f64::NAN;
-            ema_prev = None;
-            emaa_prev = None;
-            emab_prev = None;
+            ema_prev = 0.0;
+            emaa_prev = 0.0;
+            emab_prev = 0.0;
+            has_ema = false;
+            has_emaa = false;
+            has_emab = false;
             val_prev = f64::NAN;
             continue;
         }
 
-        let prev_ema_nz = ema_prev.unwrap_or(0.0);
+        let prev_ema_nz = if has_ema { ema_prev } else { 0.0 };
         let ema = prev_ema_nz + alpha * (value - prev_ema_nz);
-        let ratioa = match ema_prev {
-            Some(prev_ema) => safe_ratio(ema, prev_ema),
-            None => f64::NAN,
+        let ratioa = if has_ema {
+            safe_ratio(ema, ema_prev)
+        } else {
+            f64::NAN
         };
-        let prev_emaa_nz = emaa_prev.unwrap_or(0.0);
-        let prev_emab_nz = emab_prev.unwrap_or(0.0);
+        let prev_emaa_nz = if has_emaa { emaa_prev } else { 0.0 };
+        let prev_emab_nz = if has_emab { emab_prev } else { 0.0 };
         let emaa_input = if ratioa.is_finite() && ratioa < 1.0 {
             ratioa
         } else {
@@ -321,9 +359,12 @@ fn momentum_ratio_oscillator_compute_into(
         out_line[i] = val;
         out_signal[i] = val_prev;
 
-        ema_prev = Some(ema);
-        emaa_prev = Some(emaa);
-        emab_prev = Some(emab);
+        ema_prev = ema;
+        emaa_prev = emaa;
+        emab_prev = emab;
+        has_ema = true;
+        has_emaa = true;
+        has_emab = true;
         val_prev = val;
     }
 }
@@ -353,14 +394,17 @@ pub fn momentum_ratio_oscillator_with_kernel(
         });
     }
 
-    let first = first_valid_source(data).ok_or(MomentumRatioOscillatorError::AllValuesNaN)?;
-    let valid = count_valid_from(data, first);
-    if valid < 2 {
-        return Err(MomentumRatioOscillatorError::NotEnoughValidData { needed: 2, valid });
+    let (first, has_second) =
+        first_valid_with_second(data).ok_or(MomentumRatioOscillatorError::AllValuesNaN)?;
+    if !has_second {
+        return Err(MomentumRatioOscillatorError::NotEnoughValidData {
+            needed: 2,
+            valid: 1,
+        });
     }
 
-    let mut line = alloc_with_nan_prefix(data.len(), line_warmup(first));
-    let mut signal = alloc_with_nan_prefix(data.len(), signal_warmup(first));
+    let mut line = alloc_uninit_f64(data.len());
+    let mut signal = alloc_uninit_f64(data.len());
     momentum_ratio_oscillator_compute_into(
         data,
         period,
@@ -396,10 +440,13 @@ pub fn momentum_ratio_oscillator_into_slice(
             data_len: data.len(),
         });
     }
-    let first = first_valid_source(data).ok_or(MomentumRatioOscillatorError::AllValuesNaN)?;
-    let valid = count_valid_from(data, first);
-    if valid < 2 {
-        return Err(MomentumRatioOscillatorError::NotEnoughValidData { needed: 2, valid });
+    let (_first, has_second) =
+        first_valid_with_second(data).ok_or(MomentumRatioOscillatorError::AllValuesNaN)?;
+    if !has_second {
+        return Err(MomentumRatioOscillatorError::NotEnoughValidData {
+            needed: 2,
+            valid: 1,
+        });
     }
 
     momentum_ratio_oscillator_compute_into(

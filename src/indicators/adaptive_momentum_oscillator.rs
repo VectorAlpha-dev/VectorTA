@@ -60,6 +60,12 @@ pub struct AdaptiveMomentumOscillatorOutput {
     pub ama: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdaptiveMomentumOscillatorOutputField {
+    Amo,
+    Ama,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -536,6 +542,32 @@ fn compute_into_slices(
     Ok(())
 }
 
+#[inline(always)]
+fn compute_output_into_slice(
+    prepared: PreparedInput<'_>,
+    field: AdaptiveMomentumOscillatorOutputField,
+    out: &mut [f64],
+) -> Result<(), AdaptiveMomentumOscillatorError> {
+    ensure_output_len(prepared.len, out.len())?;
+    out.fill(f64::NAN);
+
+    let mut core = AdaptiveMomentumOscillatorCore::try_new(&AdaptiveMomentumOscillatorParams {
+        length: Some(prepared.length),
+        smoothing_length: Some(prepared.smoothing_length),
+    })?;
+
+    for idx in 0..prepared.len {
+        if let Some((amo, ama)) = core.update(prepared.data[idx]) {
+            out[idx] = match field {
+                AdaptiveMomentumOscillatorOutputField::Amo => amo,
+                AdaptiveMomentumOscillatorOutputField::Ama => ama,
+            };
+        }
+    }
+
+    Ok(())
+}
+
 #[inline]
 pub fn adaptive_momentum_oscillator(
     input: &AdaptiveMomentumOscillatorInput<'_>,
@@ -565,6 +597,17 @@ pub fn adaptive_momentum_oscillator_into_slice(
     let _kernel = normalize_single_kernel_to_scalar(kernel);
     let prepared = prepare_input(input)?;
     compute_into_slices(prepared, amo_out, ama_out)
+}
+
+pub fn adaptive_momentum_oscillator_output_into_slice(
+    out: &mut [f64],
+    input: &AdaptiveMomentumOscillatorInput<'_>,
+    kernel: Kernel,
+    field: AdaptiveMomentumOscillatorOutputField,
+) -> Result<(), AdaptiveMomentumOscillatorError> {
+    let _kernel = normalize_single_kernel_to_scalar(kernel);
+    let prepared = prepare_input(input)?;
+    compute_output_into_slice(prepared, field, out)
 }
 
 #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]

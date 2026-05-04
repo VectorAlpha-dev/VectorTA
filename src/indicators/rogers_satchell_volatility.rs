@@ -373,7 +373,15 @@ fn rs_component(open: f64, high: f64, low: f64, close: f64) -> Option<f64> {
     {
         return None;
     }
-    Some((high / close).ln() * (high / open).ln() + (low / close).ln() * (low / open).ln())
+    Some(rs_component_valid(open, high, low, close))
+}
+
+#[inline(always)]
+fn rs_component_valid(open: f64, high: f64, low: f64, close: f64) -> f64 {
+    let high_close = (high / close).ln();
+    let low_close = (low / close).ln();
+    let close_open = (close / open).ln();
+    high_close * (high_close + close_open) + low_close * (low_close + close_open)
 }
 
 #[inline(always)]
@@ -389,6 +397,7 @@ fn prepare_input<'a>(
         usize,
         usize,
         Kernel,
+        bool,
     ),
     RogersSatchellVolatilityError,
 > {
@@ -430,15 +439,16 @@ fn prepare_input<'a>(
         return Err(RogersSatchellVolatilityError::InvalidSignalLength { signal_length });
     }
 
-    let valid = open
-        .iter()
-        .zip(high.iter())
-        .zip(low.iter())
-        .zip(close.iter())
-        .filter(|(((o, h), l), c)| {
-            validate_ohlc(**o) && validate_ohlc(**h) && validate_ohlc(**l) && validate_ohlc(**c)
-        })
-        .count();
+    let mut valid = 0usize;
+    for i in 0..len {
+        if validate_ohlc(open[i])
+            && validate_ohlc(high[i])
+            && validate_ohlc(low[i])
+            && validate_ohlc(close[i])
+        {
+            valid += 1;
+        }
+    }
     if valid == 0 {
         return Err(RogersSatchellVolatilityError::NoValidInputData);
     }
@@ -450,11 +460,20 @@ fn prepare_input<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         value => value.to_non_batch(),
     };
 
-    Ok((open, high, low, close, lookback, signal_length, chosen))
+    Ok((
+        open,
+        high,
+        low,
+        close,
+        lookback,
+        signal_length,
+        chosen,
+        valid == len,
+    ))
 }
 
 #[inline(always)]
@@ -544,6 +563,153 @@ fn compute_signal_from_rs(rs: &[f64], signal_length: usize, out: &mut [f64]) {
 }
 
 #[inline(always)]
+fn compute_all_valid_rolling(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    lookback: usize,
+    signal_length: usize,
+    out_rs: &mut [f64],
+    out_signal: &mut [f64],
+) {
+    if lookback == 8 && signal_length == 8 {
+        compute_all_valid_rolling_fixed::<8, 8>(open, high, low, close, out_rs, out_signal);
+        return;
+    }
+
+    let len = close.len();
+    let rs_warm = lookback.saturating_sub(1).min(len);
+    out_rs[..rs_warm].fill(f64::NAN);
+    let signal_warm = lookback
+        .saturating_sub(1)
+        .saturating_add(signal_length.saturating_sub(1))
+        .min(len);
+    out_signal[..signal_warm].fill(f64::NAN);
+
+    let mut term_ring = vec![0.0; lookback];
+    let mut signal_ring = vec![0.0; signal_length];
+    let inv_lookback = 1.0 / lookback as f64;
+    let inv_signal = 1.0 / signal_length as f64;
+    let mut term_sum = 0.0;
+    let mut term_idx = 0usize;
+    let mut term_count = 0usize;
+    let mut signal_sum = 0.0;
+    let mut signal_idx = 0usize;
+    let mut signal_count = 0usize;
+
+    for i in 0..len {
+        let term = rs_component_valid(open[i], high[i], low[i], close[i]);
+        if term_count == lookback {
+            term_sum -= term_ring[term_idx];
+        } else {
+            term_count += 1;
+        }
+        term_ring[term_idx] = term;
+        term_sum += term;
+        term_idx += 1;
+        if term_idx == lookback {
+            term_idx = 0;
+        }
+
+        if term_count == lookback {
+            let mut variance = term_sum * inv_lookback;
+            if variance < 0.0 {
+                variance = 0.0;
+            }
+            let rs = variance.sqrt();
+            out_rs[i] = rs;
+
+            if signal_count == signal_length {
+                signal_sum -= signal_ring[signal_idx];
+            } else {
+                signal_count += 1;
+            }
+            signal_ring[signal_idx] = rs;
+            signal_sum += rs;
+            signal_idx += 1;
+            if signal_idx == signal_length {
+                signal_idx = 0;
+            }
+
+            if signal_count == signal_length {
+                out_signal[i] = signal_sum * inv_signal;
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn compute_all_valid_rolling_fixed<const LOOKBACK: usize, const SIGNAL: usize>(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    out_rs: &mut [f64],
+    out_signal: &mut [f64],
+) {
+    let len = close.len();
+    let rs_warm = LOOKBACK.saturating_sub(1).min(len);
+    out_rs[..rs_warm].fill(f64::NAN);
+    let signal_warm = LOOKBACK
+        .saturating_sub(1)
+        .saturating_add(SIGNAL.saturating_sub(1))
+        .min(len);
+    out_signal[..signal_warm].fill(f64::NAN);
+
+    let mut term_ring = [0.0; LOOKBACK];
+    let mut signal_ring = [0.0; SIGNAL];
+    let inv_lookback = 1.0 / LOOKBACK as f64;
+    let inv_signal = 1.0 / SIGNAL as f64;
+    let mut term_sum = 0.0;
+    let mut term_idx = 0usize;
+    let mut term_count = 0usize;
+    let mut signal_sum = 0.0;
+    let mut signal_idx = 0usize;
+    let mut signal_count = 0usize;
+
+    for i in 0..len {
+        let term = rs_component_valid(open[i], high[i], low[i], close[i]);
+        if term_count == LOOKBACK {
+            term_sum -= term_ring[term_idx];
+        } else {
+            term_count += 1;
+        }
+        term_ring[term_idx] = term;
+        term_sum += term;
+        term_idx += 1;
+        if term_idx == LOOKBACK {
+            term_idx = 0;
+        }
+
+        if term_count == LOOKBACK {
+            let mut variance = term_sum * inv_lookback;
+            if variance < 0.0 {
+                variance = 0.0;
+            }
+            let rs = variance.sqrt();
+            out_rs[i] = rs;
+
+            if signal_count == SIGNAL {
+                signal_sum -= signal_ring[signal_idx];
+            } else {
+                signal_count += 1;
+            }
+            signal_ring[signal_idx] = rs;
+            signal_sum += rs;
+            signal_idx += 1;
+            if signal_idx == SIGNAL {
+                signal_idx = 0;
+            }
+
+            if signal_count == SIGNAL {
+                out_signal[i] = signal_sum * inv_signal;
+            }
+        }
+    }
+}
+
+#[inline(always)]
 fn rogers_satchell_volatility_compute_into(
     open: &[f64],
     high: &[f64],
@@ -552,9 +718,24 @@ fn rogers_satchell_volatility_compute_into(
     lookback: usize,
     signal_length: usize,
     _kernel: Kernel,
+    all_valid: bool,
     out_rs: &mut [f64],
     out_signal: &mut [f64],
 ) {
+    if all_valid {
+        compute_all_valid_rolling(
+            open,
+            high,
+            low,
+            close,
+            lookback,
+            signal_length,
+            out_rs,
+            out_signal,
+        );
+        return;
+    }
+
     let (prefix_valid, prefix_sum) = build_term_prefixes(open, high, low, close);
     compute_rs_from_prefix(&prefix_valid, &prefix_sum, lookback, out_rs);
     compute_signal_from_rs(out_rs, signal_length, out_signal);
@@ -565,7 +746,8 @@ pub fn rogers_satchell_volatility_with_kernel(
     input: &RogersSatchellVolatilityInput,
     kernel: Kernel,
 ) -> Result<RogersSatchellVolatilityOutput, RogersSatchellVolatilityError> {
-    let (open, high, low, close, lookback, signal_length, chosen) = prepare_input(input, kernel)?;
+    let (open, high, low, close, lookback, signal_length, chosen, all_valid) =
+        prepare_input(input, kernel)?;
     let len = close.len();
 
     let mut rs = alloc_with_nan_prefix(len, lookback.saturating_sub(1));
@@ -582,6 +764,7 @@ pub fn rogers_satchell_volatility_with_kernel(
         lookback,
         signal_length,
         chosen,
+        all_valid,
         &mut rs,
         &mut signal,
     );
@@ -596,7 +779,8 @@ pub fn rogers_satchell_volatility_into_slice(
     input: &RogersSatchellVolatilityInput,
     kernel: Kernel,
 ) -> Result<(), RogersSatchellVolatilityError> {
-    let (open, high, low, close, lookback, signal_length, chosen) = prepare_input(input, kernel)?;
+    let (open, high, low, close, lookback, signal_length, chosen, all_valid) =
+        prepare_input(input, kernel)?;
     let expected = close.len();
     if out_rs.len() != expected || out_signal.len() != expected {
         return Err(RogersSatchellVolatilityError::OutputLengthMismatch {
@@ -613,6 +797,7 @@ pub fn rogers_satchell_volatility_into_slice(
         lookback,
         signal_length,
         chosen,
+        all_valid,
         out_rs,
         out_signal,
     );
@@ -1682,6 +1867,49 @@ mod tests {
             return true;
         }
         (a - b).abs() <= tol
+    }
+
+    fn direct_rs_component(open: f64, high: f64, low: f64, close: f64) -> f64 {
+        (high / close).ln() * (high / open).ln() + (low / close).ln() * (low / open).ln()
+    }
+
+    #[test]
+    fn test_rs_component_rewrite_matches_direct_formula() {
+        for i in 1..128 {
+            let x = i as f64;
+            let open = 90.0 + x * 0.31 + (x * 0.17).sin();
+            let close = open + (x * 0.11).cos() * 0.8;
+            let high = open.max(close) + 0.25 + (x * 0.07).sin().abs();
+            let low = (open.min(close) - 0.2 - (x * 0.13).cos().abs() * 0.3).max(0.01);
+            assert!(approx_eq(
+                rs_component_valid(open, high, low, close),
+                direct_rs_component(open, high, low, close),
+                1e-14
+            ));
+        }
+    }
+
+    #[test]
+    fn test_into_slice_overwrites_stale_buffers_all_valid() -> Result<(), Box<dyn Error>> {
+        let (open, high, low, close) = sample_ohlc(40);
+        let input = RogersSatchellVolatilityInput::from_slices(
+            &open,
+            &high,
+            &low,
+            &close,
+            RogersSatchellVolatilityParams::default(),
+        );
+        let mut rs = vec![123.0; close.len()];
+        let mut signal = vec![456.0; close.len()];
+        rogers_satchell_volatility_into_slice(&mut rs, &mut signal, &input, Kernel::Auto)?;
+
+        assert!(rs[..7].iter().all(|v| v.is_nan()));
+        assert!(signal[..14].iter().all(|v| v.is_nan()));
+        assert!(rs[7..].iter().all(|v| v.is_finite()));
+        assert!(signal[14..].iter().all(|v| v.is_finite()));
+        assert!(!rs.iter().any(|v| *v == 123.0));
+        assert!(!signal.iter().any(|v| *v == 456.0));
+        Ok(())
     }
 
     #[test]

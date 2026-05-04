@@ -48,8 +48,24 @@ impl<'a> AsRef<[f64]> for SrsiInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             SrsiData::Slice(slice) => slice,
-            SrsiData::Candles { candles, source } => source_type(candles, source),
+            SrsiData::Candles { candles, source } => srsi_source_type(candles, source),
         }
+    }
+}
+
+#[inline(always)]
+fn srsi_source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "close" => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
     }
 }
 
@@ -268,7 +284,7 @@ pub fn srsi(input: &SrsiInput) -> Result<SrsiOutput, SrsiError> {
 
 pub fn srsi_with_kernel(input: &SrsiInput, kernel: Kernel) -> Result<SrsiOutput, SrsiError> {
     let data: &[f64] = match &input.data {
-        SrsiData::Candles { candles, source } => source_type(candles, source),
+        SrsiData::Candles { candles, source } => srsi_source_type(candles, source),
         SrsiData::Slice(sl) => sl,
     };
 
@@ -310,7 +326,7 @@ pub fn srsi_with_kernel(input: &SrsiInput, kernel: Kernel) -> Result<SrsiOutput,
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 srsi_avx512(data, rsi_period, stoch_period, k_len, d_len)
             }
-            _ => unreachable!(),
+            _ => srsi_scalar(data, rsi_period, stoch_period, k_len, d_len),
         }
     }
 }
@@ -323,10 +339,6 @@ pub unsafe fn srsi_scalar(
     k_period: usize,
     d_period: usize,
 ) -> Result<SrsiOutput, SrsiError> {
-    if rsi_period == 14 && stoch_period == 14 && k_period == 3 && d_period == 3 {
-        return srsi_scalar_classic(data, rsi_period, stoch_period, k_period, d_period);
-    }
-
     let n = data.len();
     if n == 0 {
         return Err(SrsiError::EmptyInputData);

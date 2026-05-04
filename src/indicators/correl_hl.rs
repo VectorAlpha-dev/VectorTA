@@ -96,15 +96,7 @@ impl<'a> CorrelHlInput<'a> {
     #[inline(always)]
     pub fn as_refs(&'a self) -> Result<(&'a [f64], &'a [f64]), CorrelHlError> {
         match &self.data {
-            CorrelHlData::Candles { candles } => {
-                let hi = candles
-                    .select_candle_field("high")
-                    .map_err(|_| CorrelHlError::CandleFieldError { field: "high" })?;
-                let lo = candles
-                    .select_candle_field("low")
-                    .map_err(|_| CorrelHlError::CandleFieldError { field: "low" })?;
-                Ok((hi, lo))
-            }
+            CorrelHlData::Candles { candles } => Ok((&candles.high, &candles.low)),
             CorrelHlData::Slices { high, low } => Ok((*high, *low)),
         }
     }
@@ -242,6 +234,9 @@ fn correl_hl_prepare<'a>(
     }
 
     let chosen = match kernel {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Auto => Kernel::Scalar,
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
         Kernel::Auto => detect_best_kernel(),
         k => k,
     };
@@ -304,7 +299,7 @@ pub fn correl_hl_into_slice(
 #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn correl_hl_into(out: &mut [f64], input: &CorrelHlInput) -> Result<(), CorrelHlError> {
-    let (high, _low, period, first, _chosen) = correl_hl_prepare(input, Kernel::Auto)?;
+    let (high, low, period, first, chosen) = correl_hl_prepare(input, Kernel::Auto)?;
     if out.len() != high.len() {
         return Err(CorrelHlError::OutputLengthMismatch {
             expected: high.len(),
@@ -312,13 +307,14 @@ pub fn correl_hl_into(out: &mut [f64], input: &CorrelHlInput) -> Result<(), Corr
         });
     }
 
+    correl_hl_compute_into(high, low, period, first, chosen, out);
     let warm = first + period - 1;
     let warm_cap = warm.min(out.len());
     for v in &mut out[..warm_cap] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    correl_hl_into_slice(out, input, Kernel::Auto)
+    Ok(())
 }
 
 #[inline]
@@ -891,13 +887,7 @@ impl CorrelHlBatchBuilder {
     }
 
     pub fn apply_candles(self, c: &Candles) -> Result<CorrelHlBatchOutput, CorrelHlError> {
-        let high = c
-            .select_candle_field("high")
-            .map_err(|_| CorrelHlError::EmptyInputData)?;
-        let low = c
-            .select_candle_field("low")
-            .map_err(|_| CorrelHlError::EmptyInputData)?;
-        self.apply_slices(high, low)
+        self.apply_slices(&c.high, &c.low)
     }
 }
 

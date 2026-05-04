@@ -14,9 +14,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
-};
+use crate::utilities::helpers::alloc_with_nan_prefix;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
@@ -429,7 +427,7 @@ fn validate_common(
     base_multiplier: f64,
     noise_threshold: f64,
     expansion_alpha: f64,
-) -> Result<(), EvasiveSuperTrendError> {
+) -> Result<bool, EvasiveSuperTrendError> {
     if open.is_empty() || high.is_empty() || low.is_empty() || close.is_empty() {
         return Err(EvasiveSuperTrendError::EmptyInputData);
     }
@@ -457,7 +455,7 @@ fn validate_common(
             valid: longest,
         });
     }
-    Ok(())
+    Ok(longest == open.len())
 }
 
 #[inline(always)]
@@ -565,6 +563,43 @@ fn compute_row(
     }
 }
 
+fn compute_row_all_valid(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    atr_length: usize,
+    base_multiplier: f64,
+    noise_threshold: f64,
+    expansion_alpha: f64,
+    band_out: &mut [f64],
+    state_out: &mut [f64],
+    noisy_out: &mut [f64],
+    changed_out: &mut [f64],
+) {
+    let mut tracker = AtrTracker::new(atr_length);
+    let mut trend = 1i8;
+    let mut band = f64::NAN;
+
+    for i in 0..close.len() {
+        if let Some((band_value, state_value, noisy_value, changed_value)) = compute_point(
+            &mut tracker,
+            &mut trend,
+            &mut band,
+            high[i],
+            low[i],
+            close[i],
+            base_multiplier,
+            noise_threshold,
+            expansion_alpha,
+        ) {
+            band_out[i] = band_value;
+            state_out[i] = state_value;
+            noisy_out[i] = noisy_value;
+            changed_out[i] = changed_value;
+        }
+    }
+}
+
 #[inline]
 pub fn evasive_supertrend(
     input: &EvasiveSuperTrendInput,
@@ -581,7 +616,7 @@ pub fn evasive_supertrend_with_kernel(
     let base_multiplier = input.get_base_multiplier();
     let noise_threshold = input.get_noise_threshold();
     let expansion_alpha = input.get_expansion_alpha();
-    validate_common(
+    let all_valid = validate_common(
         open,
         high,
         low,
@@ -592,34 +627,43 @@ pub fn evasive_supertrend_with_kernel(
         expansion_alpha,
     )?;
 
-    let mut band = alloc_with_nan_prefix(close.len(), 0);
-    let mut state = alloc_with_nan_prefix(close.len(), 0);
-    let mut noisy = alloc_with_nan_prefix(close.len(), 0);
-    let mut changed = alloc_with_nan_prefix(close.len(), 0);
-    band.fill(f64::NAN);
-    state.fill(f64::NAN);
-    noisy.fill(f64::NAN);
-    changed.fill(f64::NAN);
+    let mut band = alloc_with_nan_prefix(close.len(), close.len());
+    let mut state = alloc_with_nan_prefix(close.len(), close.len());
+    let mut noisy = alloc_with_nan_prefix(close.len(), close.len());
+    let mut changed = alloc_with_nan_prefix(close.len(), close.len());
 
-    let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
+    let _ = kernel;
 
-    compute_row(
-        open,
-        high,
-        low,
-        close,
-        atr_length,
-        base_multiplier,
-        noise_threshold,
-        expansion_alpha,
-        &mut band,
-        &mut state,
-        &mut noisy,
-        &mut changed,
-    );
+    if all_valid {
+        compute_row_all_valid(
+            high,
+            low,
+            close,
+            atr_length,
+            base_multiplier,
+            noise_threshold,
+            expansion_alpha,
+            &mut band,
+            &mut state,
+            &mut noisy,
+            &mut changed,
+        );
+    } else {
+        compute_row(
+            open,
+            high,
+            low,
+            close,
+            atr_length,
+            base_multiplier,
+            noise_threshold,
+            expansion_alpha,
+            &mut band,
+            &mut state,
+            &mut noisy,
+            &mut changed,
+        );
+    }
 
     Ok(EvasiveSuperTrendOutput {
         band,
@@ -642,7 +686,7 @@ pub fn evasive_supertrend_into_slice(
     let base_multiplier = input.get_base_multiplier();
     let noise_threshold = input.get_noise_threshold();
     let expansion_alpha = input.get_expansion_alpha();
-    validate_common(
+    let all_valid = validate_common(
         open,
         high,
         low,
@@ -678,29 +722,42 @@ pub fn evasive_supertrend_into_slice(
         });
     }
 
-    let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
+    let _ = kernel;
 
     out_band.fill(f64::NAN);
     out_state.fill(f64::NAN);
     out_noisy.fill(f64::NAN);
     out_changed.fill(f64::NAN);
-    compute_row(
-        open,
-        high,
-        low,
-        close,
-        atr_length,
-        base_multiplier,
-        noise_threshold,
-        expansion_alpha,
-        out_band,
-        out_state,
-        out_noisy,
-        out_changed,
-    );
+    if all_valid {
+        compute_row_all_valid(
+            high,
+            low,
+            close,
+            atr_length,
+            base_multiplier,
+            noise_threshold,
+            expansion_alpha,
+            out_band,
+            out_state,
+            out_noisy,
+            out_changed,
+        );
+    } else {
+        compute_row(
+            open,
+            high,
+            low,
+            close,
+            atr_length,
+            base_multiplier,
+            noise_threshold,
+            expansion_alpha,
+            out_band,
+            out_state,
+            out_noisy,
+            out_changed,
+        );
+    }
     Ok(())
 }
 
@@ -1159,7 +1216,7 @@ pub fn evasive_supertrend_batch_inner_into(
         .iter()
         .map(|params| params.expansion_alpha.unwrap_or(DEFAULT_EXPANSION_ALPHA))
         .fold(0.0_f64, f64::max);
-    validate_common(
+    let all_valid = validate_common(
         open,
         high,
         low,
@@ -1203,10 +1260,7 @@ pub fn evasive_supertrend_batch_inner_into(
         });
     }
 
-    let _chosen = match kernel {
-        Kernel::Auto => detect_best_batch_kernel(),
-        other => other,
-    };
+    let _ = kernel;
 
     let worker = |row: usize,
                   band_row: &mut [f64],
@@ -1218,20 +1272,36 @@ pub fn evasive_supertrend_batch_inner_into(
         noisy_row.fill(f64::NAN);
         changed_row.fill(f64::NAN);
         let params = &combos[row];
-        compute_row(
-            open,
-            high,
-            low,
-            close,
-            params.atr_length.unwrap_or(DEFAULT_ATR_LENGTH),
-            params.base_multiplier.unwrap_or(DEFAULT_BASE_MULTIPLIER),
-            params.noise_threshold.unwrap_or(DEFAULT_NOISE_THRESHOLD),
-            params.expansion_alpha.unwrap_or(DEFAULT_EXPANSION_ALPHA),
-            band_row,
-            state_row,
-            noisy_row,
-            changed_row,
-        );
+        if all_valid {
+            compute_row_all_valid(
+                high,
+                low,
+                close,
+                params.atr_length.unwrap_or(DEFAULT_ATR_LENGTH),
+                params.base_multiplier.unwrap_or(DEFAULT_BASE_MULTIPLIER),
+                params.noise_threshold.unwrap_or(DEFAULT_NOISE_THRESHOLD),
+                params.expansion_alpha.unwrap_or(DEFAULT_EXPANSION_ALPHA),
+                band_row,
+                state_row,
+                noisy_row,
+                changed_row,
+            );
+        } else {
+            compute_row(
+                open,
+                high,
+                low,
+                close,
+                params.atr_length.unwrap_or(DEFAULT_ATR_LENGTH),
+                params.base_multiplier.unwrap_or(DEFAULT_BASE_MULTIPLIER),
+                params.noise_threshold.unwrap_or(DEFAULT_NOISE_THRESHOLD),
+                params.expansion_alpha.unwrap_or(DEFAULT_EXPANSION_ALPHA),
+                band_row,
+                state_row,
+                noisy_row,
+                changed_row,
+            );
+        }
     };
 
     #[cfg(not(target_arch = "wasm32"))]

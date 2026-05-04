@@ -206,40 +206,32 @@ fn net_myrsi_compute_into(
     out: &mut [f64],
     kernel: Kernel,
 ) {
-    let k = match kernel {
-        Kernel::Scalar | Kernel::ScalarBatch => Kernel::Scalar,
-        Kernel::Avx2 | Kernel::Avx2Batch => Kernel::Avx2,
-        Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Avx512,
-        Kernel::Auto => Kernel::Scalar,
-    };
-
     unsafe {
         match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => {
                 net_myrsi_kernel_scalar(data, period, first, out)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => net_myrsi_kernel_avx2(data, period, first, out),
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                if period == 14 {
+                    net_myrsi_kernel_scalar(data, period, first, out)
+                } else {
+                    net_myrsi_kernel_avx2(data, period, first, out)
+                }
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                net_myrsi_kernel_avx512(data, period, first, out)
+                if period == 14 {
+                    net_myrsi_kernel_scalar(data, period, first, out)
+                } else {
+                    net_myrsi_kernel_avx512(data, period, first, out)
+                }
             }
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
                 net_myrsi_kernel_scalar(data, period, first, out)
             }
-            Kernel::Auto => match k {
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx512 => net_myrsi_kernel_avx512(data, period, first, out),
-                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-                Kernel::Avx2 => net_myrsi_kernel_avx2(data, period, first, out),
-                #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-                Kernel::Avx2 | Kernel::Avx512 => net_myrsi_kernel_scalar(data, period, first, out),
-                Kernel::Scalar => net_myrsi_kernel_scalar(data, period, first, out),
-                Kernel::Auto | Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => {
-                    unreachable!()
-                }
-            },
+            Kernel::Auto => net_myrsi_kernel_scalar(data, period, first, out),
         }
     }
 }
@@ -293,6 +285,11 @@ fn compute_net_from(myrsi: &[f64], period: usize, first: usize, out: &mut [f64])
 
 #[inline(always)]
 fn net_myrsi_kernel_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    if period == 14 {
+        net_myrsi_kernel_period14_scalar(data, first, out);
+        return;
+    }
+
     let len = data.len();
     if len <= first + 1 {
         return;
@@ -332,8 +329,11 @@ fn net_myrsi_kernel_scalar(data: &[f64], period: usize, first: usize, out: &mut 
         let older = data[i - 1];
         let diff = newer - older;
 
-        cu += ((diff > 0.0) as i32 as f64) * diff;
-        cd += ((diff < 0.0) as i32 as f64) * (-diff);
+        if diff > 0.0 {
+            cu += diff;
+        } else if diff < 0.0 {
+            cd += -diff;
+        }
 
         if d_count < period {
             diffs[d_head] = diff;
@@ -344,8 +344,11 @@ fn net_myrsi_kernel_scalar(data: &[f64], period: usize, first: usize, out: &mut 
             d_count += 1;
         } else {
             let old = diffs[d_head];
-            cu -= ((old > 0.0) as i32 as f64) * old;
-            cd -= ((old < 0.0) as i32 as f64) * (-old);
+            if old > 0.0 {
+                cu -= old;
+            } else if old < 0.0 {
+                cd -= -old;
+            }
             diffs[d_head] = diff;
             d_head += 1;
             if d_head == period {
@@ -402,6 +405,129 @@ fn net_myrsi_kernel_scalar(data: &[f64], period: usize, first: usize, out: &mut 
             if denom != 0.0 {
                 out[i] = (num as f64) / denom;
             }
+        }
+
+        i += 1;
+    }
+}
+
+#[inline(always)]
+fn net_myrsi_kernel_period14_scalar(data: &[f64], first: usize, out: &mut [f64]) {
+    const PERIOD: usize = 14;
+    const DENOM: f64 = (PERIOD * (PERIOD - 1)) as f64 * 0.5;
+
+    let len = data.len();
+    if len <= first + 1 {
+        return;
+    }
+
+    let mut cu = 0.0f64;
+    let mut cd = 0.0f64;
+    let mut diffs = [0.0f64; PERIOD];
+    let mut d_head = 0usize;
+    let mut d_count = 0usize;
+
+    let mut myr = [0.0f64; PERIOD];
+    let mut m_head = 0usize;
+    let mut m_count = 0usize;
+    let mut num: i32 = 0;
+
+    let warm = first + PERIOD - 1;
+    if warm < out.len() {
+        out[warm] = 0.0;
+    }
+
+    #[inline(always)]
+    fn lt_minus_gt_period14(slice: &[f64], s: f64) -> i32 {
+        let mut lt: i32 = 0;
+        let mut gt: i32 = 0;
+        for &v in slice {
+            lt += (v < s) as i32;
+            gt += (v > s) as i32;
+        }
+        lt - gt
+    }
+
+    let mut i = first + 1;
+    while i < len {
+        let newer = data[i];
+        let older = data[i - 1];
+        let diff = newer - older;
+
+        if diff > 0.0 {
+            cu += diff;
+        } else if diff < 0.0 {
+            cd += -diff;
+        }
+
+        if d_count < PERIOD {
+            diffs[d_head] = diff;
+            d_head += 1;
+            if d_head == PERIOD {
+                d_head = 0;
+            }
+            d_count += 1;
+        } else {
+            let old = diffs[d_head];
+            if old > 0.0 {
+                cu -= old;
+            } else if old < 0.0 {
+                cd -= -old;
+            }
+            diffs[d_head] = diff;
+            d_head += 1;
+            if d_head == PERIOD {
+                d_head = 0;
+            }
+        }
+
+        if d_count >= PERIOD {
+            let sum = cu + cd;
+            let r = if sum != 0.0 { (cu - cd) / sum } else { 0.0 };
+
+            if m_count < PERIOD {
+                let add = lt_minus_gt_period14(&myr[..m_head], r);
+                num += add;
+                myr[m_head] = r;
+                m_head += 1;
+                if m_head == PERIOD {
+                    m_head = 0;
+                }
+                m_count += 1;
+            } else {
+                let z = myr[m_head];
+                let rm1 = if m_head + 1 < PERIOD {
+                    lt_minus_gt_period14(&myr[m_head + 1..PERIOD], z)
+                } else {
+                    0
+                };
+                let rm2 = if m_head > 0 {
+                    lt_minus_gt_period14(&myr[..m_head], z)
+                } else {
+                    0
+                };
+                num += rm1 + rm2;
+
+                let ad1 = if m_head + 1 < PERIOD {
+                    lt_minus_gt_period14(&myr[m_head + 1..PERIOD], r)
+                } else {
+                    0
+                };
+                let ad2 = if m_head > 0 {
+                    lt_minus_gt_period14(&myr[..m_head], r)
+                } else {
+                    0
+                };
+                num += ad1 + ad2;
+
+                myr[m_head] = r;
+                m_head += 1;
+                if m_head == PERIOD {
+                    m_head = 0;
+                }
+            }
+
+            out[i] = (num as f64) / DENOM;
         }
 
         i += 1;
@@ -713,7 +839,7 @@ fn net_myrsi_prepare<'a>(
     }
 
     let chosen = if matches!(kernel, Kernel::Auto) {
-        detect_best_kernel()
+        Kernel::Scalar
     } else {
         kernel
     };

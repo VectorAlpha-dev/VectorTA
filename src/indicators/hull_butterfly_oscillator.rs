@@ -61,6 +61,13 @@ pub struct HullButterflyOscillatorOutput {
     pub signal: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HullButterflyOscillatorOutputField {
+    Oscillator,
+    CumulativeMean,
+    Signal,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -506,6 +513,27 @@ fn hull_butterfly_oscillator_row_from_slice(
     }
 }
 
+#[inline(always)]
+fn hull_butterfly_oscillator_selected_row_from_slice(
+    data: &[f64],
+    params: ResolvedParams,
+    field: HullButterflyOscillatorOutputField,
+    out: &mut [f64],
+) {
+    out.fill(f64::NAN);
+
+    let mut stream = HullButterflyOscillatorStream::new_resolved(params);
+    for (slot, &value) in out.iter_mut().zip(data.iter()) {
+        if let Some((oscillator, cumulative_mean, signal)) = stream.update(value) {
+            *slot = match field {
+                HullButterflyOscillatorOutputField::Oscillator => oscillator,
+                HullButterflyOscillatorOutputField::CumulativeMean => cumulative_mean,
+                HullButterflyOscillatorOutputField::Signal => signal,
+            };
+        }
+    }
+}
+
 #[inline]
 pub fn hull_butterfly_oscillator(
     input: &HullButterflyOscillatorInput,
@@ -565,6 +593,27 @@ pub fn hull_butterfly_oscillator_into_slices(
         cumulative_mean_out,
         signal_out,
     );
+    Ok(())
+}
+
+#[inline]
+pub fn hull_butterfly_oscillator_output_into_slice(
+    out: &mut [f64],
+    input: &HullButterflyOscillatorInput,
+    kernel: Kernel,
+    field: HullButterflyOscillatorOutputField,
+) -> Result<(), HullButterflyOscillatorError> {
+    let expected = input.as_ref().len();
+    if out.len() != expected {
+        return Err(HullButterflyOscillatorError::OutputLengthMismatch {
+            expected,
+            oscillator_got: out.len(),
+            cumulative_mean_got: out.len(),
+            signal_got: out.len(),
+        });
+    }
+    let (data, _first, params, _chosen) = hull_butterfly_oscillator_prepare(input, kernel)?;
+    hull_butterfly_oscillator_selected_row_from_slice(data, params, field, out);
     Ok(())
 }
 

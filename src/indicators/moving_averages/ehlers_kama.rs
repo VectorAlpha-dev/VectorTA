@@ -39,6 +39,9 @@ use std::mem::MaybeUninit;
 use std::sync::Arc;
 use thiserror::Error;
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+static EHLERS_KAMA_AUTO_KERNEL: std::sync::OnceLock<Kernel> = std::sync::OnceLock::new();
+
 impl<'a> AsRef<[f64]> for EhlersKamaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -249,16 +252,22 @@ pub fn ehlers_kama_scalar(data: &[f64], period: usize, first_valid: usize, out: 
         return;
     }
 
+    let data_ptr = data.as_ptr();
+    let out_ptr = out.as_mut_ptr();
     let mut delta_sum = 0.0;
     let delta_start = first_valid + 1;
-    for k in delta_start..=start {
-        delta_sum += (data[k] - data[k - 1]).abs();
+    let mut k = delta_start;
+    while k <= start {
+        unsafe {
+            delta_sum += (*data_ptr.add(k) - *data_ptr.add(k - 1)).abs();
+        }
+        k += 1;
     }
 
-    let mut prev_kama = data[start - 1];
+    let mut prev_kama = unsafe { *data_ptr.add(start - 1) };
 
-    let a0 = data[start];
-    let direction = (a0 - data[start - (period - 1)]).abs();
+    let a0 = unsafe { *data_ptr.add(start) };
+    let direction = unsafe { (a0 - *data_ptr.add(start - (period - 1))).abs() };
     let ef = if delta_sum == 0.0 {
         0.0
     } else {
@@ -268,17 +277,24 @@ pub fn ehlers_kama_scalar(data: &[f64], period: usize, first_valid: usize, out: 
     let s_term = 0.6667f64.mul_add(ef, 0.0645);
     let mut s = s_term * s_term;
     prev_kama = s.mul_add(a0 - prev_kama, prev_kama);
-    out[start] = prev_kama;
+    unsafe {
+        *out_ptr.add(start) = prev_kama;
+    }
 
-    for i in (start + 1)..len {
+    let mut i = start + 1;
+    while i < len {
         let drop_idx = i - period;
         if drop_idx > first_valid {
-            delta_sum -= (data[drop_idx] - data[drop_idx - 1]).abs();
+            unsafe {
+                delta_sum -= (*data_ptr.add(drop_idx) - *data_ptr.add(drop_idx - 1)).abs();
+            }
         }
-        let a = data[i];
-        delta_sum += (a - data[i - 1]).abs();
+        let a = unsafe { *data_ptr.add(i) };
+        unsafe {
+            delta_sum += (a - *data_ptr.add(i - 1)).abs();
+        }
 
-        let direction = (a - data[i - (period - 1)]).abs();
+        let direction = unsafe { (a - *data_ptr.add(i - (period - 1))).abs() };
         let ef = if delta_sum == 0.0 {
             0.0
         } else {
@@ -289,7 +305,35 @@ pub fn ehlers_kama_scalar(data: &[f64], period: usize, first_valid: usize, out: 
         s = s_term * s_term;
 
         prev_kama = s.mul_add(a - prev_kama, prev_kama);
-        out[i] = prev_kama;
+        unsafe {
+            *out_ptr.add(i) = prev_kama;
+        }
+        i += 1;
+    }
+}
+
+#[inline(always)]
+fn ehlers_kama_auto_kernel() -> Kernel {
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        *EHLERS_KAMA_AUTO_KERNEL.get_or_init(|| {
+            if std::arch::is_x86_feature_detected!("avx2")
+                && std::arch::is_x86_feature_detected!("fma")
+            {
+                Kernel::Avx2
+            } else if std::arch::is_x86_feature_detected!("avx512f")
+                && std::arch::is_x86_feature_detected!("fma")
+            {
+                Kernel::Avx512
+            } else {
+                Kernel::Scalar
+            }
+        })
+    }
+
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    {
+        Kernel::Scalar
     }
 }
 
@@ -531,7 +575,7 @@ fn ehlers_kama_prepare<'a>(
         });
     }
     let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => ehlers_kama_auto_kernel(),
         k => k,
     };
     Ok((data, period, first, chosen))

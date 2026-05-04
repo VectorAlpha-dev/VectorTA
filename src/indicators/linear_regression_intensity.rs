@@ -36,9 +36,25 @@ impl<'a> AsRef<[f64]> for LinearRegressionIntensityInput<'a> {
         match &self.data {
             LinearRegressionIntensityData::Slice(slice) => slice,
             LinearRegressionIntensityData::Candles { candles, source } => {
-                source_type(candles, source)
+                linear_regression_intensity_source_type(candles, source)
             }
         }
+    }
+}
+
+#[inline(always)]
+fn linear_regression_intensity_source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "close" => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
     }
 }
 
@@ -299,6 +315,17 @@ fn trend_to_intensity(trend: i64, total_combinations: usize) -> f64 {
 }
 
 #[inline(always)]
+fn pair_sign(later: f64, earlier: f64) -> i64 {
+    if later > earlier {
+        1
+    } else if later < earlier {
+        -1
+    } else {
+        0
+    }
+}
+
+#[inline(always)]
 fn warmup_prefix(first: usize, params: ResolvedParams) -> usize {
     first
         .saturating_add(params.linreg_length)
@@ -506,12 +533,107 @@ fn compute_fast_from_linreg(linreg: &[f64], params: ResolvedParams, out: &mut [f
 }
 
 #[inline]
+fn compute_fused_small_lookback(
+    data: &[f64],
+    first: usize,
+    params: ResolvedParams,
+    out: &mut [f64],
+) {
+    let period = params.linreg_length;
+    let lookback = params.lookback_period;
+    let period_f = period as f64;
+    let x_sum = ((period * (period + 1)) / 2) as f64;
+    let x2_sum = ((period * (period + 1) * (2 * period + 1)) / 6) as f64;
+    let denom_inv = 1.0 / (period_f * x2_sum - x_sum * x_sum);
+    let inv_period = 1.0 / period_f;
+
+    let mut y_sum = 0.0;
+    let mut xy_sum = 0.0;
+    let init_slice = &data[first..first + period - 1];
+    let mut k = 1usize;
+    for &value in init_slice {
+        y_sum += value;
+        xy_sum += (k as f64) * value;
+        k += 1;
+    }
+
+    let total = total_combinations(lookback);
+    let mut window = vec![0.0; lookback];
+    let mut head = 0usize;
+    let mut count = 0usize;
+    let mut trend = 0i64;
+    let mut idx = first + period - 1;
+    let mut old_idx = first;
+
+    while idx < data.len() {
+        let new_value = data[idx];
+        y_sum += new_value;
+        xy_sum += new_value * period_f;
+
+        let b = (period_f * xy_sum - x_sum * y_sum) * denom_inv;
+        let a = (y_sum - b * x_sum) * inv_period;
+        let lr = a + b * period_f;
+
+        if lookback == 1 {
+            out[idx] = 0.0;
+        } else if count < lookback {
+            for &prior in &window[..count] {
+                trend += pair_sign(lr, prior);
+            }
+            window[count] = lr;
+            count += 1;
+            if count == lookback {
+                out[idx] = trend_to_intensity(trend, total);
+            }
+        } else {
+            let old = window[head];
+            let mut remove_delta = 0i64;
+            let mut add_delta = 0i64;
+            let mut pos = head + 1;
+            if pos == lookback {
+                pos = 0;
+            }
+            for _ in 1..lookback {
+                let value = window[pos];
+                remove_delta += pair_sign(value, old);
+                add_delta += pair_sign(lr, value);
+                pos += 1;
+                if pos == lookback {
+                    pos = 0;
+                }
+            }
+            trend += add_delta - remove_delta;
+            window[head] = lr;
+            head += 1;
+            if head == lookback {
+                head = 0;
+            }
+            out[idx] = trend_to_intensity(trend, total);
+        }
+
+        xy_sum -= y_sum;
+        y_sum -= data[old_idx];
+        idx += 1;
+        old_idx += 1;
+    }
+}
+
+#[inline]
 fn linear_regression_intensity_compute_into(
     data: &[f64],
     params: ResolvedParams,
     kernel: Kernel,
     out: &mut [f64],
 ) -> Result<(), LinearRegressionIntensityError> {
+    if params.lookback_period <= 64 {
+        if let Some(first) = first_valid_index(data) {
+            if data[first..].iter().all(|value| value.is_finite()) {
+                compute_fused_small_lookback(data, first, params, out);
+                return Ok(());
+            }
+        }
+    }
+
     let linreg = linreg_with_kernel(
         &LinRegInput::from_slice(
             data,
@@ -737,7 +859,7 @@ impl LinearRegressionIntensityBatchBuilder {
         candles: &Candles,
         source: &str,
     ) -> Result<LinearRegressionIntensityBatchOutput, LinearRegressionIntensityError> {
-        self.apply_slice(source_type(candles, source))
+        self.apply_slice(linear_regression_intensity_source_type(candles, source))
     }
 }
 

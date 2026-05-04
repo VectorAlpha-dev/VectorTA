@@ -295,7 +295,7 @@ pub fn chande_with_kernel(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -393,7 +393,7 @@ pub fn chande_compute_into(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -449,6 +449,11 @@ pub fn chande_scalar(
     first: usize,
     out: &mut [f64],
 ) {
+    if period == 22 && mult == 3.0 && dir == "long" {
+        chande_scalar_default_long(high, low, close, first, out);
+        return;
+    }
+
     let len = high.len();
     if first >= len {
         return;
@@ -563,6 +568,81 @@ pub fn chande_scalar(
 
             prev_close = close[i];
         }
+    }
+}
+
+#[inline(always)]
+fn chande_scalar_default_long(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    first: usize,
+    out: &mut [f64],
+) {
+    const PERIOD: usize = 22;
+    const MASK: usize = 31;
+    const ALPHA: f64 = 1.0 / 22.0;
+    const MULT: f64 = 3.0;
+
+    let len = high.len();
+    if first >= len {
+        return;
+    }
+
+    let warmup = first + PERIOD - 1;
+    let mut sum_tr = 0.0f64;
+    let mut rma = 0.0f64;
+    let mut prev_close = close[first];
+    let mut dq = [0usize; 32];
+    let mut head = 0usize;
+    let mut count = 0usize;
+
+    for i in first..len {
+        let hi = high[i];
+        let lo = low[i];
+        let tr = if i == first {
+            hi - lo
+        } else {
+            let hl = hi - lo;
+            let hc = (hi - prev_close).abs();
+            let lc = (lo - prev_close).abs();
+            hl.max(hc).max(lc)
+        };
+
+        if i >= warmup {
+            let window_start = i + 1 - PERIOD;
+            while count != 0 && dq[head] < window_start {
+                head = (head + 1) & MASK;
+                count -= 1;
+            }
+        }
+
+        while count != 0 {
+            let back = (head + count - 1) & MASK;
+            if high[dq[back]] <= hi {
+                count -= 1;
+            } else {
+                break;
+            }
+        }
+        let tail = (head + count) & MASK;
+        dq[tail] = i;
+        count += 1;
+
+        if i < warmup {
+            sum_tr += tr;
+        } else if i == warmup {
+            sum_tr += tr;
+            rma = sum_tr / PERIOD as f64;
+            let max_h = high[dq[head]];
+            out[i] = (-rma).mul_add(MULT, max_h);
+        } else {
+            rma = ALPHA.mul_add(tr - rma, rma);
+            let max_h = high[dq[head]];
+            out[i] = (-rma).mul_add(MULT, max_h);
+        }
+
+        prev_close = close[i];
     }
 }
 

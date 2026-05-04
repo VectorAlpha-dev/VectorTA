@@ -201,6 +201,39 @@ impl MassBuilder {
 }
 
 #[inline(always)]
+fn mass_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "close" => &candles.close,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
+    }
+}
+
+#[inline(always)]
+fn mass_first_valid(high: &[f64], low: &[f64]) -> Option<usize> {
+    let len = high.len();
+    unsafe {
+        let hp = high.as_ptr();
+        let lp = low.as_ptr();
+        let mut i = 0usize;
+        while i < len {
+            if !(*hp.add(i)).is_nan() && !(*lp.add(i)).is_nan() {
+                return Some(i);
+            }
+            i += 1;
+        }
+    }
+    None
+}
+
+#[inline(always)]
 fn mass_prepare<'a>(
     input: &'a MassInput,
     kernel: Kernel,
@@ -211,8 +244,8 @@ fn mass_prepare<'a>(
             high_source,
             low_source,
         } => (
-            source_type(candles, high_source),
-            source_type(candles, low_source),
+            mass_source(candles, high_source),
+            mass_source(candles, low_source),
         ),
         MassData::Slices { high, low } => (*high, *low),
     };
@@ -232,9 +265,7 @@ fn mass_prepare<'a>(
         });
     }
 
-    let first = (0..high.len())
-        .find(|&i| !high[i].is_nan() && !low[i].is_nan())
-        .ok_or(MassError::AllValuesNaN)?;
+    let first = mass_first_valid(high, low).ok_or(MassError::AllValuesNaN)?;
 
     let needed_bars = 16 + period - 1;
     if high.len() - first < needed_bars {
@@ -264,9 +295,9 @@ fn mass_compute_into(
         match kern {
             Kernel::Scalar | Kernel::ScalarBatch => mass_scalar(high, low, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => mass_avx2(high, low, period, first, out),
+            Kernel::Avx2 | Kernel::Avx2Batch => mass_scalar(high, low, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => mass_avx512(high, low, period, first, out),
+            Kernel::Avx512 | Kernel::Avx512Batch => mass_scalar(high, low, period, first, out),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
                 mass_scalar(high, low, period, first, out)

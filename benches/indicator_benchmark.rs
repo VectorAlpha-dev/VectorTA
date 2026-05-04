@@ -48,16 +48,40 @@ use vector_ta::indicators::moving_averages::{
     dema::{dema_with_kernel, DemaBatchBuilder, DemaInput},
     dma::{dma_with_kernel, DmaBatchBuilder, DmaInput},
     edcf::{edcf_with_kernel, EdcfBatchBuilder, EdcfInput},
-    ehlers_ecema::{ehlers_ecema_with_kernel, EhlersEcemaBatchBuilder, EhlersEcemaInput},
+    ehlers_ecema::{
+        ehlers_ecema as ehlers_ecema_raw, ehlers_ecema_with_kernel, EhlersEcemaBatchBuilder,
+        EhlersEcemaInput,
+    },
     ehlers_itrend::{ehlers_itrend_with_kernel, EhlersITrendBatchBuilder, EhlersITrendInput},
-    ehlers_kama::{ehlers_kama_with_kernel, EhlersKamaBatchBuilder, EhlersKamaInput},
-    ehlers_pma::{ehlers_pma_with_kernel, EhlersPmaBuilder, EhlersPmaInput},
-    ehma::{ehma_with_kernel, EhmaBatchBuilder, EhmaInput},
-    ema::{ema_with_kernel, EmaBatchBuilder, EmaInput},
-    epma::{epma_with_kernel, EpmaBatchBuilder, EpmaInput},
+    ehlers_kama::{
+        ehlers_kama as ehlers_kama_raw, ehlers_kama_with_kernel, EhlersKamaBatchBuilder,
+        EhlersKamaInput,
+    },
+    ehlers_pma::{
+        ehlers_pma as ehlers_pma_raw, ehlers_pma_with_kernel, EhlersPmaBuilder, EhlersPmaInput,
+    },
+    ehlers_undersampled_double_moving_average::{
+        ehlers_undersampled_double_moving_average as ehlers_undersampled_double_moving_average_raw,
+        ehlers_undersampled_double_moving_average_with_kernel,
+        EhlersUndersampledDoubleMovingAverageInput,
+    },
+    ehma::{ehma as ehma_raw, ehma_with_kernel, EhmaBatchBuilder, EhmaInput},
+    elastic_volume_weighted_moving_average::{
+        elastic_volume_weighted_moving_average as elastic_volume_weighted_moving_average_raw,
+        elastic_volume_weighted_moving_average_with_kernel,
+        ElasticVolumeWeightedMovingAverageInput,
+    },
+    ema::{ema as ema_raw, ema_with_kernel, EmaBatchBuilder, EmaInput},
+    ema_deviation_corrected_t3::{
+        ema_deviation_corrected_t3 as ema_deviation_corrected_t3_raw,
+        ema_deviation_corrected_t3_with_kernel, EmaDeviationCorrectedT3Input,
+    },
+    epma::{epma as epma_raw, epma_with_kernel, EpmaBatchBuilder, EpmaInput},
     frama::{frama_with_kernel, FramaBatchBuilder, FramaInput},
-    fwma::{fwma_with_kernel, FwmaBatchBuilder, FwmaInput},
-    gaussian::{gaussian_with_kernel, GaussianBatchBuilder, GaussianInput},
+    fwma::{fwma as fwma_raw, fwma_with_kernel, FwmaBatchBuilder, FwmaInput},
+    gaussian::{
+        gaussian as gaussian_raw, gaussian_with_kernel, GaussianBatchBuilder, GaussianInput,
+    },
     highpass::{highpass_with_kernel, HighPassBatchBuilder, HighPassInput},
     highpass_2_pole::{highpass_2_pole_with_kernel, HighPass2BatchBuilder, HighPass2Input},
     hma::{hma_with_kernel, HmaBatchBuilder, HmaInput},
@@ -106,6 +130,10 @@ use vector_ta::indicators::{
         bandpass as bandpass_raw, bandpass_with_kernel, BandPassBatchBuilder, BandPassInput,
     },
     cci_cycle::{cci_cycle, cci_cycle_with_kernel, CciCycleBatchBuilder, CciCycleInput},
+    fvg_positioning_average::{
+        fvg_positioning_average as fvg_positioning_average_raw,
+        fvg_positioning_average_with_kernel, FvgPositioningAverageInput,
+    },
     fvg_trailing_stop::{fvg_trailing_stop, fvg_trailing_stop_with_kernel, FvgTrailingStopInput},
     halftrend::{
         halftrend, halftrend_with_kernel, HalfTrendBatchBuilder, HalfTrendData, HalfTrendInput,
@@ -162,22 +190,120 @@ use vector_ta::indicators::{
     damiani_volatmeter::{damiani_volatmeter as damiani_volatmeter_raw, DamianiVolatmeterInput},
     dec_osc::{dec_osc as dec_osc_raw, DecOscInput},
     decycler::{decycler as decycler_raw, DecyclerInput},
+    demand_index::{demand_index as demand_index_raw, DemandIndexInput},
     deviation::{deviation_with_kernel, DeviationBatchBuilder, DeviationInput},
     devstop::{devstop as devstop_raw, DevStopInput},
     di::{di as di_raw, DiInput},
     dm::{dm as dm_raw, DmBatchBuilder, DmInput},
     donchian::{donchian as donchian_raw, donchian_with_kernel, DonchianInput},
+    donchian_channel_width::{
+        donchian_channel_width as donchian_channel_width_raw, donchian_channel_width_with_kernel,
+        DonchianChannelWidthInput,
+    },
     dpo::{dpo as dpo_raw, dpo_with_kernel, DpoBatchBuilder, DpoInput},
     dti::{dti as dti_raw, dti_with_kernel, DtiInput},
-    dx::{dx as dx_raw, DxBatchBuilder, DxInput},
+    dx::{dx as dx_raw, dx_with_kernel, DxBatchBuilder, DxInput},
+    dynamic_momentum_index::{
+        dynamic_momentum_index as dynamic_momentum_index_raw, dynamic_momentum_index_with_kernel,
+        DynamicMomentumIndexInput,
+    },
     efi::{efi as efi_raw, efi_with_kernel, EfiInput},
-    emd::{emd as emd_raw, EmdInput},
+    ehlers_adaptive_cg::{
+        ehlers_adaptive_cg as ehlers_adaptive_cg_raw, ehlers_adaptive_cg_with_kernel,
+        EhlersAdaptiveCgInput,
+    },
+    ehlers_adaptive_cyber_cycle::{
+        ehlers_adaptive_cyber_cycle as ehlers_adaptive_cyber_cycle_raw,
+        ehlers_adaptive_cyber_cycle_with_kernel, EhlersAdaptiveCyberCycleInput,
+    },
+    ehlers_autocorrelation_periodogram::{
+        ehlers_autocorrelation_periodogram as ehlers_autocorrelation_periodogram_raw,
+        ehlers_autocorrelation_periodogram_with_kernel, EhlersAutocorrelationPeriodogramInput,
+    },
+    ehlers_data_sampling_relative_strength_indicator::{
+        ehlers_data_sampling_relative_strength_indicator as ehlers_data_sampling_relative_strength_indicator_raw,
+        ehlers_data_sampling_relative_strength_indicator_with_kernel,
+        EhlersDataSamplingRelativeStrengthIndicatorInput,
+    },
+    ehlers_detrending_filter::{
+        ehlers_detrending_filter as ehlers_detrending_filter_raw,
+        ehlers_detrending_filter_with_kernel, EhlersDetrendingFilterInput,
+    },
+    ehlers_fm_demodulator::{
+        ehlers_fm_demodulator as ehlers_fm_demodulator_raw, ehlers_fm_demodulator_with_kernel,
+        EhlersFmDemodulatorInput,
+    },
+    ehlers_linear_extrapolation_predictor::{
+        ehlers_linear_extrapolation_predictor as ehlers_linear_extrapolation_predictor_raw,
+        ehlers_linear_extrapolation_predictor_with_kernel, EhlersLinearExtrapolationPredictorInput,
+    },
+    ehlers_simple_cycle_indicator::{
+        ehlers_simple_cycle_indicator as ehlers_simple_cycle_indicator_raw,
+        ehlers_simple_cycle_indicator_with_kernel, EhlersSimpleCycleIndicatorInput,
+    },
+    ehlers_smoothed_adaptive_momentum::{
+        ehlers_smoothed_adaptive_momentum as ehlers_smoothed_adaptive_momentum_raw,
+        ehlers_smoothed_adaptive_momentum_with_kernel, EhlersSmoothedAdaptiveMomentumInput,
+    },
+    emd::{emd as emd_raw, emd_with_kernel, EmdInput},
+    emd_trend::{emd_trend as emd_trend_raw, emd_trend_with_kernel, EmdTrendInput},
     emv::{emv as emv_raw, emv_with_kernel, EmvBatchBuilder, EmvData, EmvInput},
     er::{er as er_raw, er_with_kernel, ErBatchBuilder, ErInput},
     eri::{eri as eri_raw, eri_with_kernel, EriBatchBuilder, EriData, EriInput},
-    fisher::{fisher as fisher_raw, FisherInput},
+    evasive_supertrend::{
+        evasive_supertrend as evasive_supertrend_raw, evasive_supertrend_with_kernel,
+        EvasiveSuperTrendInput,
+    },
+    ewma_volatility::{
+        ewma_volatility as ewma_volatility_raw, ewma_volatility_with_kernel, EwmaVolatilityInput,
+    },
+    exponential_trend::{
+        exponential_trend as exponential_trend_raw, exponential_trend_with_kernel,
+        ExponentialTrendInput,
+    },
+    fibonacci_entry_bands::{
+        fibonacci_entry_bands as fibonacci_entry_bands_raw, fibonacci_entry_bands_with_kernel,
+        FibonacciEntryBandsInput,
+    },
+    fibonacci_trailing_stop::{
+        fibonacci_trailing_stop as fibonacci_trailing_stop_raw,
+        fibonacci_trailing_stop_with_kernel, FibonacciTrailingStopInput,
+    },
+    fisher::{fisher as fisher_raw, fisher_with_kernel, FisherInput},
+    forward_backward_exponential_oscillator::{
+        forward_backward_exponential_oscillator as forward_backward_exponential_oscillator_raw,
+        forward_backward_exponential_oscillator_with_kernel,
+        ForwardBackwardExponentialOscillatorInput,
+    },
     fosc::{fosc as fosc_raw, fosc_with_kernel, FoscInput},
+    fractal_dimension_index::{
+        fractal_dimension_index as fractal_dimension_index_raw,
+        fractal_dimension_index_with_kernel, FractalDimensionIndexInput,
+    },
+    garman_klass_volatility::{
+        garman_klass_volatility as garman_klass_volatility_raw,
+        garman_klass_volatility_with_kernel, GarmanKlassVolatilityInput,
+    },
     gatorosc::{gatorosc as gatorosc_raw, GatorOscInput},
+    geometric_bias_oscillator::{
+        geometric_bias_oscillator as geometric_bias_oscillator_raw,
+        geometric_bias_oscillator_with_kernel, GeometricBiasOscillatorInput,
+    },
+    gmma_oscillator::{
+        gmma_oscillator as gmma_oscillator_raw, gmma_oscillator_with_kernel, GmmaOscillatorInput,
+    },
+    gopalakrishnan_range_index::{
+        gopalakrishnan_range_index as gopalakrishnan_range_index_raw,
+        gopalakrishnan_range_index_with_kernel, GopalakrishnanRangeIndexInput,
+    },
+    grover_llorens_cycle_oscillator::{
+        grover_llorens_cycle_oscillator as grover_llorens_cycle_oscillator_raw,
+        grover_llorens_cycle_oscillator_with_kernel, GroverLlorensCycleOscillatorInput,
+    },
+    half_causal_estimator::{
+        half_causal_estimator as half_causal_estimator_raw, half_causal_estimator_with_kernel,
+        HalfCausalEstimatorInput, HalfCausalEstimatorParams,
+    },
     ift_rsi::{ift_rsi as ift_rsi_raw, ift_rsi_with_kernel, IftRsiInput},
     kaufmanstop::{
         kaufmanstop as kaufmanstop_raw, kaufmanstop_with_kernel, KaufmanstopBatchBuilder,
@@ -360,31 +486,66 @@ pub type CwmaInputS = CwmaInput<'static>;
 pub type DamianiVolatmeterInputS = DamianiVolatmeterInput<'static>;
 pub type DecOscInputS = DecOscInput<'static>;
 pub type DecyclerInputS = DecyclerInput<'static>;
+pub type DemandIndexInputS = DemandIndexInput<'static>;
 pub type DemaInputS = DemaInput<'static>;
 pub type DevStopInputS = DevStopInput<'static>;
 pub type DiInputS = DiInput<'static>;
 pub type DmInputS = DmInput<'static>;
 pub type DonchianInputS = DonchianInput<'static>;
+pub type DonchianChannelWidthInputS = DonchianChannelWidthInput<'static>;
 pub type DpoInputS = DpoInput<'static>;
 pub type DtiInputS = DtiInput<'static>;
 pub type DxInputS = DxInput<'static>;
+pub type DynamicMomentumIndexInputS = DynamicMomentumIndexInput<'static>;
 pub type EdcfInputS = EdcfInput<'static>;
+pub type EhlersAdaptiveCgInputS = EhlersAdaptiveCgInput<'static>;
+pub type EhlersAdaptiveCyberCycleInputS = EhlersAdaptiveCyberCycleInput<'static>;
+pub type EhlersAutocorrelationPeriodogramInputS = EhlersAutocorrelationPeriodogramInput<'static>;
+pub type EhlersDataSamplingRelativeStrengthIndicatorInputS =
+    EhlersDataSamplingRelativeStrengthIndicatorInput<'static>;
+pub type EhlersDetrendingFilterInputS = EhlersDetrendingFilterInput<'static>;
+pub type EhlersFmDemodulatorInputS = EhlersFmDemodulatorInput<'static>;
+pub type EhlersLinearExtrapolationPredictorInputS =
+    EhlersLinearExtrapolationPredictorInput<'static>;
+pub type EhlersSimpleCycleIndicatorInputS = EhlersSimpleCycleIndicatorInput<'static>;
+pub type EhlersSmoothedAdaptiveMomentumInputS = EhlersSmoothedAdaptiveMomentumInput<'static>;
 pub type EfiInputS = EfiInput<'static>;
 pub type EhlersEcemaInputS = EhlersEcemaInput<'static>;
 pub type EhlersITrendInputS = EhlersITrendInput<'static>;
 pub type EhlersPmaInputS = EhlersPmaInput<'static>;
 pub type EhlersKamaInputS = EhlersKamaInput<'static>;
+pub type EhlersUndersampledDoubleMovingAverageInputS =
+    EhlersUndersampledDoubleMovingAverageInput<'static>;
+pub type ElasticVolumeWeightedMovingAverageInputS =
+    ElasticVolumeWeightedMovingAverageInput<'static>;
+pub type EmaDeviationCorrectedT3InputS = EmaDeviationCorrectedT3Input<'static>;
 pub type EmaInputS = EmaInput<'static>;
 pub type EmdInputS = EmdInput<'static>;
+pub type EmdTrendInputS = EmdTrendInput<'static>;
 pub type EmvInputS = EmvInput<'static>;
 pub type EpmaInputS = EpmaInput<'static>;
 pub type ErInputS = ErInput<'static>;
 pub type EriInputS = EriInput<'static>;
+pub type EvasiveSuperTrendInputS = EvasiveSuperTrendInput<'static>;
+pub type EwmaVolatilityInputS = EwmaVolatilityInput<'static>;
+pub type ExponentialTrendInputS = ExponentialTrendInput<'static>;
+pub type FibonacciEntryBandsInputS = FibonacciEntryBandsInput<'static>;
+pub type FibonacciTrailingStopInputS = FibonacciTrailingStopInput<'static>;
 pub type FisherInputS = FisherInput<'static>;
+pub type ForwardBackwardExponentialOscillatorInputS =
+    ForwardBackwardExponentialOscillatorInput<'static>;
 pub type FoscInputS = FoscInput<'static>;
+pub type FractalDimensionIndexInputS = FractalDimensionIndexInput<'static>;
+pub type FvgPositioningAverageInputS = FvgPositioningAverageInput<'static>;
 pub type FramaInputS = FramaInput<'static>;
 pub type FwmaInputS = FwmaInput<'static>;
+pub type GarmanKlassVolatilityInputS = GarmanKlassVolatilityInput<'static>;
 pub type GatorOscInputS = GatorOscInput<'static>;
+pub type GeometricBiasOscillatorInputS = GeometricBiasOscillatorInput<'static>;
+pub type GmmaOscillatorInputS = GmmaOscillatorInput<'static>;
+pub type GopalakrishnanRangeIndexInputS = GopalakrishnanRangeIndexInput<'static>;
+pub type GroverLlorensCycleOscillatorInputS = GroverLlorensCycleOscillatorInput<'static>;
+pub type HalfCausalEstimatorInputS = HalfCausalEstimatorInput<'static>;
 pub type GaussianInputS = GaussianInput<'static>;
 pub type HighPassInputS = HighPassInput<'static>;
 pub type HighPass2InputS = HighPass2Input<'static>;
@@ -1280,6 +1441,24 @@ impl InputLen for VwmaInputS {
     }
 }
 
+impl InputLen for HalfCausalEstimatorInputS {
+    fn with_len(len: usize) -> Self {
+        let candles = match len {
+            10_000 => &*CANDLES_10K,
+            100_000 => &*CANDLES_100K,
+            1_000_000 => &*CANDLES_1M,
+            _ => panic!("unsupported len {len}"),
+        };
+        HalfCausalEstimatorInput::from_slice(
+            &candles.volume,
+            HalfCausalEstimatorParams {
+                slots_per_day: Some(60),
+                ..HalfCausalEstimatorParams::default()
+            },
+        )
+    }
+}
+
 impl_input_len!(
     AsoInputS,
     AcoscInputS,
@@ -1316,31 +1495,60 @@ impl_input_len!(
     DamianiVolatmeterInputS,
     DecOscInputS,
     DecyclerInputS,
+    DemandIndexInputS,
     DemaInputS,
     DevStopInputS,
     DiInputS,
     DmInputS,
     DonchianInputS,
+    DonchianChannelWidthInputS,
     DpoInputS,
     DtiInputS,
     DxInputS,
+    DynamicMomentumIndexInputS,
     EdcfInputS,
+    EhlersAdaptiveCgInputS,
+    EhlersAdaptiveCyberCycleInputS,
+    EhlersAutocorrelationPeriodogramInputS,
+    EhlersDataSamplingRelativeStrengthIndicatorInputS,
+    EhlersDetrendingFilterInputS,
+    EhlersFmDemodulatorInputS,
+    EhlersLinearExtrapolationPredictorInputS,
+    EhlersSimpleCycleIndicatorInputS,
+    EhlersSmoothedAdaptiveMomentumInputS,
     EfiInputS,
     EhlersEcemaInputS,
     EhlersITrendInputS,
     EhlersPmaInputS,
     EhlersKamaInputS,
+    EhlersUndersampledDoubleMovingAverageInputS,
+    ElasticVolumeWeightedMovingAverageInputS,
+    EmaDeviationCorrectedT3InputS,
     EmaInputS,
     EmdInputS,
+    EmdTrendInputS,
     EmvInputS,
     EpmaInputS,
     ErInputS,
     EriInputS,
+    EvasiveSuperTrendInputS,
+    EwmaVolatilityInputS,
+    ExponentialTrendInputS,
+    FibonacciEntryBandsInputS,
+    FibonacciTrailingStopInputS,
     FisherInputS,
+    ForwardBackwardExponentialOscillatorInputS,
     FoscInputS,
+    FractalDimensionIndexInputS,
+    FvgPositioningAverageInputS,
     FramaInputS,
     FwmaInputS,
+    GarmanKlassVolatilityInputS,
     GatorOscInputS,
+    GeometricBiasOscillatorInputS,
+    GmmaOscillatorInputS,
+    GopalakrishnanRangeIndexInputS,
+    GroverLlorensCycleOscillatorInputS,
     GaussianInputS,
     HighPassInputS,
     HighPass2InputS,
@@ -1507,17 +1715,161 @@ bench_wrappers! {
     (di_bench, di_raw, DiInputS),
     (dm_bench, dm_raw, DmInputS),
     (donchian_bench, donchian_raw, DonchianInputS),
+    (
+        donchian_channel_width_bench,
+        donchian_channel_width_raw,
+        DonchianChannelWidthInputS
+    ),
     (dpo_bench, dpo_raw, DpoInputS),
     (dti_bench, dti_raw, DtiInputS),
     (dx_bench, dx_raw, DxInputS),
+    (
+        dynamic_momentum_index_bench,
+        dynamic_momentum_index_raw,
+        DynamicMomentumIndexInputS
+    ),
     (efi_bench, efi_raw, EfiInputS),
+    (
+        ehlers_adaptive_cg_bench,
+        ehlers_adaptive_cg_raw,
+        EhlersAdaptiveCgInputS
+    ),
+    (
+        ehlers_adaptive_cyber_cycle_bench,
+        ehlers_adaptive_cyber_cycle_raw,
+        EhlersAdaptiveCyberCycleInputS
+    ),
+    (
+        ehlers_autocorrelation_periodogram_bench,
+        ehlers_autocorrelation_periodogram_raw,
+        EhlersAutocorrelationPeriodogramInputS
+    ),
+    (
+        ehlers_data_sampling_relative_strength_indicator_bench,
+        ehlers_data_sampling_relative_strength_indicator_raw,
+        EhlersDataSamplingRelativeStrengthIndicatorInputS
+    ),
+    (
+        ehlers_detrending_filter_bench,
+        ehlers_detrending_filter_raw,
+        EhlersDetrendingFilterInputS
+    ),
+    (
+        ehlers_fm_demodulator_bench,
+        ehlers_fm_demodulator_raw,
+        EhlersFmDemodulatorInputS
+    ),
+    (
+        ehlers_linear_extrapolation_predictor_bench,
+        ehlers_linear_extrapolation_predictor_raw,
+        EhlersLinearExtrapolationPredictorInputS
+    ),
+    (
+        ehlers_simple_cycle_indicator_bench,
+        ehlers_simple_cycle_indicator_raw,
+        EhlersSimpleCycleIndicatorInputS
+    ),
+    (
+        ehlers_smoothed_adaptive_momentum_bench,
+        ehlers_smoothed_adaptive_momentum_raw,
+        EhlersSmoothedAdaptiveMomentumInputS
+    ),
+    (ehlers_ecema_bench, ehlers_ecema_raw, EhlersEcemaInputS),
+    (ehlers_kama_bench, ehlers_kama_raw, EhlersKamaInputS),
+    (ehlers_pma_bench, ehlers_pma_raw, EhlersPmaInputS),
+    (
+        ehlers_undersampled_double_moving_average_bench,
+        ehlers_undersampled_double_moving_average_raw,
+        EhlersUndersampledDoubleMovingAverageInputS
+    ),
+    (
+        elastic_volume_weighted_moving_average_bench,
+        elastic_volume_weighted_moving_average_raw,
+        ElasticVolumeWeightedMovingAverageInputS
+    ),
+    (
+        ema_deviation_corrected_t3_bench,
+        ema_deviation_corrected_t3_raw,
+        EmaDeviationCorrectedT3InputS
+    ),
     (emd_bench, emd_raw, EmdInputS),
+    (emd_trend_bench, emd_trend_raw, EmdTrendInputS),
     (emv_bench, emv_raw, EmvInputS),
+    (epma_bench, epma_raw, EpmaInputS),
     (er_bench, er_raw, ErInputS),
     (eri_bench, eri_raw, EriInputS),
+    (
+        evasive_supertrend_bench,
+        evasive_supertrend_raw,
+        EvasiveSuperTrendInputS
+    ),
+    (
+        ewma_volatility_bench,
+        ewma_volatility_raw,
+        EwmaVolatilityInputS
+    ),
+    (
+        exponential_trend_bench,
+        exponential_trend_raw,
+        ExponentialTrendInputS
+    ),
+    (
+        fibonacci_entry_bands_bench,
+        fibonacci_entry_bands_raw,
+        FibonacciEntryBandsInputS
+    ),
+    (
+        fibonacci_trailing_stop_bench,
+        fibonacci_trailing_stop_raw,
+        FibonacciTrailingStopInputS
+    ),
+    (ehma_bench, ehma_raw, EhmaInputS),
+    (ema_bench, ema_raw, EmaInputS),
     (fisher_bench, fisher_raw, FisherInputS),
+    (
+        forward_backward_exponential_oscillator_bench,
+        forward_backward_exponential_oscillator_raw,
+        ForwardBackwardExponentialOscillatorInputS
+    ),
     (fosc_bench, fosc_raw, FoscInputS),
+    (
+        fractal_dimension_index_bench,
+        fractal_dimension_index_raw,
+        FractalDimensionIndexInputS
+    ),
+    (fwma_bench, fwma_raw, FwmaInputS),
+    (
+        garman_klass_volatility_bench,
+        garman_klass_volatility_raw,
+        GarmanKlassVolatilityInputS
+    ),
     (gatorosc_bench, gatorosc_raw, GatorOscInputS),
+    (gaussian_bench, gaussian_raw, GaussianInputS),
+    (
+        geometric_bias_oscillator_bench,
+        geometric_bias_oscillator_raw,
+        GeometricBiasOscillatorInputS
+    ),
+    (
+        gmma_oscillator_bench,
+        gmma_oscillator_raw,
+        GmmaOscillatorInputS
+    ),
+    (
+        gopalakrishnan_range_index_bench,
+        gopalakrishnan_range_index_raw,
+        GopalakrishnanRangeIndexInputS
+    ),
+    (
+        grover_llorens_cycle_oscillator_bench,
+        grover_llorens_cycle_oscillator_raw,
+        GroverLlorensCycleOscillatorInputS
+    ),
+    (
+        half_causal_estimator_bench,
+        half_causal_estimator_raw,
+        HalfCausalEstimatorInputS
+    ),
     (ift_rsi_bench, ift_rsi_raw, IftRsiInputS),
     (kaufmanstop_bench, kaufmanstop_raw, KaufmanstopInputS),
     (kdj_bench, kdj_raw, KdjInputS),
@@ -1604,9 +1956,15 @@ bench_wrappers! {
     (volume_adjusted_ma_bench, VolumeAdjustedMa, VolumeAdjustedMaInputS),
     (net_myrsi_bench, net_myrsi, NetMyrsiInputS),
     (cci_cycle_bench, cci_cycle, CciCycleInputS),
+    (
+        fvg_positioning_average_bench,
+        fvg_positioning_average_raw,
+        FvgPositioningAverageInputS
+    ),
     (fvg_trailing_stop_bench, fvg_trailing_stop, FvgTrailingStopInputS),
     (halftrend_bench, halftrend, HalfTrendInputS),
     (reverse_rsi_bench, reverse_rsi, ReverseRsiInputS),
+    (demand_index_bench, demand_index_raw, DemandIndexInputS),
     (vama_bench, vama, VamaInputS),
 }
 
@@ -1645,21 +2003,58 @@ bench_scalars!(
     damiani_volatmeter_bench => DamianiVolatmeterInputS,
     dec_osc_bench     => DecOscInputS,
     decycler_bench    => DecyclerInputS,
+    demand_index_bench => DemandIndexInputS,
     devstop_bench     => DevStopInputS,
     di_bench          => DiInputS,
     dm_bench          => DmInputS,
     donchian_bench    => DonchianInputS,
+    donchian_channel_width_bench => DonchianChannelWidthInputS,
     dpo_bench         => DpoInputS,
     dti_bench         => DtiInputS,
     dx_bench          => DxInputS,
+    dynamic_momentum_index_bench => DynamicMomentumIndexInputS,
     efi_bench         => EfiInputS,
+    ehlers_adaptive_cg_bench => EhlersAdaptiveCgInputS,
+    ehlers_adaptive_cyber_cycle_bench => EhlersAdaptiveCyberCycleInputS,
+    ehlers_autocorrelation_periodogram_bench => EhlersAutocorrelationPeriodogramInputS,
+    ehlers_data_sampling_relative_strength_indicator_bench => EhlersDataSamplingRelativeStrengthIndicatorInputS,
+    ehlers_detrending_filter_bench => EhlersDetrendingFilterInputS,
+    ehlers_fm_demodulator_bench => EhlersFmDemodulatorInputS,
+    ehlers_linear_extrapolation_predictor_bench => EhlersLinearExtrapolationPredictorInputS,
+    ehlers_simple_cycle_indicator_bench => EhlersSimpleCycleIndicatorInputS,
+    ehlers_smoothed_adaptive_momentum_bench => EhlersSmoothedAdaptiveMomentumInputS,
+    ehlers_ecema_bench => EhlersEcemaInputS,
+    ehlers_kama_bench => EhlersKamaInputS,
+    ehlers_pma_bench => EhlersPmaInputS,
+    ehlers_undersampled_double_moving_average_bench => EhlersUndersampledDoubleMovingAverageInputS,
+    elastic_volume_weighted_moving_average_bench => ElasticVolumeWeightedMovingAverageInputS,
+    ema_deviation_corrected_t3_bench => EmaDeviationCorrectedT3InputS,
     emd_bench         => EmdInputS,
+    emd_trend_bench   => EmdTrendInputS,
     emv_bench         => EmvInputS,
+    epma_bench        => EpmaInputS,
     er_bench          => ErInputS,
     eri_bench         => EriInputS,
+    evasive_supertrend_bench => EvasiveSuperTrendInputS,
+    ewma_volatility_bench => EwmaVolatilityInputS,
+    exponential_trend_bench => ExponentialTrendInputS,
+    fibonacci_entry_bands_bench => FibonacciEntryBandsInputS,
+    fibonacci_trailing_stop_bench => FibonacciTrailingStopInputS,
+    ehma_bench        => EhmaInputS,
+    ema_bench         => EmaInputS,
     fisher_bench      => FisherInputS,
+    forward_backward_exponential_oscillator_bench => ForwardBackwardExponentialOscillatorInputS,
     fosc_bench        => FoscInputS,
+    fractal_dimension_index_bench => FractalDimensionIndexInputS,
+    fwma_bench        => FwmaInputS,
+    garman_klass_volatility_bench => GarmanKlassVolatilityInputS,
     gatorosc_bench    => GatorOscInputS,
+    gaussian_bench    => GaussianInputS,
+    geometric_bias_oscillator_bench => GeometricBiasOscillatorInputS,
+    gmma_oscillator_bench => GmmaOscillatorInputS,
+    gopalakrishnan_range_index_bench => GopalakrishnanRangeIndexInputS,
+    grover_llorens_cycle_oscillator_bench => GroverLlorensCycleOscillatorInputS,
+    half_causal_estimator_bench => HalfCausalEstimatorInputS,
     ift_rsi_bench     => IftRsiInputS,
     kaufmanstop_bench => KaufmanstopInputS,
     kdj_bench         => KdjInputS,
@@ -1745,6 +2140,7 @@ bench_scalars!(
     volume_adjusted_ma_bench => VolumeAdjustedMaInputS,
     net_myrsi_bench => NetMyrsiInputS,
     cci_cycle_bench => CciCycleInputS,
+    fvg_positioning_average_bench => FvgPositioningAverageInputS,
     fvg_trailing_stop_bench => FvgTrailingStopInputS,
     halftrend_bench => HalfTrendInputS,
     reverse_rsi_bench => ReverseRsiInputS,
@@ -1864,12 +2260,41 @@ make_kernel_wrappers!(ehlers_ecema, ehlers_ecema_with_kernel, EhlersEcemaInputS;
 make_kernel_wrappers!(ehlers_itrend, ehlers_itrend_with_kernel, EhlersITrendInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(ehlers_pma, ehlers_pma_with_kernel, EhlersPmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(ehlers_kama, ehlers_kama_with_kernel, EhlersKamaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(
+    ehlers_undersampled_double_moving_average,
+    ehlers_undersampled_double_moving_average_with_kernel,
+    EhlersUndersampledDoubleMovingAverageInputS;
+    Scalar,Avx2,Avx512
+);
+make_kernel_wrappers!(
+    elastic_volume_weighted_moving_average,
+    elastic_volume_weighted_moving_average_with_kernel,
+    ElasticVolumeWeightedMovingAverageInputS;
+    Scalar,Avx2,Avx512
+);
+make_kernel_wrappers!(
+    ema_deviation_corrected_t3,
+    ema_deviation_corrected_t3_with_kernel,
+    EmaDeviationCorrectedT3InputS;
+    Scalar,Avx2,Avx512
+);
+make_kernel_wrappers!(emd, emd_with_kernel, EmdInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(emd_trend, emd_trend_with_kernel, EmdTrendInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(ema, ema_with_kernel, EmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(epma, epma_with_kernel, EpmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(pma, pma_with_kernel, PmaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(frama, frama_with_kernel, FramaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(fwma, fwma_with_kernel, FwmaInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(
+    garman_klass_volatility,
+    garman_klass_volatility_with_kernel,
+    GarmanKlassVolatilityInputS;
+    Scalar,Avx2,Avx512
+);
 make_kernel_wrappers!(gaussian, gaussian_with_kernel, GaussianInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(gopalakrishnan_range_index, gopalakrishnan_range_index_with_kernel, GopalakrishnanRangeIndexInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(grover_llorens_cycle_oscillator, grover_llorens_cycle_oscillator_with_kernel, GroverLlorensCycleOscillatorInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(half_causal_estimator, half_causal_estimator_with_kernel, HalfCausalEstimatorInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(highpass_2_pole, highpass_2_pole_with_kernel, HighPass2InputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(highpass, highpass_with_kernel, HighPassInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(hma, hma_with_kernel, HmaInputS; Scalar,Avx2,Avx512);
@@ -1897,8 +2322,88 @@ make_kernel_wrappers!(reflex, reflex_with_kernel, ReflexInputS; Scalar,Avx2,Avx5
 make_kernel_wrappers!(sinwma, sinwma_with_kernel, SinWmaInputS; Scalar,Avx2,Avx512);
 
 make_kernel_wrappers!(mod_god_mode, mod_god_mode_with_kernel, ModGodModeInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(fisher, fisher_with_kernel, FisherInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(
+    forward_backward_exponential_oscillator,
+    forward_backward_exponential_oscillator_with_kernel,
+    ForwardBackwardExponentialOscillatorInputS;
+    Scalar,Avx2,Avx512
+);
 make_kernel_wrappers!(fosc, fosc_with_kernel, FoscInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(
+    fractal_dimension_index,
+    fractal_dimension_index_with_kernel,
+    FractalDimensionIndexInputS;
+    Scalar,Avx2,Avx512
+);
+make_kernel_wrappers!(
+    fvg_positioning_average,
+    fvg_positioning_average_with_kernel,
+    FvgPositioningAverageInputS;
+    Scalar,Avx2,Avx512
+);
 make_kernel_wrappers!(dpo, dpo_with_kernel, DpoInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(dx, dx_with_kernel, DxInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(
+    dynamic_momentum_index,
+    dynamic_momentum_index_with_kernel,
+    DynamicMomentumIndexInputS;
+    Scalar,Avx2,Avx512
+);
+make_kernel_wrappers!(
+    ehlers_adaptive_cg,
+    ehlers_adaptive_cg_with_kernel,
+    EhlersAdaptiveCgInputS;
+    Scalar,Avx2,Avx512
+);
+make_kernel_wrappers!(
+    ehlers_adaptive_cyber_cycle,
+    ehlers_adaptive_cyber_cycle_with_kernel,
+    EhlersAdaptiveCyberCycleInputS;
+    Scalar,Avx2,Avx512
+);
+make_kernel_wrappers!(
+    ehlers_autocorrelation_periodogram,
+    ehlers_autocorrelation_periodogram_with_kernel,
+    EhlersAutocorrelationPeriodogramInputS;
+    Scalar,Avx2,Avx512
+);
+make_kernel_wrappers!(
+    ehlers_data_sampling_relative_strength_indicator,
+    ehlers_data_sampling_relative_strength_indicator_with_kernel,
+    EhlersDataSamplingRelativeStrengthIndicatorInputS;
+    Scalar,Avx2,Avx512
+);
+make_kernel_wrappers!(
+    ehlers_detrending_filter,
+    ehlers_detrending_filter_with_kernel,
+    EhlersDetrendingFilterInputS;
+    Scalar,Avx2,Avx512
+);
+make_kernel_wrappers!(
+    ehlers_fm_demodulator,
+    ehlers_fm_demodulator_with_kernel,
+    EhlersFmDemodulatorInputS;
+    Scalar,Avx2,Avx512
+);
+make_kernel_wrappers!(
+    ehlers_linear_extrapolation_predictor,
+    ehlers_linear_extrapolation_predictor_with_kernel,
+    EhlersLinearExtrapolationPredictorInputS;
+    Scalar,Avx2,Avx512
+);
+make_kernel_wrappers!(
+    ehlers_simple_cycle_indicator,
+    ehlers_simple_cycle_indicator_with_kernel,
+    EhlersSimpleCycleIndicatorInputS;
+    Scalar,Avx2,Avx512
+);
+make_kernel_wrappers!(
+    ehlers_smoothed_adaptive_momentum,
+    ehlers_smoothed_adaptive_momentum_with_kernel,
+    EhlersSmoothedAdaptiveMomentumInputS;
+    Scalar,Avx2,Avx512
+);
 make_batch_wrappers!(dpo_batch, DpoBatchBuilder, DpoInputS; ScalarBatch,Avx2Batch,Avx512Batch);
 make_kernel_wrappers!(kaufmanstop, kaufmanstop_with_kernel, KaufmanstopInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(cksp, cksp_with_kernel, CkspInputS; Scalar,Avx2,Avx512);
@@ -2190,6 +2695,12 @@ make_kernel_wrappers!(vama, vama_with_kernel, VamaInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(wavetrend, wavetrend_with_kernel, WavetrendInputS; Scalar,Avx2,Avx512);
 
 make_kernel_wrappers!(donchian, donchian_with_kernel, DonchianInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(
+    donchian_channel_width,
+    donchian_channel_width_with_kernel,
+    DonchianChannelWidthInputS;
+    Scalar,Avx2,Avx512
+);
 
 make_kernel_wrappers!(rsx, rsx_with_kernel, RsxInputS; Scalar,Avx2,Avx512);
 
@@ -2385,6 +2896,20 @@ make_kernel_wrappers!(
 );
 
 make_kernel_wrappers!(
+    geometric_bias_oscillator,
+    geometric_bias_oscillator_with_kernel,
+    GeometricBiasOscillatorInputS;
+    Scalar,Avx2,Avx512
+);
+
+make_kernel_wrappers!(
+    gmma_oscillator,
+    gmma_oscillator_with_kernel,
+    GmmaOscillatorInputS;
+    Scalar,Avx2,Avx512
+);
+
+make_kernel_wrappers!(
     obv,
     vector_ta::indicators::obv::obv_with_kernel,
     ObvInputS;
@@ -2408,6 +2933,16 @@ make_kernel_wrappers!(ultosc, ultosc_with_kernel, UltOscInputS; Scalar,Avx2,Avx5
 make_kernel_wrappers!(qstick, qstick_with_kernel, QstickInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(nadaraya_watson_envelope, nadaraya_watson_envelope_with_kernel, NweInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(eri, eri_with_kernel, EriInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(
+    evasive_supertrend,
+    evasive_supertrend_with_kernel,
+    EvasiveSuperTrendInputS;
+    Scalar,Avx2,Avx512
+);
+make_kernel_wrappers!(ewma_volatility, ewma_volatility_with_kernel, EwmaVolatilityInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(exponential_trend, exponential_trend_with_kernel, ExponentialTrendInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(fibonacci_entry_bands, fibonacci_entry_bands_with_kernel, FibonacciEntryBandsInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(fibonacci_trailing_stop, fibonacci_trailing_stop_with_kernel, FibonacciTrailingStopInputS; Scalar,Avx2,Avx512);
 
 make_batch_wrappers!(
     vosc_batch, VoscBatchBuilder, VoscInputS;
@@ -3309,6 +3844,13 @@ bench_variants!(
 );
 
 bench_variants!(
+    fisher => FisherInputS; None;
+    fisher_scalar,
+    fisher_avx2,
+    fisher_avx512,
+);
+
+bench_variants!(
     fisher_batch => FisherInputS; None;
     fisher_batch_scalarbatch,
     fisher_batch_avx2batch,
@@ -3543,6 +4085,48 @@ bench_variants!(
     ehlers_ecema_scalar,
     ehlers_ecema_avx2,
     ehlers_ecema_avx512,
+);
+
+bench_variants!(
+    ehlers_fm_demodulator => EhlersFmDemodulatorInputS; None;
+    ehlers_fm_demodulator_scalar,
+    ehlers_fm_demodulator_avx2,
+    ehlers_fm_demodulator_avx512,
+);
+
+bench_variants!(
+    ehlers_linear_extrapolation_predictor => EhlersLinearExtrapolationPredictorInputS; None;
+    ehlers_linear_extrapolation_predictor_scalar,
+    ehlers_linear_extrapolation_predictor_avx2,
+    ehlers_linear_extrapolation_predictor_avx512,
+);
+
+bench_variants!(
+    ehlers_simple_cycle_indicator => EhlersSimpleCycleIndicatorInputS; None;
+    ehlers_simple_cycle_indicator_scalar,
+    ehlers_simple_cycle_indicator_avx2,
+    ehlers_simple_cycle_indicator_avx512,
+);
+
+bench_variants!(
+    ehlers_smoothed_adaptive_momentum => EhlersSmoothedAdaptiveMomentumInputS; None;
+    ehlers_smoothed_adaptive_momentum_scalar,
+    ehlers_smoothed_adaptive_momentum_avx2,
+    ehlers_smoothed_adaptive_momentum_avx512,
+);
+
+bench_variants!(
+    ehlers_undersampled_double_moving_average => EhlersUndersampledDoubleMovingAverageInputS; None;
+    ehlers_undersampled_double_moving_average_scalar,
+    ehlers_undersampled_double_moving_average_avx2,
+    ehlers_undersampled_double_moving_average_avx512,
+);
+
+bench_variants!(
+    elastic_volume_weighted_moving_average => ElasticVolumeWeightedMovingAverageInputS; None;
+    elastic_volume_weighted_moving_average_scalar,
+    elastic_volume_weighted_moving_average_avx2,
+    elastic_volume_weighted_moving_average_avx512,
 );
 
 bench_variants!(
@@ -4075,6 +4659,41 @@ bench_variants!(
 );
 
 bench_variants!(
+    evasive_supertrend => EvasiveSuperTrendInputS; None;
+    evasive_supertrend_scalar,
+    evasive_supertrend_avx2,
+    evasive_supertrend_avx512,
+);
+
+bench_variants!(
+    ewma_volatility => EwmaVolatilityInputS; None;
+    ewma_volatility_scalar,
+    ewma_volatility_avx2,
+    ewma_volatility_avx512,
+);
+
+bench_variants!(
+    exponential_trend => ExponentialTrendInputS; None;
+    exponential_trend_scalar,
+    exponential_trend_avx2,
+    exponential_trend_avx512,
+);
+
+bench_variants!(
+    fibonacci_entry_bands => FibonacciEntryBandsInputS; None;
+    fibonacci_entry_bands_scalar,
+    fibonacci_entry_bands_avx2,
+    fibonacci_entry_bands_avx512,
+);
+
+bench_variants!(
+    fibonacci_trailing_stop => FibonacciTrailingStopInputS; None;
+    fibonacci_trailing_stop_scalar,
+    fibonacci_trailing_stop_avx2,
+    fibonacci_trailing_stop_avx512,
+);
+
+bench_variants!(
     eri_batch => EriInputS; Some(13);
     eri_batch_scalarbatch,
     eri_batch_avx2batch,
@@ -4187,6 +4806,27 @@ bench_variants!(
 );
 
 bench_variants!(
+    ema_deviation_corrected_t3 => EmaDeviationCorrectedT3InputS; None;
+    ema_deviation_corrected_t3_scalar,
+    ema_deviation_corrected_t3_avx2,
+    ema_deviation_corrected_t3_avx512,
+);
+
+bench_variants!(
+    emd => EmdInputS; None;
+    emd_scalar,
+    emd_avx2,
+    emd_avx512,
+);
+
+bench_variants!(
+    emd_trend => EmdTrendInputS; None;
+    emd_trend_scalar,
+    emd_trend_avx2,
+    emd_trend_avx512,
+);
+
+bench_variants!(
     epma => EpmaInputS; None;
     epma_scalar,
     epma_avx2,
@@ -4212,6 +4852,13 @@ bench_variants!(
     fwma_scalar,
     fwma_avx2,
     fwma_avx512,
+);
+
+bench_variants!(
+    garman_klass_volatility => GarmanKlassVolatilityInputS; None;
+    garman_klass_volatility_scalar,
+    garman_klass_volatility_avx2,
+    garman_klass_volatility_avx512,
 );
 
 bench_variants!(
@@ -4537,6 +5184,13 @@ bench_variants!(
 );
 
 bench_variants!(
+    donchian_channel_width => DonchianChannelWidthInputS; None;
+    donchian_channel_width_scalar,
+    donchian_channel_width_avx2,
+    donchian_channel_width_avx512,
+);
+
+bench_variants!(
     donchian_batch => DonchianInputS; Some(20);
     donchian_batch_scalarbatch,
     donchian_batch_avx2batch,
@@ -4628,10 +5282,24 @@ bench_variants!(
 );
 
 bench_variants!(
+    forward_backward_exponential_oscillator => ForwardBackwardExponentialOscillatorInputS; None;
+    forward_backward_exponential_oscillator_scalar,
+    forward_backward_exponential_oscillator_avx2,
+    forward_backward_exponential_oscillator_avx512,
+);
+
+bench_variants!(
     fosc => FoscInputS; None;
     fosc_scalar,
     fosc_avx2,
     fosc_avx512,
+);
+
+bench_variants!(
+    fractal_dimension_index => FractalDimensionIndexInputS; None;
+    fractal_dimension_index_scalar,
+    fractal_dimension_index_avx2,
+    fractal_dimension_index_avx512,
 );
 
 bench_variants!(
@@ -4737,6 +5405,13 @@ bench_variants!(
     cci_cycle_batch_scalarbatch,
     cci_cycle_batch_avx2batch,
     cci_cycle_batch_avx512batch
+);
+
+bench_variants!(
+    fvg_positioning_average => FvgPositioningAverageInputS; None;
+    fvg_positioning_average_scalar,
+    fvg_positioning_average_avx2,
+    fvg_positioning_average_avx512,
 );
 
 bench_variants!(
@@ -5051,6 +5726,41 @@ bench_variants!(
 );
 
 bench_variants!(
+    geometric_bias_oscillator => GeometricBiasOscillatorInputS; None;
+    geometric_bias_oscillator_scalar,
+    geometric_bias_oscillator_avx2,
+    geometric_bias_oscillator_avx512,
+);
+
+bench_variants!(
+    gmma_oscillator => GmmaOscillatorInputS; None;
+    gmma_oscillator_scalar,
+    gmma_oscillator_avx2,
+    gmma_oscillator_avx512,
+);
+
+bench_variants!(
+    gopalakrishnan_range_index => GopalakrishnanRangeIndexInputS; None;
+    gopalakrishnan_range_index_scalar,
+    gopalakrishnan_range_index_avx2,
+    gopalakrishnan_range_index_avx512,
+);
+
+bench_variants!(
+    grover_llorens_cycle_oscillator => GroverLlorensCycleOscillatorInputS; None;
+    grover_llorens_cycle_oscillator_scalar,
+    grover_llorens_cycle_oscillator_avx2,
+    grover_llorens_cycle_oscillator_avx512,
+);
+
+bench_variants!(
+    half_causal_estimator => HalfCausalEstimatorInputS; None;
+    half_causal_estimator_scalar,
+    half_causal_estimator_avx2,
+    half_causal_estimator_avx512,
+);
+
+bench_variants!(
     ui => UiInputS; None;
     ui_scalar,
     ui_avx2,
@@ -5193,6 +5903,55 @@ bench_variants!(
     dx_batch_avx512batch,
 );
 
+bench_variants!(
+    dx => DxInputS; Some(14);
+    dx_scalar,
+    dx_avx2,
+    dx_avx512,
+);
+
+bench_variants!(
+    dynamic_momentum_index => DynamicMomentumIndexInputS; Some(30);
+    dynamic_momentum_index_scalar,
+    dynamic_momentum_index_avx2,
+    dynamic_momentum_index_avx512,
+);
+
+bench_variants!(
+    ehlers_adaptive_cg => EhlersAdaptiveCgInputS; Some(100);
+    ehlers_adaptive_cg_scalar,
+    ehlers_adaptive_cg_avx2,
+    ehlers_adaptive_cg_avx512,
+);
+
+bench_variants!(
+    ehlers_adaptive_cyber_cycle => EhlersAdaptiveCyberCycleInputS; Some(3);
+    ehlers_adaptive_cyber_cycle_scalar,
+    ehlers_adaptive_cyber_cycle_avx2,
+    ehlers_adaptive_cyber_cycle_avx512,
+);
+
+bench_variants!(
+    ehlers_autocorrelation_periodogram => EhlersAutocorrelationPeriodogramInputS; Some(2);
+    ehlers_autocorrelation_periodogram_scalar,
+    ehlers_autocorrelation_periodogram_avx2,
+    ehlers_autocorrelation_periodogram_avx512,
+);
+
+bench_variants!(
+    ehlers_data_sampling_relative_strength_indicator => EhlersDataSamplingRelativeStrengthIndicatorInputS; Some(3);
+    ehlers_data_sampling_relative_strength_indicator_scalar,
+    ehlers_data_sampling_relative_strength_indicator_avx2,
+    ehlers_data_sampling_relative_strength_indicator_avx512,
+);
+
+bench_variants!(
+    ehlers_detrending_filter => EhlersDetrendingFilterInputS; Some(2);
+    ehlers_detrending_filter_scalar,
+    ehlers_detrending_filter_avx2,
+    ehlers_detrending_filter_avx512,
+);
+
 criterion_main!(
     benches_scalar,
     benches_safezonestop,
@@ -5216,8 +5975,11 @@ criterion_main!(
     benches_sar_batch,
     benches_stoch,
     benches_stoch_batch,
+    benches_fisher,
     benches_fisher_batch,
+    benches_fvg_positioning_average,
     benches_fvg_trailing_stop,
+    benches_garman_klass_volatility,
     benches_gatorosc,
     benches_halftrend,
     benches_halftrend_batch,
@@ -5297,7 +6059,14 @@ criterion_main!(
     benches_mfi_batch,
     benches_midprice_batch,
     benches_rsi_batch,
+    benches_dx,
     benches_dx_batch,
+    benches_dynamic_momentum_index,
+    benches_ehlers_adaptive_cg,
+    benches_ehlers_adaptive_cyber_cycle,
+    benches_ehlers_autocorrelation_periodogram,
+    benches_ehlers_data_sampling_relative_strength_indicator,
+    benches_ehlers_detrending_filter,
     benches_adx,
     benches_adx_batch,
     benches_adx_batch_dev_250,
@@ -5320,6 +6089,11 @@ criterion_main!(
     benches_yang_zhang_volatility,
     benches_mab,
     benches_eri,
+    benches_evasive_supertrend,
+    benches_ewma_volatility,
+    benches_exponential_trend,
+    benches_fibonacci_entry_bands,
+    benches_fibonacci_trailing_stop,
     benches_eri_batch,
     benches_zscore_batch,
     benches_yang_zhang_volatility_batch,
@@ -5344,6 +6118,12 @@ criterion_main!(
     benches_edcf,
     benches_edcf_batch,
     benches_ehlers_ecema,
+    benches_ehlers_fm_demodulator,
+    benches_ehlers_linear_extrapolation_predictor,
+    benches_ehlers_simple_cycle_indicator,
+    benches_ehlers_smoothed_adaptive_momentum,
+    benches_ehlers_undersampled_double_moving_average,
+    benches_elastic_volume_weighted_moving_average,
     benches_ehlers_ecema_batch,
     benches_ehlers_itrend,
     benches_ehlers_itrend_batch,
@@ -5353,6 +6133,9 @@ criterion_main!(
     benches_ehlers_kama,
     benches_ehlers_kama_batch,
     benches_ema,
+    benches_ema_deviation_corrected_t3,
+    benches_emd,
+    benches_emd_trend,
     benches_ema_batch,
     benches_epma,
     benches_epma_batch,
@@ -5363,6 +6146,11 @@ criterion_main!(
     benches_fwma_batch,
     benches_gaussian,
     benches_gaussian_batch,
+    benches_geometric_bias_oscillator,
+    benches_gmma_oscillator,
+    benches_gopalakrishnan_range_index,
+    benches_grover_llorens_cycle_oscillator,
+    benches_half_causal_estimator,
     benches_pivot,
     benches_pivot_batch,
     benches_highpass_2_pole,
@@ -5459,7 +6247,9 @@ criterion_main!(
     benches_wavetrend_batch,
     benches_dpo,
     benches_dpo_batch,
+    benches_forward_backward_exponential_oscillator,
     benches_fosc,
+    benches_fractal_dimension_index,
     benches_wto_batch,
     benches_nama_batch,
     benches_di_batch,
@@ -5486,6 +6276,7 @@ criterion_main!(
     benches_percentile_nearest_rank_batch,
     benches_ppo,
     benches_donchian,
+    benches_donchian_channel_width,
     benches_donchian_batch,
     benches_kurtosis,
     benches_kurtosis_batch,

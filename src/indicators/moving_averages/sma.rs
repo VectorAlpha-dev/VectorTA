@@ -42,7 +42,18 @@ impl<'a> AsRef<[f64]> for SmaInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             SmaData::Slice(slice) => slice,
-            SmaData::Candles { candles, source } => source_type(candles, source),
+            SmaData::Candles { candles, source } => match *source {
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -292,6 +303,10 @@ fn sma_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, o
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 sma_avx512(data, period, first, out);
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                sma_scalar(data, period, first, out);
             }
             _ => unreachable!(),
         }

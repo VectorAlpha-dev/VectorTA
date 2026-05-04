@@ -26,12 +26,26 @@ use std::convert::AsRef;
 use std::mem::ManuallyDrop;
 use thiserror::Error;
 
+#[inline(always)]
+fn advance_decline_line_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "close" => &candles.close,
+        "volume" => &candles.volume,
+        _ => source_type(candles, source),
+    }
+}
+
 impl<'a> AsRef<[f64]> for AdvanceDeclineLineInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             AdvanceDeclineLineData::Slice(slice) => slice,
-            AdvanceDeclineLineData::Candles { candles, source } => source_type(candles, source),
+            AdvanceDeclineLineData::Candles { candles, source } => {
+                advance_decline_line_source(candles, source)
+            }
         }
     }
 }
@@ -211,11 +225,6 @@ fn first_valid_value(data: &[f64]) -> usize {
 }
 
 #[inline(always)]
-fn count_valid_values(data: &[f64]) -> usize {
-    data.iter().filter(|v| v.is_finite()).count()
-}
-
-#[inline(always)]
 fn advance_decline_line_row(data: &[f64], out: &mut [f64]) {
     let mut started = false;
     let mut sum = 0.0;
@@ -251,7 +260,6 @@ fn advance_decline_line_prepare<'a>(
         return Err(AdvanceDeclineLineError::AllValuesNaN);
     }
 
-    let _valid = count_valid_values(data);
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other.to_non_batch(),
@@ -330,7 +338,7 @@ impl AdvanceDeclineLineBatchBuilder {
         candles: &Candles,
         source: &str,
     ) -> Result<AdvanceDeclineLineBatchOutput, AdvanceDeclineLineError> {
-        self.apply_slice(source_type(candles, source))
+        self.apply_slice(advance_decline_line_source(candles, source))
     }
 
     #[inline]

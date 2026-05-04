@@ -22,7 +22,7 @@ use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
-use std::mem::{ManuallyDrop, MaybeUninit};
+use std::mem::ManuallyDrop;
 use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for EwmaVolatilityInput<'a> {
@@ -30,8 +30,22 @@ impl<'a> AsRef<[f64]> for EwmaVolatilityInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             EwmaVolatilityData::Slice(slice) => slice,
-            EwmaVolatilityData::Candles { candles, source } => source_type(candles, source),
+            EwmaVolatilityData::Candles { candles, source } => {
+                ewma_volatility_source(candles, source)
+            }
         }
+    }
+}
+
+#[inline(always)]
+fn ewma_volatility_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "close" => &candles.close,
+        "volume" => &candles.volume,
+        _ => source_type(candles, source),
     }
 }
 
@@ -246,6 +260,61 @@ fn prepare_returns(data: &[f64]) -> Result<EwmaPrepared, EwmaVolatilityError> {
 }
 
 #[inline(always)]
+fn validate_ewma_data(data: &[f64]) -> Result<(), EwmaVolatilityError> {
+    if data.is_empty() {
+        return Err(EwmaVolatilityError::EmptyInputData);
+    }
+    if !data.iter().any(|v| !v.is_nan()) {
+        return Err(EwmaVolatilityError::AllValuesNaN);
+    }
+    Ok(())
+}
+
+#[inline(always)]
+fn valid_sq_return(prev: f64, curr: f64) -> Option<f64> {
+    if prev.is_finite() && curr.is_finite() && prev > 0.0 && curr > 0.0 {
+        let ret = (curr / prev).ln();
+        Some(ret * ret)
+    } else {
+        None
+    }
+}
+
+#[inline(always)]
+fn seed_ewma_single_pass(data: &[f64], period: usize) -> Result<(usize, f64), EwmaVolatilityError> {
+    let mut valid = 0usize;
+    let mut sum = 0.0;
+
+    for i in 1..data.len() {
+        if let Some(sq) = valid_sq_return(data[i - 1], data[i]) {
+            valid += 1;
+            sum += sq;
+            if valid == period {
+                return Ok((i, sum / period as f64));
+            }
+        }
+    }
+
+    Err(EwmaVolatilityError::NotEnoughValidData {
+        needed: period,
+        valid,
+    })
+}
+
+#[inline(always)]
+fn fill_row_single_pass(data: &[f64], seed_idx: usize, mut ema: f64, alpha: f64, out: &mut [f64]) {
+    let beta = 1.0 - alpha;
+
+    out[seed_idx] = ema.max(0.0).sqrt() * EWMA_SCALE;
+    for i in (seed_idx + 1)..out.len() {
+        if let Some(sq) = valid_sq_return(data[i - 1], data[i]) {
+            ema = beta.mul_add(ema, alpha * sq);
+        }
+        out[i] = ema.max(0.0).sqrt() * EWMA_SCALE;
+    }
+}
+
+#[inline(always)]
 fn fill_row_from_precomputed(
     prep: &EwmaPrepared,
     period: usize,
@@ -275,22 +344,6 @@ fn fill_row_from_precomputed(
     Ok(seed_idx)
 }
 
-#[inline(always)]
-fn ewma_prepare<'a>(
-    input: &'a EwmaVolatilityInput,
-    kernel: Kernel,
-) -> Result<(&'a [f64], usize, f64, Kernel, EwmaPrepared), EwmaVolatilityError> {
-    let data = input.as_ref();
-    let lambda = input.get_lambda();
-    let period = period_from_lambda(lambda)?;
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
-    let prep = prepare_returns(data)?;
-    Ok((data, period, alpha_from_period(period), chosen, prep))
-}
-
 #[inline]
 pub fn ewma_volatility(
     input: &EwmaVolatilityInput,
@@ -300,19 +353,15 @@ pub fn ewma_volatility(
 
 pub fn ewma_volatility_with_kernel(
     input: &EwmaVolatilityInput,
-    kernel: Kernel,
+    _kernel: Kernel,
 ) -> Result<EwmaVolatilityOutput, EwmaVolatilityError> {
-    let (data, period, alpha, _chosen, prep) = ewma_prepare(input, kernel)?;
-    let seed_idx = prep
-        .valid_indices
-        .get(period.saturating_sub(1))
-        .copied()
-        .ok_or(EwmaVolatilityError::NotEnoughValidData {
-            needed: period,
-            valid: prep.valid_values.len(),
-        })?;
+    let data = input.as_ref();
+    let period = period_from_lambda(input.get_lambda())?;
+    validate_ewma_data(data)?;
+    let alpha = alpha_from_period(period);
+    let (seed_idx, ema) = seed_ewma_single_pass(data, period)?;
     let mut out = alloc_with_nan_prefix(data.len(), seed_idx);
-    fill_row_from_precomputed(&prep, period, alpha, &mut out)?;
+    fill_row_single_pass(data, seed_idx, ema, alpha, &mut out);
     Ok(EwmaVolatilityOutput { values: out })
 }
 
@@ -328,9 +377,11 @@ pub fn ewma_volatility_into(
 pub fn ewma_volatility_into_slice(
     dst: &mut [f64],
     input: &EwmaVolatilityInput,
-    kernel: Kernel,
+    _kernel: Kernel,
 ) -> Result<(), EwmaVolatilityError> {
-    let (data, period, alpha, _chosen, prep) = ewma_prepare(input, kernel)?;
+    let data = input.as_ref();
+    let period = period_from_lambda(input.get_lambda())?;
+    validate_ewma_data(data)?;
     if dst.len() != data.len() {
         return Err(EwmaVolatilityError::OutputLengthMismatch {
             expected: data.len(),
@@ -338,7 +389,9 @@ pub fn ewma_volatility_into_slice(
         });
     }
     dst.fill(f64::NAN);
-    fill_row_from_precomputed(&prep, period, alpha, dst)?;
+    let alpha = alpha_from_period(period);
+    let (seed_idx, ema) = seed_ewma_single_pass(data, period)?;
+    fill_row_single_pass(data, seed_idx, ema, alpha, dst);
     Ok(())
 }
 
@@ -595,13 +648,14 @@ fn ewma_volatility_batch_inner(
 
     let mut buf_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &warmups);
+    {
+        let out: &mut [f64] = unsafe {
+            core::slice::from_raw_parts_mut(buf_mu.as_mut_ptr() as *mut f64, buf_mu.len())
+        };
+        ewma_volatility_batch_inner_into(data, sweep, kernel, parallel, out)?;
+    }
+
     let mut buf_guard = ManuallyDrop::new(buf_mu);
-    let out: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
-    };
-
-    ewma_volatility_batch_inner_into(data, sweep, kernel, parallel, out)?;
-
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,

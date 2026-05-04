@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
@@ -205,9 +205,9 @@ fn extract_hlc<'a>(
 ) -> Result<(&'a [f64], &'a [f64], &'a [f64]), RandomWalkIndexError> {
     let (high, low, close) = match &input.data {
         RandomWalkIndexData::Candles { candles } => (
-            source_type(candles, "high"),
-            source_type(candles, "low"),
-            source_type(candles, "close"),
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
         ),
         RandomWalkIndexData::Slices { high, low, close } => (*high, *low, *close),
     };
@@ -270,6 +270,94 @@ fn nz_history(src: &[f64], idx: usize, offset: usize) -> f64 {
 }
 
 #[inline(always)]
+unsafe fn nz_history_14_ptr(src: *const f64, idx: usize) -> f64 {
+    if idx >= DEFAULT_LENGTH {
+        let value = unsafe { *src.add(idx - DEFAULT_LENGTH) };
+        if value.is_finite() {
+            value
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    }
+}
+
+#[inline(always)]
+fn compute_random_walk_index_14_into(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    first: usize,
+    out_high: &mut [f64],
+    out_low: &mut [f64],
+) {
+    let n = close.len();
+    let warm = first + DEFAULT_LENGTH - 1;
+    let sqrt_length = (DEFAULT_LENGTH as f64).sqrt();
+    let alpha = 1.0 / DEFAULT_LENGTH as f64;
+    unsafe {
+        let high_ptr = high.as_ptr();
+        let low_ptr = low.as_ptr();
+        let close_ptr = close.as_ptr();
+        let out_high_ptr = out_high.as_mut_ptr();
+        let out_low_ptr = out_low.as_mut_ptr();
+        let mut prev_close = *close_ptr.add(first);
+        let mut sum_tr = *high_ptr.add(first) - *low_ptr.add(first);
+        let mut i = first + 1;
+
+        while i < warm {
+            let h = *high_ptr.add(i);
+            let l = *low_ptr.add(i);
+            let tr = (h - l)
+                .max((h - prev_close).abs())
+                .max((l - prev_close).abs());
+            sum_tr += tr;
+            prev_close = *close_ptr.add(i);
+            i += 1;
+        }
+
+        let h = *high_ptr.add(warm);
+        let l = *low_ptr.add(warm);
+        let tr = (h - l)
+            .max((h - prev_close).abs())
+            .max((l - prev_close).abs());
+        sum_tr += tr;
+        let mut atr = sum_tr / DEFAULT_LENGTH as f64;
+        let denom = atr * sqrt_length;
+        if denom.is_finite() && denom != 0.0 {
+            *out_high_ptr.add(warm) = (h - nz_history_14_ptr(low_ptr, warm)) / denom;
+            *out_low_ptr.add(warm) = (nz_history_14_ptr(high_ptr, warm) - l) / denom;
+        } else {
+            *out_high_ptr.add(warm) = f64::NAN;
+            *out_low_ptr.add(warm) = f64::NAN;
+        }
+        prev_close = *close_ptr.add(warm);
+        i = warm + 1;
+
+        while i < n {
+            let h = *high_ptr.add(i);
+            let l = *low_ptr.add(i);
+            let tr = (h - l)
+                .max((h - prev_close).abs())
+                .max((l - prev_close).abs());
+            atr = alpha.mul_add(tr - atr, atr);
+            let denom = atr * sqrt_length;
+            if denom.is_finite() && denom != 0.0 {
+                *out_high_ptr.add(i) = (h - nz_history_14_ptr(low_ptr, i)) / denom;
+                *out_low_ptr.add(i) = (nz_history_14_ptr(high_ptr, i) - l) / denom;
+            } else {
+                *out_high_ptr.add(i) = f64::NAN;
+                *out_low_ptr.add(i) = f64::NAN;
+            }
+
+            prev_close = *close_ptr.add(i);
+            i += 1;
+        }
+    }
+}
+
+#[inline(always)]
 fn compute_random_walk_index_into(
     high: &[f64],
     low: &[f64],
@@ -279,6 +367,11 @@ fn compute_random_walk_index_into(
     out_high: &mut [f64],
     out_low: &mut [f64],
 ) {
+    if length == DEFAULT_LENGTH {
+        compute_random_walk_index_14_into(high, low, close, first, out_high, out_low);
+        return;
+    }
+
     let n = close.len();
     let warm = first + length - 1;
     let sqrt_length = (length as f64).sqrt();
@@ -295,24 +388,12 @@ fn compute_random_walk_index_into(
             out_high[first] = (high[first] - nz_history(low, first, length)) / denom;
             out_low[first] = (nz_history(high, first, length) - low[first]) / denom;
         }
-    }
-
-    let mut i = first + 1;
-    while i < n {
-        let tr = (high[i] - low[i])
-            .max((high[i] - prev_close).abs())
-            .max((low[i] - prev_close).abs());
-
-        if i <= warm {
-            sum_tr += tr;
-            if i == warm {
-                atr = sum_tr / length as f64;
-            }
-        } else {
+        let mut i = first + 1;
+        while i < n {
+            let tr = (high[i] - low[i])
+                .max((high[i] - prev_close).abs())
+                .max((low[i] - prev_close).abs());
             atr = alpha.mul_add(tr - atr, atr);
-        }
-
-        if i >= warm {
             let denom = atr * sqrt_length;
             if denom.is_finite() && denom != 0.0 {
                 out_high[i] = (high[i] - nz_history(low, i, length)) / denom;
@@ -321,6 +402,51 @@ fn compute_random_walk_index_into(
                 out_high[i] = f64::NAN;
                 out_low[i] = f64::NAN;
             }
+
+            prev_close = close[i];
+            i += 1;
+        }
+        return;
+    }
+
+    let mut i = first + 1;
+    while i < warm {
+        let tr = (high[i] - low[i])
+            .max((high[i] - prev_close).abs())
+            .max((low[i] - prev_close).abs());
+        sum_tr += tr;
+        prev_close = close[i];
+        i += 1;
+    }
+
+    let tr = (high[warm] - low[warm])
+        .max((high[warm] - prev_close).abs())
+        .max((low[warm] - prev_close).abs());
+    sum_tr += tr;
+    atr = sum_tr / length as f64;
+    let denom = atr * sqrt_length;
+    if denom.is_finite() && denom != 0.0 {
+        out_high[warm] = (high[warm] - nz_history(low, warm, length)) / denom;
+        out_low[warm] = (nz_history(high, warm, length) - low[warm]) / denom;
+    } else {
+        out_high[warm] = f64::NAN;
+        out_low[warm] = f64::NAN;
+    }
+    prev_close = close[warm];
+    i = warm + 1;
+
+    while i < n {
+        let tr = (high[i] - low[i])
+            .max((high[i] - prev_close).abs())
+            .max((low[i] - prev_close).abs());
+        atr = alpha.mul_add(tr - atr, atr);
+        let denom = atr * sqrt_length;
+        if denom.is_finite() && denom != 0.0 {
+            out_high[i] = (high[i] - nz_history(low, i, length)) / denom;
+            out_low[i] = (nz_history(high, i, length) - low[i]) / denom;
+        } else {
+            out_high[i] = f64::NAN;
+            out_low[i] = f64::NAN;
         }
 
         prev_close = close[i];

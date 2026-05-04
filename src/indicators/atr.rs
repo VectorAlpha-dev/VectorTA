@@ -236,17 +236,7 @@ pub fn atr(input: &AtrInput) -> Result<AtrOutput, AtrError> {
 
 pub fn atr_with_kernel(input: &AtrInput, kernel: Kernel) -> Result<AtrOutput, AtrError> {
     let (high, low, close) = match &input.data {
-        AtrData::Candles { candles } => (
-            candles
-                .select_candle_field("high")
-                .map_err(|_| AtrError::NoCandlesAvailable)?,
-            candles
-                .select_candle_field("low")
-                .map_err(|_| AtrError::NoCandlesAvailable)?,
-            candles
-                .select_candle_field("close")
-                .map_err(|_| AtrError::NoCandlesAvailable)?,
-        ),
+        AtrData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
         AtrData::Slices { high, low, close } => {
             if high.len() != low.len() || low.len() != close.len() {
                 return Err(AtrError::InconsistentSliceLengths {

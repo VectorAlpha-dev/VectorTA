@@ -302,6 +302,10 @@ pub fn tsf_with_kernel(input: &TsfInput, kernel: Kernel) -> Result<TsfOutput, Ts
             Kernel::Avx2 | Kernel::Avx2Batch => tsf_avx2(data, period, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => tsf_avx512(data, period, first, &mut out),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                tsf_scalar(data, period, first, &mut out)
+            }
             _ => unreachable!(),
         }
     }
@@ -356,9 +360,9 @@ pub fn tsf_into_slice(dst: &mut [f64], input: &TsfInput, kern: Kernel) -> Result
     match chosen {
         Kernel::Scalar | Kernel::ScalarBatch => tsf_scalar(data, period, first, dst),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx2 | Kernel::Avx2Batch => unsafe { tsf_avx2(data, period, first, dst) },
+        Kernel::Avx2 | Kernel::Avx2Batch => tsf_scalar(data, period, first, dst),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx512 | Kernel::Avx512Batch => unsafe { tsf_avx512(data, period, first, dst) },
+        Kernel::Avx512 | Kernel::Avx512Batch => tsf_scalar(data, period, first, dst),
         #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
         Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
             tsf_scalar(data, period, first, dst)

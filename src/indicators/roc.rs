@@ -76,6 +76,22 @@ impl<'a> AsRef<[f64]> for RocInput<'a> {
     }
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+fn select_roc_auto_kernel(len: usize) -> Kernel {
+    match detect_best_kernel() {
+        Kernel::Avx512 if len < 1_000_000 => Kernel::Avx512,
+        Kernel::Avx512 | Kernel::Avx2 => Kernel::Avx2,
+        _ => Kernel::Scalar,
+    }
+}
+
+#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+#[inline(always)]
+fn select_roc_auto_kernel(_len: usize) -> Kernel {
+    Kernel::Scalar
+}
+
 impl<'a> RocInput<'a> {
     #[inline]
     pub fn from_candles(candles: &'a Candles, source: &'a str, params: RocParams) -> Self {
@@ -214,7 +230,7 @@ fn roc_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => select_roc_auto_kernel(len),
         k => k,
     };
     Ok((data, period, first, chosen))

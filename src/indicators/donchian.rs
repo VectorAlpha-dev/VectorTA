@@ -1,4 +1,4 @@
-use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 #[cfg(target_arch = "wasm32")]
 use crate::utilities::helpers::detect_wasm_kernel;
@@ -22,6 +22,14 @@ use wasm_bindgen::prelude::*;
 pub enum DonchianData<'a> {
     Candles { candles: &'a Candles },
     Slices { high: &'a [f64], low: &'a [f64] },
+}
+
+#[inline(always)]
+fn donchian_slices<'a>(data: &'a DonchianData<'a>) -> (&'a [f64], &'a [f64]) {
+    match data {
+        DonchianData::Candles { candles } => (candles.high.as_slice(), candles.low.as_slice()),
+        DonchianData::Slices { high, low } => (high, low),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -163,14 +171,7 @@ pub fn donchian_with_kernel(
     input: &DonchianInput,
     kernel: Kernel,
 ) -> Result<DonchianOutput, DonchianError> {
-    let (high, low): (&[f64], &[f64]) = match &input.data {
-        DonchianData::Candles { candles } => {
-            let high = source_type(candles, "high");
-            let low = source_type(candles, "low");
-            (high, low)
-        }
-        DonchianData::Slices { high, low } => (high, low),
-    };
+    let (high, low) = donchian_slices(&input.data);
 
     if high.is_empty() || low.is_empty() {
         return Err(DonchianError::EmptyInputData);
@@ -275,6 +276,152 @@ pub fn donchian_with_kernel(
 }
 
 #[inline]
+pub fn donchian_upper_with_kernel(
+    input: &DonchianInput,
+    kernel: Kernel,
+) -> Result<Vec<f64>, DonchianError> {
+    donchian_selected_with_kernel::<0>(input, kernel)
+}
+
+#[inline]
+pub fn donchian_middle_with_kernel(
+    input: &DonchianInput,
+    kernel: Kernel,
+) -> Result<Vec<f64>, DonchianError> {
+    donchian_selected_with_kernel::<1>(input, kernel)
+}
+
+#[inline]
+pub fn donchian_lower_with_kernel(
+    input: &DonchianInput,
+    kernel: Kernel,
+) -> Result<Vec<f64>, DonchianError> {
+    donchian_selected_with_kernel::<2>(input, kernel)
+}
+
+#[inline]
+fn donchian_selected_with_kernel<const OUT: u8>(
+    input: &DonchianInput,
+    kernel: Kernel,
+) -> Result<Vec<f64>, DonchianError> {
+    let (high, low) = donchian_slices(&input.data);
+
+    if high.is_empty() || low.is_empty() {
+        return Err(DonchianError::EmptyInputData);
+    }
+    if high.len() != low.len() {
+        return Err(DonchianError::MismatchedLength);
+    }
+
+    let first_valid_high = high.iter().position(|&x| !x.is_nan());
+    let first_valid_low = low.iter().position(|&x| !x.is_nan());
+    let first_valid_idx = match (first_valid_high, first_valid_low) {
+        (Some(h), Some(l)) => h.max(l),
+        _ => return Err(DonchianError::AllValuesNaN),
+    };
+
+    let len = high.len();
+    let period = input.get_period();
+    if period == 0 || period > len {
+        return Err(DonchianError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
+    if (len - first_valid_idx) < period {
+        return Err(DonchianError::NotEnoughValidData {
+            needed: period,
+            valid: len - first_valid_idx,
+        });
+    }
+
+    let warmup_period = first_valid_idx + period - 1;
+    let mut out = alloc_with_nan_prefix(len, warmup_period);
+
+    if period <= 32 {
+        donchian_selected_short::<OUT>(high, low, period, first_valid_idx, &mut out);
+        return Ok(out);
+    }
+
+    let full = donchian_with_kernel(input, kernel)?;
+    Ok(match OUT {
+        0 => full.upperband,
+        1 => full.middleband,
+        2 => full.lowerband,
+        _ => unreachable!(),
+    })
+}
+
+#[inline(always)]
+fn donchian_selected_short<const OUT: u8>(
+    high: &[f64],
+    low: &[f64],
+    period: usize,
+    first_valid: usize,
+    out: &mut [f64],
+) {
+    let n = high.len();
+    if n == 0 || period == 0 {
+        return;
+    }
+
+    let warmup = first_valid + period - 1;
+    unsafe {
+        let hp = high.as_ptr();
+        let lp = low.as_ptr();
+        let op = out.as_mut_ptr();
+        if period == 1 {
+            for i in warmup..n {
+                let h = *hp.add(i);
+                let l = *lp.add(i);
+                if h.is_nan() || l.is_nan() {
+                    *op.add(i) = f64::NAN;
+                } else {
+                    *op.add(i) = match OUT {
+                        0 => h,
+                        1 => (h - l).mul_add(0.5, l),
+                        2 => l,
+                        _ => unreachable!(),
+                    };
+                }
+            }
+            return;
+        }
+
+        for i in warmup..n {
+            let start = i + 1 - period;
+            let mut maxv = f64::NEG_INFINITY;
+            let mut minv = f64::INFINITY;
+            let mut has_nan = false;
+            for k in 0..period {
+                let h = *hp.add(start + k);
+                let l = *lp.add(start + k);
+                if h.is_nan() || l.is_nan() {
+                    has_nan = true;
+                    break;
+                }
+                if OUT != 2 && h > maxv {
+                    maxv = h;
+                }
+                if OUT != 0 && l < minv {
+                    minv = l;
+                }
+            }
+            if has_nan {
+                *op.add(i) = f64::NAN;
+            } else {
+                *op.add(i) = match OUT {
+                    0 => maxv,
+                    1 => (maxv - minv).mul_add(0.5, minv),
+                    2 => minv,
+                    _ => unreachable!(),
+                };
+            }
+        }
+    }
+}
+
+#[inline]
 pub fn donchian_scalar(
     high: &[f64],
     low: &[f64],
@@ -314,46 +461,6 @@ pub fn donchian_scalar(
                     *up.add(i) = h;
                     *lw.add(i) = l;
                     *mp.add(i) = (h - l).mul_add(0.5, l);
-                }
-            }
-        }
-        return;
-    }
-
-    if period <= 32 {
-        unsafe {
-            let hp = high.as_ptr();
-            let lp = low.as_ptr();
-            let up = upper.as_mut_ptr();
-            let mp = middle.as_mut_ptr();
-            let lw = lower.as_mut_ptr();
-            for i in warmup..n {
-                let start = i + 1 - period;
-                let mut maxv = f64::NEG_INFINITY;
-                let mut minv = f64::INFINITY;
-                let mut has_nan = false;
-                for k in 0..period {
-                    let h = *hp.add(start + k);
-                    let l = *lp.add(start + k);
-                    if h.is_nan() || l.is_nan() {
-                        has_nan = true;
-                        break;
-                    }
-                    if h > maxv {
-                        maxv = h;
-                    }
-                    if l < minv {
-                        minv = l;
-                    }
-                }
-                if has_nan {
-                    *up.add(i) = f64::NAN;
-                    *lw.add(i) = f64::NAN;
-                    *mp.add(i) = f64::NAN;
-                } else {
-                    *up.add(i) = maxv;
-                    *lw.add(i) = minv;
-                    *mp.add(i) = (maxv - minv).mul_add(0.5, minv);
                 }
             }
         }
@@ -526,7 +633,7 @@ pub fn donchian_avx512(
     middle: &mut [f64],
     lower: &mut [f64],
 ) {
-    donchian_scalar(high, low, period, first_valid, upper, middle, lower)
+    donchian_avx2(high, low, period, first_valid, upper, middle, lower)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -550,14 +657,7 @@ pub fn donchian_into_slice(
     input: &DonchianInput,
     kern: Kernel,
 ) -> Result<(), DonchianError> {
-    let (high, low): (&[f64], &[f64]) = match &input.data {
-        DonchianData::Candles { candles } => {
-            let high = source_type(candles, "high");
-            let low = source_type(candles, "low");
-            (high, low)
-        }
-        DonchianData::Slices { high, low } => (high, low),
-    };
+    let (high, low) = donchian_slices(&input.data);
 
     if high.is_empty() || low.is_empty() {
         return Err(DonchianError::EmptyInputData);
@@ -754,9 +854,7 @@ impl DonchianBatchBuilder {
             .apply_slices(high, low)
     }
     pub fn apply_candles(self, c: &Candles) -> Result<DonchianBatchOutput, DonchianError> {
-        let high = source_type(c, "high");
-        let low = source_type(c, "low");
-        self.apply_slices(high, low)
+        self.apply_slices(&c.high, &c.low)
     }
     pub fn with_default_candles(c: &Candles) -> Result<DonchianBatchOutput, DonchianError> {
         DonchianBatchBuilder::new()
@@ -1631,6 +1729,39 @@ mod tests {
                 i
             );
             assert!(eq(expected.lowerband[i], lo[i]), "lower mismatch at {}", i);
+        }
+    }
+
+    #[test]
+    fn test_donchian_selected_outputs_match_api() {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path).expect("failed to load candles");
+        let input = DonchianInput::with_default_candles(&candles);
+        let expected = donchian(&input).expect("baseline donchian failed");
+        let upper = donchian_upper_with_kernel(&input, Kernel::Scalar).expect("upper failed");
+        let middle = donchian_middle_with_kernel(&input, Kernel::Scalar).expect("middle failed");
+        let lower = donchian_lower_with_kernel(&input, Kernel::Scalar).expect("lower failed");
+
+        let eq = |a: f64, b: f64| (a.is_nan() && b.is_nan()) || (a == b);
+        assert_eq!(expected.upperband.len(), upper.len());
+        assert_eq!(expected.middleband.len(), middle.len());
+        assert_eq!(expected.lowerband.len(), lower.len());
+        for i in 0..upper.len() {
+            assert!(
+                eq(expected.upperband[i], upper[i]),
+                "upper mismatch at {}",
+                i
+            );
+            assert!(
+                eq(expected.middleband[i], middle[i]),
+                "middle mismatch at {}",
+                i
+            );
+            assert!(
+                eq(expected.lowerband[i], lower[i]),
+                "lower mismatch at {}",
+                i
+            );
         }
     }
 

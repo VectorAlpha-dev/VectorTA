@@ -187,6 +187,43 @@ pub fn marketefi(input: &MarketefiInput) -> Result<MarketefiOutput, MarketefiErr
 }
 
 #[inline(always)]
+fn marketefi_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "close" => &candles.close,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
+    }
+}
+
+#[inline(always)]
+fn marketefi_first_valid(high: &[f64], low: &[f64], volume: &[f64]) -> Option<usize> {
+    let len = high.len();
+    unsafe {
+        let hp = high.as_ptr();
+        let lp = low.as_ptr();
+        let vp = volume.as_ptr();
+        let mut i = 0usize;
+        while i < len {
+            let h = *hp.add(i);
+            let l = *lp.add(i);
+            let v = *vp.add(i);
+            if !(h.is_nan() || l.is_nan() || v.is_nan()) {
+                return Some(i);
+            }
+            i += 1;
+        }
+    }
+    None
+}
+
+#[inline(always)]
 fn marketefi_prepare<'a>(
     input: &'a MarketefiInput<'a>,
     kernel: Kernel,
@@ -198,9 +235,9 @@ fn marketefi_prepare<'a>(
             source_low,
             source_volume,
         } => (
-            source_type(candles, source_high),
-            source_type(candles, source_low),
-            source_type(candles, source_volume),
+            marketefi_source(candles, source_high),
+            marketefi_source(candles, source_low),
+            marketefi_source(candles, source_volume),
         ),
         MarketefiData::Slices { high, low, volume } => (*high, *low, *volume),
     };
@@ -213,14 +250,7 @@ fn marketefi_prepare<'a>(
     }
 
     let len = high.len();
-    let first = (0..len)
-        .find(|&i| {
-            let h = high[i];
-            let l = low[i];
-            let v = volume[i];
-            !(h.is_nan() || l.is_nan() || v.is_nan())
-        })
-        .ok_or(MarketefiError::AllValuesNaN)?;
+    let first = marketefi_first_valid(high, low, volume).ok_or(MarketefiError::AllValuesNaN)?;
 
     let chosen = match kernel {
         Kernel::Auto => match detect_best_kernel() {

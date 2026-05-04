@@ -160,16 +160,18 @@ pub fn kdj(input: &KdjInput) -> Result<KdjOutput, KdjError> {
 
 pub fn kdj_with_kernel(input: &KdjInput, kernel: Kernel) -> Result<KdjOutput, KdjError> {
     let (high, low, close): (&[f64], &[f64], &[f64]) = match &input.data {
-        KdjData::Candles { candles } => (
-            source_type(candles, "high"),
-            source_type(candles, "low"),
-            source_type(candles, "close"),
-        ),
+        KdjData::Candles { candles } => (&candles.high, &candles.low, &candles.close),
         KdjData::Slices { high, low, close } => (high, low, close),
     };
 
     if high.is_empty() || low.is_empty() || close.is_empty() {
         return Err(KdjError::EmptyInputData);
+    }
+    if high.len() != low.len() || high.len() != close.len() {
+        return Err(KdjError::BufferSizeMismatch {
+            expected: high.len(),
+            got: low.len().min(close.len()),
+        });
     }
 
     let fast_k_period = input.get_fast_k_period();
@@ -211,20 +213,10 @@ pub fn kdj_with_kernel(input: &KdjInput, kernel: Kernel) -> Result<KdjOutput, Kd
         });
     }
 
-    let mut chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
+    let chosen = match kernel {
+        Kernel::Auto => Kernel::Scalar,
+        other => other.to_non_batch(),
     };
-
-    if matches!(kernel, Kernel::Auto)
-        && fast_k_period == 9
-        && slow_k_period == 3
-        && slow_d_period == 3
-        && slow_k_ma_type.eq_ignore_ascii_case("sma")
-        && slow_d_ma_type.eq_ignore_ascii_case("sma")
-    {
-        chosen = Kernel::Scalar;
-    }
 
     unsafe {
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -280,7 +272,17 @@ pub fn kdj_with_kernel(input: &KdjInput, kernel: Kernel) -> Result<KdjOutput, Kd
                 slow_d_ma_type,
                 first_valid_idx,
             ),
-            _ => unreachable!(),
+            _ => kdj_scalar(
+                high,
+                low,
+                close,
+                fast_k_period,
+                slow_k_period,
+                slow_k_ma_type,
+                slow_d_period,
+                slow_d_ma_type,
+                first_valid_idx,
+            ),
         }
     }
 }
@@ -345,15 +347,17 @@ pub fn kdj_into_slices(
     kern: Kernel,
 ) -> Result<(), KdjError> {
     let (high, low, close) = match &input.data {
-        KdjData::Candles { candles } => (
-            source_type(candles, "high"),
-            source_type(candles, "low"),
-            source_type(candles, "close"),
-        ),
+        KdjData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
         KdjData::Slices { high, low, close } => (*high, *low, *close),
     };
     if high.is_empty() || low.is_empty() || close.is_empty() {
         return Err(KdjError::EmptyInputData);
+    }
+    if high.len() != low.len() || high.len() != close.len() {
+        return Err(KdjError::BufferSizeMismatch {
+            expected: high.len(),
+            got: low.len().min(close.len()),
+        });
     }
     let len = high.len();
     if k_out.len() != len {
@@ -415,8 +419,8 @@ pub fn kdj_into_slices(
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
-        k => k,
+        Kernel::Auto => Kernel::Scalar,
+        k => k.to_non_batch(),
     };
 
     match chosen {
@@ -469,6 +473,9 @@ fn kdj_compute_into_scalar(
 
     let sma_k = slow_k_ma.eq_ignore_ascii_case("sma");
     let sma_d = slow_d_ma.eq_ignore_ascii_case("sma");
+    if sma_k && sma_d && fast_k == 9 && slow_k == 3 && slow_d == 3 {
+        return kdj_default_sma_9_3_3_into(high, low, close, first, k_out, d_out, j_out);
+    }
     if sma_k && sma_d {
         for i in 0..k_warm.min(len) {
             k_out[i] = f64::NAN;
@@ -843,6 +850,172 @@ fn kdj_compute_into_scalar(
             3.0 * k_out[i] - 2.0 * d_out[i]
         };
     }
+    Ok(())
+}
+
+#[inline]
+fn kdj_default_sma_9_3_3_into(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    first: usize,
+    k_out: &mut [f64],
+    d_out: &mut [f64],
+    j_out: &mut [f64],
+) -> Result<(), KdjError> {
+    let len = high.len();
+    let stoch_warm = first + 8;
+    let k_warm = stoch_warm + 2;
+    let d_warm = k_warm + 2;
+
+    for i in 0..k_warm.min(len) {
+        k_out[i] = f64::NAN;
+    }
+    for i in 0..d_warm.min(len) {
+        d_out[i] = f64::NAN;
+        j_out[i] = f64::NAN;
+    }
+
+    let mut max_idx = [0usize; 10];
+    let mut max_val = [0.0f64; 10];
+    let mut min_idx = [0usize; 10];
+    let mut min_val = [0.0f64; 10];
+    let (mut max_head, mut max_tail, mut max_cnt) = (0usize, 0usize, 0usize);
+    let (mut min_head, mut min_tail, mut min_cnt) = (0usize, 0usize, 0usize);
+
+    let mut stoch_ring = [f64::NAN; 3];
+    let mut sum_k = 0.0f64;
+    let mut cnt_k: usize = 0;
+
+    let mut k_ring = [f64::NAN; 3];
+    let mut sum_d = 0.0f64;
+    let mut cnt_d: usize = 0;
+
+    let mut pos_k = stoch_warm % 3;
+    let mut pos_d = k_warm % 3;
+
+    let mut i = first;
+    while i < len {
+        let hi = unsafe { *high.get_unchecked(i) };
+        while max_cnt > 0 {
+            let back = if max_tail == 0 { 9 } else { max_tail - 1 };
+            if max_val[back] <= hi {
+                max_tail = back;
+                max_cnt -= 1;
+            } else {
+                break;
+            }
+        }
+        max_val[max_tail] = hi;
+        max_idx[max_tail] = i;
+        max_tail += 1;
+        if max_tail == 10 {
+            max_tail = 0;
+        }
+        max_cnt += 1;
+        while max_cnt > 0 && max_idx[max_head] + 9 <= i {
+            max_head += 1;
+            if max_head == 10 {
+                max_head = 0;
+            }
+            max_cnt -= 1;
+        }
+
+        let lo = unsafe { *low.get_unchecked(i) };
+        while min_cnt > 0 {
+            let back = if min_tail == 0 { 9 } else { min_tail - 1 };
+            if min_val[back] >= lo {
+                min_tail = back;
+                min_cnt -= 1;
+            } else {
+                break;
+            }
+        }
+        min_val[min_tail] = lo;
+        min_idx[min_tail] = i;
+        min_tail += 1;
+        if min_tail == 10 {
+            min_tail = 0;
+        }
+        min_cnt += 1;
+        while min_cnt > 0 && min_idx[min_head] + 9 <= i {
+            min_head += 1;
+            if min_head == 10 {
+                min_head = 0;
+            }
+            min_cnt -= 1;
+        }
+
+        if i >= stoch_warm {
+            let hh = max_val[max_head];
+            let ll = min_val[min_head];
+            let denom = hh - ll;
+            let stoch_i = if denom == 0.0 || denom.is_nan() {
+                f64::NAN
+            } else {
+                let c = unsafe { *close.get_unchecked(i) };
+                100.0 * ((c - ll) / denom)
+            };
+
+            let old_st = stoch_ring[pos_k];
+            if !old_st.is_nan() {
+                sum_k -= old_st;
+                cnt_k -= 1;
+            }
+            stoch_ring[pos_k] = stoch_i;
+            if !stoch_i.is_nan() {
+                sum_k += stoch_i;
+                cnt_k += 1;
+            }
+            pos_k += 1;
+            if pos_k == 3 {
+                pos_k = 0;
+            }
+
+            if i >= k_warm {
+                let k_val = if cnt_k > 0 {
+                    sum_k / (cnt_k as f64)
+                } else {
+                    f64::NAN
+                };
+                unsafe { *k_out.get_unchecked_mut(i) = k_val };
+
+                let old_k = k_ring[pos_d];
+                if !old_k.is_nan() {
+                    sum_d -= old_k;
+                    cnt_d -= 1;
+                }
+                k_ring[pos_d] = k_val;
+                if !k_val.is_nan() {
+                    sum_d += k_val;
+                    cnt_d += 1;
+                }
+                pos_d += 1;
+                if pos_d == 3 {
+                    pos_d = 0;
+                }
+
+                if i >= d_warm {
+                    let d_val = if cnt_d > 0 {
+                        sum_d / (cnt_d as f64)
+                    } else {
+                        f64::NAN
+                    };
+                    unsafe {
+                        *d_out.get_unchecked_mut(i) = d_val;
+                        *j_out.get_unchecked_mut(i) = if k_val.is_nan() || d_val.is_nan() {
+                            f64::NAN
+                        } else {
+                            3.0 * k_val - 2.0 * d_val
+                        };
+                    }
+                }
+            }
+        }
+
+        i += 1;
+    }
+
     Ok(())
 }
 

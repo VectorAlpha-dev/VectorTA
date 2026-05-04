@@ -28,9 +28,7 @@ use crate::utilities::helpers::{
 use crate::utilities::kernel_validation::validate_kernel;
 
 use crate::indicators::cci::{cci, cci_into_slice, CciInput, CciParams, CciStream};
-use crate::indicators::moving_averages::ema::{
-    ema, ema_into_slice, EmaInput, EmaParams, EmaStream,
-};
+use crate::indicators::moving_averages::ema::{EmaParams, EmaStream};
 use crate::indicators::moving_averages::smma::{smma, smma_into_slice, SmmaInput, SmmaParams};
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -47,6 +45,21 @@ use thiserror::Error;
 #[inline(always)]
 fn fmadd(a: f64, b: f64, c: f64) -> f64 {
     a.mul_add(b, c)
+}
+
+#[inline(always)]
+fn cci_cycle_candle_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    if source.eq_ignore_ascii_case("close") {
+        &candles.close
+    } else {
+        source_type(candles, source)
+    }
+}
+
+#[inline(always)]
+fn cci_cycle_is_finite_fast(x: f64) -> bool {
+    const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
+    (x.to_bits() & EXP_MASK) != EXP_MASK
 }
 
 #[derive(Clone, Debug)]
@@ -115,7 +128,7 @@ impl<'a> AsRef<[f64]> for CciCycleInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             CciCycleData::Slice(slice) => slice,
-            CciCycleData::Candles { candles, source } => source_type(candles, source),
+            CciCycleData::Candles { candles, source } => cci_cycle_candle_source(candles, source),
         }
     }
 }
@@ -330,26 +343,11 @@ pub fn cci_cycle_with_kernel(
     );
     cci_into_slice(&mut work, &ci, chosen).map_err(|e| CciCycleError::CciError(e.to_string()))?;
 
-    let half = (length + 1) / 2;
-    let mut ema_s = alloc_with_nan_prefix(data.len(), first + half - 1);
-    let mut ema_l = alloc_with_nan_prefix(data.len(), first + length - 1);
-
-    let eis = EmaInput::from_slice(&work, EmaParams { period: Some(half) });
-    ema_into_slice(&mut ema_s, &eis, chosen).map_err(|e| CciCycleError::EmaError(e.to_string()))?;
-
-    let eil = EmaInput::from_slice(
-        &work,
-        EmaParams {
-            period: Some(length),
-        },
-    );
-    ema_into_slice(&mut ema_l, &eil, chosen).map_err(|e| CciCycleError::EmaError(e.to_string()))?;
+    cci_cycle_double_ema_in_place(&mut work, length, first);
 
     let mut out = alloc_with_nan_prefix(data.len(), first + length * 4);
 
-    cci_cycle_compute_from_parts(
-        data, length, factor, first, chosen, &ema_s, &ema_l, &mut work, &mut out,
-    )?;
+    cci_cycle_compute_from_parts(data, length, factor, first, chosen, &mut work, &mut out)?;
 
     Ok(CciCycleOutput { values: out })
 }
@@ -378,29 +376,14 @@ pub fn cci_cycle_into_slice(
     );
     cci_into_slice(&mut work, &ci, chosen).map_err(|e| CciCycleError::CciError(e.to_string()))?;
 
-    let half = (length + 1) / 2;
-    let mut ema_s = alloc_with_nan_prefix(dst.len(), first + half - 1);
-    let mut ema_l = alloc_with_nan_prefix(dst.len(), first + length - 1);
-
-    let eis = EmaInput::from_slice(&work, EmaParams { period: Some(half) });
-    ema_into_slice(&mut ema_s, &eis, chosen).map_err(|e| CciCycleError::EmaError(e.to_string()))?;
-
-    let eil = EmaInput::from_slice(
-        &work,
-        EmaParams {
-            period: Some(length),
-        },
-    );
-    ema_into_slice(&mut ema_l, &eil, chosen).map_err(|e| CciCycleError::EmaError(e.to_string()))?;
+    cci_cycle_double_ema_in_place(&mut work, length, first);
 
     let warm = (first + length * 4).min(dst.len());
     for v in &mut dst[..warm] {
         *v = f64::NAN;
     }
 
-    cci_cycle_compute_from_parts(
-        data, length, factor, first, chosen, &ema_s, &ema_l, &mut work, dst,
-    )?;
+    cci_cycle_compute_from_parts(data, length, factor, first, chosen, &mut work, dst)?;
 
     Ok(())
 }
@@ -450,11 +433,62 @@ fn cci_cycle_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => detect_best_kernel(),
         k => k,
     };
 
     Ok((data, length, factor, first, chosen))
+}
+
+#[inline(always)]
+fn cci_cycle_double_ema_in_place(work: &mut [f64], length: usize, first: usize) {
+    let len = work.len();
+    let start = first + length - 1;
+    if start >= len {
+        return;
+    }
+
+    let half = (length + 1) / 2;
+    let alpha_s = 2.0 / (half as f64 + 1.0);
+    let beta_s = 1.0 - alpha_s;
+    let alpha_l = 2.0 / (length as f64 + 1.0);
+    let beta_l = 1.0 - alpha_l;
+
+    let mut mean_s = work[start];
+    let mut mean_l = mean_s;
+    work[start] = mean_s;
+    let mut count_s = 1usize;
+    let mut count_l = 1usize;
+    let warm_s = (start + half).min(len);
+    let warm_l = (start + length).min(len);
+
+    let mut i = start + 1;
+    while i < len {
+        let x = work[i];
+
+        if i < warm_s {
+            if cci_cycle_is_finite_fast(x) {
+                count_s += 1;
+                let vc = count_s as f64;
+                mean_s = ((vc - 1.0) * mean_s + x) / vc;
+            }
+        } else if cci_cycle_is_finite_fast(x) {
+            mean_s = beta_s.mul_add(mean_s, alpha_s * x);
+        }
+
+        if i < warm_l {
+            if cci_cycle_is_finite_fast(x) {
+                count_l += 1;
+                let vc = count_l as f64;
+                mean_l = ((vc - 1.0) * mean_l + x) / vc;
+            }
+        } else if cci_cycle_is_finite_fast(x) {
+            mean_l = beta_l.mul_add(mean_l, alpha_l * x);
+        }
+
+        work[i] = mean_s + mean_s - mean_l;
+        i += 1;
+    }
 }
 
 #[inline(always)]
@@ -464,8 +498,6 @@ fn cci_cycle_compute_from_parts(
     factor: f64,
     first: usize,
     kernel: Kernel,
-    ema_short: &[f64],
-    ema_long: &[f64],
     work: &mut [f64],
     out: &mut [f64],
 ) -> Result<(), CciCycleError> {
@@ -476,21 +508,6 @@ fn cci_cycle_compute_from_parts(
     for i in 0..warm_lim {
         work[i] = f64::NAN;
     }
-    if warm_lim < len {
-        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        unsafe {
-            match kernel {
-                Kernel::Avx512 => double_ema_avx512(work, ema_short, ema_long, warm_lim),
-                Kernel::Avx2 => double_ema_avx2(work, ema_short, ema_long, warm_lim),
-                _ => double_ema_scalar(work, ema_short, ema_long, warm_lim),
-            }
-        }
-        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-        {
-            double_ema_scalar(work, ema_short, ema_long, warm_lim);
-        }
-    }
-
     let smma_p = ((length as f64).sqrt().round() as usize).max(1);
     let sm_warm = first + smma_p - 1;
     let mut ccis = alloc_with_nan_prefix(len, sm_warm);

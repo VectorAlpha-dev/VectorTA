@@ -55,6 +55,12 @@ pub struct HistoricalVolatilityPercentileOutput {
     pub hvp_sma: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoricalVolatilityPercentileOutputField {
+    Hvp,
+    HvpSma,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -506,6 +512,39 @@ pub fn historical_volatility_percentile_into_slice(
     dst_hvp_sma.fill(f64::NAN);
     let returns = build_returns(data);
     hvp_compute_into(&returns, length, annual_length, first, dst_hvp, dst_hvp_sma);
+    Ok(())
+}
+
+#[inline]
+pub fn historical_volatility_percentile_output_into_slice(
+    out: &mut [f64],
+    input: &HistoricalVolatilityPercentileInput,
+    kernel: Kernel,
+    field: HistoricalVolatilityPercentileOutputField,
+) -> Result<(), HistoricalVolatilityPercentileError> {
+    let (data, length, annual_length, first, _chosen) = hvp_prepare(input, kernel)?;
+    if out.len() != data.len() {
+        return Err(HistoricalVolatilityPercentileError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
+        });
+    }
+    out.fill(f64::NAN);
+    let returns = build_returns(data);
+    match field {
+        HistoricalVolatilityPercentileOutputField::Hvp => {
+            let mut hvp_sma = alloc_with_nan_prefix(
+                data.len(),
+                hvp_sma_warmup(length, annual_length, first).min(data.len()),
+            );
+            hvp_compute_into(&returns, length, annual_length, first, out, &mut hvp_sma);
+        }
+        HistoricalVolatilityPercentileOutputField::HvpSma => {
+            let mut hvp =
+                alloc_with_nan_prefix(data.len(), hvp_warmup(length, annual_length, first));
+            hvp_compute_into(&returns, length, annual_length, first, &mut hvp, out);
+        }
+    }
     Ok(())
 }
 

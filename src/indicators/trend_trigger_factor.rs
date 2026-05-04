@@ -249,6 +249,99 @@ fn calc_ttf(hh: f64, ll: f64, hist_hh: f64, hist_ll: f64) -> f64 {
     }
 }
 
+#[derive(Clone, Debug)]
+struct IndexMonoQueue {
+    idx: Vec<usize>,
+    head: usize,
+    tail: usize,
+    count: usize,
+}
+
+impl IndexMonoQueue {
+    fn new(window: usize) -> Self {
+        Self {
+            idx: vec![0; window.max(1) + 1],
+            head: 0,
+            tail: 0,
+            count: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn cap(&self) -> usize {
+        self.idx.len()
+    }
+
+    #[inline(always)]
+    fn back_pos(&self) -> usize {
+        if self.tail == 0 {
+            self.cap() - 1
+        } else {
+            self.tail - 1
+        }
+    }
+
+    #[inline(always)]
+    fn evict(&mut self, window_start: usize) {
+        while self.count > 0 && self.idx[self.head] < window_start {
+            self.head += 1;
+            if self.head == self.cap() {
+                self.head = 0;
+            }
+            self.count -= 1;
+        }
+    }
+
+    #[inline(always)]
+    fn push_max(&mut self, idx: usize, values: &[f64]) {
+        let value = values[idx];
+        while self.count > 0 {
+            let back = self.back_pos();
+            if values[self.idx[back]] <= value {
+                self.tail = back;
+                self.count -= 1;
+            } else {
+                break;
+            }
+        }
+        self.idx[self.tail] = idx;
+        self.tail += 1;
+        if self.tail == self.cap() {
+            self.tail = 0;
+        }
+        self.count += 1;
+    }
+
+    #[inline(always)]
+    fn push_min(&mut self, idx: usize, values: &[f64]) {
+        let value = values[idx];
+        while self.count > 0 {
+            let back = self.back_pos();
+            if values[self.idx[back]] >= value {
+                self.tail = back;
+                self.count -= 1;
+            } else {
+                break;
+            }
+        }
+        self.idx[self.tail] = idx;
+        self.tail += 1;
+        if self.tail == self.cap() {
+            self.tail = 0;
+        }
+        self.count += 1;
+    }
+
+    #[inline(always)]
+    fn front(&self) -> Option<usize> {
+        if self.count == 0 {
+            None
+        } else {
+            Some(self.idx[self.head])
+        }
+    }
+}
+
 #[inline(always)]
 fn compute_trend_trigger_factor_into(
     high: &[f64],
@@ -258,10 +351,12 @@ fn compute_trend_trigger_factor_into(
     out: &mut [f64],
 ) {
     let warm = first + length - 1;
-    let mut maxq: VecDeque<usize> = VecDeque::with_capacity(length + 1);
-    let mut minq: VecDeque<usize> = VecDeque::with_capacity(length + 1);
-    let mut hh_history: VecDeque<f64> = VecDeque::with_capacity(length + 1);
-    let mut ll_history: VecDeque<f64> = VecDeque::with_capacity(length + 1);
+    let mut maxq = IndexMonoQueue::new(length);
+    let mut minq = IndexMonoQueue::new(length);
+    let mut hh_history = vec![0.0f64; length];
+    let mut ll_history = vec![0.0f64; length];
+    let mut hist_head = 0usize;
+    let mut hist_len = 0usize;
 
     for i in first..high.len() {
         let h = high[i];
@@ -275,61 +370,38 @@ fn compute_trend_trigger_factor_into(
 
         let window_start = i.saturating_add(1).saturating_sub(length).max(first);
 
-        while let Some(&front) = maxq.front() {
-            if front < window_start {
-                maxq.pop_front();
-            } else {
-                break;
-            }
-        }
-        while let Some(&front) = minq.front() {
-            if front < window_start {
-                minq.pop_front();
-            } else {
-                break;
-            }
-        }
-
-        while let Some(&back) = maxq.back() {
-            if high[back] <= h {
-                maxq.pop_back();
-            } else {
-                break;
-            }
-        }
-        maxq.push_back(i);
-
-        while let Some(&back) = minq.back() {
-            if low[back] >= l {
-                minq.pop_back();
-            } else {
-                break;
-            }
-        }
-        minq.push_back(i);
+        maxq.evict(window_start);
+        minq.evict(window_start);
+        maxq.push_max(i, high);
+        minq.push_min(i, low);
 
         if i >= warm {
-            let hh = high[*maxq.front().unwrap()];
-            let ll = low[*minq.front().unwrap()];
-            let hist_hh = if hh_history.len() == length {
-                hh_history.front().copied().unwrap_or(0.0)
+            let hh = high[maxq.front().unwrap()];
+            let ll = low[minq.front().unwrap()];
+            let hist_hh = if hist_len == length {
+                hh_history[hist_head]
             } else {
                 0.0
             };
-            let hist_ll = if ll_history.len() == length {
-                ll_history.front().copied().unwrap_or(0.0)
+            let hist_ll = if hist_len == length {
+                ll_history[hist_head]
             } else {
                 0.0
             };
             out[i] = calc_ttf(hh, ll, hist_hh, hist_ll);
 
-            hh_history.push_back(hh);
-            ll_history.push_back(ll);
-            if hh_history.len() > length {
-                hh_history.pop_front();
-            }
-            if ll_history.len() > length {
-                ll_history.pop_front();
+            if hist_len < length {
+                let pos = (hist_head + hist_len) % length;
+                hh_history[pos] = hh;
+                ll_history[pos] = ll;
+                hist_len += 1;
+            } else {
+                hh_history[hist_head] = hh;
+                ll_history[hist_head] = ll;
+                hist_head += 1;
+                if hist_head == length {
+                    hist_head = 0;
+                }
             }
         }
     }

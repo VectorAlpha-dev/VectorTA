@@ -53,6 +53,15 @@ pub struct HyperTrendOutput {
     pub changed: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HyperTrendOutputField {
+    Upper,
+    Average,
+    Lower,
+    Trend,
+    Changed,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -448,6 +457,68 @@ fn hypertrend_row_scalar(
     }
 }
 
+#[inline(always)]
+fn hypertrend_selected_row_scalar(
+    high: &[f64],
+    low: &[f64],
+    source: &[f64],
+    factor: f64,
+    slope: f64,
+    width_ratio: f64,
+    atr_values: &[f64],
+    field: HyperTrendOutputField,
+    out: &mut [f64],
+) {
+    let mut initialized = false;
+    let mut avg = 0.0;
+    let mut hold = 0.0;
+    let mut os = 1.0;
+
+    for i in 0..source.len() {
+        let src = source[i];
+        if !valid_bar(high[i], low[i], src) {
+            out[i] = f64::NAN;
+            initialized = false;
+            avg = 0.0;
+            hold = 0.0;
+            os = 1.0;
+            continue;
+        }
+
+        let (upper, average, lower, trend, changed) = if !initialized {
+            avg = src;
+            hold = 0.0;
+            os = 1.0;
+            initialized = true;
+            (avg, avg, avg, os, 0.0)
+        } else {
+            let atr = atr_values[i] * factor;
+            let next_avg = if (src - avg).abs() > atr {
+                0.5 * (src + avg)
+            } else {
+                avg + os * (hold / factor / slope)
+            };
+            let next_os = pine_sign(next_avg - avg);
+            let changed = if next_os != os { 1.0 } else { 0.0 };
+            let next_hold = if changed != 0.0 { atr } else { hold };
+            let upper = next_avg + width_ratio * next_hold;
+            let lower = next_avg - width_ratio * next_hold;
+            avg = next_avg;
+            hold = next_hold;
+            os = next_os;
+            (upper, next_avg, lower, next_os, changed)
+        };
+
+        out[i] = match field {
+            HyperTrendOutputField::Upper => upper,
+            HyperTrendOutputField::Average => average,
+            HyperTrendOutputField::Lower => lower,
+            HyperTrendOutputField::Trend => trend,
+            HyperTrendOutputField::Changed => changed,
+        };
+    }
+}
+
 #[inline]
 pub fn hypertrend(input: &HyperTrendInput) -> Result<HyperTrendOutput, HyperTrendError> {
     hypertrend_with_kernel(input, Kernel::Auto)
@@ -552,6 +623,44 @@ pub fn hypertrend_into_slice(
         out_lower,
         out_trend,
         out_changed,
+    );
+    Ok(())
+}
+
+#[inline]
+pub fn hypertrend_output_into_slice(
+    out: &mut [f64],
+    input: &HyperTrendInput,
+    kernel: Kernel,
+    field: HyperTrendOutputField,
+) -> Result<(), HyperTrendError> {
+    let (high, low, source) = input.as_refs();
+    validate_lengths(high, low, source)?;
+    let len = source.len();
+    if out.len() != len {
+        return Err(HyperTrendError::OutputLengthMismatch {
+            expected: len,
+            got: out.len(),
+        });
+    }
+
+    let factor = input.get_factor();
+    let slope = input.get_slope();
+    let width_percent = input.get_width_percent();
+    validate_params(factor, slope, width_percent)?;
+    let _kernel = normalize_kernel(kernel);
+    let atr_values = compute_atr_zeroed(high, low, source);
+
+    hypertrend_selected_row_scalar(
+        high,
+        low,
+        source,
+        factor,
+        slope,
+        width_percent * 0.01,
+        &atr_values,
+        field,
+        out,
     );
     Ok(())
 }

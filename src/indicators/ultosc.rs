@@ -349,9 +349,18 @@ fn ultosc_prepare<'a>(
             low_src,
             close_src,
         } => {
-            let high = source_type(candles, high_src);
-            let low = source_type(candles, low_src);
-            let close = source_type(candles, close_src);
+            let high = match *high_src {
+                "high" => candles.high.as_slice(),
+                _ => source_type(candles, high_src),
+            };
+            let low = match *low_src {
+                "low" => candles.low.as_slice(),
+                _ => source_type(candles, low_src),
+            };
+            let close = match *close_src {
+                "close" => candles.close.as_slice(),
+                _ => source_type(candles, close_src),
+            };
             (high, low, close)
         }
         UltOscData::Slices { high, low, close } => (*high, *low, *close),
@@ -487,7 +496,7 @@ fn ultosc_compute_into(
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 ultosc_avx512(high, low, close, p1, p2, p3, first_valid, dst)
             }
-            _ => unreachable!(),
+            _ => ultosc_scalar(high, low, close, p1, p2, p3, first_valid, dst),
         }
     }
 }

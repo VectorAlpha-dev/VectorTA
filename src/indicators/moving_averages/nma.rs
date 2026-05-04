@@ -225,8 +225,12 @@ fn nma_prepare<'a>(
         }
     }
 
-    let mut sqrt_diffs = vec![0.0; period];
-    for i in 0..period {
+    let mut sqrt_diffs = if period == 40 && matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch) {
+        Vec::new()
+    } else {
+        vec![0.0; period]
+    };
+    for i in 0..sqrt_diffs.len() {
         let s0 = (i as f64).sqrt();
         let s1 = ((i + 1) as f64).sqrt();
         sqrt_diffs[i] = s1 - s0;
@@ -255,7 +259,11 @@ fn nma_compute_into(
 
         match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                nma_scalar_with_precomputed(data, period, first, ln_values, sqrt_diffs, out)
+                if period == 40 {
+                    nma_scalar_period40_with_precomputed(data, first, ln_values, out)
+                } else {
+                    nma_scalar_with_precomputed(data, period, first, ln_values, sqrt_diffs, out)
+                }
             }
 
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -359,6 +367,67 @@ pub fn nma_scalar_with_precomputed(
 
         let x0 = data[j - period];
         let x1 = data[j - period + 1];
+        out[j] = (x1 - x0).mul_add(ratio, x0);
+    }
+}
+
+#[inline]
+pub fn nma_scalar_period40_with_precomputed(
+    data: &[f64],
+    first: usize,
+    ln_values: &[f64],
+    out: &mut [f64],
+) {
+    const PERIOD: usize = 40;
+    let len = data.len();
+
+    let mut sqrt_diffs = [0.0f64; PERIOD];
+    for i in 0..PERIOD {
+        let s0 = (i as f64).sqrt();
+        let s1 = ((i + 1) as f64).sqrt();
+        sqrt_diffs[i] = s1 - s0;
+    }
+
+    for j in (first + PERIOD)..len {
+        let base = j - PERIOD;
+
+        let mut num = 0.0f64;
+        let mut denom = 0.0f64;
+
+        let mut prev = ln_values[base];
+        let mut t = 0usize;
+        while t + 4 <= PERIOD {
+            let cur = ln_values[base + t + 1];
+            let diff = (cur - prev).abs();
+            prev = cur;
+            num += diff * sqrt_diffs[PERIOD - 1 - t];
+            denom += diff;
+
+            let cur = ln_values[base + t + 2];
+            let diff = (cur - prev).abs();
+            prev = cur;
+            num += diff * sqrt_diffs[PERIOD - 2 - t];
+            denom += diff;
+
+            let cur = ln_values[base + t + 3];
+            let diff = (cur - prev).abs();
+            prev = cur;
+            num += diff * sqrt_diffs[PERIOD - 3 - t];
+            denom += diff;
+
+            let cur = ln_values[base + t + 4];
+            let diff = (cur - prev).abs();
+            prev = cur;
+            num += diff * sqrt_diffs[PERIOD - 4 - t];
+            denom += diff;
+
+            t += 4;
+        }
+
+        let ratio = if denom == 0.0 { 0.0 } else { num / denom };
+
+        let x0 = data[j - PERIOD];
+        let x1 = data[j - PERIOD + 1];
         out[j] = (x1 - x0).mul_add(ratio, x0);
     }
 }
@@ -791,6 +860,11 @@ pub unsafe fn nma_avx512_v2(
     use aligned_vec::AVec;
     use core::arch::x86_64::*;
 
+    if period == 40 {
+        nma_avx512_v2_period40(data, first, ln_values, sqrt_diffs, out);
+        return;
+    }
+
     let len = data.len();
     debug_assert!(len == ln_values.len());
     debug_assert!(period >= 1 && period <= len);
@@ -858,6 +932,78 @@ pub unsafe fn nma_avx512_v2(
         let i0 = period - 1;
         let x2 = data[j - i0 - 1];
         let dx = data[j - i0] - x2;
+        out[j] = ratio.mul_add(dx, x2);
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+#[target_feature(enable = "avx512f,avx512dq,avx512vl,fma")]
+unsafe fn nma_avx512_v2_period40(
+    data: &[f64],
+    first: usize,
+    ln_values: &mut [f64],
+    sqrt_diffs: &[f64],
+    out: &mut [f64],
+) {
+    use core::arch::x86_64::*;
+
+    const PERIOD: usize = 40;
+    let len = data.len();
+    debug_assert!(len == ln_values.len());
+
+    for i in 0..len {
+        ln_values[i] = data[i].max(1e-10).ln();
+    }
+
+    for i in 0..len - 1 {
+        ln_values[i] = (ln_values[i + 1] - ln_values[i]).abs();
+    }
+    ln_values[len - 1] = 0.0;
+    let d = ln_values;
+
+    let mut s = alloc_with_nan_prefix(len + 1, 0);
+    s[0] = 0.0;
+    for k in 0..len {
+        s[k + 1] = s[k] + d[k];
+    }
+
+    let mut w_rev = [0.0f64; PERIOD];
+    for i in 0..PERIOD {
+        w_rev[i] = sqrt_diffs[PERIOD - 1 - i];
+    }
+
+    let warm = first + PERIOD;
+    let zero = _mm512_setzero_pd();
+
+    for j in warm..len {
+        let base = j - PERIOD;
+        let denom = s[j] - s[j - PERIOD];
+        let mut num_acc = zero;
+
+        let d0 = _mm512_loadu_pd(d.as_ptr().add(base));
+        let w0 = _mm512_loadu_pd(w_rev.as_ptr());
+        let d1 = _mm512_loadu_pd(d.as_ptr().add(base + 8));
+        let w1 = _mm512_loadu_pd(w_rev.as_ptr().add(8));
+        num_acc = _mm512_fmadd_pd(d0, w0, num_acc);
+        num_acc = _mm512_fmadd_pd(d1, w1, num_acc);
+
+        let d2 = _mm512_loadu_pd(d.as_ptr().add(base + 16));
+        let w2 = _mm512_loadu_pd(w_rev.as_ptr().add(16));
+        let d3 = _mm512_loadu_pd(d.as_ptr().add(base + 24));
+        let w3 = _mm512_loadu_pd(w_rev.as_ptr().add(24));
+        num_acc = _mm512_fmadd_pd(d2, w2, num_acc);
+        num_acc = _mm512_fmadd_pd(d3, w3, num_acc);
+
+        let d4 = _mm512_loadu_pd(d.as_ptr().add(base + 32));
+        let w4 = _mm512_loadu_pd(w_rev.as_ptr().add(32));
+        num_acc = _mm512_fmadd_pd(d4, w4, num_acc);
+
+        let num = _mm512_reduce_add_pd(num_acc);
+        let ratio = if denom == 0.0 { 0.0 } else { num / denom };
+
+        let x2 = data[j - PERIOD];
+        let dx = data[j - PERIOD + 1] - x2;
         out[j] = ratio.mul_add(dx, x2);
     }
 }

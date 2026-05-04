@@ -27,8 +27,24 @@ impl<'a> AsRef<[f64]> for SrwmaInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             SrwmaData::Slice(slice) => slice,
-            SrwmaData::Candles { candles, source } => source_type(candles, source),
+            SrwmaData::Candles { candles, source } => srwma_source_type(candles, source),
         }
+    }
+}
+
+#[inline(always)]
+fn srwma_source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "close" => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
     }
 }
 
@@ -173,7 +189,7 @@ pub fn srwma(input: &SrwmaInput) -> Result<SrwmaOutput, SrwmaError> {
 
 pub fn srwma_with_kernel(input: &SrwmaInput, kernel: Kernel) -> Result<SrwmaOutput, SrwmaError> {
     let data: &[f64] = match &input.data {
-        SrwmaData::Candles { candles, source } => source_type(candles, source),
+        SrwmaData::Candles { candles, source } => srwma_source_type(candles, source),
         SrwmaData::Slice(sl) => sl,
     };
 
@@ -235,13 +251,9 @@ pub fn srwma_with_kernel(input: &SrwmaInput, kernel: Kernel) -> Result<SrwmaOutp
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                if period <= 32 {
-                    srwma_scalar(data, &weights, period, first, inv_norm, &mut out)
-                } else {
-                    srwma_avx512(data, &weights, period, first, inv_norm, &mut out)
-                }
+                srwma_avx512(data, &weights, period, first, inv_norm, &mut out)
             }
-            _ => unreachable!(),
+            _ => srwma_scalar(data, &weights, period, first, inv_norm, &mut out),
         }
     }
 
@@ -516,7 +528,7 @@ impl SrwmaBatchBuilder {
     }
 
     pub fn apply_candles(self, c: &Candles, src: &str) -> Result<SrwmaBatchOutput, SrwmaError> {
-        let slice = source_type(c, src);
+        let slice = srwma_source_type(c, src);
         self.apply_slice(slice)
     }
 
@@ -2378,7 +2390,7 @@ pub fn srwma_into_slice(
 ) -> Result<(), SrwmaError> {
     let data = match &input.data {
         SrwmaData::Slice(s) => *s,
-        SrwmaData::Candles { candles, source } => source_type(candles, source),
+        SrwmaData::Candles { candles, source } => srwma_source_type(candles, source),
     };
 
     if data.is_empty() {
@@ -2443,7 +2455,7 @@ pub fn srwma_into_slice(
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 srwma_avx512(data, &weights, period, first, inv_norm, dst)
             }
-            _ => unreachable!(),
+            _ => srwma_scalar(data, &weights, period, first, inv_norm, dst),
         }
     }
 

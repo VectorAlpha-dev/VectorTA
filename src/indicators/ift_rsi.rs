@@ -38,7 +38,18 @@ impl<'a> AsRef<[f64]> for IftRsiInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             IftRsiData::Slice(slice) => slice,
-            IftRsiData::Candles { candles, source } => source_type(candles, source),
+            IftRsiData::Candles { candles, source } => match *source {
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -223,10 +234,7 @@ pub fn ift_rsi_with_kernel(
     input: &IftRsiInput,
     kernel: Kernel,
 ) -> Result<IftRsiOutput, IftRsiError> {
-    let data: &[f64] = match &input.data {
-        IftRsiData::Candles { candles, source } => source_type(candles, source),
-        IftRsiData::Slice(sl) => sl,
-    };
+    let data: &[f64] = input.as_ref();
 
     if data.is_empty() {
         return Err(IftRsiError::EmptyData);
@@ -260,8 +268,19 @@ pub fn ift_rsi_with_kernel(
     let warmup_period = first + rsi_period + wma_period - 1;
     let mut out = alloc_with_nan_prefix(len, warmup_period);
 
-    unsafe {
-        ift_rsi_scalar_classic(data, rsi_period, wma_period, first, &mut out)?;
+    if is_default_ift_rsi_params(rsi_period, wma_period) {
+        unsafe {
+            match kernel {
+                Kernel::Avx2 | Kernel::Avx512 => {
+                    ift_rsi_scalar_default_5_9(data, first, &mut out)?;
+                }
+                _ => ift_rsi_scalar_default_5_9(data, first, &mut out)?,
+            }
+        }
+    } else {
+        unsafe {
+            ift_rsi_scalar_classic(data, rsi_period, wma_period, first, &mut out)?;
+        }
     }
 
     Ok(IftRsiOutput { values: out })
@@ -270,10 +289,7 @@ pub fn ift_rsi_with_kernel(
 #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn ift_rsi_into(input: &IftRsiInput, out: &mut [f64]) -> Result<(), IftRsiError> {
-    let data: &[f64] = match &input.data {
-        IftRsiData::Candles { candles, source } => source_type(candles, source),
-        IftRsiData::Slice(sl) => sl,
-    };
+    let data: &[f64] = input.as_ref();
 
     if out.len() != data.len() {
         return Err(IftRsiError::OutputLengthMismatch {
@@ -343,10 +359,7 @@ pub fn ift_rsi_into_slice(
     input: &IftRsiInput,
     kern: Kernel,
 ) -> Result<(), IftRsiError> {
-    let data: &[f64] = match &input.data {
-        IftRsiData::Candles { candles, source } => source_type(candles, source),
-        IftRsiData::Slice(sl) => sl,
-    };
+    let data: &[f64] = input.as_ref();
 
     if data.is_empty() {
         return Err(IftRsiError::EmptyData);
@@ -379,11 +392,16 @@ pub fn ift_rsi_into_slice(
         *v = f64::NAN;
     }
 
-    unsafe {
-        return ift_rsi_scalar_classic(data, rsi_period, wma_period, first, dst);
+    if is_default_ift_rsi_params(rsi_period, wma_period) {
+        unsafe {
+            match kern {
+                Kernel::Avx2 | Kernel::Avx512 => ift_rsi_scalar_default_5_9(data, first, dst),
+                _ => ift_rsi_scalar_default_5_9(data, first, dst),
+            }
+        }
+    } else {
+        unsafe { ift_rsi_scalar_classic(data, rsi_period, wma_period, first, dst) }
     }
-
-    Ok(())
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1274,6 +1292,109 @@ impl IftRsiStream {
 #[inline(always)]
 fn tanh_kernel(x: f64) -> f64 {
     x.tanh()
+}
+
+#[inline(always)]
+fn is_default_ift_rsi_params(rsi_period: usize, wma_period: usize) -> bool {
+    rsi_period == 5 && wma_period == 9
+}
+
+#[inline]
+pub unsafe fn ift_rsi_scalar_default_5_9(
+    data: &[f64],
+    first_valid: usize,
+    out: &mut [f64],
+) -> Result<(), IftRsiError> {
+    let len = data.len();
+    if first_valid >= len {
+        return Ok(());
+    }
+    let sliced = data.get_unchecked(first_valid..);
+    let n = sliced.len();
+    if n == 0 || 13 >= n {
+        return Ok(());
+    }
+
+    const RP: usize = 5;
+    const WP: usize = 9;
+    const ALPHA: f64 = 0.2;
+    const BETA: f64 = 1.0 - ALPHA;
+    const DENOM_RCP: f64 = 1.0 / 45.0;
+    const WP_F: f64 = 9.0;
+
+    let mut avg_gain = 0.0f64;
+    let mut avg_loss = 0.0f64;
+    let mut seed_i = 1usize;
+    while seed_i <= RP {
+        let d = *sliced.get_unchecked(seed_i) - *sliced.get_unchecked(seed_i - 1);
+        if d > 0.0 {
+            avg_gain += d;
+        } else {
+            avg_loss -= d;
+        }
+        seed_i += 1;
+    }
+    avg_gain *= ALPHA;
+    avg_loss *= ALPHA;
+
+    let mut buf = [0.0f64; WP];
+    let mut head = 0usize;
+    let mut filled = 0usize;
+    let mut sum = 0.0f64;
+    let mut num = 0.0f64;
+
+    let mut i = RP;
+    while i < n {
+        if i > RP {
+            let d = *sliced.get_unchecked(i) - *sliced.get_unchecked(i - 1);
+            let gain = if d > 0.0 { d } else { 0.0 };
+            let loss = if d < 0.0 { -d } else { 0.0 };
+            avg_gain = f64::mul_add(avg_gain, BETA, ALPHA * gain);
+            avg_loss = f64::mul_add(avg_loss, BETA, ALPHA * loss);
+        }
+
+        let rs = if avg_loss != 0.0 {
+            avg_gain / avg_loss
+        } else {
+            100.0
+        };
+        let rsi = 100.0 - 100.0 / (1.0 + rs);
+        let x = 0.1f64 * (rsi - 50.0);
+
+        if filled < WP {
+            sum += x;
+            num = f64::mul_add((filled as f64) + 1.0, x, num);
+            *buf.get_unchecked_mut(head) = x;
+            head += 1;
+            if head == WP {
+                head = 0;
+            }
+            filled += 1;
+
+            if filled == WP {
+                let wma = num * DENOM_RCP;
+                *out.get_unchecked_mut(first_valid + i) = wma.tanh();
+            }
+        } else {
+            let x_old = *buf.get_unchecked(head);
+            *buf.get_unchecked_mut(head) = x;
+            head += 1;
+            if head == WP {
+                head = 0;
+            }
+
+            let sum_t = sum;
+            num = f64::mul_add(WP_F, x, num) - sum_t;
+            sum = sum_t + x - x_old;
+
+            let wma = num * DENOM_RCP;
+            *out.get_unchecked_mut(first_valid + i) = wma.tanh();
+        }
+
+        i += 1;
+    }
+
+    Ok(())
 }
 
 #[inline]

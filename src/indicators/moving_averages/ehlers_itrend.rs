@@ -198,7 +198,7 @@ fn ehlers_itrend_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -231,10 +231,36 @@ pub fn ehlers_itrend_scalar_tail(
     let (mut prev_i2, mut prev_q2) = (0.0, 0.0);
     let (mut prev_re, mut prev_im) = (0.0, 0.0);
     let (mut prev_mesa, mut prev_smooth) = (0.0, 0.0);
-    let mut sum_ring = vec![0.0; max_dc];
+    let prefix_sum = if first_valid == 0 {
+        let mut values = Vec::with_capacity(length + 1);
+        values.push(0.0);
+        let mut acc = 0.0;
+        let mut finite = true;
+        for &x in src {
+            if !x.is_finite() {
+                finite = false;
+                break;
+            }
+            acc += x;
+            values.push(acc);
+        }
+        if finite {
+            Some(values)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let mut sum_ring = if prefix_sum.is_some() {
+        Vec::new()
+    } else {
+        vec![0.0; max_dc]
+    };
     let mut sum_idx = 0usize;
     let (mut prev_it1, mut prev_it2, mut prev_it3) = (0.0, 0.0, 0.0);
     let mut ring_ptr = 0usize;
+    let (mut src_l1, mut src_l2, mut src_l3) = (0.0, 0.0, 0.0);
 
     #[inline(always)]
     fn ring_get(buf: &[f64; 7], center: usize, off: usize) -> f64 {
@@ -247,11 +273,8 @@ pub fn ehlers_itrend_scalar_tail(
 
     for i in 0..length {
         let x0 = src[i];
-        let x1 = if i >= 1 { src[i - 1] } else { 0.0 };
-        let x2 = if i >= 2 { src[i - 2] } else { 0.0 };
-        let x3 = if i >= 3 { src[i - 3] } else { 0.0 };
 
-        let fir_val = (4.0 * x0 + 3.0 * x1 + 2.0 * x2 + x3) / 10.0;
+        let fir_val = (4.0 * x0 + 3.0 * src_l1 + 2.0 * src_l2 + src_l3) / 10.0;
         fir_buf[ring_ptr] = fir_val;
 
         let fir_0 = ring_get(&fir_buf, ring_ptr, 0);
@@ -324,17 +347,24 @@ pub fn ehlers_itrend_scalar_tail(
         let mut dcp = (sp_val + 0.5).floor() as usize;
         dcp = dcp.clamp(1, max_dc);
 
-        sum_ring[sum_idx] = x0;
-        sum_idx += 1;
-        if sum_idx == max_dc {
-            sum_idx = 0;
-        }
-        let mut sum_src = 0.0;
-        let mut idx2 = sum_idx;
-        for _ in 0..dcp {
-            idx2 = if idx2 == 0 { max_dc - 1 } else { idx2 - 1 };
-            sum_src += sum_ring[idx2];
-        }
+        let sum_src = if let Some(prefix) = prefix_sum.as_ref() {
+            let end = i + 1;
+            let start = end.saturating_sub(dcp);
+            prefix[end] - prefix[start]
+        } else {
+            sum_ring[sum_idx] = x0;
+            sum_idx += 1;
+            if sum_idx == max_dc {
+                sum_idx = 0;
+            }
+            let mut sum_src = 0.0;
+            let mut idx2 = sum_idx;
+            for _ in 0..dcp {
+                idx2 = if idx2 == 0 { max_dc - 1 } else { idx2 - 1 };
+                sum_src += sum_ring[idx2];
+            }
+            sum_src
+        };
         let it_val = sum_src / dcp as f64;
 
         let eit_val = if i < warmup_bars {
@@ -350,6 +380,9 @@ pub fn ehlers_itrend_scalar_tail(
         if i >= warm {
             out[i] = eit_val;
         }
+        src_l3 = src_l2;
+        src_l2 = src_l1;
+        src_l1 = x0;
         ring_ptr += 1;
         if ring_ptr == 7 {
             ring_ptr = 0;
@@ -372,11 +405,41 @@ fn ehlers_itrend_compute_into(
             ehlers_itrend_scalar_tail(data, warmup_bars, max_dc, first, warm, out)
         }
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-            ehlers_itrend_scalar_tail(data, warmup_bars, max_dc, first, warm, out)
-        }
+        Kernel::Avx2 | Kernel::Avx2Batch => unsafe {
+            ehlers_itrend_scalar_tail_avx2(data, warmup_bars, max_dc, first, warm, out)
+        },
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx512 | Kernel::Avx512Batch => unsafe {
+            ehlers_itrend_scalar_tail_avx512(data, warmup_bars, max_dc, first, warm, out)
+        },
         _ => unreachable!(),
     }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn ehlers_itrend_scalar_tail_avx2(
+    src: &[f64],
+    warmup_bars: usize,
+    max_dc: usize,
+    first_valid: usize,
+    warm: usize,
+    out: &mut [f64],
+) {
+    ehlers_itrend_scalar_tail(src, warmup_bars, max_dc, first_valid, warm, out);
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,fma")]
+unsafe fn ehlers_itrend_scalar_tail_avx512(
+    src: &[f64],
+    warmup_bars: usize,
+    max_dc: usize,
+    first_valid: usize,
+    warm: usize,
+    out: &mut [f64],
+) {
+    ehlers_itrend_scalar_tail(src, warmup_bars, max_dc, first_valid, warm, out);
 }
 
 pub fn ehlers_itrend_with_kernel(

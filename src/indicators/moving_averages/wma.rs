@@ -40,7 +40,13 @@ impl<'a> AsRef<[f64]> for WmaInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             WmaData::Slice(slice) => slice,
-            WmaData::Candles { candles, source } => source_type(candles, source),
+            WmaData::Candles { candles, source } => {
+                if source.eq_ignore_ascii_case("close") {
+                    candles.close.as_slice()
+                } else {
+                    source_type(candles, source)
+                }
+            }
         }
     }
 }
@@ -224,12 +230,12 @@ pub fn wma_into_slice(dst: &mut [f64], input: &WmaInput, kern: Kernel) -> Result
         });
     }
 
-    wma_compute_into(data, period, first, chosen, dst);
-
     let warmup_end = first + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
     }
+
+    wma_compute_into(data, period, first, chosen, dst);
 
     Ok(())
 }
@@ -286,6 +292,10 @@ fn wma_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, o
             Kernel::Avx2 | Kernel::Avx2Batch => wma_avx2(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => wma_avx512(data, period, first, out),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                wma_scalar(data, period, first, out)
+            }
             _ => unreachable!(),
         }
     }

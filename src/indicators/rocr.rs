@@ -231,7 +231,20 @@ fn rocr_prepare<'a>(
     }
 
     let chosen = match kern {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            {
+                match detect_best_kernel() {
+                    Kernel::Avx512 if len < 1_000_000 => Kernel::Avx512,
+                    Kernel::Avx512 | Kernel::Avx2 => Kernel::Avx2,
+                    _ => Kernel::Scalar,
+                }
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            {
+                Kernel::Scalar
+            }
+        }
         k => k,
     };
     Ok((data, period, first, chosen))
@@ -305,111 +318,107 @@ pub fn rocr_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn rocr_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    unsafe {
-        let start = first_valid + period;
-        let len = data.len();
-        if start >= len {
-            return;
-        }
+    unsafe { rocr_avx512_impl(data, period, first_valid, out) }
+}
 
-        #[cfg(target_feature = "avx512f")]
-        {
-            let mut i = start;
-            let end = len;
-            let step = 8usize;
-            while i + step <= end {
-                let cur = _mm512_loadu_pd(data.as_ptr().add(i));
-                let pst = _mm512_loadu_pd(data.as_ptr().add(i - period));
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn rocr_avx512_impl(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
+    let start = first_valid + period;
+    let len = data.len();
+    if start >= len {
+        return;
+    }
 
-                let m0 = _mm512_cmp_pd_mask(pst, _mm512_set1_pd(0.0), _CMP_EQ_OQ);
-                let m1 = _mm512_cmp_pd_mask(pst, pst, _CMP_UNORD_Q);
-                let bad = m0 | m1;
-                let good = !bad;
+    let mut i = start;
+    let end = len;
+    let step = 8usize;
+    while i + step <= end {
+        let cur = _mm512_loadu_pd(data.as_ptr().add(i));
+        let pst = _mm512_loadu_pd(data.as_ptr().add(i - period));
 
-                let res = _mm512_maskz_div_pd(good, cur, pst);
-                _mm512_storeu_pd(out.as_mut_ptr().add(i), res);
-                i += step;
-            }
-            for j in i..end {
-                let p = *data.get_unchecked(j - period);
-                let c = *data.get_unchecked(j);
-                *out.get_unchecked_mut(j) = if p == 0.0 || p.is_nan() { 0.0 } else { c / p };
-            }
-            return;
-        }
+        let m0 = _mm512_cmp_pd_mask(pst, _mm512_set1_pd(0.0), _CMP_EQ_OQ);
+        let m1 = _mm512_cmp_pd_mask(pst, pst, _CMP_UNORD_Q);
+        let bad = m0 | m1;
+        let good = !bad;
 
-        rocr_scalar(data, period, first_valid, out)
+        let res = _mm512_maskz_div_pd(good, cur, pst);
+        _mm512_storeu_pd(out.as_mut_ptr().add(i), res);
+        i += step;
+    }
+    for j in i..end {
+        let p = *data.get_unchecked(j - period);
+        let c = *data.get_unchecked(j);
+        *out.get_unchecked_mut(j) = if p == 0.0 || p.is_nan() { 0.0 } else { c / p };
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn rocr_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    unsafe {
-        let start = first_valid + period;
-        let len = data.len();
-        if start >= len {
-            return;
-        }
+    unsafe { rocr_avx2_impl(data, period, first_valid, out) }
+}
 
-        #[cfg(target_feature = "avx2")]
-        {
-            let mut i = start;
-            let mut p = i - period;
-            let end = len;
-            let zero = _mm256_set1_pd(0.0);
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn rocr_avx2_impl(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
+    let start = first_valid + period;
+    let len = data.len();
+    if start >= len {
+        return;
+    }
 
-            while i + 8 <= end {
-                let cur0 = _mm256_loadu_pd(data.as_ptr().add(i));
-                let pst0 = _mm256_loadu_pd(data.as_ptr().add(p));
-                let div0 = _mm256_div_pd(cur0, pst0);
-                let m0z = _mm256_cmp_pd(pst0, zero, _CMP_EQ_OQ);
-                let m0n = _mm256_cmp_pd(pst0, pst0, _CMP_UNORD_Q);
-                let m0 = _mm256_or_pd(m0z, m0n);
-                let res0 = _mm256_andnot_pd(m0, div0);
-                _mm256_storeu_pd(out.as_mut_ptr().add(i), res0);
+    let mut i = start;
+    let mut p = i - period;
+    let end = len;
+    let zero = _mm256_set1_pd(0.0);
 
-                let cur1 = _mm256_loadu_pd(data.as_ptr().add(i + 4));
-                let pst1 = _mm256_loadu_pd(data.as_ptr().add(p + 4));
-                let div1 = _mm256_div_pd(cur1, pst1);
-                let m1z = _mm256_cmp_pd(pst1, zero, _CMP_EQ_OQ);
-                let m1n = _mm256_cmp_pd(pst1, pst1, _CMP_UNORD_Q);
-                let m1 = _mm256_or_pd(m1z, m1n);
-                let res1 = _mm256_andnot_pd(m1, div1);
-                _mm256_storeu_pd(out.as_mut_ptr().add(i + 4), res1);
+    while i + 8 <= end {
+        let cur0 = _mm256_loadu_pd(data.as_ptr().add(i));
+        let pst0 = _mm256_loadu_pd(data.as_ptr().add(p));
+        let div0 = _mm256_div_pd(cur0, pst0);
+        let m0z = _mm256_cmp_pd(pst0, zero, _CMP_EQ_OQ);
+        let m0n = _mm256_cmp_pd(pst0, pst0, _CMP_UNORD_Q);
+        let m0 = _mm256_or_pd(m0z, m0n);
+        let res0 = _mm256_andnot_pd(m0, div0);
+        _mm256_storeu_pd(out.as_mut_ptr().add(i), res0);
 
-                i += 8;
-                p += 8;
-            }
+        let cur1 = _mm256_loadu_pd(data.as_ptr().add(i + 4));
+        let pst1 = _mm256_loadu_pd(data.as_ptr().add(p + 4));
+        let div1 = _mm256_div_pd(cur1, pst1);
+        let m1z = _mm256_cmp_pd(pst1, zero, _CMP_EQ_OQ);
+        let m1n = _mm256_cmp_pd(pst1, pst1, _CMP_UNORD_Q);
+        let m1 = _mm256_or_pd(m1z, m1n);
+        let res1 = _mm256_andnot_pd(m1, div1);
+        _mm256_storeu_pd(out.as_mut_ptr().add(i + 4), res1);
 
-            while i + 4 <= end {
-                let cur = _mm256_loadu_pd(data.as_ptr().add(i));
-                let pst = _mm256_loadu_pd(data.as_ptr().add(p));
-                let div = _mm256_div_pd(cur, pst);
-                let mz = _mm256_cmp_pd(pst, zero, _CMP_EQ_OQ);
-                let mn = _mm256_cmp_pd(pst, pst, _CMP_UNORD_Q);
-                let m = _mm256_or_pd(mz, mn);
-                let res = _mm256_andnot_pd(m, div);
-                _mm256_storeu_pd(out.as_mut_ptr().add(i), res);
-                i += 4;
-                p += 4;
-            }
+        i += 8;
+        p += 8;
+    }
 
-            while i < end {
-                let past = *data.get_unchecked(p);
-                let cur = *data.get_unchecked(i);
-                let b = past.to_bits();
-                let is_zero = (b & 0x7fff_ffff_ffff_ffff) == 0;
-                let is_nan = (b & 0x7ff0_0000_0000_0000) == 0x7ff0_0000_0000_0000
-                    && (b & 0x000f_ffff_ffff_ffff) != 0;
-                *out.get_unchecked_mut(i) = if is_zero | is_nan { 0.0 } else { cur / past };
-                i += 1;
-                p += 1;
-            }
-            return;
-        }
+    while i + 4 <= end {
+        let cur = _mm256_loadu_pd(data.as_ptr().add(i));
+        let pst = _mm256_loadu_pd(data.as_ptr().add(p));
+        let div = _mm256_div_pd(cur, pst);
+        let mz = _mm256_cmp_pd(pst, zero, _CMP_EQ_OQ);
+        let mn = _mm256_cmp_pd(pst, pst, _CMP_UNORD_Q);
+        let m = _mm256_or_pd(mz, mn);
+        let res = _mm256_andnot_pd(m, div);
+        _mm256_storeu_pd(out.as_mut_ptr().add(i), res);
+        i += 4;
+        p += 4;
+    }
 
-        rocr_scalar(data, period, first_valid, out)
+    while i < end {
+        let past = *data.get_unchecked(p);
+        let cur = *data.get_unchecked(i);
+        let b = past.to_bits();
+        let is_zero = (b & 0x7fff_ffff_ffff_ffff) == 0;
+        let is_nan = (b & 0x7ff0_0000_0000_0000) == 0x7ff0_0000_0000_0000
+            && (b & 0x000f_ffff_ffff_ffff) != 0;
+        *out.get_unchecked_mut(i) = if is_zero | is_nan { 0.0 } else { cur / past };
+        i += 1;
+        p += 1;
     }
 }
 

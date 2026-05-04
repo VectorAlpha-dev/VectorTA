@@ -34,6 +34,18 @@ use crate::indicators::moving_averages::vwma::{
 };
 use crate::indicators::sma::{sma_into_slice, sma_with_kernel, SmaInput, SmaParams};
 
+#[inline(always)]
+fn avsl_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "close" => &candles.close,
+        "volume" => &candles.volume,
+        _ => source_type(candles, source),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum AvslData<'a> {
     Candles {
@@ -346,8 +358,8 @@ fn avsl_prepare<'a>(
             close_source,
             low_source,
         } => (
-            source_type(candles, close_source),
-            source_type(candles, low_source),
+            avsl_source(candles, close_source),
+            avsl_source(candles, low_source),
             candles.volume.as_slice(),
         ),
         AvslData::Slices { close, low, volume } => (*close, *low, *volume),
@@ -393,6 +405,9 @@ fn avsl_prepare<'a>(
     }
 
     let chosen = match kernel {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Auto => detect_best_kernel(),
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
@@ -1675,8 +1690,8 @@ impl AvslBatchBuilder {
         close_src: &str,
         low_src: &str,
     ) -> Result<AvslBatchOutput, AvslError> {
-        let close = source_type(c, close_src);
-        let low = source_type(c, low_src);
+        let close = avsl_source(c, close_src);
+        let low = avsl_source(c, low_src);
         let volume = c.volume.as_slice();
         self.apply_slices(close, low, volume)
     }

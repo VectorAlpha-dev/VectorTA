@@ -268,6 +268,13 @@ enum ResetOnMode {
     All,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ValidationStats {
+    reset_mode: ResetOnMode,
+    first_valid: usize,
+    longest_valid: usize,
+}
+
 #[inline(always)]
 fn is_valid_ohlc(open: f64, high: f64, low: f64, close: f64) -> bool {
     open.is_finite() && high.is_finite() && low.is_finite() && close.is_finite()
@@ -291,6 +298,34 @@ fn longest_valid_run(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> 
         }
     }
     best
+}
+
+#[inline(always)]
+fn valid_run_stats(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+) -> Option<(usize, usize)> {
+    let mut best = 0usize;
+    let mut cur = 0usize;
+    let mut first_valid = usize::MAX;
+    for i in 0..close.len() {
+        if is_valid_ohlc(open[i], high[i], low[i], close[i]) {
+            if first_valid == usize::MAX {
+                first_valid = i;
+            }
+            cur += 1;
+            best = best.max(cur);
+        } else {
+            cur = 0;
+        }
+    }
+    if first_valid == usize::MAX {
+        None
+    } else {
+        Some((first_valid, best))
+    }
 }
 
 #[inline(always)]
@@ -345,6 +380,22 @@ fn validate_common(
     increment_factor: f64,
     reset_on: &str,
 ) -> Result<ResetOnMode, MarketStructureTrailingStopError> {
+    Ok(
+        validate_common_stats(open, high, low, close, length, increment_factor, reset_on)?
+            .reset_mode,
+    )
+}
+
+#[inline(always)]
+fn validate_common_stats(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    length: usize,
+    increment_factor: f64,
+    reset_on: &str,
+) -> Result<ValidationStats, MarketStructureTrailingStopError> {
     if open.is_empty() || high.is_empty() || low.is_empty() || close.is_empty() {
         return Err(MarketStructureTrailingStopError::EmptyInputData);
     }
@@ -363,10 +414,8 @@ fn validate_common(
         return Err(MarketStructureTrailingStopError::InvalidIncrementFactor { increment_factor });
     }
     let reset_mode = parse_reset_on(reset_on)?;
-    let longest = longest_valid_run(open, high, low, close);
-    if longest == 0 {
-        return Err(MarketStructureTrailingStopError::AllValuesNaN);
-    }
+    let (first_valid, longest) = valid_run_stats(open, high, low, close)
+        .ok_or(MarketStructureTrailingStopError::AllValuesNaN)?;
     let needed = length
         .checked_mul(2)
         .and_then(|v| v.checked_add(1))
@@ -379,20 +428,32 @@ fn validate_common(
             valid: longest,
         });
     }
-    Ok(reset_mode)
+    Ok(ValidationStats {
+        reset_mode,
+        first_valid,
+        longest_valid: longest,
+    })
 }
 
 #[inline(always)]
 fn is_pivot_high(high: &[f64], center: usize, length: usize) -> bool {
-    let pivot = high[center];
-    for idx in (center - length)..center {
-        if high[idx] > pivot {
-            return false;
+    unsafe {
+        let ptr = high.as_ptr();
+        let pivot = *ptr.add(center);
+        let mut idx = center - length;
+        while idx < center {
+            if *ptr.add(idx) > pivot {
+                return false;
+            }
+            idx += 1;
         }
-    }
-    for idx in (center + 1)..=(center + length) {
-        if high[idx] >= pivot {
-            return false;
+        idx = center + 1;
+        let end = center + length;
+        while idx <= end {
+            if *ptr.add(idx) >= pivot {
+                return false;
+            }
+            idx += 1;
         }
     }
     true
@@ -400,15 +461,23 @@ fn is_pivot_high(high: &[f64], center: usize, length: usize) -> bool {
 
 #[inline(always)]
 fn is_pivot_low(low: &[f64], center: usize, length: usize) -> bool {
-    let pivot = low[center];
-    for idx in (center - length)..center {
-        if low[idx] < pivot {
-            return false;
+    unsafe {
+        let ptr = low.as_ptr();
+        let pivot = *ptr.add(center);
+        let mut idx = center - length;
+        while idx < center {
+            if *ptr.add(idx) < pivot {
+                return false;
+            }
+            idx += 1;
         }
-    }
-    for idx in (center + 1)..=(center + length) {
-        if low[idx] <= pivot {
-            return false;
+        idx = center + 1;
+        let end = center + length;
+        while idx <= end {
+            if *ptr.add(idx) <= pivot {
+                return false;
+            }
+            idx += 1;
         }
     }
     true
@@ -585,7 +654,7 @@ pub fn market_structure_trailing_stop_with_kernel(
     let (open, high, low, close) = input_slices(input)?;
     let length = input.get_length();
     let increment_factor = input.get_increment_factor();
-    let reset_mode = validate_common(
+    let stats = validate_common_stats(
         open,
         high,
         low,
@@ -594,28 +663,50 @@ pub fn market_structure_trailing_stop_with_kernel(
         increment_factor,
         input.get_reset_on(),
     )?;
+    let reset_mode = stats.reset_mode;
+    let clean_tail = stats.longest_valid == close.len() - stats.first_valid;
 
-    let mut trailing_stop = alloc_with_nan_prefix(close.len(), 0);
-    let mut state = alloc_with_nan_prefix(close.len(), 0);
-    let mut structure = alloc_with_nan_prefix(close.len(), 0);
+    let prefix = if clean_tail {
+        stats.first_valid
+    } else {
+        close.len()
+    };
+    let mut trailing_stop = alloc_with_nan_prefix(close.len(), prefix);
+    let mut state = alloc_with_nan_prefix(close.len(), prefix);
+    let mut structure = alloc_with_nan_prefix(close.len(), prefix);
 
     let _chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
 
-    compute_row(
-        open,
-        high,
-        low,
-        close,
-        length,
-        increment_factor,
-        reset_mode,
-        &mut trailing_stop,
-        &mut state,
-        &mut structure,
-    );
+    if clean_tail {
+        let start = stats.first_valid;
+        compute_run(
+            &high[start..],
+            &low[start..],
+            &close[start..],
+            length,
+            increment_factor,
+            reset_mode,
+            &mut trailing_stop[start..],
+            &mut state[start..],
+            &mut structure[start..],
+        );
+    } else {
+        compute_row(
+            open,
+            high,
+            low,
+            close,
+            length,
+            increment_factor,
+            reset_mode,
+            &mut trailing_stop,
+            &mut state,
+            &mut structure,
+        );
+    }
 
     Ok(MarketStructureTrailingStopOutput {
         trailing_stop,
@@ -634,7 +725,7 @@ pub fn market_structure_trailing_stop_into_slice(
     let (open, high, low, close) = input_slices(input)?;
     let length = input.get_length();
     let increment_factor = input.get_increment_factor();
-    let reset_mode = validate_common(
+    let stats = validate_common_stats(
         open,
         high,
         low,
@@ -643,6 +734,8 @@ pub fn market_structure_trailing_stop_into_slice(
         increment_factor,
         input.get_reset_on(),
     )?;
+    let reset_mode = stats.reset_mode;
+    let clean_tail = stats.longest_valid == close.len() - stats.first_valid;
 
     if out_trailing_stop.len() != close.len() {
         return Err(MarketStructureTrailingStopError::OutputLengthMismatch {
@@ -668,21 +761,45 @@ pub fn market_structure_trailing_stop_into_slice(
         other => other,
     };
 
-    out_trailing_stop.fill(f64::NAN);
-    out_state.fill(f64::NAN);
-    out_structure.fill(f64::NAN);
-    compute_row(
-        open,
-        high,
-        low,
-        close,
-        length,
-        increment_factor,
-        reset_mode,
-        out_trailing_stop,
-        out_state,
-        out_structure,
-    );
+    if clean_tail {
+        let start = stats.first_valid;
+        for dst in [
+            &mut *out_trailing_stop,
+            &mut *out_state,
+            &mut *out_structure,
+        ] {
+            for value in &mut dst[..start] {
+                *value = f64::NAN;
+            }
+        }
+        compute_run(
+            &high[start..],
+            &low[start..],
+            &close[start..],
+            length,
+            increment_factor,
+            reset_mode,
+            &mut out_trailing_stop[start..],
+            &mut out_state[start..],
+            &mut out_structure[start..],
+        );
+    } else {
+        out_trailing_stop.fill(f64::NAN);
+        out_state.fill(f64::NAN);
+        out_structure.fill(f64::NAN);
+        compute_row(
+            open,
+            high,
+            low,
+            close,
+            length,
+            increment_factor,
+            reset_mode,
+            out_trailing_stop,
+            out_state,
+            out_structure,
+        );
+    }
     Ok(())
 }
 

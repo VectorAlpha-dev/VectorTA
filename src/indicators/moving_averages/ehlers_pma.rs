@@ -332,7 +332,7 @@ pub fn ehlers_pma_with_kernel(
     let mut trigger = alloc_with_nan_prefix(len, warm_trigger);
 
     let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => detect_best_kernel(),
         k => k,
     };
 
@@ -583,7 +583,7 @@ pub fn ehlers_pma_into_flat_with_kernel(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => detect_best_kernel(),
         k => k,
     };
 
@@ -686,7 +686,7 @@ pub fn ehlers_pma_into_slices_with_kernel(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => detect_best_kernel(),
         k => k,
     };
 

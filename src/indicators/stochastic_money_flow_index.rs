@@ -15,8 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -274,17 +273,24 @@ pub enum StochasticMoneyFlowIndexError {
 
 #[inline(always)]
 fn longest_valid_run(source: &[f64], volume: &[f64]) -> usize {
+    valid_run_stats(source, volume).0
+}
+
+#[inline(always)]
+fn valid_run_stats(source: &[f64], volume: &[f64]) -> (usize, bool) {
     let mut best = 0usize;
     let mut cur = 0usize;
+    let mut all_valid = true;
     for (&src, &vol) in source.iter().zip(volume.iter()) {
         if src.is_finite() && vol.is_finite() {
             cur += 1;
             best = best.max(cur);
         } else {
+            all_valid = false;
             cur = 0;
         }
     }
-    best
+    (best, all_valid)
 }
 
 #[inline(always)]
@@ -336,7 +342,7 @@ fn validate_common(
     stoch_k_smooth: usize,
     stoch_d_smooth: usize,
     mfi_length: usize,
-) -> Result<(), StochasticMoneyFlowIndexError> {
+) -> Result<bool, StochasticMoneyFlowIndexError> {
     if source.is_empty() || volume.is_empty() {
         return Err(StochasticMoneyFlowIndexError::EmptyInputData);
     }
@@ -351,7 +357,7 @@ fn validate_common(
     validate_period("stoch_d_smooth", stoch_d_smooth, source.len())?;
     validate_period("mfi_length", mfi_length, source.len())?;
 
-    let max_run = longest_valid_run(source, volume);
+    let (max_run, all_valid) = valid_run_stats(source, volume);
     if max_run == 0 {
         return Err(StochasticMoneyFlowIndexError::AllValuesNaN);
     }
@@ -362,14 +368,16 @@ fn validate_common(
             valid: max_run,
         });
     }
-    Ok(())
+    Ok(all_valid)
 }
 
 #[derive(Debug, Clone)]
 struct SmaState {
     period: usize,
     sum: f64,
-    window: VecDeque<f64>,
+    window: Vec<f64>,
+    head: usize,
+    len: usize,
 }
 
 impl SmaState {
@@ -378,14 +386,17 @@ impl SmaState {
         Self {
             period,
             sum: 0.0,
-            window: VecDeque::with_capacity(period.max(1)),
+            window: vec![0.0; period.max(1)],
+            head: 0,
+            len: 0,
         }
     }
 
     #[inline(always)]
     fn reset(&mut self) {
         self.sum = 0.0;
-        self.window.clear();
+        self.head = 0;
+        self.len = 0;
     }
 
     #[inline(always)]
@@ -394,18 +405,30 @@ impl SmaState {
             self.reset();
             return None;
         }
+        self.update_finite(value)
+    }
+
+    #[inline(always)]
+    fn update_finite(&mut self, value: f64) -> Option<f64> {
         if self.period == 1 {
             return Some(value);
         }
-        self.window.push_back(value);
-        self.sum += value;
-        if self.window.len() < self.period {
-            return None;
-        }
-        if self.window.len() > self.period {
-            if let Some(old) = self.window.pop_front() {
-                self.sum -= old;
+        if self.len < self.period {
+            self.window[self.head] = value;
+            self.head += 1;
+            if self.head == self.period {
+                self.head = 0;
             }
+            self.len += 1;
+            self.sum += value;
+            return (self.len == self.period).then_some(self.sum / self.period as f64);
+        }
+        self.sum += value;
+        self.sum -= self.window[self.head];
+        self.window[self.head] = value;
+        self.head += 1;
+        if self.head == self.period {
+            self.head = 0;
         }
         Some(self.sum / self.period as f64)
     }
@@ -445,8 +468,6 @@ impl MoneyFlowState {
 
     #[inline(always)]
     fn reset(&mut self) {
-        self.pos_buf.fill(0.0);
-        self.neg_buf.fill(0.0);
         self.head = 0;
         self.count = 0;
         self.pos_sum = 0.0;
@@ -604,7 +625,11 @@ impl StochasticMoneyFlowIndexStream {
             self.reset();
             return None;
         }
+        self.update_finite(source, volume)
+    }
 
+    #[inline(always)]
+    fn update_finite(&mut self, source: f64, volume: f64) -> Option<(f64, f64)> {
         let mfi = self.mfi.update(source, volume)?;
         self.push_mfi(mfi);
         if self.mfi_index < self.stoch_k_length {
@@ -619,7 +644,7 @@ impl StochasticMoneyFlowIndexStream {
             0.0
         };
 
-        let k = self.k_sma.update(raw_k)?;
+        let k = self.k_sma.update_finite(raw_k)?;
         let d = match self.d_sma.update(k) {
             Some(value) => value,
             None => f64::NAN,
@@ -644,6 +669,212 @@ impl StochasticMoneyFlowIndexStream {
 }
 
 #[inline(always)]
+fn compute_row_default_14_3_3_14<const CHECK_FINITE: bool>(
+    source: &[f64],
+    volume: &[f64],
+    out_k: &mut [f64],
+    out_d: &mut [f64],
+) {
+    let mut pos_buf = [0.0; 13];
+    let mut neg_buf = [0.0; 13];
+    let mut flow_head = 0usize;
+    let mut flow_count = 0usize;
+    let mut pos_sum = 0.0;
+    let mut neg_sum = 0.0;
+    let mut prev_source = f64::NAN;
+    let mut has_prev = false;
+
+    let mut max_idx = [0usize; 15];
+    let mut max_val = [0.0; 15];
+    let mut max_head = 0usize;
+    let mut max_len = 0usize;
+    let mut min_idx = [0usize; 15];
+    let mut min_val = [0.0; 15];
+    let mut min_head = 0usize;
+    let mut min_len = 0usize;
+    let mut mfi_index = 0usize;
+
+    let mut k_buf = [0.0; 3];
+    let mut k_head = 0usize;
+    let mut k_len = 0usize;
+    let mut k_sum = 0.0;
+    let mut d_buf = [0.0; 3];
+    let mut d_head = 0usize;
+    let mut d_len = 0usize;
+    let mut d_sum = 0.0;
+
+    for i in 0..source.len() {
+        let src = source[i];
+        let vol = volume[i];
+        if CHECK_FINITE && (!src.is_finite() || !vol.is_finite()) {
+            flow_head = 0;
+            flow_count = 0;
+            pos_sum = 0.0;
+            neg_sum = 0.0;
+            prev_source = f64::NAN;
+            has_prev = false;
+            max_head = 0;
+            max_len = 0;
+            min_head = 0;
+            min_len = 0;
+            mfi_index = 0;
+            k_head = 0;
+            k_len = 0;
+            k_sum = 0.0;
+            d_head = 0;
+            d_len = 0;
+            d_sum = 0.0;
+            out_k[i] = f64::NAN;
+            out_d[i] = f64::NAN;
+            continue;
+        }
+
+        if !has_prev {
+            prev_source = src;
+            has_prev = true;
+            out_k[i] = f64::NAN;
+            out_d[i] = f64::NAN;
+            continue;
+        }
+
+        let diff = src - prev_source;
+        prev_source = src;
+        let flow = src * vol;
+        let pos_new = if diff > 0.0 { flow } else { 0.0 };
+        let neg_new = if diff < 0.0 { flow } else { 0.0 };
+
+        if flow_count == 13 {
+            pos_sum -= pos_buf[flow_head];
+            neg_sum -= neg_buf[flow_head];
+        } else {
+            flow_count += 1;
+        }
+
+        pos_buf[flow_head] = pos_new;
+        neg_buf[flow_head] = neg_new;
+        pos_sum += pos_new;
+        neg_sum += neg_new;
+        flow_head += 1;
+        if flow_head == 13 {
+            flow_head = 0;
+        }
+
+        if flow_count < 13 {
+            out_k[i] = f64::NAN;
+            out_d[i] = f64::NAN;
+            continue;
+        }
+
+        let total = pos_sum + neg_sum;
+        let mfi = if total <= 1e-14 {
+            0.0
+        } else {
+            100.0 * pos_sum / total
+        };
+
+        while max_len > 0 {
+            let back = (max_head + max_len - 1) % 15;
+            if max_val[back] > mfi {
+                break;
+            }
+            max_len -= 1;
+        }
+        let max_tail = (max_head + max_len) % 15;
+        max_idx[max_tail] = mfi_index;
+        max_val[max_tail] = mfi;
+        max_len += 1;
+
+        while min_len > 0 {
+            let back = (min_head + min_len - 1) % 15;
+            if min_val[back] < mfi {
+                break;
+            }
+            min_len -= 1;
+        }
+        let min_tail = (min_head + min_len) % 15;
+        min_idx[min_tail] = mfi_index;
+        min_val[min_tail] = mfi;
+        min_len += 1;
+
+        let window_start = mfi_index.saturating_add(1).saturating_sub(14);
+        while max_len > 0 && max_idx[max_head] < window_start {
+            max_head = (max_head + 1) % 15;
+            max_len -= 1;
+        }
+        while min_len > 0 && min_idx[min_head] < window_start {
+            min_head = (min_head + 1) % 15;
+            min_len -= 1;
+        }
+        mfi_index += 1;
+
+        if mfi_index < 14 {
+            out_k[i] = f64::NAN;
+            out_d[i] = f64::NAN;
+            continue;
+        }
+
+        let highest = max_val[max_head];
+        let lowest = min_val[min_head];
+        let raw_k = if highest - lowest > f64::EPSILON {
+            100.0 * (mfi - lowest) / (highest - lowest)
+        } else {
+            0.0
+        };
+
+        let k = if k_len < 3 {
+            k_buf[k_head] = raw_k;
+            k_head += 1;
+            if k_head == 3 {
+                k_head = 0;
+            }
+            k_len += 1;
+            k_sum += raw_k;
+            if k_len < 3 {
+                out_k[i] = f64::NAN;
+                out_d[i] = f64::NAN;
+                continue;
+            }
+            k_sum / 3.0
+        } else {
+            k_sum += raw_k;
+            k_sum -= k_buf[k_head];
+            k_buf[k_head] = raw_k;
+            k_head += 1;
+            if k_head == 3 {
+                k_head = 0;
+            }
+            k_sum / 3.0
+        };
+
+        out_k[i] = k;
+        let d = if d_len < 3 {
+            d_buf[d_head] = k;
+            d_head += 1;
+            if d_head == 3 {
+                d_head = 0;
+            }
+            d_len += 1;
+            d_sum += k;
+            if d_len < 3 {
+                f64::NAN
+            } else {
+                d_sum / 3.0
+            }
+        } else {
+            d_sum += k;
+            d_sum -= d_buf[d_head];
+            d_buf[d_head] = k;
+            d_head += 1;
+            if d_head == 3 {
+                d_head = 0;
+            }
+            d_sum / 3.0
+        };
+        out_d[i] = d;
+    }
+}
+
+#[inline(always)]
 fn compute_row(
     source: &[f64],
     volume: &[f64],
@@ -651,11 +882,19 @@ fn compute_row(
     stoch_k_smooth: usize,
     stoch_d_smooth: usize,
     mfi_length: usize,
+    all_finite: bool,
     out_k: &mut [f64],
     out_d: &mut [f64],
 ) {
-    out_k.fill(f64::NAN);
-    out_d.fill(f64::NAN);
+    if stoch_k_length == 14 && stoch_k_smooth == 3 && stoch_d_smooth == 3 && mfi_length == 14 {
+        if all_finite {
+            compute_row_default_14_3_3_14::<false>(source, volume, out_k, out_d);
+        } else {
+            compute_row_default_14_3_3_14::<true>(source, volume, out_k, out_d);
+        }
+        return;
+    }
+
     let mut stream = StochasticMoneyFlowIndexStream::try_new(StochasticMoneyFlowIndexParams {
         stoch_k_length: Some(stoch_k_length),
         stoch_k_smooth: Some(stoch_k_smooth),
@@ -665,9 +904,20 @@ fn compute_row(
     .expect("validated params");
 
     for i in 0..source.len() {
-        if let Some((k, d)) = stream.update(source[i], volume[i]) {
-            out_k[i] = k;
-            out_d[i] = d;
+        let value = if all_finite {
+            stream.update_finite(source[i], volume[i])
+        } else {
+            stream.update(source[i], volume[i])
+        };
+        match value {
+            Some((k, d)) => {
+                out_k[i] = k;
+                out_d[i] = d;
+            }
+            None => {
+                out_k[i] = f64::NAN;
+                out_d[i] = f64::NAN;
+            }
         }
     }
 }
@@ -676,7 +926,18 @@ fn compute_row(
 fn slices_from_input<'a>(input: &'a StochasticMoneyFlowIndexInput<'a>) -> (&'a [f64], &'a [f64]) {
     match &input.data {
         StochasticMoneyFlowIndexData::Candles { candles, source } => {
-            (source_type(candles, source), candles.volume.as_slice())
+            let source_slice = match *source {
+                "close" => candles.close.as_slice(),
+                "open" => candles.open.as_slice(),
+                "high" => candles.high.as_slice(),
+                "low" => candles.low.as_slice(),
+                "hl2" => candles.hl2.as_slice(),
+                "hlc3" => candles.hlc3.as_slice(),
+                "ohlc4" => candles.ohlc4.as_slice(),
+                "hlcc4" => candles.hlcc4.as_slice(),
+                _ => source_type(candles, source),
+            };
+            (source_slice, candles.volume.as_slice())
         }
         StochasticMoneyFlowIndexData::Slices { source, volume } => (*source, *volume),
     }
@@ -697,7 +958,7 @@ pub fn stochastic_money_flow_index_with_kernel(
     let stoch_k_smooth = input.get_stoch_k_smooth();
     let stoch_d_smooth = input.get_stoch_d_smooth();
     let mfi_length = input.get_mfi_length();
-    validate_common(
+    let all_finite = validate_common(
         source,
         volume,
         stoch_k_length,
@@ -707,18 +968,12 @@ pub fn stochastic_money_flow_index_with_kernel(
     )?;
 
     let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto | Kernel::Avx2 | Kernel::Avx512 => Kernel::Scalar,
         other => other,
     };
 
-    let mut k = alloc_with_nan_prefix(
-        source.len(),
-        k_warmup_prefix(mfi_length, stoch_k_length, stoch_k_smooth),
-    );
-    let mut d = alloc_with_nan_prefix(
-        source.len(),
-        d_warmup_prefix(mfi_length, stoch_k_length, stoch_k_smooth, stoch_d_smooth),
-    );
+    let mut k = alloc_uninit_f64(source.len());
+    let mut d = alloc_uninit_f64(source.len());
     compute_row(
         source,
         volume,
@@ -726,6 +981,7 @@ pub fn stochastic_money_flow_index_with_kernel(
         stoch_k_smooth,
         stoch_d_smooth,
         mfi_length,
+        all_finite,
         &mut k,
         &mut d,
     );
@@ -743,7 +999,7 @@ pub fn stochastic_money_flow_index_into_slice(
     let stoch_k_smooth = input.get_stoch_k_smooth();
     let stoch_d_smooth = input.get_stoch_d_smooth();
     let mfi_length = input.get_mfi_length();
-    validate_common(
+    let all_finite = validate_common(
         source,
         volume,
         stoch_k_length,
@@ -765,7 +1021,7 @@ pub fn stochastic_money_flow_index_into_slice(
     }
 
     let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto | Kernel::Avx2 | Kernel::Avx512 => Kernel::Scalar,
         other => other,
     };
 
@@ -776,6 +1032,7 @@ pub fn stochastic_money_flow_index_into_slice(
         stoch_k_smooth,
         stoch_d_smooth,
         mfi_length,
+        all_finite,
         dst_k,
         dst_d,
     );
@@ -1027,7 +1284,7 @@ fn stochastic_money_flow_index_batch_inner(
         });
     }
 
-    let max_run = longest_valid_run(source, volume);
+    let (max_run, all_finite) = valid_run_stats(source, volume);
     if max_run == 0 {
         return Err(StochasticMoneyFlowIndexError::AllValuesNaN);
     }
@@ -1143,7 +1400,7 @@ fn stochastic_money_flow_index_batch_inner_into(
         });
     }
 
-    let max_run = longest_valid_run(source, volume);
+    let (max_run, all_finite) = valid_run_stats(source, volume);
     if max_run == 0 {
         return Err(StochasticMoneyFlowIndexError::AllValuesNaN);
     }
@@ -1179,6 +1436,7 @@ fn stochastic_money_flow_index_batch_inner_into(
             params.stoch_k_smooth.unwrap_or(3),
             params.stoch_d_smooth.unwrap_or(3),
             params.mfi_length.unwrap_or(14),
+            all_finite,
             dst_k,
             dst_d,
         );

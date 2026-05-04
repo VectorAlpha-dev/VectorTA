@@ -283,6 +283,16 @@ pub struct EhlersAutocorrelationPeriodogramStream {
     corr: Vec<f64>,
     power: Vec<f64>,
     smooth: Vec<f64>,
+    cos_table: Vec<f64>,
+    sin_table: Vec<f64>,
+    trig_stride: usize,
+    hp_coef: f64,
+    hp_prev1_coef: f64,
+    hp_prev2_coef: f64,
+    filt_c1: f64,
+    filt_c2: f64,
+    filt_c3: f64,
+    decay: f64,
     dom: f64,
     max_pwr: f64,
     e: f64,
@@ -301,6 +311,31 @@ impl EhlersAutocorrelationPeriodogramStream {
     #[inline]
     fn new_resolved(params: ResolvedParams) -> Self {
         let size = params.max_period + 1;
+        let alpha_hp = highpass_alpha(params.max_period);
+        let one_minus = 1.0 - alpha_hp;
+        let a1 = (-SQRT_2 * PI / params.min_period as f64).exp();
+        let b1 = 2.0 * a1 * (SQRT_2 * PI / params.min_period as f64).cos();
+        let c2 = b1;
+        let c3 = -(a1 * a1);
+        let diff = (params.max_period - params.min_period) as f64;
+        let decay = if diff > 0.0 {
+            10.0_f64.powf(-0.15 / diff)
+        } else {
+            1.0
+        };
+        let trig_stride = params.max_period + 1;
+        let trig_len = trig_stride * trig_stride;
+        let mut cos_table = vec![0.0; trig_len];
+        let mut sin_table = vec![0.0; trig_len];
+        for period in params.min_period..=params.max_period {
+            let period_f = period as f64;
+            let base = period * trig_stride;
+            for n in 2..=params.max_period {
+                let angle = 2.0 * PI * n as f64 / period_f;
+                cos_table[base + n] = angle.cos();
+                sin_table[base + n] = angle.sin();
+            }
+        }
         Self {
             params,
             prev_price_1: 0.0,
@@ -313,6 +348,16 @@ impl EhlersAutocorrelationPeriodogramStream {
             corr: vec![0.0; size],
             power: vec![0.0; size],
             smooth: vec![0.0; size],
+            cos_table,
+            sin_table,
+            trig_stride,
+            hp_coef: (1.0 - alpha_hp * 0.5).powi(2),
+            hp_prev1_coef: 2.0 * one_minus,
+            hp_prev2_coef: one_minus.powi(2),
+            filt_c1: 1.0 - c2 - c3,
+            filt_c2: c2,
+            filt_c3: c3,
+            decay,
             dom: (params.min_period + params.max_period) as f64 * 0.5,
             max_pwr: 0.0,
             e: 1.0,
@@ -347,19 +392,13 @@ impl EhlersAutocorrelationPeriodogramStream {
             return None;
         }
 
-        let alpha_hp = highpass_alpha(self.params.max_period);
-        let one_minus = 1.0 - alpha_hp;
-        let hp = (1.0 - alpha_hp * 0.5).powi(2)
-            * (value - 2.0 * self.prev_price_1 + self.prev_price_2)
-            + 2.0 * one_minus * self.hp_prev_1
-            - one_minus.powi(2) * self.hp_prev_2;
+        let hp = self.hp_coef * (value - 2.0 * self.prev_price_1 + self.prev_price_2)
+            + self.hp_prev1_coef * self.hp_prev_1
+            - self.hp_prev2_coef * self.hp_prev_2;
 
-        let a1 = (-SQRT_2 * PI / self.params.min_period as f64).exp();
-        let b1 = 2.0 * a1 * (SQRT_2 * PI / self.params.min_period as f64).cos();
-        let c2 = b1;
-        let c3 = -(a1 * a1);
-        let c1 = 1.0 - c2 - c3;
-        let filt = c1 * (hp + self.hp_prev_1) * 0.5 + c2 * self.filt_prev_1 + c3 * self.filt_prev_2;
+        let filt = self.filt_c1 * (hp + self.hp_prev_1) * 0.5
+            + self.filt_c2 * self.filt_prev_1
+            + self.filt_c3 * self.filt_prev_2;
 
         self.prev_price_2 = self.prev_price_1;
         self.prev_price_1 = value;
@@ -374,43 +413,66 @@ impl EhlersAutocorrelationPeriodogramStream {
         if self.params.max_period >= 1 {
             self.corr[1] = 0.0;
         }
-        for lag in 2..=self.params.max_period {
-            let window = corr_window(self.params.avg_length, lag);
-            let mut sx = 0.0;
-            let mut sy = 0.0;
-            let mut sxx = 0.0;
-            let mut syy = 0.0;
-            let mut sxy = 0.0;
-            for k in 0..window {
-                let x = self.filt_back(k);
-                let y = self.filt_back(lag + k);
-                sx += x;
-                sy += y;
-                sxx += x * x;
-                syy += y * y;
-                sxy += x * y;
+        if self.params.avg_length == 3 {
+            let x0 = self.filt_back(0);
+            let x1 = self.filt_back(1);
+            let x2 = self.filt_back(2);
+            let sx = x0 + x1 + x2;
+            let sxx = x0 * x0 + x1 * x1 + x2 * x2;
+            for lag in 2..=self.params.max_period {
+                let y0 = self.filt_back(lag);
+                let y1 = self.filt_back(lag + 1);
+                let y2 = self.filt_back(lag + 2);
+                let sy = y0 + y1 + y2;
+                let syy = y0 * y0 + y1 * y1 + y2 * y2;
+                let sxy = x0 * y0 + x1 * y1 + x2 * y2;
+                let denom_x = 3.0 * sxx - sx * sx;
+                let denom_y = 3.0 * syy - sy * sy;
+                let denom = denom_x * denom_y;
+                self.corr[lag] = if denom > 0.0 {
+                    (3.0 * sxy - sx * sy) / denom.sqrt()
+                } else {
+                    0.0
+                };
             }
-            let valid = window as f64;
-            let denom_x = valid * sxx - sx * sx;
-            let denom_y = valid * syy - sy * sy;
-            let denom = denom_x * denom_y;
-            self.corr[lag] = if denom > 0.0 {
-                (valid * sxy - sx * sy) / denom.sqrt()
-            } else {
-                0.0
-            };
+        } else {
+            for lag in 2..=self.params.max_period {
+                let window = corr_window(self.params.avg_length, lag);
+                let mut sx = 0.0;
+                let mut sy = 0.0;
+                let mut sxx = 0.0;
+                let mut syy = 0.0;
+                let mut sxy = 0.0;
+                for k in 0..window {
+                    let x = self.filt_back(k);
+                    let y = self.filt_back(lag + k);
+                    sx += x;
+                    sy += y;
+                    sxx += x * x;
+                    syy += y * y;
+                    sxy += x * y;
+                }
+                let valid = window as f64;
+                let denom_x = valid * sxx - sx * sx;
+                let denom_y = valid * syy - sy * sy;
+                let denom = denom_x * denom_y;
+                self.corr[lag] = if denom > 0.0 {
+                    (valid * sxy - sx * sy) / denom.sqrt()
+                } else {
+                    0.0
+                };
+            }
         }
 
         let mut local_max_pwr = 0.0;
         for period in self.params.min_period..=self.params.max_period {
             let mut cos_acc = 0.0;
             let mut sin_acc = 0.0;
-            let period_f = period as f64;
+            let trig_base = period * self.trig_stride;
             for n in 2..=self.params.max_period {
-                let angle = 2.0 * PI * n as f64 / period_f;
                 let corr = self.corr[n];
-                cos_acc += corr * angle.cos();
-                sin_acc += corr * angle.sin();
+                cos_acc += corr * self.cos_table[trig_base + n];
+                sin_acc += corr * self.sin_table[trig_base + n];
             }
             let sq = cos_acc * cos_acc + sin_acc * sin_acc;
             let smooth = 0.2 * sq * sq + 0.8 * self.smooth[period];
@@ -420,16 +482,10 @@ impl EhlersAutocorrelationPeriodogramStream {
             }
         }
 
-        let diff = (self.params.max_period - self.params.min_period) as f64;
-        let decay = if diff > 0.0 {
-            10.0_f64.powf(-0.15 / diff)
-        } else {
-            1.0
-        };
         if local_max_pwr > self.max_pwr {
             self.max_pwr = local_max_pwr;
         } else {
-            self.max_pwr *= decay;
+            self.max_pwr *= self.decay;
         }
 
         let mut weighted = 0.0;

@@ -267,6 +267,7 @@ struct PreparedInput<'a> {
     len: usize,
     params: ResolvedParams,
     warmup: usize,
+    all_valid_from_first: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -752,19 +753,19 @@ pub fn range_filtered_trend_signals_with_kernel(
     kernel: Kernel,
 ) -> Result<RangeFilteredTrendSignalsOutput, RangeFilteredTrendSignalsError> {
     let prepared = prepare_input(input, kernel)?;
-    let mut kalman = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut supertrend = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut upper_band = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut lower_band = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut trend = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut kalman_trend = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut state = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut market_trending = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut market_ranging = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut short_term_bullish = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut short_term_bearish = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut long_term_bullish = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    let mut long_term_bearish = alloc_with_nan_prefix(prepared.len, prepared.warmup);
+    let mut kalman = alloc_with_nan_prefix(prepared.len, 0);
+    let mut supertrend = alloc_with_nan_prefix(prepared.len, 0);
+    let mut upper_band = alloc_with_nan_prefix(prepared.len, 0);
+    let mut lower_band = alloc_with_nan_prefix(prepared.len, 0);
+    let mut trend = alloc_with_nan_prefix(prepared.len, 0);
+    let mut kalman_trend = alloc_with_nan_prefix(prepared.len, 0);
+    let mut state = alloc_with_nan_prefix(prepared.len, 0);
+    let mut market_trending = alloc_with_nan_prefix(prepared.len, 0);
+    let mut market_ranging = alloc_with_nan_prefix(prepared.len, 0);
+    let mut short_term_bullish = alloc_with_nan_prefix(prepared.len, 0);
+    let mut short_term_bearish = alloc_with_nan_prefix(prepared.len, 0);
+    let mut long_term_bullish = alloc_with_nan_prefix(prepared.len, 0);
+    let mut long_term_bearish = alloc_with_nan_prefix(prepared.len, 0);
 
     range_filtered_trend_signals_into_slices(
         input,
@@ -1005,6 +1006,7 @@ fn prepare_input<'a>(
     let valid = (first..len)
         .filter(|&i| high[i].is_finite() && low[i].is_finite() && close[i].is_finite())
         .count();
+    let all_valid_from_first = valid == len - first;
     let needed = WMA_PERIOD.max(params.supertrend_atr_period).max(2);
     if valid < needed {
         return Err(RangeFilteredTrendSignalsError::NotEnoughValidData { needed, valid });
@@ -1020,6 +1022,7 @@ fn prepare_input<'a>(
         len,
         params,
         warmup: first + (WMA_PERIOD - 1).max(params.supertrend_atr_period.saturating_sub(1)),
+        all_valid_from_first,
     })
 }
 
@@ -1041,19 +1044,24 @@ fn compute_into_slices(
     dst_long_term_bullish: &mut [f64],
     dst_long_term_bearish: &mut [f64],
 ) -> Result<(), RangeFilteredTrendSignalsError> {
-    dst_kalman.fill(f64::NAN);
-    dst_supertrend.fill(f64::NAN);
-    dst_upper_band.fill(f64::NAN);
-    dst_lower_band.fill(f64::NAN);
-    dst_trend.fill(f64::NAN);
-    dst_kalman_trend.fill(f64::NAN);
-    dst_state.fill(f64::NAN);
-    dst_market_trending.fill(f64::NAN);
-    dst_market_ranging.fill(f64::NAN);
-    dst_short_term_bullish.fill(f64::NAN);
-    dst_short_term_bearish.fill(f64::NAN);
-    dst_long_term_bullish.fill(f64::NAN);
-    dst_long_term_bearish.fill(f64::NAN);
+    let init_len = if prepared.all_valid_from_first {
+        prepared.warmup.min(prepared.len)
+    } else {
+        prepared.len
+    };
+    dst_kalman[..init_len].fill(f64::NAN);
+    dst_supertrend[..init_len].fill(f64::NAN);
+    dst_upper_band[..init_len].fill(f64::NAN);
+    dst_lower_band[..init_len].fill(f64::NAN);
+    dst_trend[..init_len].fill(f64::NAN);
+    dst_kalman_trend[..init_len].fill(f64::NAN);
+    dst_state[..init_len].fill(f64::NAN);
+    dst_market_trending[..init_len].fill(f64::NAN);
+    dst_market_ranging[..init_len].fill(f64::NAN);
+    dst_short_term_bullish[..init_len].fill(f64::NAN);
+    dst_short_term_bearish[..init_len].fill(f64::NAN);
+    dst_long_term_bullish[..init_len].fill(f64::NAN);
+    dst_long_term_bearish[..init_len].fill(f64::NAN);
 
     let mut core = RangeFilteredTrendSignalsCore::new(prepared.params);
     for i in 0..prepared.len {

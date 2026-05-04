@@ -152,8 +152,24 @@ impl<'a> AsRef<[f64]> for ZlemaInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             ZlemaData::Slice(slice) => slice,
-            ZlemaData::Candles { candles, source } => source_type(candles, source),
+            ZlemaData::Candles { candles, source } => zlema_source(candles, source),
         }
+    }
+}
+
+#[inline(always)]
+fn zlema_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => candles.open.as_slice(),
+        "high" => candles.high.as_slice(),
+        "low" => candles.low.as_slice(),
+        "close" => candles.close.as_slice(),
+        "volume" => candles.volume.as_slice(),
+        "hl2" => candles.hl2.as_slice(),
+        "hlc3" => candles.hlc3.as_slice(),
+        "ohlc4" => candles.ohlc4.as_slice(),
+        "hlcc4" | "hlcc" => candles.hlcc4.as_slice(),
+        _ => source_type(candles, source),
     }
 }
 
@@ -338,6 +354,8 @@ pub fn zlema_with_kernel(input: &ZlemaInput, kernel: Kernel) -> Result<ZlemaOutp
 
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Scalar,
         k => k,
     };
 
@@ -1604,6 +1622,8 @@ pub fn zlema_compute_into(
 
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Scalar,
         other => other,
     };
 
@@ -1648,6 +1668,8 @@ pub fn zlema_into_slice(
 
     let chosen = match kern {
         Kernel::Auto => Kernel::Scalar,
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Scalar,
         k => k,
     };
     unsafe {

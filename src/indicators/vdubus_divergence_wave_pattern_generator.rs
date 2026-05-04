@@ -14,7 +14,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, make_uninit_matrix};
+use crate::utilities::helpers::{alloc_uninit_f64, detect_best_batch_kernel, make_uninit_matrix};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1753,18 +1753,18 @@ pub fn vdubus_divergence_wave_pattern_generator_with_kernel(
     let prepared = prepare_input(input, kernel)?;
     let len = prepared.close.len();
     let mut output = VdubusDivergenceWavePatternGeneratorOutput {
-        fast_standard: vec![f64::NAN; len],
-        fast_climax: vec![f64::NAN; len],
-        fast_rounded: vec![f64::NAN; len],
-        fast_predator: vec![f64::NAN; len],
-        slow_standard: vec![f64::NAN; len],
-        slow_climax: vec![f64::NAN; len],
-        slow_rounded: vec![f64::NAN; len],
-        slow_predator: vec![f64::NAN; len],
-        opposing_force: vec![f64::NAN; len],
-        macd: vec![f64::NAN; len],
-        signal: vec![f64::NAN; len],
-        hist: vec![f64::NAN; len],
+        fast_standard: alloc_uninit_f64(len),
+        fast_climax: alloc_uninit_f64(len),
+        fast_rounded: alloc_uninit_f64(len),
+        fast_predator: alloc_uninit_f64(len),
+        slow_standard: alloc_uninit_f64(len),
+        slow_climax: alloc_uninit_f64(len),
+        slow_rounded: alloc_uninit_f64(len),
+        slow_predator: alloc_uninit_f64(len),
+        opposing_force: alloc_uninit_f64(len),
+        macd: alloc_uninit_f64(len),
+        signal: alloc_uninit_f64(len),
+        hist: alloc_uninit_f64(len),
     };
     let _ = prepared.warmup;
     compute_row(

@@ -21,12 +21,13 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use std::arch::is_x86_feature_detected;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use std::arch::x86_64::*;
 
@@ -39,6 +40,39 @@ use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
+const DEFAULT_LENGTH: usize = 13;
+const DEFAULT_VI_FACTOR: f64 = 0.67;
+const DEFAULT_STRICT: bool = true;
+const DEFAULT_SAMPLE_PERIOD: usize = 0;
+const DEFAULT_SOURCE: &str = "close";
+
+#[inline(always)]
+fn source_slice<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        DEFAULT_SOURCE => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
+    }
+}
+
+#[inline(always)]
+fn single_auto_kernel() -> Kernel {
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            return Kernel::Avx2;
+        }
+    }
+    Kernel::Scalar
+}
+
 impl<'a> AsRef<[f64]> for VolumeAdjustedMaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -46,7 +80,7 @@ impl<'a> AsRef<[f64]> for VolumeAdjustedMaInput<'a> {
             VolumeAdjustedMaData::Slice { data, .. } => data,
             VolumeAdjustedMaData::Candles {
                 candles, source, ..
-            } => source_type(candles, source),
+            } => source_slice(candles, source),
         }
     }
 }
@@ -83,10 +117,10 @@ pub struct VolumeAdjustedMaParams {
 impl Default for VolumeAdjustedMaParams {
     fn default() -> Self {
         Self {
-            length: Some(13),
-            vi_factor: Some(0.67),
-            strict: Some(true),
-            sample_period: Some(0),
+            length: Some(DEFAULT_LENGTH),
+            vi_factor: Some(DEFAULT_VI_FACTOR),
+            strict: Some(DEFAULT_STRICT),
+            sample_period: Some(DEFAULT_SAMPLE_PERIOD),
         }
     }
 }
@@ -119,27 +153,27 @@ impl<'a> VolumeAdjustedMaInput<'a> {
 
     #[inline]
     pub fn with_default_candles(c: &'a Candles) -> Self {
-        Self::from_candles(c, "close", VolumeAdjustedMaParams::default())
+        Self::from_candles(c, DEFAULT_SOURCE, VolumeAdjustedMaParams::default())
     }
 
     #[inline]
     pub fn get_length(&self) -> usize {
-        self.params.length.unwrap_or(13)
+        self.params.length.unwrap_or(DEFAULT_LENGTH)
     }
 
     #[inline]
     pub fn get_vi_factor(&self) -> f64 {
-        self.params.vi_factor.unwrap_or(0.67)
+        self.params.vi_factor.unwrap_or(DEFAULT_VI_FACTOR)
     }
 
     #[inline]
     pub fn get_strict(&self) -> bool {
-        self.params.strict.unwrap_or(true)
+        self.params.strict.unwrap_or(DEFAULT_STRICT)
     }
 
     #[inline]
     pub fn get_sample_period(&self) -> usize {
-        self.params.sample_period.unwrap_or(0)
+        self.params.sample_period.unwrap_or(DEFAULT_SAMPLE_PERIOD)
     }
 
     #[inline]
@@ -227,7 +261,7 @@ impl VolumeAdjustedMaBuilder {
             strict: self.strict,
             sample_period: self.sample_period,
         };
-        let i = VolumeAdjustedMaInput::from_candles(c, "close", p);
+        let i = VolumeAdjustedMaInput::from_candles(c, DEFAULT_SOURCE, p);
         VolumeAdjustedMa_with_kernel(&i, self.kernel)
     }
 
@@ -354,7 +388,7 @@ fn VolumeAdjustedMa_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => single_auto_kernel(),
         k => k,
     };
     Ok((
@@ -1072,7 +1106,7 @@ impl VolumeAdjustedMaBatchBuilder {
         c: &Candles,
         src: &str,
     ) -> Result<VolumeAdjustedMaBatchOutput, VolumeAdjustedMaError> {
-        self.apply_slices(source_type(c, src), &c.volume)
+        self.apply_slices(source_slice(c, src), &c.volume)
     }
 
     pub fn with_default_slice(
@@ -1090,7 +1124,7 @@ impl VolumeAdjustedMaBatchBuilder {
     ) -> Result<VolumeAdjustedMaBatchOutput, VolumeAdjustedMaError> {
         VolumeAdjustedMaBatchBuilder::new()
             .kernel(Kernel::Auto)
-            .apply_candles(c, "close")
+            .apply_candles(c, DEFAULT_SOURCE)
     }
 }
 

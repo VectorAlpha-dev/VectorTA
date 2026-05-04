@@ -282,6 +282,8 @@ struct PreparedInput<'a> {
     close: &'a [f64],
     len: usize,
     params: ResolvedParams,
+    first: usize,
+    valid: usize,
     warmup: usize,
 }
 
@@ -386,7 +388,9 @@ impl AtrState {
 #[derive(Clone, Debug)]
 struct RollingSma {
     period: usize,
-    buffer: VecDeque<f64>,
+    buffer: Vec<f64>,
+    head: usize,
+    len: usize,
     sum: f64,
 }
 
@@ -395,29 +399,40 @@ impl RollingSma {
     fn new(period: usize) -> Self {
         Self {
             period,
-            buffer: VecDeque::with_capacity(period),
+            buffer: vec![0.0; period],
+            head: 0,
+            len: 0,
             sum: 0.0,
         }
     }
 
     #[inline(always)]
     fn reset(&mut self) {
-        self.buffer.clear();
+        self.buffer.fill(0.0);
+        self.head = 0;
+        self.len = 0;
         self.sum = 0.0;
     }
 
     #[inline(always)]
     fn update(&mut self, value: f64) -> Option<f64> {
-        if self.buffer.len() == self.period {
-            if let Some(old) = self.buffer.pop_front() {
-                self.sum -= old;
+        if self.len < self.period {
+            self.buffer[self.len] = value;
+            self.len += 1;
+            self.sum += value;
+            if self.len < self.period {
+                None
+            } else {
+                Some(self.sum / self.period as f64)
             }
-        }
-        self.buffer.push_back(value);
-        self.sum += value;
-        if self.buffer.len() < self.period {
-            None
         } else {
+            let old = self.buffer[self.head];
+            self.buffer[self.head] = value;
+            self.sum += value - old;
+            self.head += 1;
+            if self.head == self.period {
+                self.head = 0;
+            }
             Some(self.sum / self.period as f64)
         }
     }
@@ -825,9 +840,8 @@ pub fn market_structure_confluence_with_kernel(
     let mut bearish_bos = alloc_with_nan_prefix(prepared.len, prepared.warmup);
     let mut bearish_choch = alloc_with_nan_prefix(prepared.len, prepared.warmup);
 
-    market_structure_confluence_into_slices(
-        input,
-        kernel,
+    compute_into_slices(
+        &prepared,
         &mut basis,
         &mut upper_band,
         &mut lower_band,
@@ -1086,13 +1100,20 @@ fn prepare_input<'a>(
     if len == 0 {
         return Err(MarketStructureConfluenceError::EmptyInputData);
     }
-    let first = (0..len)
-        .find(|&i| high[i].is_finite() && low[i].is_finite() && close[i].is_finite())
-        .ok_or(MarketStructureConfluenceError::AllValuesNaN)?;
+    let mut first = len;
+    let mut valid = 0usize;
+    for i in 0..len {
+        if high[i].is_finite() && low[i].is_finite() && close[i].is_finite() {
+            if first == len {
+                first = i;
+            }
+            valid += 1;
+        }
+    }
+    if first == len {
+        return Err(MarketStructureConfluenceError::AllValuesNaN);
+    }
     let params = resolve_params(input.params.clone(), len)?;
-    let valid = (first..len)
-        .filter(|&i| high[i].is_finite() && low[i].is_finite() && close[i].is_finite())
-        .count();
     let needed = (params.swing_size * 2 + 1)
         .max(params.basis_length)
         .max(params.atr_length + params.atr_smooth - 1);
@@ -1109,6 +1130,8 @@ fn prepare_input<'a>(
         close,
         len,
         params,
+        first,
+        valid,
         warmup: first
             + (params.swing_size * 2)
                 .max(params.basis_length.saturating_sub(1))
@@ -1137,25 +1160,51 @@ fn compute_into_slices(
     dst_bearish_bos: &mut [f64],
     dst_bearish_choch: &mut [f64],
 ) -> Result<(), MarketStructureConfluenceError> {
-    dst_basis.fill(f64::NAN);
-    dst_upper_band.fill(f64::NAN);
-    dst_lower_band.fill(f64::NAN);
-    dst_structure_direction.fill(f64::NAN);
-    dst_bullish_arrow.fill(f64::NAN);
-    dst_bearish_arrow.fill(f64::NAN);
-    dst_bullish_change.fill(f64::NAN);
-    dst_bearish_change.fill(f64::NAN);
-    dst_hh.fill(f64::NAN);
-    dst_lh.fill(f64::NAN);
-    dst_hl.fill(f64::NAN);
-    dst_ll.fill(f64::NAN);
-    dst_bullish_bos.fill(f64::NAN);
-    dst_bullish_choch.fill(f64::NAN);
-    dst_bearish_bos.fill(f64::NAN);
-    dst_bearish_choch.fill(f64::NAN);
+    let clean = prepared.first == 0 && prepared.valid == prepared.len;
+    if clean {
+        let warmup = prepared.warmup.min(prepared.len);
+        for dst in [
+            &mut *dst_basis,
+            &mut *dst_upper_band,
+            &mut *dst_lower_band,
+            &mut *dst_structure_direction,
+            &mut *dst_bullish_arrow,
+            &mut *dst_bearish_arrow,
+            &mut *dst_bullish_change,
+            &mut *dst_bearish_change,
+            &mut *dst_hh,
+            &mut *dst_lh,
+            &mut *dst_hl,
+            &mut *dst_ll,
+            &mut *dst_bullish_bos,
+            &mut *dst_bullish_choch,
+            &mut *dst_bearish_bos,
+            &mut *dst_bearish_choch,
+        ] {
+            for value in &mut dst[..warmup] {
+                *value = f64::NAN;
+            }
+        }
+    } else {
+        dst_basis.fill(f64::NAN);
+        dst_upper_band.fill(f64::NAN);
+        dst_lower_band.fill(f64::NAN);
+        dst_structure_direction.fill(f64::NAN);
+        dst_bullish_arrow.fill(f64::NAN);
+        dst_bearish_arrow.fill(f64::NAN);
+        dst_bullish_change.fill(f64::NAN);
+        dst_bearish_change.fill(f64::NAN);
+        dst_hh.fill(f64::NAN);
+        dst_lh.fill(f64::NAN);
+        dst_hl.fill(f64::NAN);
+        dst_ll.fill(f64::NAN);
+        dst_bullish_bos.fill(f64::NAN);
+        dst_bullish_choch.fill(f64::NAN);
+        dst_bearish_bos.fill(f64::NAN);
+        dst_bearish_choch.fill(f64::NAN);
+    }
 
     let mut core = MarketStructureConfluenceCore::new(prepared.params);
-    core.reset();
     for i in 0..prepared.len {
         let Some(point) = core.update(prepared.high[i], prepared.low[i], prepared.close[i]) else {
             continue;

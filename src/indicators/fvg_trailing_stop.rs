@@ -12,11 +12,10 @@ use serde::{Deserialize, Serialize};
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -66,12 +65,23 @@ pub enum FvgTrailingStopData<'a> {
 
 #[inline]
 fn first_valid_ohlc(high: &[f64], low: &[f64], close: &[f64]) -> usize {
+    first_valid_ohlc_status(high, low, close).0
+}
+
+#[inline]
+fn first_valid_ohlc_status(high: &[f64], low: &[f64], close: &[f64]) -> (usize, bool) {
+    let mut first = usize::MAX;
+    let mut all_valid = true;
     for i in 0..high.len() {
         if !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() {
-            return i;
+            if first == usize::MAX {
+                first = i;
+            }
+        } else {
+            all_valid = false;
         }
     }
-    usize::MAX
+    (first, all_valid)
 }
 
 #[derive(Debug, Clone)]
@@ -475,6 +485,302 @@ fn fvg_ts_scalar(
     }
 }
 
+#[inline]
+fn fvg_ts_scalar_default_5_9<const ALL_VALID: bool>(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    upper: &mut [f64],
+    lower: &mut [f64],
+    upper_ts: &mut [f64],
+    lower_ts: &mut [f64],
+) {
+    let len = high.len();
+    debug_assert_eq!(len, low.len());
+    debug_assert_eq!(len, close.len());
+    debug_assert_eq!(len, upper.len());
+    debug_assert_eq!(len, lower.len());
+    debug_assert_eq!(len, upper_ts.len());
+    debug_assert_eq!(len, lower_ts.len());
+
+    let mut bull_buf = [0.0f64; 5];
+    let mut bear_buf = [0.0f64; 5];
+    let mut bull_len: usize = 0;
+    let mut bear_len: usize = 0;
+
+    let mut last_bull_non_na: Option<usize> = None;
+    let mut last_bear_non_na: Option<usize> = None;
+
+    let mut bull_ring_vals = [0.0f64; 9];
+    let mut bull_ring_nan = [false; 9];
+    let mut bear_ring_vals = [0.0f64; 9];
+    let mut bear_ring_nan = [false; 9];
+
+    let mut bull_sum = 0.0f64;
+    let mut bear_sum = 0.0f64;
+    let mut bull_nan_cnt = 0usize;
+    let mut bear_nan_cnt = 0usize;
+    let mut bull_ring_count = 0usize;
+    let mut bear_ring_count = 0usize;
+    let mut bull_ring_idx = 0usize;
+    let mut bear_ring_idx = 0usize;
+
+    let mut os: Option<i8> = None;
+    let mut ts: Option<f64> = None;
+    let mut ts_prev: Option<f64> = None;
+
+    for i in 0..len {
+        if i >= 2
+            && (ALL_VALID
+                || (!high[i - 2].is_nan() && !low[i - 2].is_nan() && !close[i - 1].is_nan()))
+        {
+            if low[i] > high[i - 2] && close[i - 1] > high[i - 2] {
+                if bull_len < 5 {
+                    bull_buf[bull_len] = high[i - 2];
+                    bull_len += 1;
+                } else {
+                    for k in 1..5 {
+                        bull_buf[k - 1] = bull_buf[k];
+                    }
+                    bull_buf[4] = high[i - 2];
+                }
+            }
+            if high[i] < low[i - 2] && close[i - 1] < low[i - 2] {
+                if bear_len < 5 {
+                    bear_buf[bear_len] = low[i - 2];
+                    bear_len += 1;
+                } else {
+                    for k in 1..5 {
+                        bear_buf[k - 1] = bear_buf[k];
+                    }
+                    bear_buf[4] = low[i - 2];
+                }
+            }
+        }
+
+        let c = close[i];
+
+        let mut new_bull_len = 0usize;
+        let mut bull_acc = 0.0f64;
+        for k in 0..bull_len {
+            let v = bull_buf[k];
+            if c >= v {
+                bull_buf[new_bull_len] = v;
+                new_bull_len += 1;
+                bull_acc += v;
+            }
+        }
+        bull_len = new_bull_len;
+
+        let mut new_bear_len = 0usize;
+        let mut bear_acc = 0.0f64;
+        for k in 0..bear_len {
+            let v = bear_buf[k];
+            if c <= v {
+                bear_buf[new_bear_len] = v;
+                new_bear_len += 1;
+                bear_acc += v;
+            }
+        }
+        bear_len = new_bear_len;
+
+        let bull_avg = if bull_len > 0 {
+            bull_acc / (bull_len as f64)
+        } else {
+            f64::NAN
+        };
+        let bear_avg = if bear_len > 0 {
+            bear_acc / (bear_len as f64)
+        } else {
+            f64::NAN
+        };
+
+        if !bull_avg.is_nan() {
+            last_bull_non_na = Some(i);
+        }
+        if !bear_avg.is_nan() {
+            last_bear_non_na = Some(i);
+        }
+
+        let bull_bs = if bull_avg.is_nan() {
+            match last_bull_non_na {
+                Some(last) => ((i - last).max(1)).min(9),
+                None => 1,
+            }
+        } else {
+            1
+        };
+        let bear_bs = if bear_avg.is_nan() {
+            match last_bear_non_na {
+                Some(last) => ((i - last).max(1)).min(9),
+                None => 1,
+            }
+        } else {
+            1
+        };
+
+        let bull_sma = if bull_avg.is_nan() && (i + 1) >= bull_bs {
+            let mut s = 0.0f64;
+            let start = i + 1 - bull_bs;
+            for j in start..=i {
+                s += close[j];
+            }
+            s / (bull_bs as f64)
+        } else {
+            f64::NAN
+        };
+        let bear_sma = if bear_avg.is_nan() && (i + 1) >= bear_bs {
+            let mut s = 0.0f64;
+            let start = i + 1 - bear_bs;
+            for j in start..=i {
+                s += close[j];
+            }
+            s / (bear_bs as f64)
+        } else {
+            f64::NAN
+        };
+
+        let x_bull = if !bull_avg.is_nan() {
+            bull_avg
+        } else {
+            bull_sma
+        };
+        let x_bear = if !bear_avg.is_nan() {
+            bear_avg
+        } else {
+            bear_sma
+        };
+
+        if bull_ring_count < 9 {
+            let is_nan = x_bull.is_nan();
+            bull_ring_nan[bull_ring_count] = is_nan;
+            bull_ring_vals[bull_ring_count] = if is_nan { 0.0 } else { x_bull };
+            if is_nan {
+                bull_nan_cnt += 1;
+            } else {
+                bull_sum += x_bull;
+            }
+            bull_ring_count += 1;
+        } else {
+            let idx = bull_ring_idx;
+            if bull_ring_nan[idx] {
+                bull_nan_cnt -= 1;
+            } else {
+                bull_sum -= bull_ring_vals[idx];
+            }
+            let is_nan = x_bull.is_nan();
+            bull_ring_nan[idx] = is_nan;
+            if is_nan {
+                bull_ring_vals[idx] = 0.0;
+                bull_nan_cnt += 1;
+            } else {
+                bull_ring_vals[idx] = x_bull;
+                bull_sum += x_bull;
+            }
+            bull_ring_idx = if idx + 1 == 9 { 0 } else { idx + 1 };
+        }
+
+        if bear_ring_count < 9 {
+            let is_nan = x_bear.is_nan();
+            bear_ring_nan[bear_ring_count] = is_nan;
+            bear_ring_vals[bear_ring_count] = if is_nan { 0.0 } else { x_bear };
+            if is_nan {
+                bear_nan_cnt += 1;
+            } else {
+                bear_sum += x_bear;
+            }
+            bear_ring_count += 1;
+        } else {
+            let idx = bear_ring_idx;
+            if bear_ring_nan[idx] {
+                bear_nan_cnt -= 1;
+            } else {
+                bear_sum -= bear_ring_vals[idx];
+            }
+            let is_nan = x_bear.is_nan();
+            bear_ring_nan[idx] = is_nan;
+            if is_nan {
+                bear_ring_vals[idx] = 0.0;
+                bear_nan_cnt += 1;
+            } else {
+                bear_ring_vals[idx] = x_bear;
+                bear_sum += x_bear;
+            }
+            bear_ring_idx = if idx + 1 == 9 { 0 } else { idx + 1 };
+        }
+
+        let bull_disp = if bull_ring_count >= 9 && bull_nan_cnt == 0 {
+            bull_sum / 9.0
+        } else {
+            f64::NAN
+        };
+        let bear_disp = if bear_ring_count >= 9 && bear_nan_cnt == 0 {
+            bear_sum / 9.0
+        } else {
+            f64::NAN
+        };
+
+        let prev_os = os;
+        let next_os = if !bear_disp.is_nan() && c > bear_disp {
+            Some(1)
+        } else if !bull_disp.is_nan() && c < bull_disp {
+            Some(-1)
+        } else {
+            os
+        };
+        os = next_os;
+
+        if let (Some(cur), Some(prev)) = (os, prev_os) {
+            if cur == 1 && prev != 1 {
+                ts = Some(bull_disp);
+            } else if cur == -1 && prev != -1 {
+                ts = Some(bear_disp);
+            } else if cur == 1 {
+                if let Some(t) = ts {
+                    ts = Some(bull_disp.max(t));
+                }
+            } else if cur == -1 {
+                if let Some(t) = ts {
+                    ts = Some(bear_disp.min(t));
+                }
+            }
+        } else {
+            if os == Some(1) {
+                if let Some(t) = ts {
+                    ts = Some(bull_disp.max(t));
+                }
+            }
+            if os == Some(-1) {
+                if let Some(t) = ts {
+                    ts = Some(bear_disp.min(t));
+                }
+            }
+        }
+
+        let show = ts.is_some() || ts_prev.is_some();
+        let ts_nz = if ts.is_some() { ts } else { ts_prev };
+
+        if os == Some(1) && show {
+            upper[i] = f64::NAN;
+            lower[i] = bull_disp;
+            upper_ts[i] = f64::NAN;
+            lower_ts[i] = ts_nz.unwrap_or(f64::NAN);
+        } else if os == Some(-1) && show {
+            upper[i] = bear_disp;
+            lower[i] = f64::NAN;
+            upper_ts[i] = ts_nz.unwrap_or(f64::NAN);
+            lower_ts[i] = f64::NAN;
+        } else {
+            upper[i] = f64::NAN;
+            lower[i] = f64::NAN;
+            upper_ts[i] = f64::NAN;
+            lower_ts[i] = f64::NAN;
+        }
+
+        ts_prev = ts;
+    }
+}
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn fvg_ts_avx2(
@@ -562,7 +868,19 @@ unsafe fn fvg_ts_simd128(
 #[inline]
 fn fvg_ts_prepare<'a>(
     input: &'a FvgTrailingStopInput,
-) -> Result<(&'a [f64], &'a [f64], &'a [f64], usize, usize, bool, usize), FvgTrailingStopError> {
+) -> Result<
+    (
+        &'a [f64],
+        &'a [f64],
+        &'a [f64],
+        usize,
+        usize,
+        bool,
+        usize,
+        bool,
+    ),
+    FvgTrailingStopError,
+> {
     let (h, l, c) = input.as_slices();
     if h.is_empty() || l.is_empty() || c.is_empty() {
         return Err(FvgTrailingStopError::EmptyInputData);
@@ -574,7 +892,7 @@ fn fvg_ts_prepare<'a>(
             data_len: len,
         });
     }
-    let first = first_valid_ohlc(h, l, c);
+    let (first, all_valid) = first_valid_ohlc_status(h, l, c);
     if first == usize::MAX {
         return Err(FvgTrailingStopError::AllValuesNaN);
     }
@@ -598,7 +916,16 @@ fn fvg_ts_prepare<'a>(
         });
     }
     let reset_on_cross = input.get_reset_on_cross();
-    Ok((h, l, c, lookback, smoothing_len, reset_on_cross, first))
+    Ok((
+        h,
+        l,
+        c,
+        lookback,
+        smoothing_len,
+        reset_on_cross,
+        first,
+        all_valid,
+    ))
 }
 
 #[inline]
@@ -614,7 +941,17 @@ fn fvg_ts_compute_into(
     upper_ts: &mut [f64],
     lower_ts: &mut [f64],
     kernel: Kernel,
+    all_valid: bool,
 ) {
+    if lookback == 5 && smoothing_len == 9 && !reset_on_cross {
+        if all_valid {
+            fvg_ts_scalar_default_5_9::<true>(high, low, close, upper, lower, upper_ts, lower_ts);
+        } else {
+            fvg_ts_scalar_default_5_9::<false>(high, low, close, upper, lower, upper_ts, lower_ts);
+        }
+        return;
+    }
+
     unsafe {
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
@@ -705,14 +1042,13 @@ pub fn fvg_trailing_stop_with_kernel(
     input: &FvgTrailingStopInput,
     kernel: Kernel,
 ) -> Result<FvgTrailingStopOutput, FvgTrailingStopError> {
-    let (h, l, c, lookback, smoothing_len, reset_on_cross, first) = fvg_ts_prepare(input)?;
+    let (h, l, c, lookback, smoothing_len, reset_on_cross, _, all_valid) = fvg_ts_prepare(input)?;
     let len = h.len();
-    let warm = (first + 2 + smoothing_len.saturating_sub(1)).min(len);
 
-    let mut upper = alloc_with_nan_prefix(len, warm);
-    let mut lower = alloc_with_nan_prefix(len, warm);
-    let mut upper_ts = alloc_with_nan_prefix(len, warm);
-    let mut lower_ts = alloc_with_nan_prefix(len, warm);
+    let mut upper = alloc_uninit_f64(len);
+    let mut lower = alloc_uninit_f64(len);
+    let mut upper_ts = alloc_uninit_f64(len);
+    let mut lower_ts = alloc_uninit_f64(len);
 
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
@@ -731,6 +1067,7 @@ pub fn fvg_trailing_stop_with_kernel(
         &mut upper_ts,
         &mut lower_ts,
         chosen,
+        all_valid,
     );
 
     Ok(FvgTrailingStopOutput {
@@ -761,7 +1098,8 @@ pub fn fvg_trailing_stop_into_slices(
     input: &FvgTrailingStopInput,
     kernel: Kernel,
 ) -> Result<(), FvgTrailingStopError> {
-    let (h, l, c, lookback, smoothing_len, reset_on_cross, first) = fvg_ts_prepare(input)?;
+    let (h, l, c, lookback, smoothing_len, reset_on_cross, first, all_valid) =
+        fvg_ts_prepare(input)?;
     let len = h.len();
     if [upper.len(), lower.len(), upper_ts.len(), lower_ts.len()]
         .iter()
@@ -793,6 +1131,7 @@ pub fn fvg_trailing_stop_into_slices(
         upper_ts,
         lower_ts,
         chosen,
+        all_valid,
     );
 
     let warm = (first + 2 + smoothing_len.saturating_sub(1)).min(len);
@@ -2412,7 +2751,7 @@ pub fn fvg_trailing_stop_js(
     };
     let input = FvgTrailingStopInput::from_slices(high, low, close, params);
 
-    let (h, low_in, c, lookback, smoothing_len, reset, first) =
+    let (h, low_in, c, lookback, smoothing_len, reset, first, all_valid) =
         fvg_ts_prepare(&input).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let len = h.len();
     let warm = (first + 2 + smoothing_len.saturating_sub(1)).min(len);
@@ -2438,6 +2777,7 @@ pub fn fvg_trailing_stop_js(
         uts,
         lts,
         chosen,
+        all_valid,
     );
     for v in &mut u[..warm] {
         *v = f64::NAN;

@@ -126,8 +126,17 @@ impl<'a> AsRef<[f64]> for KeltnerInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             KeltnerData::Slice(_, _, _, source) => source,
-            KeltnerData::Candles { candles, source } => source_type(candles, source),
+            KeltnerData::Candles { candles, source } => keltner_source(candles, source),
         }
+    }
+}
+
+#[inline(always)]
+fn keltner_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    if source.eq_ignore_ascii_case("close") {
+        &candles.close
+    } else {
+        source_type(candles, source)
     }
 }
 
@@ -252,23 +261,28 @@ pub fn keltner_with_kernel(
 ) -> Result<KeltnerOutput, KeltnerError> {
     let (high, low, close, source_slice): (&[f64], &[f64], &[f64], &[f64]) = match &input.data {
         KeltnerData::Candles { candles, source } => (
-            candles
-                .select_candle_field("high")
-                .map_err(|e| KeltnerError::MaError(e.to_string()))?,
-            candles
-                .select_candle_field("low")
-                .map_err(|e| KeltnerError::MaError(e.to_string()))?,
-            candles
-                .select_candle_field("close")
-                .map_err(|e| KeltnerError::MaError(e.to_string()))?,
-            source_type(candles, source),
+            &candles.high,
+            &candles.low,
+            &candles.close,
+            keltner_source(candles, source),
         ),
         KeltnerData::Slice(h, l, c, s) => (*h, *l, *c, *s),
     };
     let period = input.get_period();
+    let multiplier = input.get_multiplier();
+    let ma_type = input.get_ma_type();
     let len = close.len();
     if len == 0 {
         return Err(KeltnerError::EmptyInputData);
+    }
+    if high.len() != len || low.len() != len || source_slice.len() != len {
+        return Err(KeltnerError::InvalidInput(format!(
+            "inconsistent lengths: high={}, low={}, close={}, source={}",
+            high.len(),
+            low.len(),
+            close.len(),
+            source_slice.len()
+        )));
     }
     if period == 0 || period > len {
         return Err(KeltnerError::InvalidPeriod {
@@ -290,7 +304,7 @@ pub fn keltner_with_kernel(
 
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
-        other => other,
+        other => other.to_non_batch(),
     };
 
     let warm = first + period - 1;
@@ -306,8 +320,8 @@ pub fn keltner_with_kernel(
                 close,
                 source_slice,
                 period,
-                input.get_multiplier(),
-                input.get_ma_type(),
+                multiplier,
+                ma_type,
                 first,
                 &mut upper_band,
                 &mut middle_band,
@@ -320,8 +334,8 @@ pub fn keltner_with_kernel(
                 close,
                 source_slice,
                 period,
-                input.get_multiplier(),
-                input.get_ma_type(),
+                multiplier,
+                ma_type,
                 first,
                 &mut upper_band,
                 &mut middle_band,
@@ -334,14 +348,26 @@ pub fn keltner_with_kernel(
                 close,
                 source_slice,
                 period,
-                input.get_multiplier(),
-                input.get_ma_type(),
+                multiplier,
+                ma_type,
                 first,
                 &mut upper_band,
                 &mut middle_band,
                 &mut lower_band,
             ),
-            _ => unreachable!(),
+            _ => keltner_scalar(
+                high,
+                low,
+                close,
+                source_slice,
+                period,
+                multiplier,
+                ma_type,
+                first,
+                &mut upper_band,
+                &mut middle_band,
+                &mut lower_band,
+            ),
         }
     }
     Ok(KeltnerOutput {
@@ -372,25 +398,30 @@ pub fn keltner_into_slice(
 ) -> Result<(), KeltnerError> {
     let (high, low, close, source_slice): (&[f64], &[f64], &[f64], &[f64]) = match &input.data {
         KeltnerData::Candles { candles, source } => (
-            candles
-                .select_candle_field("high")
-                .map_err(|e| KeltnerError::MaError(e.to_string()))?,
-            candles
-                .select_candle_field("low")
-                .map_err(|e| KeltnerError::MaError(e.to_string()))?,
-            candles
-                .select_candle_field("close")
-                .map_err(|e| KeltnerError::MaError(e.to_string()))?,
-            source_type(candles, source),
+            &candles.high,
+            &candles.low,
+            &candles.close,
+            keltner_source(candles, source),
         ),
         KeltnerData::Slice(h, l, c, s) => (*h, *l, *c, *s),
     };
 
     let period = input.get_period();
+    let multiplier = input.get_multiplier();
+    let ma_type = input.get_ma_type();
     let len = close.len();
 
     if len == 0 {
         return Err(KeltnerError::EmptyInputData);
+    }
+    if high.len() != len || low.len() != len || source_slice.len() != len {
+        return Err(KeltnerError::InvalidInput(format!(
+            "inconsistent lengths: high={}, low={}, close={}, source={}",
+            high.len(),
+            low.len(),
+            close.len(),
+            source_slice.len()
+        )));
     }
 
     if upper_dst.len() != len || middle_dst.len() != len || lower_dst.len() != len {
@@ -421,7 +452,7 @@ pub fn keltner_into_slice(
 
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
-        other => other,
+        other => other.to_non_batch(),
     };
 
     unsafe {
@@ -432,8 +463,8 @@ pub fn keltner_into_slice(
                 close,
                 source_slice,
                 period,
-                input.get_multiplier(),
-                input.get_ma_type(),
+                multiplier,
+                ma_type,
                 first,
                 upper_dst,
                 middle_dst,
@@ -446,8 +477,8 @@ pub fn keltner_into_slice(
                 close,
                 source_slice,
                 period,
-                input.get_multiplier(),
-                input.get_ma_type(),
+                multiplier,
+                ma_type,
                 first,
                 upper_dst,
                 middle_dst,
@@ -460,8 +491,8 @@ pub fn keltner_into_slice(
                 close,
                 source_slice,
                 period,
-                input.get_multiplier(),
-                input.get_ma_type(),
+                multiplier,
+                ma_type,
                 first,
                 upper_dst,
                 middle_dst,
@@ -475,8 +506,8 @@ pub fn keltner_into_slice(
                     close,
                     source_slice,
                     period,
-                    input.get_multiplier(),
-                    input.get_ma_type(),
+                    multiplier,
+                    ma_type,
                     first,
                     upper_dst,
                     middle_dst,

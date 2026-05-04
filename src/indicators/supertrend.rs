@@ -8,8 +8,7 @@ use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -104,11 +103,9 @@ impl<'a> SuperTrendInput<'a> {
     #[inline(always)]
     fn as_hlc(&self) -> (&[f64], &[f64], &[f64]) {
         match &self.data {
-            SuperTrendData::Candles { candles } => (
-                source_type(candles, "high"),
-                source_type(candles, "low"),
-                source_type(candles, "close"),
-            ),
+            SuperTrendData::Candles { candles } => {
+                (&candles.high[..], &candles.low[..], &candles.close[..])
+            }
             SuperTrendData::Slices { high, low, close } => (*high, *low, *close),
         }
     }
@@ -223,19 +220,7 @@ pub fn supertrend(input: &SuperTrendInput) -> Result<SuperTrendOutput, SuperTren
 fn supertrend_prepare<'a>(
     input: &'a SuperTrendInput,
     kernel: Kernel,
-) -> Result<
-    (
-        &'a [f64],
-        &'a [f64],
-        &'a [f64],
-        usize,
-        f64,
-        usize,
-        Vec<f64>,
-        Kernel,
-    ),
-    SuperTrendError,
-> {
+) -> Result<(&'a [f64], &'a [f64], &'a [f64], usize, f64, usize, Kernel), SuperTrendError> {
     let (high, low, close) = input.as_hlc();
 
     if high.is_empty() || low.is_empty() || close.is_empty() {
@@ -273,21 +258,6 @@ fn supertrend_prepare<'a>(
         });
     }
 
-    let atr_input = AtrInput::from_slices(
-        &high[first_valid_idx..],
-        &low[first_valid_idx..],
-        &close[first_valid_idx..],
-        AtrParams {
-            length: Some(period),
-        },
-    );
-    let AtrOutput { values: atr_values } = atr(&atr_input)?;
-
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
-
     Ok((
         high,
         low,
@@ -295,20 +265,57 @@ fn supertrend_prepare<'a>(
         period,
         factor,
         first_valid_idx,
-        atr_values,
-        chosen,
+        resolve_single_kernel(kernel),
     ))
 }
 
 #[inline(always)]
-fn supertrend_compute_into(
+fn resolve_single_kernel(kernel: Kernel) -> Kernel {
+    match kernel {
+        Kernel::Auto => {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            {
+                if std::arch::is_x86_feature_detected!("avx2")
+                    && std::arch::is_x86_feature_detected!("fma")
+                {
+                    return Kernel::Avx2;
+                }
+                if std::arch::is_x86_feature_detected!("avx512f")
+                    && std::arch::is_x86_feature_detected!("fma")
+                {
+                    return Kernel::Avx512;
+                }
+                Kernel::Scalar
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            {
+                Kernel::Scalar
+            }
+        }
+        other => other,
+    }
+}
+
+#[inline(always)]
+fn fill_supertrend_prefixes(trend: &mut [f64], changed: &mut [f64], warmup: usize) {
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let prefix = warmup.min(trend.len());
+    for v in &mut trend[..prefix] {
+        *v = qnan;
+    }
+    for v in &mut changed[..prefix] {
+        *v = qnan;
+    }
+}
+
+#[inline(always)]
+fn supertrend_compute_direct_into(
     high: &[f64],
     low: &[f64],
     close: &[f64],
     period: usize,
     factor: f64,
     first_valid_idx: usize,
-    atr_values: &[f64],
     kernel: Kernel,
     trend_out: &mut [f64],
     changed_out: &mut [f64],
@@ -316,56 +323,52 @@ fn supertrend_compute_into(
     unsafe {
         match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                supertrend_scalar(
+                supertrend_scalar_fused(
                     high,
                     low,
                     close,
                     period,
                     factor,
                     first_valid_idx,
-                    &atr_values,
                     trend_out,
                     changed_out,
                 );
             }
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                supertrend_scalar(
+                supertrend_scalar_fused(
                     high,
                     low,
                     close,
                     period,
                     factor,
                     first_valid_idx,
-                    &atr_values,
                     trend_out,
                     changed_out,
                 );
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                supertrend_avx2(
+                supertrend_fused_avx2(
                     high,
                     low,
                     close,
                     period,
                     factor,
                     first_valid_idx,
-                    &atr_values,
                     trend_out,
                     changed_out,
                 );
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                supertrend_avx512(
+                supertrend_fused_avx512(
                     high,
                     low,
                     close,
                     period,
                     factor,
                     first_valid_idx,
-                    &atr_values,
                     trend_out,
                     changed_out,
                 );
@@ -379,21 +382,22 @@ pub fn supertrend_with_kernel(
     input: &SuperTrendInput,
     kernel: Kernel,
 ) -> Result<SuperTrendOutput, SuperTrendError> {
-    let (high, low, close, period, factor, first_valid_idx, atr_values, chosen) =
+    let (high, low, close, period, factor, first_valid_idx, chosen) =
         supertrend_prepare(input, kernel)?;
 
     let len = high.len();
-    let mut trend = alloc_with_nan_prefix(len, first_valid_idx + period - 1);
-    let mut changed = alloc_with_nan_prefix(len, first_valid_idx + period - 1);
+    let warmup_end = first_valid_idx + period - 1;
+    let mut trend = alloc_uninit_f64(len);
+    let mut changed = alloc_uninit_f64(len);
+    fill_supertrend_prefixes(&mut trend, &mut changed, warmup_end);
 
-    supertrend_compute_into(
+    supertrend_compute_direct_into(
         high,
         low,
         close,
         period,
         factor,
         first_valid_idx,
-        &atr_values,
         chosen,
         &mut trend,
         &mut changed,
@@ -425,32 +429,198 @@ pub fn supertrend_into(
         });
     }
 
-    let (high, low, close, period, factor, first_valid_idx, atr_values, chosen) =
+    let (high, low, close, period, factor, first_valid_idx, chosen) =
         supertrend_prepare(input, Kernel::Auto)?;
 
     let warmup_end = first_valid_idx + period - 1;
-    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
-    for v in &mut trend_out[..warmup_end.min(len)] {
-        *v = qnan;
-    }
-    for v in &mut changed_out[..warmup_end.min(len)] {
-        *v = qnan;
-    }
+    fill_supertrend_prefixes(trend_out, changed_out, warmup_end);
 
-    supertrend_compute_into(
+    supertrend_compute_direct_into(
         high,
         low,
         close,
         period,
         factor,
         first_valid_idx,
-        &atr_values,
         chosen,
         trend_out,
         changed_out,
     );
 
     Ok(())
+}
+
+#[inline(always)]
+unsafe fn supertrend_scalar_fused(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    factor: f64,
+    first_valid_idx: usize,
+    trend: &mut [f64],
+    changed: &mut [f64],
+) {
+    let len = high.len();
+    let start = first_valid_idx + period;
+    if start > len {
+        return;
+    }
+
+    let h_ptr = high.as_ptr();
+    let l_ptr = low.as_ptr();
+    let c_ptr = close.as_ptr();
+    let tr_ptr = trend.as_mut_ptr();
+    let ch_ptr = changed.as_mut_ptr();
+
+    let warmup = start - 1;
+    let alpha = 1.0 / (period as f64);
+
+    let mut sum_tr = *h_ptr.add(first_valid_idx) - *l_ptr.add(first_valid_idx);
+    if warmup > first_valid_idx {
+        let mut i = first_valid_idx + 1;
+        let mut prev_c = *c_ptr.add(i - 1);
+        while i <= warmup {
+            let hi = *h_ptr.add(i);
+            let lo = *l_ptr.add(i);
+            let mut true_range = hi - lo;
+            let high_close = (hi - prev_c).abs();
+            if high_close > true_range {
+                true_range = high_close;
+            }
+            let low_close = (lo - prev_c).abs();
+            if low_close > true_range {
+                true_range = low_close;
+            }
+            sum_tr += true_range;
+            prev_c = *c_ptr.add(i);
+            i += 1;
+        }
+    }
+
+    let mut atr = sum_tr / (period as f64);
+
+    let hw = *h_ptr.add(warmup);
+    let lw = *l_ptr.add(warmup);
+    let hl2_w = (hw + lw) * 0.5;
+    let mut prev_upper_band = hl2_w + factor * atr;
+    let mut prev_lower_band = hl2_w - factor * atr;
+
+    let mut last_close = *c_ptr.add(warmup);
+    let mut upper_state = if last_close <= prev_upper_band {
+        *tr_ptr.add(warmup) = prev_upper_band;
+        true
+    } else {
+        *tr_ptr.add(warmup) = prev_lower_band;
+        false
+    };
+    *ch_ptr.add(warmup) = 0.0;
+
+    let mut i = warmup + 1;
+    let neg_factor = -factor;
+    while i < len {
+        let hi = *h_ptr.add(i);
+        let lo = *l_ptr.add(i);
+        let prev_close = last_close;
+
+        let mut true_range = hi - lo;
+        let high_close = (hi - prev_close).abs();
+        if high_close > true_range {
+            true_range = high_close;
+        }
+        let low_close = (lo - prev_close).abs();
+        if low_close > true_range {
+            true_range = low_close;
+        }
+        atr = (-alpha).mul_add(atr, atr) + alpha * true_range;
+
+        let hl2 = (hi + lo) * 0.5;
+        let upper_basic = factor.mul_add(atr, hl2);
+        let lower_basic = neg_factor.mul_add(atr, hl2);
+
+        let mut curr_upper_band = upper_basic;
+        if prev_close <= prev_upper_band {
+            curr_upper_band = curr_upper_band.min(prev_upper_band);
+        }
+        let mut curr_lower_band = lower_basic;
+        if prev_close >= prev_lower_band {
+            curr_lower_band = curr_lower_band.max(prev_lower_band);
+        }
+
+        let curr_close = *c_ptr.add(i);
+        if upper_state {
+            if curr_close <= curr_upper_band {
+                *tr_ptr.add(i) = curr_upper_band;
+                *ch_ptr.add(i) = 0.0;
+            } else {
+                *tr_ptr.add(i) = curr_lower_band;
+                *ch_ptr.add(i) = 1.0;
+                upper_state = false;
+            }
+        } else {
+            if curr_close >= curr_lower_band {
+                *tr_ptr.add(i) = curr_lower_band;
+                *ch_ptr.add(i) = 0.0;
+            } else {
+                *tr_ptr.add(i) = curr_upper_band;
+                *ch_ptr.add(i) = 1.0;
+                upper_state = true;
+            }
+        }
+
+        prev_upper_band = curr_upper_band;
+        prev_lower_band = curr_lower_band;
+        last_close = curr_close;
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn supertrend_fused_avx2(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    factor: f64,
+    first_valid_idx: usize,
+    trend: &mut [f64],
+    changed: &mut [f64],
+) {
+    supertrend_scalar_fused(
+        high,
+        low,
+        close,
+        period,
+        factor,
+        first_valid_idx,
+        trend,
+        changed,
+    );
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,fma")]
+unsafe fn supertrend_fused_avx512(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    factor: f64,
+    first_valid_idx: usize,
+    trend: &mut [f64],
+    changed: &mut [f64],
+) {
+    supertrend_scalar_fused(
+        high,
+        low,
+        close,
+        period,
+        factor,
+        first_valid_idx,
+        trend,
+        changed,
+    );
 }
 
 #[inline(always)]
@@ -2092,7 +2262,7 @@ pub fn supertrend_into_slice(
     input: &SuperTrendInput,
     kern: Kernel,
 ) -> Result<(), SuperTrendError> {
-    let (high, low, close, period, factor, first_valid_idx, atr_values, chosen) =
+    let (high, low, close, period, factor, first_valid_idx, chosen) =
         supertrend_prepare(input, kern)?;
 
     let len = high.len();
@@ -2110,21 +2280,15 @@ pub fn supertrend_into_slice(
     }
 
     let warmup_end = first_valid_idx + period - 1;
-    for v in &mut trend_dst[..warmup_end] {
-        *v = f64::NAN;
-    }
-    for v in &mut changed_dst[..warmup_end] {
-        *v = f64::NAN;
-    }
+    fill_supertrend_prefixes(trend_dst, changed_dst, warmup_end);
 
-    supertrend_compute_into(
+    supertrend_compute_direct_into(
         high,
         low,
         close,
         period,
         factor,
         first_valid_idx,
-        &atr_values,
         chosen,
         trend_dst,
         changed_dst,

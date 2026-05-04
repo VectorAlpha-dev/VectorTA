@@ -61,15 +61,21 @@ fn pivot_compute_into(
     s4: &mut [f64],
 ) {
     unsafe {
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        {
+            let _ = k;
+            pivot_scalar(
+                high, low, close, open, mode, first, r4, r3, r2, r1, pp, s1, s2, s3, s4,
+            );
+        }
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         match k {
             Kernel::Scalar | Kernel::ScalarBatch => pivot_scalar(
                 high, low, close, open, mode, first, r4, r3, r2, r1, pp, s1, s2, s3, s4,
             ),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => pivot_avx2(
                 high, low, close, open, mode, first, r4, r3, r2, r1, pp, s1, s2, s3, s4,
             ),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => pivot_avx512(
                 high, low, close, open, mode, first, r4, r3, r2, r1, pp, s1, s2, s3, s4,
             ),
@@ -235,22 +241,26 @@ pub fn pivot(input: &PivotInput) -> Result<PivotOutput, PivotError> {
     pivot_with_kernel(input, Kernel::Auto)
 }
 
-pub fn pivot_with_kernel(input: &PivotInput, kernel: Kernel) -> Result<PivotOutput, PivotError> {
-    let (high, low, close, open) = match &input.data {
-        PivotData::Candles { candles } => {
-            let high = source_type(candles, "high");
-            let low = source_type(candles, "low");
-            let close = source_type(candles, "close");
-            let open = source_type(candles, "open");
-            (high, low, close, open)
-        }
+#[inline(always)]
+fn pivot_refs<'a>(input: &'a PivotInput<'a>) -> (&'a [f64], &'a [f64], &'a [f64], &'a [f64]) {
+    match &input.data {
+        PivotData::Candles { candles } => (
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
+            candles.open.as_slice(),
+        ),
         PivotData::Slices {
             high,
             low,
             close,
             open,
         } => (*high, *low, *close, *open),
-    };
+    }
+}
+
+pub fn pivot_with_kernel(input: &PivotInput, kernel: Kernel) -> Result<PivotOutput, PivotError> {
+    let (high, low, close, open) = pivot_refs(input);
     let len = high.len();
     if high.is_empty() || low.is_empty() || close.is_empty() {
         return Err(PivotError::EmptyData);
@@ -288,8 +298,14 @@ pub fn pivot_with_kernel(input: &PivotInput, kernel: Kernel) -> Result<PivotOutp
     let mut s3 = alloc_with_nan_prefix(len, first_valid_idx);
     let mut s4 = alloc_with_nan_prefix(len, first_valid_idx);
 
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    let chosen = match kernel {
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
     pivot_compute_into(
@@ -337,21 +353,7 @@ pub fn pivot_into(
     s3: &mut [f64],
     s4: &mut [f64],
 ) -> Result<(), PivotError> {
-    let (high, low, close, open) = match &input.data {
-        PivotData::Candles { candles } => {
-            let high = source_type(candles, "high");
-            let low = source_type(candles, "low");
-            let close = source_type(candles, "close");
-            let open = source_type(candles, "open");
-            (high, low, close, open)
-        }
-        PivotData::Slices {
-            high,
-            low,
-            close,
-            open,
-        } => (*high, *low, *close, *open),
-    };
+    let (high, low, close, open) = pivot_refs(input);
 
     let len = high.len();
     if high.is_empty() || low.is_empty() || close.is_empty() {
@@ -398,7 +400,10 @@ pub fn pivot_into(
         s4[i] = qnan;
     }
 
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     let chosen = detect_best_kernel();
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    let chosen = Kernel::Scalar;
     pivot_compute_into(
         high,
         low,
@@ -435,21 +440,7 @@ pub fn pivot_into_slices(
     input: &PivotInput,
     kern: Kernel,
 ) -> Result<(), PivotError> {
-    let (high, low, close, open) = match &input.data {
-        PivotData::Candles { candles } => {
-            let high = source_type(candles, "high");
-            let low = source_type(candles, "low");
-            let close = source_type(candles, "close");
-            let open = source_type(candles, "open");
-            (high, low, close, open)
-        }
-        PivotData::Slices {
-            high,
-            low,
-            close,
-            open,
-        } => (*high, *low, *close, *open),
-    };
+    let (high, low, close, open) = pivot_refs(input);
 
     let len = high.len();
     if high.is_empty() || low.is_empty() || close.is_empty() {
@@ -496,8 +487,14 @@ pub fn pivot_into_slices(
         return Err(PivotError::NotEnoughValidData);
     }
 
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     let chosen = match kern {
         Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    let chosen = match kern {
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -675,37 +672,52 @@ pub unsafe fn pivot_scalar(
             const C2: f64 = 0.183_f64;
             const C3: f64 = 0.275_f64;
             const C4: f64 = 0.55_f64;
-            for i in first..len {
-                let h = high[i];
-                let l = low[i];
-                let c = close[i];
+            let hp = high.as_ptr();
+            let lp = low.as_ptr();
+            let cp = close.as_ptr();
+            let r4p = r4.as_mut_ptr();
+            let r3p = r3.as_mut_ptr();
+            let r2p = r2.as_mut_ptr();
+            let r1p = r1.as_mut_ptr();
+            let ppp = pp.as_mut_ptr();
+            let s1p = s1.as_mut_ptr();
+            let s2p = s2.as_mut_ptr();
+            let s3p = s3.as_mut_ptr();
+            let s4p = s4.as_mut_ptr();
+            let mut i = first;
+            while i < len {
+                let h = *hp.add(i);
+                let l = *lp.add(i);
+                let c = *cp.add(i);
                 if h.is_nan() || l.is_nan() || c.is_nan() {
-                    r4[i] = nan;
-                    r3[i] = nan;
-                    r2[i] = nan;
-                    r1[i] = nan;
-                    pp[i] = nan;
-                    s1[i] = nan;
-                    s2[i] = nan;
-                    s3[i] = nan;
-                    s4[i] = nan;
+                    *r4p.add(i) = nan;
+                    *r3p.add(i) = nan;
+                    *r2p.add(i) = nan;
+                    *r1p.add(i) = nan;
+                    *ppp.add(i) = nan;
+                    *s1p.add(i) = nan;
+                    *s2p.add(i) = nan;
+                    *s3p.add(i) = nan;
+                    *s4p.add(i) = nan;
+                    i += 1;
                     continue;
                 }
                 let d = h - l;
                 let p = (h + l + c) * (1.0 / 3.0);
-                pp[i] = p;
+                *ppp.add(i) = p;
                 let d1 = d * C1;
                 let d2 = d * C2;
                 let d3 = d * C3;
                 let d4 = d * C4;
-                r1[i] = d1 + c;
-                r2[i] = d2 + c;
-                r3[i] = d3 + c;
-                r4[i] = d4 + c;
-                s1[i] = c - d1;
-                s2[i] = c - d2;
-                s3[i] = c - d3;
-                s4[i] = c - d4;
+                *r1p.add(i) = d1 + c;
+                *r2p.add(i) = d2 + c;
+                *r3p.add(i) = d3 + c;
+                *r4p.add(i) = d4 + c;
+                *s1p.add(i) = c - d1;
+                *s2p.add(i) = c - d2;
+                *s3p.add(i) = c - d3;
+                *s4p.add(i) = c - d4;
+                i += 1;
             }
         }
 

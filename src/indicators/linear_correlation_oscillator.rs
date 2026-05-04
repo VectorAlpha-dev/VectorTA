@@ -33,9 +33,25 @@ impl<'a> AsRef<[f64]> for LinearCorrelationOscillatorInput<'a> {
         match &self.data {
             LinearCorrelationOscillatorData::Slice(slice) => slice,
             LinearCorrelationOscillatorData::Candles { candles, source } => {
-                source_type(candles, source)
+                linear_correlation_oscillator_source_type(candles, source)
             }
         }
+    }
+}
+
+#[inline(always)]
+fn linear_correlation_oscillator_source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "close" => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
     }
 }
 
@@ -268,6 +284,18 @@ fn compute_correlation_from_sums(sum_y: f64, sum_y2: f64, weighted_sum: f64, per
     let inv_period = 1.0 / period_f;
     let mean_x = 0.5 * (period_f + 1.0);
     let var_x = ((period * period - 1) as f64) / 12.0;
+    compute_correlation_from_precomputed(sum_y, sum_y2, weighted_sum, inv_period, mean_x, var_x)
+}
+
+#[inline(always)]
+fn compute_correlation_from_precomputed(
+    sum_y: f64,
+    sum_y2: f64,
+    weighted_sum: f64,
+    inv_period: f64,
+    mean_x: f64,
+    var_x: f64,
+) -> f64 {
     if var_x <= 0.0 {
         return f64::NAN;
     }
@@ -295,36 +323,22 @@ fn compute_correlation_from_sums(sum_y: f64, sum_y2: f64, weighted_sum: f64, per
 }
 
 #[inline(always)]
-fn linear_correlation_oscillator_compute_slow(
-    data: &[f64],
-    period: usize,
-    first: usize,
-    out: &mut [f64],
-) {
-    for end in (first + period + 1)..data.len() {
-        let start = end + 1 - period;
-        let mut sum_y = 0.0;
-        let mut sum_y2 = 0.0;
-        let mut weighted_sum = 0.0;
-        let mut has_nan = false;
-
-        for (offset, &value) in data[start..=end].iter().enumerate() {
-            if value.is_nan() {
-                has_nan = true;
-                break;
-            }
+fn recompute_lco_window(data: &[f64], start: usize, end: usize) -> (f64, f64, f64, usize) {
+    let mut sum_y = 0.0;
+    let mut sum_y2 = 0.0;
+    let mut weighted_sum = 0.0;
+    let mut nan_count = 0usize;
+    for (offset, &value) in data[start..=end].iter().enumerate() {
+        if value.is_nan() {
+            nan_count += 1;
+        } else {
             let weight = (offset + 1) as f64;
             sum_y += value;
             sum_y2 += value * value;
             weighted_sum += weight * value;
         }
-
-        out[end] = if has_nan {
-            f64::NAN
-        } else {
-            compute_correlation_from_sums(sum_y, sum_y2, weighted_sum, period)
-        };
     }
+    (sum_y, sum_y2, weighted_sum, nan_count)
 }
 
 #[inline(always)]
@@ -340,34 +354,48 @@ pub fn linear_correlation_oscillator_scalar(
         return;
     }
 
-    if data[start..].iter().any(|v| v.is_nan()) {
-        linear_correlation_oscillator_compute_slow(data, period, first, out);
-        return;
-    }
-
-    let mut sum_y = 0.0;
-    let mut sum_y2 = 0.0;
-    let mut weighted_sum = 0.0;
-    for (offset, &value) in data[start..=end].iter().enumerate() {
-        let weight = (offset + 1) as f64;
-        sum_y += value;
-        sum_y2 += value * value;
-        weighted_sum += weight * value;
-    }
-
     let period_f = period as f64;
+    let inv_period = 1.0 / period_f;
+    let mean_x = 0.5 * (period_f + 1.0);
+    let var_x = ((period * period - 1) as f64) / 12.0;
+    let (mut sum_y, mut sum_y2, mut weighted_sum, mut nan_count) =
+        recompute_lco_window(data, start, end);
     let mut window_start = start;
     loop {
-        out[end] = compute_correlation_from_sums(sum_y, sum_y2, weighted_sum, period);
+        out[end] = if nan_count == 0 {
+            compute_correlation_from_precomputed(
+                sum_y,
+                sum_y2,
+                weighted_sum,
+                inv_period,
+                mean_x,
+                var_x,
+            )
+        } else {
+            f64::NAN
+        };
         if end + 1 == data.len() {
             break;
         }
 
         let old = data[window_start];
         let new = data[end + 1];
-        weighted_sum = weighted_sum - sum_y + period_f * new;
-        sum_y += new - old;
-        sum_y2 += new * new - old * old;
+        if nan_count == 0 && !new.is_nan() {
+            weighted_sum = weighted_sum - sum_y + period_f * new;
+            sum_y += new - old;
+            sum_y2 += new * new - old * old;
+        } else {
+            if old.is_nan() {
+                nan_count -= 1;
+            }
+            if new.is_nan() {
+                nan_count += 1;
+            }
+            if nan_count == 0 {
+                (sum_y, sum_y2, weighted_sum, _) =
+                    recompute_lco_window(data, window_start + 1, end + 1);
+            }
+        }
         window_start += 1;
         end += 1;
     }
@@ -544,7 +572,7 @@ impl LinearCorrelationOscillatorBatchBuilder {
         candles: &Candles,
         source: &str,
     ) -> Result<LinearCorrelationOscillatorBatchOutput, LinearCorrelationOscillatorError> {
-        self.apply_slice(source_type(candles, source))
+        self.apply_slice(linear_correlation_oscillator_source_type(candles, source))
     }
 }
 

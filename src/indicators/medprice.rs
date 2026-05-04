@@ -102,11 +102,27 @@ impl<'a> MedpriceInput<'a> {
                 high_source,
                 low_source,
             } => (
-                source_type(candles, high_source),
-                source_type(candles, low_source),
+                medprice_source(candles, high_source),
+                medprice_source(candles, low_source),
             ),
             MedpriceData::Slices { high, low } => (high, low),
         }
+    }
+}
+
+#[inline(always)]
+fn medprice_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "close" => &candles.close,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
     }
 }
 
@@ -198,10 +214,9 @@ pub fn medprice_with_kernel(
         });
     }
 
-    let first_valid_idx = match (0..high.len()).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
-        Some(idx) => idx,
-        None => return Err(MedpriceError::AllValuesNaN),
-    };
+    let first_valid_idx = (0..high.len())
+        .find(|&i| !high[i].is_nan() && !low[i].is_nan())
+        .ok_or(MedpriceError::AllValuesNaN)?;
 
     let mut out = alloc_with_nan_prefix(high.len(), first_valid_idx);
 
@@ -674,10 +689,9 @@ fn medprice_batch_inner(
         });
     }
 
-    let first = match (0..high.len()).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
-        Some(idx) => idx,
-        None => return Err(MedpriceError::AllValuesNaN),
-    };
+    let first = (0..high.len())
+        .find(|&i| !high[i].is_nan() && !low[i].is_nan())
+        .ok_or(MedpriceError::AllValuesNaN)?;
 
     let rows: usize = 1;
     let cols: usize = high.len();
@@ -737,10 +751,9 @@ fn medprice_batch_inner_into(
         });
     }
 
-    let first = match (0..high.len()).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
-        Some(idx) => idx,
-        None => return Err(MedpriceError::AllValuesNaN),
-    };
+    let first = (0..high.len())
+        .find(|&i| !high[i].is_nan() && !low[i].is_nan())
+        .ok_or(MedpriceError::AllValuesNaN)?;
 
     unsafe {
         match kern {
@@ -790,10 +803,9 @@ pub fn medprice_into_slice(
         });
     }
 
-    let first_valid_idx = match (0..high.len()).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
-        Some(idx) => idx,
-        None => return Err(MedpriceError::AllValuesNaN),
-    };
+    let first_valid_idx = (0..high.len())
+        .find(|&i| !high[i].is_nan() && !low[i].is_nan())
+        .ok_or(MedpriceError::AllValuesNaN)?;
 
     let chosen = match kern {
         Kernel::Auto => match detect_best_kernel() {

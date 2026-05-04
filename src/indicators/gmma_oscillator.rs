@@ -15,7 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    alloc_uninit_f64, alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
 #[cfg(feature = "python")]
@@ -31,6 +31,22 @@ const SUPER_GUPPY_FAST_PERIODS: [usize; 11] = [3, 5, 7, 9, 11, 13, 15, 17, 19, 2
 const SUPER_GUPPY_SLOW_PERIODS: [usize; 16] = [
     25, 28, 31, 34, 37, 40, 43, 46, 49, 52, 55, 58, 61, 64, 67, 70,
 ];
+
+#[inline(always)]
+fn gmma_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "close" => candles.close.as_slice(),
+        "open" => candles.open.as_slice(),
+        "high" => candles.high.as_slice(),
+        "low" => candles.low.as_slice(),
+        "volume" => candles.volume.as_slice(),
+        "hl2" => candles.hl2.as_slice(),
+        "hlc3" => candles.hlc3.as_slice(),
+        "ohlc4" => candles.ohlc4.as_slice(),
+        "hlcc4" => candles.hlcc4.as_slice(),
+        _ => source_type(candles, source),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GmmaOscillatorMode {
@@ -430,7 +446,7 @@ fn resolve_input<'a>(
             })
         }
         GmmaOscillatorData::Candles { candles, source } => {
-            let data = source_type(candles, source);
+            let data = gmma_source(candles, source);
             if data.is_empty() {
                 return Err(GmmaOscillatorError::EmptyInputData);
             }
@@ -677,16 +693,10 @@ pub fn gmma_oscillator_with_kernel(
     kernel: Kernel,
 ) -> Result<GmmaOscillatorOutput, GmmaOscillatorError> {
     let resolved = resolve_input(input)?;
-    let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
+    let _ = kernel;
 
-    let mut oscillator = alloc_with_nan_prefix(
-        resolved.data.len(),
-        resolved.smooth_length.saturating_sub(1),
-    );
-    let mut signal = alloc_with_nan_prefix(resolved.data.len(), 0);
+    let mut oscillator = alloc_uninit_f64(resolved.data.len());
+    let mut signal = alloc_uninit_f64(resolved.data.len());
     compute_row(resolved.data, resolved, &mut oscillator, &mut signal);
     Ok(GmmaOscillatorOutput { oscillator, signal })
 }
@@ -710,10 +720,7 @@ pub fn gmma_oscillator_into_slice(
             got: dst_signal.len(),
         });
     }
-    let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
+    let _ = kernel;
     compute_row(resolved.data, resolved, dst_oscillator, dst_signal);
     Ok(())
 }

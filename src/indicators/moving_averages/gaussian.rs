@@ -7,7 +7,7 @@ use crate::cuda::moving_averages::CudaGaussian;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    alloc_uninit_f64, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
 #[cfg(not(target_arch = "wasm32"))]
@@ -21,12 +21,28 @@ use thiserror::Error;
 const LANES_AVX512: usize = 8;
 const LANES_AVX2: usize = 4;
 
+#[inline(always)]
+fn gaussian_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "close" => candles.close.as_slice(),
+        "open" => candles.open.as_slice(),
+        "high" => candles.high.as_slice(),
+        "low" => candles.low.as_slice(),
+        "volume" => candles.volume.as_slice(),
+        "hl2" => candles.hl2.as_slice(),
+        "hlc3" => candles.hlc3.as_slice(),
+        "ohlc4" => candles.ohlc4.as_slice(),
+        "hlcc4" => candles.hlcc4.as_slice(),
+        _ => source_type(candles, source),
+    }
+}
+
 impl<'a> AsRef<[f64]> for GaussianInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             GaussianData::Slice(slice) => slice,
-            GaussianData::Candles { candles, source } => source_type(candles, source),
+            GaussianData::Candles { candles, source } => gaussian_source(candles, source),
         }
     }
 }
@@ -315,10 +331,7 @@ pub fn gaussian_with_kernel(
     input: &GaussianInput,
     kernel: Kernel,
 ) -> Result<GaussianOutput, GaussianError> {
-    let data: &[f64] = match &input.data {
-        GaussianData::Candles { candles, source } => source_type(candles, source),
-        GaussianData::Slice(sl) => sl,
-    };
+    let data: &[f64] = input.as_ref();
 
     let len = data.len();
     let period = input.get_period();
@@ -362,8 +375,7 @@ pub fn gaussian_with_kernel(
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
-    let warm = first_valid + period;
-    let mut out = alloc_with_nan_prefix(len, warm);
+    let mut out = alloc_uninit_f64(len);
 
     unsafe {
         match chosen {
@@ -740,7 +752,7 @@ impl GaussianBatchBuilder {
         c: &Candles,
         src: &str,
     ) -> Result<GaussianBatchOutput, GaussianError> {
-        let slice = source_type(c, src);
+        let slice = gaussian_source(c, src);
         self.apply_slice(slice)
     }
     pub fn with_default_slice(
@@ -889,11 +901,9 @@ fn gaussian_with_kernel_into(
     kernel: Kernel,
     out: &mut [f64],
 ) -> Result<(), GaussianError> {
-    let (data, period, poles, first, chosen) = gaussian_prepare(input, kernel)?;
+    let (data, period, poles, _, chosen) = gaussian_prepare(input, kernel)?;
 
-    out[..first + period].fill(f64::NAN);
-
-    gaussian_compute_into(data, period, poles, first, chosen, out);
+    gaussian_compute_into(data, period, poles, chosen, out);
 
     Ok(())
 }
@@ -957,7 +967,6 @@ fn gaussian_compute_into(
     data: &[f64],
     period: usize,
     poles: usize,
-    first: usize,
     kernel: Kernel,
     out: &mut [f64],
 ) {
@@ -968,6 +977,10 @@ fn gaussian_compute_into(
             Kernel::Avx2 | Kernel::Avx2Batch => gaussian_avx2(data, period, poles, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => gaussian_avx512(data, period, poles, out),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                gaussian_scalar(data, period, poles, out)
+            }
             _ => unreachable!(),
         }
     }

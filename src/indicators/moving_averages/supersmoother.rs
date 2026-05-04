@@ -3,8 +3,8 @@ use crate::cuda::moving_averages::{CudaSuperSmoother, DeviceArrayF32};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+    init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -37,7 +37,17 @@ impl<'a> AsRef<[f64]> for SuperSmootherInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             SuperSmootherData::Slice(sl) => sl,
-            SuperSmootherData::Candles { candles, source } => source_type(candles, source),
+            SuperSmootherData::Candles { candles, source } => match *source {
+                "close" => candles.close.as_slice(),
+                "open" => candles.open.as_slice(),
+                "high" => candles.high.as_slice(),
+                "low" => candles.low.as_slice(),
+                "hl2" => candles.hl2.as_slice(),
+                "hlc3" => candles.hlc3.as_slice(),
+                "ohlc4" => candles.ohlc4.as_slice(),
+                "hlcc4" => candles.hlcc4.as_slice(),
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -183,6 +193,19 @@ pub fn supersmoother(
 }
 
 #[inline(always)]
+fn resolve_single_kernel(kernel: Kernel) -> Kernel {
+    match kernel {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Auto => detect_best_kernel(),
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Auto | Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+            Kernel::Scalar
+        }
+        other => other,
+    }
+}
+
+#[inline(always)]
 pub fn supersmoother_with_kernel(
     input: &SuperSmootherInput,
     kernel: Kernel,
@@ -214,12 +237,9 @@ pub fn supersmoother_with_kernel(
     }
 
     let warm = first + period - 1;
-    let mut out = alloc_with_nan_prefix(len, warm);
+    let mut out = alloc_uninit_f64(len);
 
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = resolve_single_kernel(kernel);
 
     unsafe {
         match chosen {
@@ -236,6 +256,10 @@ pub fn supersmoother_with_kernel(
             }
             _ => unreachable!(),
         }
+    }
+
+    for v in &mut out[..warm] {
+        *v = f64::NAN;
     }
 
     Ok(SuperSmootherOutput { values: out })
@@ -275,10 +299,7 @@ pub fn supersmoother_into_slice(
         });
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        k => k,
-    };
+    let chosen = resolve_single_kernel(kernel);
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -339,10 +360,7 @@ pub fn supersmoother_compute_into(
         });
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = resolve_single_kernel(kernel);
 
     let warm = first + period - 1;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
@@ -402,8 +420,11 @@ pub unsafe fn supersmoother_scalar(
         });
     }
 
-    let mut out = alloc_with_nan_prefix(len, warm);
+    let mut out = alloc_uninit_f64(len);
     supersmoother_row_scalar(data, first, period, &mut out);
+    for v in &mut out[..warm] {
+        *v = f64::NAN;
+    }
     Ok(SuperSmootherOutput { values: out })
 }
 

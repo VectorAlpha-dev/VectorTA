@@ -12,11 +12,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix,
-};
+use crate::utilities::helpers::{alloc_uninit_f64, detect_best_batch_kernel, make_uninit_matrix};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
@@ -34,7 +32,6 @@ const SEED_BAR_INDEX: usize = 100;
 const MAX_EXP_RATE: f64 = 0.5;
 const MIN_DISTANCE: f64 = 0.1;
 const MIN_WIDTH_MULTIPLIER: f64 = 0.1;
-const MAX_EXP_MULTIPLIER: f64 = 900.0;
 
 #[derive(Debug, Clone)]
 pub enum ExponentialTrendData<'a> {
@@ -138,11 +135,9 @@ impl<'a> ExponentialTrendInput<'a> {
     #[inline(always)]
     fn as_hlc(&self) -> (&'a [f64], &'a [f64], &'a [f64]) {
         match &self.data {
-            ExponentialTrendData::Candles { candles } => (
-                source_type(candles, "high"),
-                source_type(candles, "low"),
-                source_type(candles, "close"),
-            ),
+            ExponentialTrendData::Candles { candles } => {
+                (&candles.high, &candles.low, &candles.close)
+            }
             ExponentialTrendData::Slices { high, low, close } => (*high, *low, *close),
         }
     }
@@ -283,7 +278,7 @@ struct PreparedExponentialTrend<'a> {
     exp_rate: f64,
     initial_distance: f64,
     width_multiplier: f64,
-    warmup: usize,
+    all_valid: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -406,6 +401,26 @@ impl ExponentialTrendState {
             return None;
         }
 
+        Some(self.update_valid(
+            high,
+            low,
+            close,
+            exp_rate,
+            initial_distance,
+            width_multiplier,
+        ))
+    }
+
+    #[inline(always)]
+    fn update_valid(
+        &mut self,
+        high: f64,
+        low: f64,
+        close: f64,
+        exp_rate: f64,
+        initial_distance: f64,
+        width_multiplier: f64,
+    ) -> (f64, f64, f64, f64, f64, f64) {
         let atr = self.atr_state.update(high, low, close);
         let atr_ready = atr.is_some();
         let mut upper = f64::NAN;
@@ -492,9 +507,8 @@ impl ExponentialTrendState {
         }
 
         if self.trend != 0 {
-            let exp_multiplier = (1.0
-                + (self.trend as f64) * (1.0 - (-exp_rate * self.bars_since_change as f64).exp()))
-            .min(MAX_EXP_MULTIPLIER);
+            let exp_multiplier = 1.0
+                + (self.trend as f64) * (1.0 - (-exp_rate * self.bars_since_change as f64).exp());
             self.initial_line *= exp_multiplier;
         }
 
@@ -536,14 +550,14 @@ impl ExponentialTrendState {
         self.prev_atr_ready = atr_ready;
         self.segment_index = self.segment_index.saturating_add(1);
 
-        Some((
+        (
             uptrend_base,
             downtrend_base,
             uptrend_extension,
             downtrend_extension,
             bullish_change,
             bearish_change,
-        ))
+        )
     }
 }
 
@@ -664,17 +678,13 @@ fn analyze_valid_segments(
 
 fn prepare_input<'a>(
     input: &'a ExponentialTrendInput<'a>,
-    kernel: Kernel,
+    _kernel: Kernel,
 ) -> Result<PreparedExponentialTrend<'a>, ExponentialTrendError> {
-    if matches!(kernel, Kernel::Auto) {
-        let _ = detect_best_kernel();
-    }
-
     let (high, low, close) = input.as_hlc();
     let exp_rate = input.get_exp_rate();
     let initial_distance = input.get_initial_distance();
     let width_multiplier = input.get_width_multiplier();
-    validate_params(exp_rate, initial_distance, width_multiplier, close.len())?;
+    validate_params(exp_rate, initial_distance, width_multiplier, usize::MAX)?;
 
     let (_, max_run) = analyze_valid_segments(high, low, close)?;
     if max_run < required_valid_bars() {
@@ -683,6 +693,7 @@ fn prepare_input<'a>(
             valid: max_run,
         });
     }
+    let all_valid = max_run == close.len();
 
     Ok(PreparedExponentialTrend {
         high,
@@ -691,42 +702,48 @@ fn prepare_input<'a>(
         exp_rate,
         initial_distance,
         width_multiplier,
-        warmup: SEED_BAR_INDEX,
+        all_valid: max_run == close.len(),
     })
 }
 
-fn compute_row(
+#[inline(always)]
+fn compute_row_unchecked(
     high: &[f64],
     low: &[f64],
     close: &[f64],
     exp_rate: f64,
     initial_distance: f64,
     width_multiplier: f64,
+    all_valid: bool,
     uptrend_base_out: &mut [f64],
     downtrend_base_out: &mut [f64],
     uptrend_extension_out: &mut [f64],
     downtrend_extension_out: &mut [f64],
     bullish_change_out: &mut [f64],
     bearish_change_out: &mut [f64],
-) -> Result<(), ExponentialTrendError> {
+) {
     let expected = close.len();
-    for out in [
-        &mut *uptrend_base_out,
-        &mut *downtrend_base_out,
-        &mut *uptrend_extension_out,
-        &mut *downtrend_extension_out,
-        &mut *bullish_change_out,
-        &mut *bearish_change_out,
-    ] {
-        if out.len() != expected {
-            return Err(ExponentialTrendError::OutputLengthMismatch {
-                expected,
-                got: out.len(),
-            });
+    let mut state = ExponentialTrendState::new();
+    if all_valid {
+        for i in 0..expected {
+            let (ub, db, ue, de, bc, brc) = state.update_valid(
+                high[i],
+                low[i],
+                close[i],
+                exp_rate,
+                initial_distance,
+                width_multiplier,
+            );
+            uptrend_base_out[i] = ub;
+            downtrend_base_out[i] = db;
+            uptrend_extension_out[i] = ue;
+            downtrend_extension_out[i] = de;
+            bullish_change_out[i] = bc;
+            bearish_change_out[i] = brc;
         }
+        return;
     }
 
-    let mut state = ExponentialTrendState::new();
     for i in 0..expected {
         if let Some((ub, db, ue, de, bc, brc)) = state.update(
             high[i],
@@ -751,45 +768,95 @@ fn compute_row(
             bearish_change_out[i] = f64::NAN;
         }
     }
+}
+
+fn compute_row(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    exp_rate: f64,
+    initial_distance: f64,
+    width_multiplier: f64,
+    all_valid: bool,
+    uptrend_base_out: &mut [f64],
+    downtrend_base_out: &mut [f64],
+    uptrend_extension_out: &mut [f64],
+    downtrend_extension_out: &mut [f64],
+    bullish_change_out: &mut [f64],
+    bearish_change_out: &mut [f64],
+) -> Result<(), ExponentialTrendError> {
+    let expected = close.len();
+    for out in [
+        &mut *uptrend_base_out,
+        &mut *downtrend_base_out,
+        &mut *uptrend_extension_out,
+        &mut *downtrend_extension_out,
+        &mut *bullish_change_out,
+        &mut *bearish_change_out,
+    ] {
+        if out.len() != expected {
+            return Err(ExponentialTrendError::OutputLengthMismatch {
+                expected,
+                got: out.len(),
+            });
+        }
+    }
+
+    compute_row_unchecked(
+        high,
+        low,
+        close,
+        exp_rate,
+        initial_distance,
+        width_multiplier,
+        all_valid,
+        uptrend_base_out,
+        downtrend_base_out,
+        uptrend_extension_out,
+        downtrend_extension_out,
+        bullish_change_out,
+        bearish_change_out,
+    );
 
     Ok(())
 }
 
-#[inline]
+#[inline(always)]
 pub fn exponential_trend(
     input: &ExponentialTrendInput,
 ) -> Result<ExponentialTrendOutput, ExponentialTrendError> {
     exponential_trend_with_kernel(input, Kernel::Auto)
 }
 
+#[inline(always)]
 pub fn exponential_trend_with_kernel(
     input: &ExponentialTrendInput,
     kernel: Kernel,
 ) -> Result<ExponentialTrendOutput, ExponentialTrendError> {
     let prepared = prepare_input(input, kernel)?;
     let len = prepared.close.len();
-    let warmup = prepared.warmup;
-    let mut uptrend_base = alloc_with_nan_prefix(len, warmup);
-    let mut downtrend_base = alloc_with_nan_prefix(len, warmup);
-    let mut uptrend_extension = alloc_with_nan_prefix(len, warmup);
-    let mut downtrend_extension = alloc_with_nan_prefix(len, warmup);
-    let mut bullish_change = alloc_with_nan_prefix(len, warmup);
-    let mut bearish_change = alloc_with_nan_prefix(len, warmup);
+    let mut uptrend_base = alloc_uninit_f64(len);
+    let mut downtrend_base = alloc_uninit_f64(len);
+    let mut uptrend_extension = alloc_uninit_f64(len);
+    let mut downtrend_extension = alloc_uninit_f64(len);
+    let mut bullish_change = alloc_uninit_f64(len);
+    let mut bearish_change = alloc_uninit_f64(len);
 
-    compute_row(
+    compute_row_unchecked(
         prepared.high,
         prepared.low,
         prepared.close,
         prepared.exp_rate,
         prepared.initial_distance,
         prepared.width_multiplier,
+        prepared.all_valid,
         &mut uptrend_base,
         &mut downtrend_base,
         &mut uptrend_extension,
         &mut downtrend_extension,
         &mut bullish_change,
         &mut bearish_change,
-    )?;
+    );
 
     Ok(ExponentialTrendOutput {
         uptrend_base,
@@ -841,6 +908,7 @@ pub fn exponential_trend_into_slice(
         prepared.exp_rate,
         prepared.initial_distance,
         prepared.width_multiplier,
+        prepared.all_valid,
         uptrend_base_out,
         downtrend_base_out,
         uptrend_extension_out,
@@ -909,9 +977,9 @@ impl ExponentialTrendBatchBuilder {
         candles: &Candles,
     ) -> Result<ExponentialTrendBatchOutput, ExponentialTrendError> {
         exponential_trend_batch_with_kernel(
-            source_type(candles, "high"),
-            source_type(candles, "low"),
-            source_type(candles, "close"),
+            &candles.high,
+            &candles.low,
+            &candles.close,
             &self.range,
             self.kernel,
         )
@@ -1040,6 +1108,7 @@ fn batch_inner_into(
             valid: max_run,
         });
     }
+    let all_valid = max_run == close.len();
 
     let combos = expand_grid_exponential_trend(sweep)?;
     let rows = combos.len();
@@ -1086,6 +1155,7 @@ fn batch_inner_into(
             params.exp_rate.unwrap_or(DEFAULT_EXP_RATE),
             params.initial_distance.unwrap_or(DEFAULT_INITIAL_DISTANCE),
             params.width_multiplier.unwrap_or(DEFAULT_WIDTH_MULTIPLIER),
+            all_valid,
             uptrend_base_row,
             downtrend_base_row,
             uptrend_extension_row,
@@ -1184,63 +1254,72 @@ pub fn exponential_trend_batch_with_kernel(
 
     let rows = expand_grid_exponential_trend(sweep)?.len();
     let cols = close.len();
-    let mut uptrend_base_guard = ManuallyDrop::new(make_uninit_matrix(rows, cols));
-    let mut downtrend_base_guard = ManuallyDrop::new(make_uninit_matrix(rows, cols));
-    let mut uptrend_extension_guard = ManuallyDrop::new(make_uninit_matrix(rows, cols));
-    let mut downtrend_extension_guard = ManuallyDrop::new(make_uninit_matrix(rows, cols));
-    let mut bullish_change_guard = ManuallyDrop::new(make_uninit_matrix(rows, cols));
-    let mut bearish_change_guard = ManuallyDrop::new(make_uninit_matrix(rows, cols));
+    let mut uptrend_base_mu = make_uninit_matrix(rows, cols);
+    let mut downtrend_base_mu = make_uninit_matrix(rows, cols);
+    let mut uptrend_extension_mu = make_uninit_matrix(rows, cols);
+    let mut downtrend_extension_mu = make_uninit_matrix(rows, cols);
+    let mut bullish_change_mu = make_uninit_matrix(rows, cols);
+    let mut bearish_change_mu = make_uninit_matrix(rows, cols);
 
-    let uptrend_base: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(
-            uptrend_base_guard.as_mut_ptr() as *mut f64,
-            uptrend_base_guard.len(),
-        )
-    };
-    let downtrend_base: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(
-            downtrend_base_guard.as_mut_ptr() as *mut f64,
-            downtrend_base_guard.len(),
-        )
-    };
-    let uptrend_extension: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(
-            uptrend_extension_guard.as_mut_ptr() as *mut f64,
-            uptrend_extension_guard.len(),
-        )
-    };
-    let downtrend_extension: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(
-            downtrend_extension_guard.as_mut_ptr() as *mut f64,
-            downtrend_extension_guard.len(),
-        )
-    };
-    let bullish_change: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(
-            bullish_change_guard.as_mut_ptr() as *mut f64,
-            bullish_change_guard.len(),
-        )
-    };
-    let bearish_change: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(
-            bearish_change_guard.as_mut_ptr() as *mut f64,
-            bearish_change_guard.len(),
-        )
+    let combos = {
+        let uptrend_base: &mut [f64] = unsafe {
+            core::slice::from_raw_parts_mut(
+                uptrend_base_mu.as_mut_ptr() as *mut f64,
+                uptrend_base_mu.len(),
+            )
+        };
+        let downtrend_base: &mut [f64] = unsafe {
+            core::slice::from_raw_parts_mut(
+                downtrend_base_mu.as_mut_ptr() as *mut f64,
+                downtrend_base_mu.len(),
+            )
+        };
+        let uptrend_extension: &mut [f64] = unsafe {
+            core::slice::from_raw_parts_mut(
+                uptrend_extension_mu.as_mut_ptr() as *mut f64,
+                uptrend_extension_mu.len(),
+            )
+        };
+        let downtrend_extension: &mut [f64] = unsafe {
+            core::slice::from_raw_parts_mut(
+                downtrend_extension_mu.as_mut_ptr() as *mut f64,
+                downtrend_extension_mu.len(),
+            )
+        };
+        let bullish_change: &mut [f64] = unsafe {
+            core::slice::from_raw_parts_mut(
+                bullish_change_mu.as_mut_ptr() as *mut f64,
+                bullish_change_mu.len(),
+            )
+        };
+        let bearish_change: &mut [f64] = unsafe {
+            core::slice::from_raw_parts_mut(
+                bearish_change_mu.as_mut_ptr() as *mut f64,
+                bearish_change_mu.len(),
+            )
+        };
+
+        batch_inner_into(
+            high,
+            low,
+            close,
+            sweep,
+            !cfg!(target_arch = "wasm32"),
+            uptrend_base,
+            downtrend_base,
+            uptrend_extension,
+            downtrend_extension,
+            bullish_change,
+            bearish_change,
+        )?
     };
 
-    let combos = batch_inner_into(
-        high,
-        low,
-        close,
-        sweep,
-        !cfg!(target_arch = "wasm32"),
-        uptrend_base,
-        downtrend_base,
-        uptrend_extension,
-        downtrend_extension,
-        bullish_change,
-        bearish_change,
-    )?;
+    let mut uptrend_base_guard = ManuallyDrop::new(uptrend_base_mu);
+    let mut downtrend_base_guard = ManuallyDrop::new(downtrend_base_mu);
+    let mut uptrend_extension_guard = ManuallyDrop::new(uptrend_extension_mu);
+    let mut downtrend_extension_guard = ManuallyDrop::new(downtrend_extension_mu);
+    let mut bullish_change_guard = ManuallyDrop::new(bullish_change_mu);
+    let mut bearish_change_guard = ManuallyDrop::new(bearish_change_mu);
 
     Ok(ExponentialTrendBatchOutput {
         uptrend_base: unsafe {

@@ -32,13 +32,32 @@ use std::convert::AsRef;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
+const DEFAULT_PERIOD: usize = 14;
+const DEFAULT_WEIGHT_SUM: f64 = 1014.0;
+
 impl<'a> AsRef<[f64]> for SqwmaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             SqwmaData::Slice(slice) => slice,
-            SqwmaData::Candles { candles, source } => source_type(candles, source),
+            SqwmaData::Candles { candles, source } => sqwma_source_type(candles, source),
         }
+    }
+}
+
+#[inline(always)]
+fn sqwma_source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "close" => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
     }
 }
 
@@ -67,7 +86,9 @@ pub struct SqwmaParams {
 
 impl Default for SqwmaParams {
     fn default() -> Self {
-        Self { period: Some(14) }
+        Self {
+            period: Some(DEFAULT_PERIOD),
+        }
     }
 }
 
@@ -101,8 +122,20 @@ impl<'a> SqwmaInput<'a> {
     }
     #[inline]
     pub fn get_period(&self) -> usize {
-        self.params.period.unwrap_or(14)
+        self.params.period.unwrap_or(DEFAULT_PERIOD)
     }
+}
+
+#[inline(always)]
+fn build_sqwma_weights(period: usize) -> (AVec<f64>, f64) {
+    let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period - 1);
+    let mut sum = 0.0;
+    for i in 0..(period - 1) {
+        let weight = (period as f64 - i as f64).powi(2);
+        sum += weight;
+        weights.push(weight);
+    }
+    (weights, sum)
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -194,7 +227,7 @@ pub fn sqwma(input: &SqwmaInput) -> Result<SqwmaOutput, SqwmaError> {
 
 pub fn sqwma_with_kernel(input: &SqwmaInput, kernel: Kernel) -> Result<SqwmaOutput, SqwmaError> {
     let data: &[f64] = match &input.data {
-        SqwmaData::Candles { candles, source } => source_type(candles, source),
+        SqwmaData::Candles { candles, source } => sqwma_source_type(candles, source),
         SqwmaData::Slice(sl) => sl,
     };
     let len = data.len();
@@ -219,32 +252,31 @@ pub fn sqwma_with_kernel(input: &SqwmaInput, kernel: Kernel) -> Result<SqwmaOutp
         });
     }
 
-    let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period - 1);
-    for i in 0..(period - 1) {
-        weights.push((period as f64 - i as f64).powi(2));
-    }
-    let weight_sum: f64 = weights.iter().sum();
-
     let warm = first + period + 1;
     let mut out = alloc_with_nan_prefix(len, warm);
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
-    unsafe {
-        match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                sqwma_scalar(data, &weights, period, first, weight_sum, &mut out)
+    if period == DEFAULT_PERIOD {
+        sqwma_scalar_default_14(data, first, &mut out);
+    } else {
+        let (weights, weight_sum) = build_sqwma_weights(period);
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => {
+                    sqwma_scalar(data, &weights, period, first, weight_sum, &mut out)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => {
+                    sqwma_avx2(data, &weights, period, first, weight_sum, &mut out)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => {
+                    sqwma_avx512(data, &weights, period, first, weight_sum, &mut out)
+                }
+                _ => sqwma_scalar(data, &weights, period, first, weight_sum, &mut out),
             }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                sqwma_avx2(data, &weights, period, first, weight_sum, &mut out)
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                sqwma_avx512(data, &weights, period, first, weight_sum, &mut out)
-            }
-            _ => unreachable!(),
         }
     }
     Ok(SqwmaOutput { values: out })
@@ -298,6 +330,34 @@ pub fn sqwma_scalar(
                 k += 1;
             }
 
+            *o_ptr.add(j) = sum * inv_ws;
+        }
+    }
+}
+
+#[inline]
+pub fn sqwma_scalar_default_14(data: &[f64], first: usize, out: &mut [f64]) {
+    let n = data.len();
+    let inv_ws = 1.0 / DEFAULT_WEIGHT_SUM;
+    unsafe {
+        let d_ptr = data.as_ptr();
+        let o_ptr = out.as_mut_ptr();
+        for j in (first + DEFAULT_PERIOD + 1)..n {
+            let dp = d_ptr.add(j);
+            let mut sum = 0.0;
+            sum = (*dp).mul_add(196.0, sum);
+            sum = (*dp.sub(1)).mul_add(169.0, sum);
+            sum = (*dp.sub(2)).mul_add(144.0, sum);
+            sum = (*dp.sub(3)).mul_add(121.0, sum);
+            sum = (*dp.sub(4)).mul_add(100.0, sum);
+            sum = (*dp.sub(5)).mul_add(81.0, sum);
+            sum = (*dp.sub(6)).mul_add(64.0, sum);
+            sum = (*dp.sub(7)).mul_add(49.0, sum);
+            sum = (*dp.sub(8)).mul_add(36.0, sum);
+            sum = (*dp.sub(9)).mul_add(25.0, sum);
+            sum = (*dp.sub(10)).mul_add(16.0, sum);
+            sum = (*dp.sub(11)).mul_add(9.0, sum);
+            sum = (*dp.sub(12)).mul_add(4.0, sum);
             *o_ptr.add(j) = sum * inv_ws;
         }
     }
@@ -382,7 +442,7 @@ pub struct SqwmaStream {
 
 impl SqwmaStream {
     pub fn try_new(params: SqwmaParams) -> Result<Self, SqwmaError> {
-        let period = params.period.unwrap_or(14);
+        let period = params.period.unwrap_or(DEFAULT_PERIOD);
         if period < 2 {
             return Err(SqwmaError::InvalidPeriod {
                 period,
@@ -575,7 +635,7 @@ impl SqwmaBatchBuilder {
         SqwmaBatchBuilder::new().kernel(k).apply_slice(data)
     }
     pub fn apply_candles(self, c: &Candles, src: &str) -> Result<SqwmaBatchOutput, SqwmaError> {
-        let slice = source_type(c, src);
+        let slice = sqwma_source_type(c, src);
         self.apply_slice(slice)
     }
     pub fn with_default_candles(c: &Candles) -> Result<SqwmaBatchOutput, SqwmaError> {
@@ -618,7 +678,7 @@ impl SqwmaBatchOutput {
     pub fn row_for_params(&self, p: &SqwmaParams) -> Option<usize> {
         self.combos
             .iter()
-            .position(|c| c.period.unwrap_or(14) == p.period.unwrap_or(14))
+            .position(|c| c.period.unwrap_or(DEFAULT_PERIOD) == p.period.unwrap_or(DEFAULT_PERIOD))
     }
     pub fn values_for(&self, p: &SqwmaParams) -> Option<&[f64]> {
         self.row_for_params(p).map(|row| {
@@ -1882,13 +1942,13 @@ pub fn sqwma_into_slice(
     kernel: Kernel,
 ) -> Result<(), SqwmaError> {
     let data: &[f64] = match &input.data {
-        SqwmaData::Candles { candles, source } => source_type(candles, source),
+        SqwmaData::Candles { candles, source } => sqwma_source_type(candles, source),
         SqwmaData::Slice(sl) => sl,
     };
     if data.is_empty() {
         return Err(SqwmaError::EmptyInputData);
     }
-    let period = input.params.period.unwrap_or(14);
+    let period = input.params.period.unwrap_or(DEFAULT_PERIOD);
 
     if dst.len() != data.len() {
         return Err(SqwmaError::OutputLengthMismatch {
@@ -1916,12 +1976,6 @@ pub fn sqwma_into_slice(
         });
     }
 
-    let mut weights = Vec::with_capacity(period - 1);
-    for i in 0..(period - 1) {
-        weights.push((period as f64 - i as f64).powi(2));
-    }
-    let weight_sum: f64 = weights.iter().sum();
-
     let warmup = first + period + 1;
     let warmup_end = warmup.min(dst.len());
     for v in &mut dst[..warmup_end] {
@@ -1933,20 +1987,25 @@ pub fn sqwma_into_slice(
         other => other,
     };
 
-    unsafe {
-        match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                sqwma_scalar(data, &weights, period, first, weight_sum, dst)
+    if period == DEFAULT_PERIOD {
+        sqwma_scalar_default_14(data, first, dst);
+    } else {
+        let (weights, weight_sum) = build_sqwma_weights(period);
+        unsafe {
+            match chosen {
+                Kernel::Scalar | Kernel::ScalarBatch => {
+                    sqwma_scalar(data, &weights, period, first, weight_sum, dst)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => {
+                    sqwma_avx2(data, &weights, period, first, weight_sum, dst)
+                }
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => {
+                    sqwma_avx512(data, &weights, period, first, weight_sum, dst)
+                }
+                _ => sqwma_scalar(data, &weights, period, first, weight_sum, dst),
             }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                sqwma_avx2(data, &weights, period, first, weight_sum, dst)
-            }
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                sqwma_avx512(data, &weights, period, first, weight_sum, dst)
-            }
-            _ => unreachable!(),
         }
     }
 

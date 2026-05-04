@@ -274,6 +274,14 @@ pub fn rvi_with_kernel(input: &RviInput, kernel: Kernel) -> Result<RviOutput, Rv
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    if matches!(
+        chosen,
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch
+    ) {
+        rvi_scalar(data, period, ma_len, matype, devtype, first, &mut out);
+        return Ok(RviOutput { values: out });
+    }
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -353,6 +361,14 @@ pub fn rvi_into_slice(dst: &mut [f64], input: &RviInput, kern: Kernel) -> Result
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    if matches!(
+        chosen,
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch
+    ) {
+        rvi_scalar(data, period, ma_len, matype, devtype, first, dst);
+        return Ok(());
+    }
 
     unsafe {
         match chosen {
@@ -404,16 +420,6 @@ pub fn rvi_scalar(
     let mut sum = 0.0f64;
     let mut sumsq = 0.0f64;
 
-    let mut ring = vec![f64::NAN; period];
-    let mut r_head = 0usize;
-    let mut r_filled = false;
-
-    let mut scratch = if devtype == 2 {
-        vec![0.0f64; period]
-    } else {
-        Vec::new()
-    };
-
     let use_sma = matype == 0;
 
     let mut up_sum = 0.0f64;
@@ -459,13 +465,6 @@ pub fn rvi_scalar(
         }
         sum += x;
         sumsq += x * x;
-        if devtype != 0 {
-            ring[i] = x;
-            if i + 1 == period {
-                r_filled = true;
-                r_head = 0;
-            }
-        }
     }
 
     if devtype == 0 {
@@ -722,6 +721,14 @@ pub fn rvi_scalar(
         return;
     }
 
+    let mut ring = vec![f64::NAN; period];
+    let mut r_head = 0usize;
+    let mut scratch = if devtype == 2 {
+        vec![0.0f64; period]
+    } else {
+        Vec::new()
+    };
+
     for i in 0..n {
         let x = data[i];
 
@@ -785,10 +792,6 @@ pub fn rvi_scalar(
                     if i < period {
                         if !incoming.is_nan() {
                             ring[i] = incoming;
-                            if i + 1 == period {
-                                r_filled = true;
-                                r_head = 0;
-                            }
                         }
                         if i + 1 < period {
                             f64::NAN
@@ -811,7 +814,6 @@ pub fn rvi_scalar(
                     } else {
                         let leaving = data[i - period];
                         if incoming.is_nan() || leaving.is_nan() {
-                            r_filled = false;
                             for j in 0..period {
                                 ring[j] = f64::NAN;
                             }
@@ -821,7 +823,6 @@ pub fn rvi_scalar(
                                 *ring.get_unchecked_mut(r_head) = incoming;
                             }
                             r_head = (r_head + 1) % period;
-                            r_filled = true;
 
                             let mut s = 0.0;
                             unsafe {
@@ -845,10 +846,6 @@ pub fn rvi_scalar(
                     if i < period {
                         if !incoming.is_nan() {
                             ring[i] = incoming;
-                            if i + 1 == period {
-                                r_filled = true;
-                                r_head = 0;
-                            }
                         }
                         if i + 1 < period {
                             f64::NAN
@@ -877,7 +874,6 @@ pub fn rvi_scalar(
                     } else {
                         let leaving = data[i - period];
                         if incoming.is_nan() || leaving.is_nan() {
-                            r_filled = false;
                             for j in 0..period {
                                 ring[j] = f64::NAN;
                             }
@@ -887,7 +883,6 @@ pub fn rvi_scalar(
                                 *ring.get_unchecked_mut(r_head) = incoming;
                             }
                             r_head = (r_head + 1) % period;
-                            r_filled = true;
 
                             unsafe {
                                 for k in 0..period {

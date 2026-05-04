@@ -44,8 +44,24 @@ impl<'a> AsRef<[f64]> for QqeInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             QqeData::Slice(slice) => slice,
-            QqeData::Candles { candles, source } => source_type(candles, source),
+            QqeData::Candles { candles, source } => qqe_source(candles, source),
         }
+    }
+}
+
+#[inline(always)]
+fn qqe_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => candles.open.as_slice(),
+        "high" => candles.high.as_slice(),
+        "low" => candles.low.as_slice(),
+        "close" => candles.close.as_slice(),
+        "volume" => candles.volume.as_slice(),
+        "hl2" => candles.hl2.as_slice(),
+        "hlc3" => candles.hlc3.as_slice(),
+        "ohlc4" => candles.ohlc4.as_slice(),
+        "hlcc4" | "hlcc" => candles.hlcc4.as_slice(),
+        _ => source_type(candles, source),
     }
 }
 
@@ -457,10 +473,7 @@ fn qqe_prepare<'a>(
         });
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        k => k,
-    };
+    let chosen = qqe_single_kernel(kernel, len, rsi_period, smoothing_factor, fast_factor);
 
     Ok((
         data,
@@ -470,6 +483,38 @@ fn qqe_prepare<'a>(
         first,
         chosen,
     ))
+}
+
+#[inline(always)]
+fn qqe_single_kernel(
+    kernel: Kernel,
+    len: usize,
+    rsi_period: usize,
+    smoothing_factor: usize,
+    fast_factor: f64,
+) -> Kernel {
+    match kernel {
+        Kernel::Auto => {
+            if rsi_period == 14 && smoothing_factor == 5 && fast_factor == 4.236 {
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                {
+                    return Kernel::Avx2;
+                }
+                #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                {
+                    return if len <= 20_000 {
+                        Kernel::Scalar
+                    } else if len <= 200_000 {
+                        Kernel::Avx512
+                    } else {
+                        Kernel::Avx2
+                    };
+                }
+            }
+            detect_best_kernel()
+        }
+        k => k,
+    }
 }
 
 #[inline]

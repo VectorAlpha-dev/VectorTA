@@ -48,7 +48,13 @@ impl<'a> AsRef<[f64]> for ZscoreInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             ZscoreData::Slice(slice) => slice,
-            ZscoreData::Candles { candles, source } => source_type(candles, source),
+            ZscoreData::Candles { candles, source } => {
+                if source.eq_ignore_ascii_case("close") {
+                    candles.close.as_slice()
+                } else {
+                    source_type(candles, source)
+                }
+            }
         }
     }
 }
@@ -300,6 +306,10 @@ pub fn zscore_with_kernel(
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 zscore_avx512(data, period, first, &ma_type, nbdev, devtype)
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                zscore_scalar(data, period, first, &ma_type, nbdev, devtype)
             }
             _ => unreachable!(),
         }
@@ -2491,6 +2501,10 @@ pub fn zscore_into_slice(
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 zscore_compute_into_avx512(data, period, first, &ma_type, nbdev, devtype, dst)
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                zscore_compute_into_scalar(data, period, first, &ma_type, nbdev, devtype, dst)
             }
             _ => {
                 return Err(ZscoreError::InvalidPeriod {

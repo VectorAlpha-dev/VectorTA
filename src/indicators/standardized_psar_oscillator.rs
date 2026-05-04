@@ -15,7 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, make_uninit_matrix,
+    alloc_uninit_f64, alloc_with_nan_prefix, detect_best_batch_kernel, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -458,6 +458,7 @@ struct PreparedInput<'a> {
     plot_bullish: bool,
     plot_bearish: bool,
     warmup: usize,
+    all_finite: bool,
 }
 
 #[inline(always)]
@@ -614,6 +615,7 @@ fn prepare_input<'a>(
         plot_bullish: input.get_plot_bullish(),
         plot_bearish: input.get_plot_bearish(),
         warmup: first_valid + needed - 1,
+        all_finite: first_valid == 0 && max_run == close.len(),
     })
 }
 
@@ -847,6 +849,8 @@ struct PivotEvent {
     price: f64,
 }
 
+type StandardizedPsarValues = (f64, f64, f64, f64, f64, f64, f64, f64);
+
 #[derive(Clone, Debug)]
 struct StandardizedPsarOscillatorState {
     psar: PsarState,
@@ -859,6 +863,7 @@ struct StandardizedPsarOscillatorState {
     plot_bearish: bool,
     oscillator_history: Vec<f64>,
     ma_history: Vec<f64>,
+    ma_lag_head: usize,
     low_history: Vec<f64>,
     high_history: Vec<f64>,
     previous_low_pivot: Option<PivotEvent>,
@@ -891,6 +896,7 @@ impl StandardizedPsarOscillatorState {
             plot_bearish,
             oscillator_history: Vec::new(),
             ma_history: Vec::new(),
+            ma_lag_head: 0,
             low_history: Vec::new(),
             high_history: Vec::new(),
             previous_low_pivot: None,
@@ -906,6 +912,7 @@ impl StandardizedPsarOscillatorState {
         self.wma.reset();
         self.oscillator_history.clear();
         self.ma_history.clear();
+        self.ma_lag_head = 0;
         self.low_history.clear();
         self.high_history.clear();
         self.previous_low_pivot = None;
@@ -914,17 +921,17 @@ impl StandardizedPsarOscillatorState {
     }
 
     #[inline(always)]
-    fn update(
-        &mut self,
-        high: f64,
-        low: f64,
-        close: f64,
-    ) -> Option<(f64, f64, f64, f64, f64, f64, f64, f64)> {
+    fn update(&mut self, high: f64, low: f64, close: f64) -> Option<StandardizedPsarValues> {
         if !high.is_finite() || !low.is_finite() || !close.is_finite() {
             self.reset();
             return None;
         }
 
+        self.update_finite(high, low, close)
+    }
+
+    #[inline(always)]
+    fn update_finite(&mut self, high: f64, low: f64, close: f64) -> Option<StandardizedPsarValues> {
         let psar = self.psar.update(high, low);
         let range = self.range_ema.update(high - low);
         let oscillator = match (psar, range) {
@@ -963,7 +970,7 @@ impl StandardizedPsarOscillatorState {
         let lag_ma = if self.wma_lag == 0 || self.ma_history.len() < self.wma_lag {
             f64::NAN
         } else {
-            self.ma_history[self.ma_history.len() - self.wma_lag]
+            self.ma_history[self.ma_lag_head]
         };
 
         let bullish_weakening = if ma.is_finite() && lag_ma.is_finite() {
@@ -988,7 +995,17 @@ impl StandardizedPsarOscillatorState {
 
         self.previous_oscillator = oscillator;
         self.oscillator_history.push(oscillator);
-        self.ma_history.push(ma);
+        if self.wma_lag > 0 {
+            if self.ma_history.len() < self.wma_lag {
+                self.ma_history.push(ma);
+            } else {
+                self.ma_history[self.ma_lag_head] = ma;
+                self.ma_lag_head += 1;
+                if self.ma_lag_head == self.wma_lag {
+                    self.ma_lag_head = 0;
+                }
+            }
+        }
         self.low_history.push(low);
         self.high_history.push(high);
 
@@ -1461,6 +1478,7 @@ fn compute_row(
     high: &[f64],
     low: &[f64],
     close: &[f64],
+    all_finite: bool,
     params: &StandardizedPsarOscillatorParams,
     oscillator_out: &mut [f64],
     ma_out: &mut [f64],
@@ -1504,40 +1522,89 @@ fn compute_row(
         params.plot_bullish.unwrap_or(DEFAULT_PLOT_BULLISH),
         params.plot_bearish.unwrap_or(DEFAULT_PLOT_BEARISH),
     );
+    state.oscillator_history.reserve_exact(len);
+    state.ma_history.reserve_exact(state.wma_lag);
+    state.low_history.reserve_exact(len);
+    state.high_history.reserve_exact(len);
+
+    if all_finite {
+        for i in 0..len {
+            write_standardized_psar_values(
+                i,
+                state.update_finite(high[i], low[i], close[i]),
+                oscillator_out,
+                ma_out,
+                bullish_reversal_out,
+                bearish_reversal_out,
+                regular_bullish_out,
+                regular_bearish_out,
+                bullish_weakening_out,
+                bearish_weakening_out,
+            );
+        }
+        return Ok(());
+    }
 
     for i in 0..len {
-        if let Some((
-            oscillator,
-            ma,
-            bullish_reversal,
-            bearish_reversal,
-            regular_bullish,
-            regular_bearish,
-            bullish_weakening,
-            bearish_weakening,
-        )) = state.update(high[i], low[i], close[i])
-        {
-            oscillator_out[i] = oscillator;
-            ma_out[i] = ma;
-            bullish_reversal_out[i] = bullish_reversal;
-            bearish_reversal_out[i] = bearish_reversal;
-            regular_bullish_out[i] = regular_bullish;
-            regular_bearish_out[i] = regular_bearish;
-            bullish_weakening_out[i] = bullish_weakening;
-            bearish_weakening_out[i] = bearish_weakening;
-        } else {
-            oscillator_out[i] = f64::NAN;
-            ma_out[i] = f64::NAN;
-            bullish_reversal_out[i] = f64::NAN;
-            bearish_reversal_out[i] = f64::NAN;
-            regular_bullish_out[i] = f64::NAN;
-            regular_bearish_out[i] = f64::NAN;
-            bullish_weakening_out[i] = f64::NAN;
-            bearish_weakening_out[i] = f64::NAN;
-        }
+        write_standardized_psar_values(
+            i,
+            state.update(high[i], low[i], close[i]),
+            oscillator_out,
+            ma_out,
+            bullish_reversal_out,
+            bearish_reversal_out,
+            regular_bullish_out,
+            regular_bearish_out,
+            bullish_weakening_out,
+            bearish_weakening_out,
+        );
     }
 
     Ok(())
+}
+
+#[inline(always)]
+fn write_standardized_psar_values(
+    i: usize,
+    values: Option<StandardizedPsarValues>,
+    oscillator_out: &mut [f64],
+    ma_out: &mut [f64],
+    bullish_reversal_out: &mut [f64],
+    bearish_reversal_out: &mut [f64],
+    regular_bullish_out: &mut [f64],
+    regular_bearish_out: &mut [f64],
+    bullish_weakening_out: &mut [f64],
+    bearish_weakening_out: &mut [f64],
+) {
+    if let Some((
+        oscillator,
+        ma,
+        bullish_reversal,
+        bearish_reversal,
+        regular_bullish,
+        regular_bearish,
+        bullish_weakening,
+        bearish_weakening,
+    )) = values
+    {
+        oscillator_out[i] = oscillator;
+        ma_out[i] = ma;
+        bullish_reversal_out[i] = bullish_reversal;
+        bearish_reversal_out[i] = bearish_reversal;
+        regular_bullish_out[i] = regular_bullish;
+        regular_bearish_out[i] = regular_bearish;
+        bullish_weakening_out[i] = bullish_weakening;
+        bearish_weakening_out[i] = bearish_weakening;
+    } else {
+        oscillator_out[i] = f64::NAN;
+        ma_out[i] = f64::NAN;
+        bullish_reversal_out[i] = f64::NAN;
+        bearish_reversal_out[i] = f64::NAN;
+        regular_bullish_out[i] = f64::NAN;
+        regular_bearish_out[i] = f64::NAN;
+        bullish_weakening_out[i] = f64::NAN;
+        bearish_weakening_out[i] = f64::NAN;
+    }
 }
 
 #[inline]
@@ -1554,19 +1621,20 @@ pub fn standardized_psar_oscillator_with_kernel(
     let prepared = prepare_input(input, kernel)?;
     let len = prepared.close.len();
 
-    let mut oscillator = alloc_with_nan_prefix(len, prepared.warmup);
-    let mut ma = alloc_with_nan_prefix(len, prepared.warmup);
-    let mut bullish_reversal = alloc_with_nan_prefix(len, prepared.warmup);
-    let mut bearish_reversal = alloc_with_nan_prefix(len, prepared.warmup);
-    let mut regular_bullish = alloc_with_nan_prefix(len, prepared.warmup);
-    let mut regular_bearish = alloc_with_nan_prefix(len, prepared.warmup);
-    let mut bullish_weakening = alloc_with_nan_prefix(len, prepared.warmup);
-    let mut bearish_weakening = alloc_with_nan_prefix(len, prepared.warmup);
+    let mut oscillator = alloc_uninit_f64(len);
+    let mut ma = alloc_uninit_f64(len);
+    let mut bullish_reversal = alloc_uninit_f64(len);
+    let mut bearish_reversal = alloc_uninit_f64(len);
+    let mut regular_bullish = alloc_uninit_f64(len);
+    let mut regular_bearish = alloc_uninit_f64(len);
+    let mut bullish_weakening = alloc_uninit_f64(len);
+    let mut bearish_weakening = alloc_uninit_f64(len);
 
     compute_row(
         prepared.high,
         prepared.low,
         prepared.close,
+        prepared.all_finite,
         &StandardizedPsarOscillatorParams {
             start: Some(prepared.start),
             increment: Some(prepared.increment),
@@ -1644,6 +1712,7 @@ pub fn standardized_psar_oscillator_into_slice(
         prepared.high,
         prepared.low,
         prepared.close,
+        prepared.all_finite,
         &StandardizedPsarOscillatorParams {
             start: Some(prepared.start),
             increment: Some(prepared.increment),
@@ -1686,6 +1755,7 @@ fn standardized_psar_oscillator_batch_inner_into(
     let combos = expand_grid_standardized_psar_oscillator(sweep)?;
     let rows = combos.len();
     let cols = close.len();
+    let all_finite = max_run == cols;
     let expected =
         rows.checked_mul(cols)
             .ok_or(StandardizedPsarOscillatorError::OutputLengthMismatch {
@@ -1749,6 +1819,7 @@ fn standardized_psar_oscillator_batch_inner_into(
             high,
             low,
             close,
+            all_finite,
             &combos[row],
             oscillator_row,
             ma_row,

@@ -16,9 +16,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
-};
+use crate::utilities::helpers::{alloc_uninit_f64, detect_best_batch_kernel, make_uninit_matrix};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
@@ -29,8 +27,6 @@ use thiserror::Error;
 const DEFAULT_SOURCE: &str = "hl2";
 const DEFAULT_ALPHA: f64 = 0.07;
 const REQUIRED_VALID_SAMPLES: usize = 3;
-const WARMUP_CYCLE: usize = 2;
-const WARMUP_TRIGGER: usize = 3;
 
 #[derive(Debug, Clone)]
 pub enum EhlersSimpleCycleIndicatorData<'a> {
@@ -205,7 +201,6 @@ pub enum EhlersSimpleCycleIndicatorError {
 
 #[derive(Debug, Clone, Copy)]
 struct ResolvedParams {
-    alpha: f64,
     coef_cycle: f64,
     coef_prev1: f64,
     coef_prev2: f64,
@@ -241,7 +236,6 @@ fn resolve_params(
     let coef_cycle = (1.0 - 0.5 * alpha) * (1.0 - 0.5 * alpha);
     let one_minus_alpha = 1.0 - alpha;
     Ok(ResolvedParams {
-        alpha,
         coef_cycle,
         coef_prev1: 2.0 * one_minus_alpha,
         coef_prev2: one_minus_alpha * one_minus_alpha,
@@ -266,15 +260,6 @@ fn validate_input<'a>(
     Ok((data, params, first, kernel.to_non_batch()))
 }
 
-#[inline(always)]
-fn ring_get<const N: usize>(buf: &[f64; N], center: usize, off: usize) -> f64 {
-    let mut idx = center + N - (off % N);
-    if idx >= N {
-        idx -= N;
-    }
-    buf[idx]
-}
-
 #[derive(Clone, Debug)]
 struct EsciCore {
     params: ResolvedParams,
@@ -289,7 +274,6 @@ struct EsciCore {
 impl EsciCore {
     #[inline(always)]
     fn new(params: ResolvedParams) -> Self {
-        let _ = params.alpha;
         Self {
             params,
             src_ring: [f64::NAN; 4],
@@ -308,10 +292,11 @@ impl EsciCore {
         }
 
         self.src_ring[self.src_idx] = source;
-        let src0 = ring_get(&self.src_ring, self.src_idx, 0);
-        let src1 = ring_get(&self.src_ring, self.src_idx, 1);
-        let src2 = ring_get(&self.src_ring, self.src_idx, 2);
-        let src3 = ring_get(&self.src_ring, self.src_idx, 3);
+        let src_idx = self.src_idx;
+        let src0 = source;
+        let src1 = self.src_ring[(src_idx + 3) & 3];
+        let src2 = self.src_ring[(src_idx + 2) & 3];
+        let src3 = self.src_ring[(src_idx + 1) & 3];
 
         let smooth = if src0.is_finite() && src1.is_finite() && src2.is_finite() && src3.is_finite()
         {
@@ -321,8 +306,13 @@ impl EsciCore {
         };
         self.smooth_ring[self.smooth_idx] = smooth;
 
-        let smooth1 = ring_get(&self.smooth_ring, self.smooth_idx, 1);
-        let smooth2 = ring_get(&self.smooth_ring, self.smooth_idx, 2);
+        let smooth_idx = self.smooth_idx;
+        let smooth1 = self.smooth_ring[if smooth_idx == 0 { 2 } else { smooth_idx - 1 }];
+        let smooth2 = self.smooth_ring[if smooth_idx >= 2 {
+            smooth_idx - 2
+        } else {
+            smooth_idx + 1
+        }];
         let prev_cycle1 = self.cycle_hist[0];
         let prev_cycle2 = self.cycle_hist[1];
 
@@ -355,8 +345,8 @@ impl EsciCore {
         self.cycle_hist[1] = self.cycle_hist[0];
         self.cycle_hist[0] = cycle;
         self.valid_count += 1;
-        self.src_idx = (self.src_idx + 1) % self.src_ring.len();
-        self.smooth_idx = (self.smooth_idx + 1) % self.smooth_ring.len();
+        self.src_idx = (src_idx + 1) & 3;
+        self.smooth_idx = if smooth_idx == 2 { 0 } else { smooth_idx + 1 };
 
         (cycle, trigger)
     }
@@ -402,9 +392,9 @@ pub fn ehlers_simple_cycle_indicator_with_kernel(
     input: &EhlersSimpleCycleIndicatorInput,
     kernel: Kernel,
 ) -> Result<EhlersSimpleCycleIndicatorOutput, EhlersSimpleCycleIndicatorError> {
-    let (data, params, first, _kernel) = validate_input(input, kernel)?;
-    let mut cycle = alloc_with_nan_prefix(data.len(), (first + WARMUP_CYCLE).min(data.len()));
-    let mut trigger = alloc_with_nan_prefix(data.len(), (first + WARMUP_TRIGGER).min(data.len()));
+    let (data, params, _first, _kernel) = validate_input(input, kernel)?;
+    let mut cycle = alloc_uninit_f64(data.len());
+    let mut trigger = alloc_uninit_f64(data.len());
     compute_esci_into(data, params, &mut cycle, &mut trigger)?;
     Ok(EhlersSimpleCycleIndicatorOutput { cycle, trigger })
 }
@@ -428,8 +418,6 @@ pub fn ehlers_simple_cycle_indicator_into_slice(
     kernel: Kernel,
 ) -> Result<(), EhlersSimpleCycleIndicatorError> {
     let (data, params, _first, _kernel) = validate_input(input, kernel)?;
-    out_cycle.fill(f64::NAN);
-    out_trigger.fill(f64::NAN);
     compute_esci_into(data, params, out_cycle, out_trigger)
 }
 
@@ -654,17 +642,12 @@ fn ehlers_simple_cycle_indicator_batch_inner(
     parallel: bool,
 ) -> Result<EhlersSimpleCycleIndicatorBatchOutput, EhlersSimpleCycleIndicatorError> {
     let combos = expand_grid(sweep)?;
-    let first = validate_raw_slice(data)?;
     let rows = combos.len();
     let cols = data.len();
     let total = batch_shape(rows, cols)?;
-    let cycle_warmups = vec![(first + WARMUP_CYCLE).min(cols); rows];
-    let trigger_warmups = vec![(first + WARMUP_TRIGGER).min(cols); rows];
 
     let mut cycle_buf = make_uninit_matrix(rows, cols);
     let mut trigger_buf = make_uninit_matrix(rows, cols);
-    init_matrix_prefixes(&mut cycle_buf, cols, &cycle_warmups);
-    init_matrix_prefixes(&mut trigger_buf, cols, &trigger_warmups);
 
     let mut cycle_guard = ManuallyDrop::new(cycle_buf);
     let mut trigger_guard = ManuallyDrop::new(trigger_buf);

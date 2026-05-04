@@ -198,6 +198,26 @@ struct PreparedInput<'a> {
     alpha: f64,
 }
 
+#[derive(Copy, Clone, Debug)]
+struct AlphaCoeffs {
+    alpha_half_sq: f64,
+    one_minus_alpha: f64,
+    one_minus_alpha_sq: f64,
+}
+
+impl AlphaCoeffs {
+    #[inline(always)]
+    fn new(alpha: f64) -> Self {
+        let alpha_half = 1.0 - 0.5 * alpha;
+        let one_minus_alpha = 1.0 - alpha;
+        Self {
+            alpha_half_sq: alpha_half * alpha_half,
+            one_minus_alpha,
+            one_minus_alpha_sq: one_minus_alpha * one_minus_alpha,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct AdaptiveBuffers {
     smooth: Vec<f64>,
@@ -304,12 +324,11 @@ fn history_or(data: &[f64], idx: usize, lag: usize, fallback: f64) -> f64 {
 fn append_step(
     data: &[f64],
     first_valid: usize,
-    alpha: f64,
+    coeffs: AlphaCoeffs,
     idx: usize,
     buffers: &mut AdaptiveBuffers,
     cg_out: &mut [f64],
 ) {
-    cg_out[idx] = f64::NAN;
     if idx < first_valid {
         return;
     }
@@ -325,20 +344,15 @@ fn append_step(
 
     buffers.smooth[idx] = (x0 + 2.0 * x1 + 2.0 * x2 + x3) / 6.0;
 
-    let alpha_half = 1.0 - 0.5 * alpha;
-    let alpha_half_sq = alpha_half * alpha_half;
-    let one_minus_alpha = 1.0 - alpha;
-    let one_minus_alpha_sq = one_minus_alpha * one_minus_alpha;
-
     if idx < first_valid + 7 {
         buffers.cycle[idx] = (x0 - 2.0 * x1 + x2) * 0.25;
     } else {
         let s0 = buffers.smooth[idx];
         let s1 = buffers.smooth[idx - 1];
         let s2 = buffers.smooth[idx - 2];
-        buffers.cycle[idx] = alpha_half_sq * (s0 - 2.0 * s1 + s2)
-            + 2.0 * one_minus_alpha * buffers.cycle[idx - 1]
-            - one_minus_alpha_sq * buffers.cycle[idx - 2];
+        buffers.cycle[idx] = coeffs.alpha_half_sq * (s0 - 2.0 * s1 + s2)
+            + 2.0 * coeffs.one_minus_alpha * buffers.cycle[idx - 1]
+            - coeffs.one_minus_alpha_sq * buffers.cycle[idx - 2];
     }
 
     if idx >= first_valid + 6 {
@@ -413,15 +427,13 @@ fn append_step(
 }
 
 fn compute_series_into(prepared: PreparedInput<'_>, cg_out: &mut [f64], trigger_out: &mut [f64]) {
-    cg_out.fill(f64::NAN);
-    trigger_out.fill(f64::NAN);
-
     let mut buffers = AdaptiveBuffers::new(prepared.len);
+    let coeffs = AlphaCoeffs::new(prepared.alpha);
     for idx in prepared.first_valid..prepared.len {
         append_step(
             prepared.data,
             prepared.first_valid,
-            prepared.alpha,
+            coeffs,
             idx,
             &mut buffers,
             cg_out,
@@ -472,6 +484,8 @@ pub fn ehlers_adaptive_cg_into_slice(
             got: trigger_out.len(),
         });
     }
+    cg_out.fill(f64::NAN);
+    trigger_out.fill(f64::NAN);
     compute_series_into(prepared, cg_out, trigger_out);
     Ok(())
 }
@@ -488,6 +502,7 @@ pub fn ehlers_adaptive_cg_into(
 #[derive(Debug, Clone)]
 pub struct EhlersAdaptiveCgStream {
     alpha: f64,
+    coeffs: AlphaCoeffs,
     first_valid: Option<usize>,
     data: Vec<f64>,
     buffers: AdaptiveBuffers,
@@ -499,6 +514,7 @@ impl EhlersAdaptiveCgStream {
         let alpha = validate_alpha(params.alpha.unwrap_or(DEFAULT_ALPHA))?;
         Ok(Self {
             alpha,
+            coeffs: AlphaCoeffs::new(alpha),
             first_valid: None,
             data: Vec::new(),
             buffers: AdaptiveBuffers::new(0),
@@ -519,7 +535,7 @@ impl EhlersAdaptiveCgStream {
         append_step(
             &self.data,
             first_valid,
-            self.alpha,
+            self.coeffs,
             idx,
             &mut self.buffers,
             &mut self.cg,
@@ -776,6 +792,8 @@ fn ehlers_adaptive_cg_batch_inner(
             first_valid,
             alpha: combos[row].alpha.unwrap_or(DEFAULT_ALPHA),
         };
+        cg_row.fill(f64::NAN);
+        trigger_row.fill(f64::NAN);
         compute_series_into(prepared, cg_row, trigger_row);
     };
 

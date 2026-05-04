@@ -441,92 +441,9 @@ pub fn nadaraya_watson_envelope_into_slices(
         });
     }
 
-    let mut out = alloc_with_nan_prefix(len, warm_out);
-    let mut resid = alloc_with_nan_prefix(len, warm_out);
-
-    for t in warm_out..len {
-        let mut num = 0.0;
-        let mut any_nan = false;
-
-        for k in 0..lookback {
-            let x = data[t - k];
-            if x.is_nan() {
-                any_nan = true;
-                break;
-            }
-            num += x * w[k];
-        }
-        if !any_nan {
-            out[t] = num / den;
-        }
-    }
-
-    for t in warm_out..len {
-        let x = data[t];
-        let y = out[t];
-        if !x.is_nan() && !y.is_nan() {
-            resid[t] = (x - y).abs();
-        }
-    }
-
-    for v in &mut upper_out[..warm_total.min(len)] {
-        *v = f64::from_bits(0x7ff8_0000_0000_0000);
-    }
-    for v in &mut lower_out[..warm_total.min(len)] {
-        *v = f64::from_bits(0x7ff8_0000_0000_0000);
-    }
-
-    const MAE_LEN: usize = 499;
-    if warm_total >= len {
-        return Ok(());
-    }
-
-    let mut sum = 0.0;
-    let mut nan_count = 0usize;
-
-    let start = warm_out;
-    let prime_end = (start + MAE_LEN - 1).min(len);
-    for t in start..prime_end {
-        let r = resid[t];
-        if r.is_nan() {
-            nan_count += 1;
-        } else {
-            sum += r;
-        }
-    }
-
-    for t in warm_total..len {
-        let r_cur = resid[t];
-        if r_cur.is_nan() {
-            nan_count += 1;
-        } else {
-            sum += r_cur;
-        }
-
-        let s = t + 1 - MAE_LEN;
-        let mae = if nan_count == 0 {
-            (sum / (MAE_LEN as f64)) * mult
-        } else {
-            f64::NAN
-        };
-
-        let y = out[t];
-        if !y.is_nan() && !mae.is_nan() {
-            upper_out[t] = y + mae;
-            lower_out[t] = y - mae;
-        } else {
-            upper_out[t] = f64::NAN;
-            lower_out[t] = f64::NAN;
-        }
-
-        let r_old = resid[s];
-        if r_old.is_nan() {
-            nan_count -= 1;
-        } else {
-            sum -= r_old;
-        }
-    }
-
+    nwe_compute_scalar_prepared(
+        data, mult, lookback, warm_out, warm_total, &w, den, upper_out, lower_out, true,
+    );
     Ok(())
 }
 
@@ -545,92 +462,201 @@ pub fn nadaraya_watson_envelope_into_slices_no_prefix(
         });
     }
 
-    let mut out = alloc_with_nan_prefix(len, warm_out);
-    let mut resid = alloc_with_nan_prefix(len, warm_out);
-
-    for t in warm_out..len {
-        let mut num = 0.0;
-        let mut bad = false;
-        for k in 0..lookback {
-            let x = data[t - k];
-            if x.is_nan() {
-                bad = true;
-                break;
-            }
-            num += x * w[k];
-        }
-        if !bad {
-            out[t] = num / den;
-        }
-    }
-
-    for t in warm_out..len {
-        let x = data[t];
-        let y = out[t];
-        if !x.is_nan() && !y.is_nan() {
-            resid[t] = (x - y).abs();
-        }
-    }
-
-    const MAE_LEN: usize = 499;
-    if warm_total >= len {
-        return Ok(warm_total);
-    }
-
-    let mut sum = 0.0;
-    let mut nan_c = 0usize;
-    let start = warm_out;
-    let prime_end = (start + MAE_LEN - 1).min(len);
-    for t in start..prime_end {
-        let r = resid[t];
-        if r.is_nan() {
-            nan_c += 1
-        } else {
-            sum += r
-        };
-    }
-
-    for t in warm_total..len {
-        let r_cur = resid[t];
-        if r_cur.is_nan() {
-            nan_c += 1
-        } else {
-            sum += r_cur
-        }
-
-        let mae = if nan_c == 0 {
-            (sum / (MAE_LEN as f64)) * mult
-        } else {
-            f64::NAN
-        };
-        let y = out[t];
-        if !y.is_nan() && !mae.is_nan() {
-            upper_out[t] = y + mae;
-            lower_out[t] = y - mae;
-        } else {
-            upper_out[t] = f64::NAN;
-            lower_out[t] = f64::NAN;
-        }
-
-        let s = t + 1 - MAE_LEN;
-        let r_old = resid[s];
-        if r_old.is_nan() {
-            nan_c -= 1
-        } else {
-            sum -= r_old
-        }
-    }
-
+    nwe_compute_scalar_prepared(
+        data, mult, lookback, warm_out, warm_total, &w, den, upper_out, lower_out, false,
+    );
     Ok(warm_total)
 }
 
 #[inline]
+fn nwe_compute_scalar_prepared(
+    data: &[f64],
+    mult: f64,
+    lookback: usize,
+    warm_out: usize,
+    warm_total: usize,
+    w: &[f64],
+    den: f64,
+    upper_out: &mut [f64],
+    lower_out: &mut [f64],
+    write_prefix: bool,
+) {
+    let len = data.len();
+    let nan = f64::from_bits(0x7ff8_0000_0000_0000);
+
+    if write_prefix {
+        let prefix_end = warm_total.min(len);
+        for v in &mut upper_out[..prefix_end] {
+            *v = nan;
+        }
+        for v in &mut lower_out[..prefix_end] {
+            *v = nan;
+        }
+    }
+
+    if warm_total >= len {
+        return;
+    }
+
+    let first = warm_out + 1 - lookback;
+    if data[first..].iter().all(|x| !x.is_nan()) {
+        nwe_compute_scalar_no_nan(
+            data, mult, lookback, warm_out, warm_total, w, den, upper_out, lower_out,
+        );
+    } else {
+        nwe_compute_scalar_nan_checked(
+            data, mult, lookback, warm_out, warm_total, w, den, upper_out, lower_out, nan,
+        );
+    }
+}
+
+#[inline]
+fn nwe_compute_scalar_no_nan(
+    data: &[f64],
+    mult: f64,
+    lookback: usize,
+    warm_out: usize,
+    warm_total: usize,
+    w: &[f64],
+    den: f64,
+    upper_out: &mut [f64],
+    lower_out: &mut [f64],
+) {
+    const MAE_LEN: usize = 499;
+
+    let mut rbuf = vec![0.0; MAE_LEN];
+    let mut rsum = 0.0f64;
+    let mut rhead = 0usize;
+    let scale = mult / (MAE_LEN as f64);
+    let dptr = data.as_ptr();
+    let wptr = w.as_ptr();
+    let mut t = warm_out;
+
+    while t < data.len() {
+        let mut num = 0.0f64;
+        let mut k = 0usize;
+        unsafe {
+            while k < lookback {
+                num += *dptr.add(t - k) * *wptr.add(k);
+                k += 1;
+            }
+        }
+
+        let y = num / den;
+        let resid = unsafe { (*dptr.add(t) - y).abs() };
+
+        let old = rbuf[rhead];
+        rsum -= old;
+        rbuf[rhead] = resid;
+        rsum += resid;
+
+        rhead += 1;
+        if rhead == MAE_LEN {
+            rhead = 0;
+        }
+
+        if t >= warm_total {
+            let mae = rsum * scale;
+            upper_out[t] = y + mae;
+            lower_out[t] = y - mae;
+        }
+
+        t += 1;
+    }
+}
+
+#[inline]
+fn nwe_compute_scalar_nan_checked(
+    data: &[f64],
+    mult: f64,
+    lookback: usize,
+    warm_out: usize,
+    warm_total: usize,
+    w: &[f64],
+    den: f64,
+    upper_out: &mut [f64],
+    lower_out: &mut [f64],
+    nan: f64,
+) {
+    const MAE_LEN: usize = 499;
+
+    let mut rbuf = vec![nan; MAE_LEN];
+    let mut rsum = 0.0f64;
+    let mut r_nan_cnt = MAE_LEN;
+    let mut rhead = 0usize;
+    let scale = mult / (MAE_LEN as f64);
+    let dptr = data.as_ptr();
+    let wptr = w.as_ptr();
+    let mut t = warm_out;
+
+    while t < data.len() {
+        let mut num = 0.0f64;
+        let mut any_nan = false;
+        let mut k = 0usize;
+
+        unsafe {
+            while k < lookback {
+                let x = *dptr.add(t - k);
+                if x.is_nan() {
+                    any_nan = true;
+                    break;
+                }
+                num += x * *wptr.add(k);
+                k += 1;
+            }
+        }
+
+        let y = if any_nan { f64::NAN } else { num / den };
+        let xt = unsafe { *dptr.add(t) };
+        let resid = if !xt.is_nan() && !y.is_nan() {
+            (xt - y).abs()
+        } else {
+            f64::NAN
+        };
+
+        let old = rbuf[rhead];
+        if old.is_nan() {
+            r_nan_cnt = r_nan_cnt.saturating_sub(1);
+        } else {
+            rsum -= old;
+        }
+
+        rbuf[rhead] = resid;
+        if resid.is_nan() {
+            r_nan_cnt += 1;
+        } else {
+            rsum += resid;
+        }
+
+        rhead += 1;
+        if rhead == MAE_LEN {
+            rhead = 0;
+        }
+
+        if t >= warm_total {
+            if !y.is_nan() && r_nan_cnt == 0 {
+                let mae = rsum * scale;
+                upper_out[t] = y + mae;
+                lower_out[t] = y - mae;
+            } else {
+                upper_out[t] = nan;
+                lower_out[t] = nan;
+            }
+        }
+
+        t += 1;
+    }
+}
+
+#[inline]
 pub fn nadaraya_watson_envelope(input: &NweInput) -> Result<NweOutput, NweError> {
-    let len = input.as_ref().len();
-    let (_, _, _, _, _, warm_total, _, _) = nwe_prepare(input)?;
+    let (data, _bw, mult, lookback, warm_out, warm_total, w, den) = nwe_prepare(input)?;
+    let len = data.len();
     let mut upper = alloc_with_nan_prefix(len, warm_total);
     let mut lower = alloc_with_nan_prefix(len, warm_total);
-    let _ = nadaraya_watson_envelope_into_slices_no_prefix(input, &mut upper, &mut lower)?;
+    nwe_compute_scalar_prepared(
+        data, mult, lookback, warm_out, warm_total, &w, den, &mut upper, &mut lower, false,
+    );
     Ok(NweOutput { upper, lower })
 }
 
@@ -638,11 +664,6 @@ pub fn nadaraya_watson_envelope_with_kernel(
     input: &NweInput,
     kernel: Kernel,
 ) -> Result<NweOutput, NweError> {
-    let len = input.as_ref().len();
-    let (_, _, _, _, _, warm_total, _, _) = nwe_prepare(input)?;
-    let mut upper = alloc_with_nan_prefix(len, warm_total);
-    let mut lower = alloc_with_nan_prefix(len, warm_total);
-
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         k => k,
@@ -652,21 +673,27 @@ pub fn nadaraya_watson_envelope_with_kernel(
     unsafe {
         match chosen {
             Kernel::Avx512 => {
-                nadaraya_watson_envelope_into_slices_avx512(input, &mut upper, &mut lower)?
+                let len = input.as_ref().len();
+                let mut upper = alloc_with_nan_prefix(len, 0);
+                let mut lower = alloc_with_nan_prefix(len, 0);
+                nadaraya_watson_envelope_into_slices_avx512(input, &mut upper, &mut lower)?;
+                Ok(NweOutput { upper, lower })
             }
             Kernel::Avx2 => {
-                nadaraya_watson_envelope_into_slices_avx2(input, &mut upper, &mut lower)?
+                let len = input.as_ref().len();
+                let mut upper = alloc_with_nan_prefix(len, 0);
+                let mut lower = alloc_with_nan_prefix(len, 0);
+                nadaraya_watson_envelope_into_slices_avx2(input, &mut upper, &mut lower)?;
+                Ok(NweOutput { upper, lower })
             }
-            _ => nadaraya_watson_envelope_into_slices(input, &mut upper, &mut lower)?,
+            _ => nadaraya_watson_envelope(input),
         }
     }
     #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
     {
         let _ = chosen;
-        nadaraya_watson_envelope_into_slices(input, &mut upper, &mut lower)?;
+        nadaraya_watson_envelope(input)
     }
-
-    Ok(NweOutput { upper, lower })
 }
 
 #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
@@ -710,6 +737,8 @@ pub fn nadaraya_watson_envelope_into(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx2")]
+#[target_feature(enable = "fma")]
 pub unsafe fn nadaraya_watson_envelope_into_slices_avx2(
     input: &NweInput,
     upper_out: &mut [f64],
@@ -833,6 +862,8 @@ pub unsafe fn nadaraya_watson_envelope_into_slices_avx2(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx512f")]
+#[target_feature(enable = "fma")]
 pub unsafe fn nadaraya_watson_envelope_into_slices_avx512(
     input: &NweInput,
     upper_out: &mut [f64],

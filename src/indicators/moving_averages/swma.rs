@@ -39,7 +39,18 @@ impl<'a> AsRef<[f64]> for SwmaInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             SwmaData::Slice(slice) => slice,
-            SwmaData::Candles { candles, source } => source_type(candles, source),
+            SwmaData::Candles { candles, source } => match *source {
+                "open" => candles.open.as_slice(),
+                "high" => candles.high.as_slice(),
+                "low" => candles.low.as_slice(),
+                "close" => candles.close.as_slice(),
+                "volume" => candles.volume.as_slice(),
+                "hl2" => candles.hl2.as_slice(),
+                "hlc3" => candles.hlc3.as_slice(),
+                "ohlc4" => candles.ohlc4.as_slice(),
+                "hlcc4" | "hlcc" => candles.hlcc4.as_slice(),
+                _ => source_type(candles, source),
+            },
         }
     }
 }

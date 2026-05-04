@@ -41,13 +41,29 @@ use thiserror::Error;
 impl<'a> AsRef<[f64]> for MaczInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
-        match &self.data {
-            MaczData::Slice(sl) => sl,
-            MaczData::SliceWithVolume { data, .. } => data,
-            MaczData::Candles {
-                candles, source, ..
-            } => source_type(candles, source),
-        }
+        macz_data_slice(&self.data)
+    }
+}
+
+#[inline(always)]
+fn macz_data_slice<'a>(data: &'a MaczData<'a>) -> &'a [f64] {
+    match data {
+        MaczData::Slice(slice) => slice,
+        MaczData::SliceWithVolume { data, .. } => data,
+        MaczData::Candles {
+            candles, source, ..
+        } => match *source {
+            "open" => &candles.open,
+            "high" => &candles.high,
+            "low" => &candles.low,
+            "close" => &candles.close,
+            "volume" => &candles.volume,
+            "hl2" => &candles.hl2,
+            "hlc3" => &candles.hlc3,
+            "ohlc4" => &candles.ohlc4,
+            "hlcc4" | "hlcc" => &candles.hlcc4,
+            _ => source_type(candles, source),
+        },
     }
 }
 
@@ -648,6 +664,7 @@ fn macz_prepare<'a>(
         bool,
         f64,
         usize,
+        usize,
         Kernel,
     ),
     MaczError,
@@ -711,7 +728,7 @@ fn macz_prepare<'a>(
         k => k,
     };
     Ok((
-        data, vol_opt, fast, slow, sig, lz, lsd, a, b, use_lag, gamma, warm_hist, chosen,
+        data, vol_opt, fast, slow, sig, lz, lsd, a, b, use_lag, gamma, first, warm_hist, chosen,
     ))
 }
 
@@ -728,109 +745,26 @@ fn macz_compute_into_tail_only(
     b: f64,
     use_lag: bool,
     gamma: f64,
+    first: usize,
     warm_hist: usize,
     kernel: Kernel,
     out: &mut [f64],
 ) -> Result<(), MaczError> {
-    let len = data.len();
-    let first = data
-        .iter()
-        .position(|x| !x.is_nan())
-        .ok_or(MaczError::AllValuesNaN)?;
-
-    if kernel == Kernel::Scalar {
-        unsafe {
-            return macz_scalar_classic(
-                data, vol, fast, slow, sig, lz, lsd, a, b, use_lag, gamma, first, warm_hist, out,
-            );
-        }
+    let _ = kernel;
+    unsafe {
+        macz_scalar_classic(
+            data, vol, fast, slow, sig, lz, lsd, a, b, use_lag, gamma, first, warm_hist, out,
+        )
     }
-
-    let warm_m = first + slow.max(lz).max(lsd) - 1;
-
-    let mut vwap = alloc_with_nan_prefix(len, first + lz - 1);
-    calculate_vwap_into(data, vol, lz, first, kernel, &mut vwap)?;
-
-    let mut zvwap = alloc_with_nan_prefix(len, first + lz - 1);
-    calculate_zvwap_into(data, &vwap, lz, first, &mut zvwap)?;
-
-    let fast_ma = sma_with_kernel(
-        &SmaInput::from_slice(data, SmaParams { period: Some(fast) }),
-        kernel,
-    )
-    .map_err(|e| MaczError::InvalidParameter {
-        msg: format!("Fast MA error: {e}"),
-    })?
-    .values;
-    let slow_ma = sma_with_kernel(
-        &SmaInput::from_slice(data, SmaParams { period: Some(slow) }),
-        kernel,
-    )
-    .map_err(|e| MaczError::InvalidParameter {
-        msg: format!("Slow MA error: {e}"),
-    })?
-    .values;
-
-    let mut macd = alloc_with_nan_prefix(len, first + slow - 1);
-    for i in (first + slow - 1)..len {
-        let f = fast_ma[i];
-        let s = slow_ma[i];
-        macd[i] = if f.is_nan() || s.is_nan() {
-            f64::NAN
-        } else {
-            f - s
-        };
-    }
-
-    let mut stdev = alloc_with_nan_prefix(len, first + lsd - 1);
-    stdev_source_population_into(data, lsd, first, kernel, &mut stdev)?;
-
-    let mut macz_t = alloc_with_nan_prefix(len, warm_m);
-    for i in warm_m..len {
-        let z = zvwap[i];
-        let m = macd[i];
-        let sd = stdev[i];
-        macz_t[i] = if z.is_nan() || m.is_nan() || sd.is_nan() || sd <= 0.0 {
-            f64::NAN
-        } else {
-            z * a + (m / sd) * b
-        };
-    }
-
-    let mut macz = alloc_with_nan_prefix(len, warm_m);
-    if use_lag {
-        apply_laguerre(&macz_t, gamma, &mut macz);
-    } else {
-        macz[warm_m..].copy_from_slice(&macz_t[warm_m..]);
-    }
-
-    let signal = sma_with_kernel(
-        &SmaInput::from_slice(&macz, SmaParams { period: Some(sig) }),
-        kernel,
-    )
-    .map_err(|e| MaczError::InvalidParameter {
-        msg: format!("Signal MA error: {e}"),
-    })?
-    .values;
-
-    for i in warm_hist..len {
-        let s = signal[i];
-        let m = macz[i];
-        out[i] = if s.is_nan() || m.is_nan() {
-            f64::NAN
-        } else {
-            m - s
-        };
-    }
-    Ok(())
 }
 
 pub fn macz_with_kernel(input: &MaczInput, kernel: Kernel) -> Result<MaczOutput, MaczError> {
-    let (data, vol, fast, slow, sig, lz, lsd, a, b, use_lag, gamma, warm_hist, chosen) =
+    let (data, vol, fast, slow, sig, lz, lsd, a, b, use_lag, gamma, first, warm_hist, chosen) =
         macz_prepare(input, kernel)?;
     let mut out = alloc_with_nan_prefix(data.len(), warm_hist);
     macz_compute_into_tail_only(
-        data, vol, fast, slow, sig, lz, lsd, a, b, use_lag, gamma, warm_hist, chosen, &mut out,
+        data, vol, fast, slow, sig, lz, lsd, a, b, use_lag, gamma, first, warm_hist, chosen,
+        &mut out,
     )?;
     Ok(MaczOutput { values: out })
 }
@@ -845,7 +779,7 @@ pub fn macz_into(input: &MaczInput, out: &mut [f64]) -> Result<(), MaczError> {
 }
 
 pub fn macz_into_slice(dst: &mut [f64], input: &MaczInput, kern: Kernel) -> Result<(), MaczError> {
-    let (data, vol, fast, slow, sig, lz, lsd, a, b, use_lag, gamma, warm_hist, chosen) =
+    let (data, vol, fast, slow, sig, lz, lsd, a, b, use_lag, gamma, first, warm_hist, chosen) =
         macz_prepare(input, kern)?;
     if dst.len() != data.len() {
         return Err(MaczError::OutputLengthMismatch {
@@ -859,7 +793,7 @@ pub fn macz_into_slice(dst: &mut [f64], input: &MaczInput, kern: Kernel) -> Resu
     }
 
     macz_compute_into_tail_only(
-        data, vol, fast, slow, sig, lz, lsd, a, b, use_lag, gamma, warm_hist, chosen, dst,
+        data, vol, fast, slow, sig, lz, lsd, a, b, use_lag, gamma, first, warm_hist, chosen, dst,
     )
 }
 
@@ -919,7 +853,14 @@ pub unsafe fn macz_scalar_classic(
     let mut l2 = 0.0_f64;
     let mut l3 = 0.0_f64;
 
-    let mut sig_ring: Vec<f64> = vec![f64::NAN; sig];
+    let mut sig_stack = [f64::NAN; 64];
+    let mut sig_heap = Vec::new();
+    let sig_ring = if sig <= sig_stack.len() {
+        &mut sig_stack[..sig]
+    } else {
+        sig_heap.resize(sig, f64::NAN);
+        &mut sig_heap[..]
+    };
     let mut sig_sum = 0.0_f64;
     let mut sig_count = 0usize;
     let mut sig_nan = 0usize;

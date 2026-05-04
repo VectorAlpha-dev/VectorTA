@@ -58,6 +58,20 @@ pub struct AdjustableMaAlternatingExtremitiesOutput {
     pub smoothed_close: Vec<f64>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum AdjustableMaAlternatingExtremitiesOutputField {
+    Ma,
+    Upper,
+    Lower,
+    Extremity,
+    State,
+    Changed,
+    SmoothedOpen,
+    SmoothedHigh,
+    SmoothedLow,
+    SmoothedClose,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -448,6 +462,107 @@ pub fn adjustable_ma_alternating_extremities_into_slices(
 }
 
 #[inline]
+pub fn adjustable_ma_alternating_extremities_output_into_slice(
+    dst: &mut [f64],
+    input: &AdjustableMaAlternatingExtremitiesInput<'_>,
+    kernel: Kernel,
+    field: AdjustableMaAlternatingExtremitiesOutputField,
+) -> Result<(), AdjustableMaAlternatingExtremitiesError> {
+    let prepared = prepare_input(input, kernel)?;
+    if dst.len() != prepared.len {
+        return Err(
+            AdjustableMaAlternatingExtremitiesError::OutputLengthMismatch {
+                expected: prepared.len,
+                got: dst.len(),
+            },
+        );
+    }
+
+    dst.fill(f64::NAN);
+    let _ = prepared.kernel;
+    match field {
+        AdjustableMaAlternatingExtremitiesOutputField::Ma
+        | AdjustableMaAlternatingExtremitiesOutputField::SmoothedClose => {
+            weighted_filter_into(
+                prepared.close,
+                prepared.first,
+                prepared.length,
+                &prepared.weights,
+                dst,
+            );
+        }
+        AdjustableMaAlternatingExtremitiesOutputField::SmoothedHigh => {
+            weighted_filter_into(
+                prepared.high,
+                prepared.first,
+                prepared.length,
+                &prepared.weights,
+                dst,
+            );
+        }
+        AdjustableMaAlternatingExtremitiesOutputField::SmoothedLow => {
+            weighted_filter_into(
+                prepared.low,
+                prepared.first,
+                prepared.length,
+                &prepared.weights,
+                dst,
+            );
+        }
+        AdjustableMaAlternatingExtremitiesOutputField::SmoothedOpen => {
+            let mut ma = alloc_with_nan_prefix(prepared.len, prepared.warmups.ma);
+            weighted_filter_into(
+                prepared.close,
+                prepared.first,
+                prepared.length,
+                &prepared.weights,
+                &mut ma,
+            );
+            compute_smoothed_open(&ma, prepared.warmups.ma, dst);
+        }
+        AdjustableMaAlternatingExtremitiesOutputField::Upper => {
+            let mut ma = alloc_with_nan_prefix(prepared.len, prepared.warmups.ma);
+            weighted_filter_into(
+                prepared.close,
+                prepared.first,
+                prepared.length,
+                &prepared.weights,
+                &mut ma,
+            );
+            compute_selected_deviation_band(&prepared, &ma, dst, true);
+        }
+        AdjustableMaAlternatingExtremitiesOutputField::Lower => {
+            let mut ma = alloc_with_nan_prefix(prepared.len, prepared.warmups.ma);
+            weighted_filter_into(
+                prepared.close,
+                prepared.first,
+                prepared.length,
+                &prepared.weights,
+                &mut ma,
+            );
+            compute_selected_deviation_band(&prepared, &ma, dst, false);
+        }
+        AdjustableMaAlternatingExtremitiesOutputField::Extremity
+        | AdjustableMaAlternatingExtremitiesOutputField::State
+        | AdjustableMaAlternatingExtremitiesOutputField::Changed => {
+            let mut ma = alloc_with_nan_prefix(prepared.len, prepared.warmups.ma);
+            let mut upper = alloc_with_nan_prefix(prepared.len, prepared.warmups.bands);
+            let mut lower = alloc_with_nan_prefix(prepared.len, prepared.warmups.bands);
+            weighted_filter_into(
+                prepared.close,
+                prepared.first,
+                prepared.length,
+                &prepared.weights,
+                &mut ma,
+            );
+            compute_deviation_bands(&prepared, &ma, &mut upper, &mut lower);
+            compute_selected_state_output(&prepared, &upper, &lower, dst, field);
+        }
+    }
+    Ok(())
+}
+
+#[inline]
 fn resolve_data<'a>(
     input: &'a AdjustableMaAlternatingExtremitiesInput<'a>,
 ) -> Result<(&'a [f64], &'a [f64], &'a [f64]), AdjustableMaAlternatingExtremitiesError> {
@@ -658,6 +773,33 @@ fn compute_deviation_bands(
 }
 
 #[inline]
+fn compute_selected_deviation_band(
+    prepared: &PreparedInput<'_>,
+    ma: &[f64],
+    out: &mut [f64],
+    upper: bool,
+) {
+    let ma_start = prepared.warmups.ma;
+    let band_start = prepared.warmups.bands;
+    let mut rolling = 0.0;
+    for i in ma_start..=band_start {
+        rolling += (prepared.close[i] - ma[i]).abs();
+    }
+    let first_dev = (rolling / prepared.length as f64) * prepared.mult;
+    out[band_start] = if upper {
+        ma[band_start] + first_dev
+    } else {
+        ma[band_start] - first_dev
+    };
+    for i in (band_start + 1)..prepared.len {
+        rolling += (prepared.close[i] - ma[i]).abs();
+        rolling -= (prepared.close[i - prepared.length] - ma[i - prepared.length]).abs();
+        let dev = (rolling / prepared.length as f64) * prepared.mult;
+        out[i] = if upper { ma[i] + dev } else { ma[i] - dev };
+    }
+}
+
+#[inline]
 fn pine_cross(prev_a: f64, prev_b: f64, curr_a: f64, curr_b: f64) -> bool {
     if !(prev_a.is_finite() && prev_b.is_finite() && curr_a.is_finite() && curr_b.is_finite()) {
         return false;
@@ -705,6 +847,59 @@ fn compute_state_and_extremity(
         } else {
             lower[i]
         };
+    }
+}
+
+#[inline]
+fn compute_selected_state_output(
+    prepared: &PreparedInput<'_>,
+    upper: &[f64],
+    lower: &[f64],
+    out: &mut [f64],
+    field: AdjustableMaAlternatingExtremitiesOutputField,
+) {
+    let start = prepared.warmups.bands;
+    let mut prev_state = 0.0;
+    out[start] = match field {
+        AdjustableMaAlternatingExtremitiesOutputField::Extremity => lower[start],
+        AdjustableMaAlternatingExtremitiesOutputField::State
+        | AdjustableMaAlternatingExtremitiesOutputField::Changed => 0.0,
+        _ => unreachable!(),
+    };
+    for i in (start + 1)..prepared.len {
+        let cross_high = pine_cross(
+            prepared.high[i - 1],
+            upper[i - 1],
+            prepared.high[i],
+            upper[i],
+        );
+        let cross_low = pine_cross(prepared.low[i - 1], lower[i - 1], prepared.low[i], lower[i]);
+        let next_state = if cross_high {
+            1.0
+        } else if cross_low {
+            0.0
+        } else {
+            prev_state
+        };
+        out[i] = match field {
+            AdjustableMaAlternatingExtremitiesOutputField::Extremity => {
+                if next_state >= 0.5 {
+                    upper[i]
+                } else {
+                    lower[i]
+                }
+            }
+            AdjustableMaAlternatingExtremitiesOutputField::State => next_state,
+            AdjustableMaAlternatingExtremitiesOutputField::Changed => {
+                if (next_state - prev_state).abs() > 0.0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            _ => unreachable!(),
+        };
+        prev_state = next_state;
     }
 }
 

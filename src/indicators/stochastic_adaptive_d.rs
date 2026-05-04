@@ -15,8 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -141,7 +140,11 @@ impl<'a> StochasticAdaptiveDInput<'a> {
             StochasticAdaptiveDData::Candles { candles, source } => (
                 candles.high.as_slice(),
                 candles.low.as_slice(),
-                source_type(candles, source),
+                if *source == "close" {
+                    candles.close.as_slice()
+                } else {
+                    source_type(candles, source)
+                },
             ),
             StochasticAdaptiveDData::Slices { high, low, close } => (*high, *low, *close),
         }
@@ -312,7 +315,7 @@ fn first_valid_bar(high: &[f64], low: &[f64], close: &[f64]) -> Option<usize> {
 #[inline(always)]
 fn normalize_kernel(kernel: Kernel) -> Kernel {
     match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other if other.is_batch() => other.to_non_batch(),
         other => other,
     }
@@ -386,7 +389,9 @@ fn compute_warmup(
 struct RollingSma {
     period: usize,
     sum: f64,
-    buf: VecDeque<f64>,
+    buf: Vec<f64>,
+    head: usize,
+    count: usize,
 }
 
 impl RollingSma {
@@ -395,29 +400,44 @@ impl RollingSma {
         Self {
             period,
             sum: 0.0,
-            buf: VecDeque::with_capacity(period),
+            buf: vec![0.0; period.max(1)],
+            head: 0,
+            count: 0,
         }
     }
 
     #[inline]
     fn reset(&mut self) {
         self.sum = 0.0;
-        self.buf.clear();
+        self.head = 0;
+        self.count = 0;
     }
 
     #[inline]
     fn update(&mut self, value: f64) -> Option<f64> {
-        self.buf.push_back(value);
-        self.sum += value;
-        if self.buf.len() > self.period {
-            if let Some(old) = self.buf.pop_front() {
-                self.sum -= old;
+        if self.count < self.period {
+            self.buf[self.head] = value;
+            self.sum += value;
+            self.head += 1;
+            if self.head == self.period {
+                self.head = 0;
             }
-        }
-        if self.buf.len() == self.period {
-            Some(self.sum / self.period as f64)
+            self.count += 1;
+            if self.count == self.period {
+                Some(self.sum / self.period as f64)
+            } else {
+                None
+            }
         } else {
-            None
+            let old = self.buf[self.head];
+            self.buf[self.head] = value;
+            self.sum += value;
+            self.sum -= old;
+            self.head += 1;
+            if self.head == self.period {
+                self.head = 0;
+            }
+            Some(self.sum / self.period as f64)
         }
     }
 }
@@ -625,10 +645,9 @@ pub fn stochastic_adaptive_d_with_kernel(
     }
 
     let _kernel = normalize_kernel(kernel);
-    let warmup = compute_warmup(first_valid, k_length, d_smoothing, pre_smooth);
-    let mut standard_d = alloc_with_nan_prefix(len, warmup);
-    let mut adaptive_d = alloc_with_nan_prefix(len, warmup);
-    let mut difference = alloc_with_nan_prefix(len, warmup);
+    let mut standard_d = alloc_uninit_f64(len);
+    let mut adaptive_d = alloc_uninit_f64(len);
+    let mut difference = alloc_uninit_f64(len);
     stochastic_adaptive_d_compute_into(
         high,
         low,

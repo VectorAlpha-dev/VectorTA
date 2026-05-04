@@ -1,8 +1,7 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -55,10 +54,7 @@ impl<'a> ObvInput<'a> {
     #[inline(always)]
     fn as_refs(&self) -> (&'a [f64], &'a [f64]) {
         match &self.data {
-            ObvData::Candles { candles } => (
-                source_type(candles, "close"),
-                source_type(candles, "volume"),
-            ),
+            ObvData::Candles { candles } => (candles.close.as_slice(), candles.volume.as_slice()),
             ObvData::Slices { close, volume } => (*close, *volume),
         }
     }
@@ -133,9 +129,16 @@ impl From<Box<dyn std::error::Error>> for ObvError {
     }
 }
 
-#[inline]
+#[inline(always)]
 pub fn obv(input: &ObvInput) -> Result<ObvOutput, ObvError> {
-    obv_with_kernel(input, Kernel::Auto)
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        obv_with_kernel(input, Kernel::Avx2)
+    }
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    {
+        obv_with_kernel(input, Kernel::Scalar)
+    }
 }
 
 pub fn obv_with_kernel(input: &ObvInput, kernel: Kernel) -> Result<ObvOutput, ObvError> {
@@ -158,6 +161,12 @@ pub fn obv_with_kernel(input: &ObvInput, kernel: Kernel) -> Result<ObvOutput, Ob
 
     let mut out = alloc_with_nan_prefix(close.len(), first);
 
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    let chosen = match kernel {
+        Kernel::Auto => Kernel::Avx2,
+        other => other,
+    };
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -184,24 +193,25 @@ pub fn obv_into(input: &ObvInput, out: &mut [f64]) -> Result<(), ObvError> {
     obv_into_slice(out, close, volume, Kernel::Auto)
 }
 
-#[inline]
+#[inline(always)]
 pub fn obv_scalar(close: &[f64], volume: &[f64], first_valid: usize, out: &mut [f64]) {
     let mut prev_obv = 0.0f64;
-    let mut prev_close = close[first_valid];
-    out[first_valid] = 0.0;
+    let mut prev_close = unsafe { *close.get_unchecked(first_valid) };
+    unsafe {
+        *out.get_unchecked_mut(first_valid) = 0.0;
+    }
 
-    let tail_close = &close[first_valid + 1..];
-    let tail_volume = &volume[first_valid + 1..];
-    let tail_out = &mut out[first_valid + 1..];
-
-    for (dst, (&c, &v)) in tail_out
-        .iter_mut()
-        .zip(tail_close.iter().zip(tail_volume.iter()))
-    {
-        let s = ((c > prev_close) as i32 - (c < prev_close) as i32) as f64;
-        prev_obv = v.mul_add(s, prev_obv);
-        *dst = prev_obv;
-        prev_close = c;
+    let mut i = first_valid + 1;
+    while i < close.len() {
+        unsafe {
+            let c = *close.get_unchecked(i);
+            let v = *volume.get_unchecked(i);
+            let s = ((c > prev_close) as i32 - (c < prev_close) as i32) as f64;
+            prev_obv = v.mul_add(s, prev_obv);
+            *out.get_unchecked_mut(i) = prev_obv;
+            prev_close = c;
+        }
+        i += 1;
     }
 }
 
@@ -1105,6 +1115,12 @@ pub fn obv_into_slice(
         .position(|(c, v)| !c.is_nan() && !v.is_nan())
         .ok_or(ObvError::AllValuesNaN)?;
 
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    let chosen = match kern {
+        Kernel::Auto => Kernel::Avx2,
+        other => other,
+    };
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
     let chosen = match kern {
         Kernel::Auto => Kernel::Scalar,
         other => other,

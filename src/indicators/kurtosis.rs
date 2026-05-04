@@ -39,8 +39,21 @@ impl<'a> AsRef<[f64]> for KurtosisInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             KurtosisData::Slice(slice) => slice,
-            KurtosisData::Candles { candles, source } => source_type(candles, source),
+            KurtosisData::Candles { candles, source } => kurtosis_source(candles, source),
         }
+    }
+}
+
+#[inline(always)]
+fn kurtosis_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "hl2" => &candles.hl2,
+        "close" => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        _ => source_type(candles, source),
     }
 }
 
@@ -224,10 +237,7 @@ pub fn kurtosis_with_kernel(
 
     let mut out = alloc_with_nan_prefix(len, first + period - 1);
 
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = kurtosis_single_kernel(kernel, period);
 
     unsafe {
         match chosen {
@@ -290,10 +300,7 @@ pub fn kurtosis_into_slice(
         *v = f64::NAN;
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = kurtosis_single_kernel(kernel, period);
 
     unsafe {
         match chosen {
@@ -333,8 +340,45 @@ pub fn kurtosis_into(input: &KurtosisInput, out: &mut [f64]) -> Result<(), Kurto
     Ok(())
 }
 
+#[inline(always)]
+fn kurtosis_single_kernel(kernel: Kernel, period: usize) -> Kernel {
+    match kernel {
+        Kernel::Auto => kurtosis_auto_kernel(period),
+        other => other.to_non_batch(),
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+fn kurtosis_auto_kernel(period: usize) -> Kernel {
+    if period == 5 {
+        if std::arch::is_x86_feature_detected!("avx512f") {
+            return Kernel::Avx512;
+        }
+        if std::arch::is_x86_feature_detected!("avx2") {
+            return Kernel::Avx2;
+        }
+    }
+    Kernel::Scalar
+}
+
+#[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+#[inline(always)]
+fn kurtosis_auto_kernel(_period: usize) -> Kernel {
+    Kernel::Scalar
+}
+
 #[inline]
 pub fn kurtosis_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    if period == 5 {
+        if data[first..].iter().all(|value| !value.is_nan()) {
+            kurtosis_scalar_period5_clean(data, first, out);
+        } else {
+            kurtosis_scalar_period5(data, first, out);
+        }
+        return;
+    }
+
     for i in (first + period - 1)..data.len() {
         let start = i + 1 - period;
         let window = &data[start..start + period];
@@ -373,9 +417,84 @@ pub fn kurtosis_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64
     }
 }
 
+#[inline(always)]
+fn kurtosis_scalar_period5_clean(data: &[f64], first: usize, out: &mut [f64]) {
+    assert!(out.len() >= data.len());
+    let len = data.len();
+    let data_ptr = data.as_ptr();
+    let out_ptr = out.as_mut_ptr();
+
+    for i in (first + 4)..len {
+        let base = unsafe { data_ptr.add(i - 4) };
+        let a = unsafe { *base };
+        let b = unsafe { *base.add(1) };
+        let c = unsafe { *base.add(2) };
+        let d = unsafe { *base.add(3) };
+        let e = unsafe { *base.add(4) };
+
+        unsafe { *out_ptr.add(i) = kurtosis_period5_value(a, b, c, d, e) };
+    }
+}
+
+#[inline(always)]
+fn kurtosis_scalar_period5(data: &[f64], first: usize, out: &mut [f64]) {
+    assert!(out.len() >= data.len());
+    let len = data.len();
+    let data_ptr = data.as_ptr();
+    let out_ptr = out.as_mut_ptr();
+
+    for i in (first + 4)..len {
+        let base = unsafe { data_ptr.add(i - 4) };
+        let a = unsafe { *base };
+        let b = unsafe { *base.add(1) };
+        let c = unsafe { *base.add(2) };
+        let d = unsafe { *base.add(3) };
+        let e = unsafe { *base.add(4) };
+
+        if a.is_nan() || b.is_nan() || c.is_nan() || d.is_nan() || e.is_nan() {
+            unsafe { *out_ptr.add(i) = f64::NAN };
+            continue;
+        }
+
+        unsafe { *out_ptr.add(i) = kurtosis_period5_value(a, b, c, d, e) };
+    }
+}
+
+#[inline(always)]
+fn kurtosis_period5_value(a: f64, b: f64, c: f64, d: f64, e: f64) -> f64 {
+    let mean = ((((a + b) + c) + d) + e) * 0.2;
+    let da = a - mean;
+    let db = b - mean;
+    let dc = c - mean;
+    let dd = d - mean;
+    let de = e - mean;
+
+    let da2 = da * da;
+    let db2 = db * db;
+    let dc2 = dc * dc;
+    let dd2 = dd * dd;
+    let de2 = de * de;
+
+    let m2 = ((((da2 + db2) + dc2) + dd2) + de2) * 0.2;
+    if m2.abs() < f64::EPSILON {
+        f64::NAN
+    } else {
+        let m4 = (((((da2 * da2) + (db2 * db2)) + (dc2 * dc2)) + (dd2 * dd2)) + (de2 * de2)) * 0.2;
+        (m4 / (m2 * m2)) - 3.0
+    }
+}
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn kurtosis_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    if period == 5
+        && std::arch::is_x86_feature_detected!("avx512f")
+        && data[first..].iter().all(|value| !value.is_nan())
+    {
+        unsafe { kurtosis_avx512_period5_clean(data, first, out) };
+        return;
+    }
+
     if period <= 32 {
         unsafe { kurtosis_avx512_short(data, period, first, out) }
     } else {
@@ -386,7 +505,165 @@ pub fn kurtosis_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn kurtosis_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    if period == 5
+        && std::arch::is_x86_feature_detected!("avx2")
+        && data[first..].iter().all(|value| !value.is_nan())
+    {
+        unsafe { kurtosis_avx2_period5_clean(data, first, out) };
+        return;
+    }
+
     unsafe { kurtosis_scalar(data, period, first, out) }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn kurtosis_avx2_period5_clean(data: &[f64], first: usize, out: &mut [f64]) {
+    assert!(out.len() >= data.len());
+    let len = data.len();
+    let data_ptr = data.as_ptr();
+    let out_ptr = out.as_mut_ptr();
+    let inv5 = _mm256_set1_pd(0.2);
+    let three = _mm256_set1_pd(3.0);
+    let eps = _mm256_set1_pd(f64::EPSILON);
+    let nan = _mm256_set1_pd(f64::NAN);
+    let sign = _mm256_set1_pd(-0.0);
+
+    let mut i = first + 4;
+    while i + 4 <= len {
+        let a = _mm256_loadu_pd(data_ptr.add(i - 4));
+        let b = _mm256_loadu_pd(data_ptr.add(i - 3));
+        let c = _mm256_loadu_pd(data_ptr.add(i - 2));
+        let d = _mm256_loadu_pd(data_ptr.add(i - 1));
+        let e = _mm256_loadu_pd(data_ptr.add(i));
+
+        let sum = _mm256_add_pd(_mm256_add_pd(_mm256_add_pd(_mm256_add_pd(a, b), c), d), e);
+        let mean = _mm256_mul_pd(sum, inv5);
+
+        let da = _mm256_sub_pd(a, mean);
+        let db = _mm256_sub_pd(b, mean);
+        let dc = _mm256_sub_pd(c, mean);
+        let dd = _mm256_sub_pd(d, mean);
+        let de = _mm256_sub_pd(e, mean);
+
+        let da2 = _mm256_mul_pd(da, da);
+        let db2 = _mm256_mul_pd(db, db);
+        let dc2 = _mm256_mul_pd(dc, dc);
+        let dd2 = _mm256_mul_pd(dd, dd);
+        let de2 = _mm256_mul_pd(de, de);
+
+        let m2_sum = _mm256_add_pd(
+            _mm256_add_pd(_mm256_add_pd(_mm256_add_pd(da2, db2), dc2), dd2),
+            de2,
+        );
+        let m2 = _mm256_mul_pd(m2_sum, inv5);
+
+        let da4 = _mm256_mul_pd(da2, da2);
+        let db4 = _mm256_mul_pd(db2, db2);
+        let dc4 = _mm256_mul_pd(dc2, dc2);
+        let dd4 = _mm256_mul_pd(dd2, dd2);
+        let de4 = _mm256_mul_pd(de2, de2);
+        let m4_sum = _mm256_add_pd(
+            _mm256_add_pd(_mm256_add_pd(_mm256_add_pd(da4, db4), dc4), dd4),
+            de4,
+        );
+        let m4 = _mm256_mul_pd(m4_sum, inv5);
+
+        let denom = _mm256_mul_pd(m2, m2);
+        let value = _mm256_sub_pd(_mm256_div_pd(m4, denom), three);
+        let abs_m2 = _mm256_andnot_pd(sign, m2);
+        let small = _mm256_cmp_pd(abs_m2, eps, _CMP_LT_OQ);
+        let result = _mm256_blendv_pd(value, nan, small);
+        _mm256_storeu_pd(out_ptr.add(i), result);
+        i += 4;
+    }
+
+    while i < len {
+        let base = data_ptr.add(i - 4);
+        *out_ptr.add(i) = kurtosis_period5_value(
+            *base,
+            *base.add(1),
+            *base.add(2),
+            *base.add(3),
+            *base.add(4),
+        );
+        i += 1;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn kurtosis_avx512_period5_clean(data: &[f64], first: usize, out: &mut [f64]) {
+    assert!(out.len() >= data.len());
+    let len = data.len();
+    let data_ptr = data.as_ptr();
+    let out_ptr = out.as_mut_ptr();
+    let inv5 = _mm512_set1_pd(0.2);
+    let three = _mm512_set1_pd(3.0);
+    let eps = _mm512_set1_pd(f64::EPSILON);
+    let nan = _mm512_set1_pd(f64::NAN);
+    let sign = _mm512_set1_pd(-0.0);
+
+    let mut i = first + 4;
+    while i + 8 <= len {
+        let a = _mm512_loadu_pd(data_ptr.add(i - 4));
+        let b = _mm512_loadu_pd(data_ptr.add(i - 3));
+        let c = _mm512_loadu_pd(data_ptr.add(i - 2));
+        let d = _mm512_loadu_pd(data_ptr.add(i - 1));
+        let e = _mm512_loadu_pd(data_ptr.add(i));
+
+        let sum = _mm512_add_pd(_mm512_add_pd(_mm512_add_pd(_mm512_add_pd(a, b), c), d), e);
+        let mean = _mm512_mul_pd(sum, inv5);
+
+        let da = _mm512_sub_pd(a, mean);
+        let db = _mm512_sub_pd(b, mean);
+        let dc = _mm512_sub_pd(c, mean);
+        let dd = _mm512_sub_pd(d, mean);
+        let de = _mm512_sub_pd(e, mean);
+
+        let da2 = _mm512_mul_pd(da, da);
+        let db2 = _mm512_mul_pd(db, db);
+        let dc2 = _mm512_mul_pd(dc, dc);
+        let dd2 = _mm512_mul_pd(dd, dd);
+        let de2 = _mm512_mul_pd(de, de);
+
+        let m2_sum = _mm512_add_pd(
+            _mm512_add_pd(_mm512_add_pd(_mm512_add_pd(da2, db2), dc2), dd2),
+            de2,
+        );
+        let m2 = _mm512_mul_pd(m2_sum, inv5);
+
+        let da4 = _mm512_mul_pd(da2, da2);
+        let db4 = _mm512_mul_pd(db2, db2);
+        let dc4 = _mm512_mul_pd(dc2, dc2);
+        let dd4 = _mm512_mul_pd(dd2, dd2);
+        let de4 = _mm512_mul_pd(de2, de2);
+        let m4_sum = _mm512_add_pd(
+            _mm512_add_pd(_mm512_add_pd(_mm512_add_pd(da4, db4), dc4), dd4),
+            de4,
+        );
+        let m4 = _mm512_mul_pd(m4_sum, inv5);
+
+        let denom = _mm512_mul_pd(m2, m2);
+        let value = _mm512_sub_pd(_mm512_div_pd(m4, denom), three);
+        let abs_m2 = _mm512_andnot_pd(sign, m2);
+        let small = _mm512_cmp_pd_mask(abs_m2, eps, _CMP_LT_OQ);
+        let result = _mm512_mask_blend_pd(small, value, nan);
+        _mm512_storeu_pd(out_ptr.add(i), result);
+        i += 8;
+    }
+
+    while i < len {
+        let base = data_ptr.add(i - 4);
+        *out_ptr.add(i) = kurtosis_period5_value(
+            *base,
+            *base.add(1),
+            *base.add(2),
+            *base.add(3),
+            *base.add(4),
+        );
+        i += 1;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

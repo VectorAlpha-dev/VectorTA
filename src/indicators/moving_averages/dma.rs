@@ -50,8 +50,24 @@ impl<'a> AsRef<[f64]> for DmaInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             DmaData::Slice(slice) => slice,
-            DmaData::Candles { candles, source } => source_type(candles, source),
+            DmaData::Candles { candles, source } => dma_source_slice(candles, source),
         }
+    }
+}
+
+#[inline(always)]
+fn dma_source_slice<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => candles.open.as_slice(),
+        "high" => candles.high.as_slice(),
+        "low" => candles.low.as_slice(),
+        "close" => candles.close.as_slice(),
+        "volume" => candles.volume.as_slice(),
+        "hl2" => candles.hl2.as_slice(),
+        "hlc3" => candles.hlc3.as_slice(),
+        "ohlc4" => candles.ohlc4.as_slice(),
+        "hlcc4" | "hlcc" => candles.hlcc4.as_slice(),
+        _ => source_type(candles, source),
     }
 }
 
@@ -416,7 +432,7 @@ fn dma_prepare<'a>(
         });
     }
     let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => dma_auto_kernel(len),
         k => k,
     };
     Ok((
@@ -428,6 +444,28 @@ fn dma_prepare<'a>(
         first,
         chosen,
     ))
+}
+
+#[inline(always)]
+fn dma_auto_kernel(_len: usize) -> Kernel {
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+        {
+            return Kernel::Avx2;
+        }
+        if std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("fma")
+        {
+            return Kernel::Avx512;
+        }
+        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+        {
+            return Kernel::Avx2;
+        }
+    }
+
+    Kernel::Scalar
 }
 
 #[inline(always)]
@@ -479,15 +517,31 @@ fn dma_compute_into(
                 out,
             ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => dma_avx512(
-                data,
-                hull_length,
-                ema_length,
-                ema_gain_limit,
-                hull_ma_type,
-                first,
-                out,
-            ),
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                if std::arch::is_x86_feature_detected!("avx2")
+                    && std::arch::is_x86_feature_detected!("fma")
+                {
+                    dma_avx2(
+                        data,
+                        hull_length,
+                        ema_length,
+                        ema_gain_limit,
+                        hull_ma_type,
+                        first,
+                        out,
+                    )
+                } else {
+                    dma_avx512(
+                        data,
+                        hull_length,
+                        ema_length,
+                        ema_gain_limit,
+                        hull_ma_type,
+                        first,
+                        out,
+                    )
+                }
+            }
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => dma_scalar(
                 data,
@@ -2000,7 +2054,7 @@ impl DmaBatchBuilder {
     }
 
     pub fn apply_candles(self, c: &Candles, src: &str) -> Result<DmaBatchOutput, DmaError> {
-        let slice = source_type(c, src);
+        let slice = dma_source_slice(c, src);
         self.apply_slice(slice)
     }
 

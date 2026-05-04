@@ -17,8 +17,7 @@ use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -44,6 +43,9 @@ impl<'a> AsRef<[f64]> for AoInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             AoData::Slice(slice) => slice,
+            AoData::Candles { candles, source } if source.eq_ignore_ascii_case("hl2") => {
+                &candles.hl2
+            }
             AoData::Candles { candles, source } => source_type(candles, source),
         }
     }
@@ -235,14 +237,14 @@ pub fn ao_into(input: &AoInput, out: &mut [f64]) -> Result<(), AoError> {
         *v = qnan;
     }
 
-    let chosen = detect_best_kernel();
+    let chosen = Kernel::Scalar;
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => ao_scalar(data, short, long, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => ao_avx2(data, short, long, first, out),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => ao_avx512(data, short, long, first, out),
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                ao_scalar(data, short, long, first, out)
+            }
             _ => unreachable!(),
         }
     }
@@ -261,7 +263,7 @@ pub fn ao_into_slice(dst: &mut [f64], input: &AoInput, kern: Kernel) -> Result<(
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -269,9 +271,9 @@ pub fn ao_into_slice(dst: &mut [f64], input: &AoInput, kern: Kernel) -> Result<(
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => ao_scalar(data, short, long, first, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => ao_avx2(data, short, long, first, dst),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => ao_avx512(data, short, long, first, dst),
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                ao_scalar(data, short, long, first, dst)
+            }
             _ => unreachable!(),
         }
     }
@@ -317,7 +319,7 @@ pub fn ao_with_kernel(input: &AoInput, kernel: Kernel) -> Result<AoOutput, AoErr
     let (data, short, long, first, len) = ao_prepare(input)?;
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -329,9 +331,9 @@ pub fn ao_with_kernel(input: &AoInput, kernel: Kernel) -> Result<AoOutput, AoErr
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => ao_scalar(data, short, long, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => ao_avx2(data, short, long, first, &mut out),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => ao_avx512(data, short, long, first, &mut out),
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                ao_scalar(data, short, long, first, &mut out)
+            }
             _ => unreachable!(),
         }
     }

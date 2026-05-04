@@ -14,10 +14,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
-};
+use crate::utilities::helpers::{alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
@@ -288,9 +285,10 @@ fn is_valid_pair(high: f64, low: f64) -> bool {
 }
 
 #[inline(always)]
-fn longest_valid_pair_run(high: &[f64], low: &[f64]) -> usize {
+fn valid_pair_run_state(high: &[f64], low: &[f64]) -> (usize, bool) {
     let mut best = 0usize;
     let mut cur = 0usize;
+    let mut all_valid = true;
     for (&h, &l) in high.iter().zip(low.iter()) {
         if is_valid_pair(h, l) {
             cur += 1;
@@ -298,10 +296,11 @@ fn longest_valid_pair_run(high: &[f64], low: &[f64]) -> usize {
                 best = cur;
             }
         } else {
+            all_valid = false;
             cur = 0;
         }
     }
-    best
+    (best, all_valid)
 }
 
 #[inline(always)]
@@ -321,7 +320,7 @@ fn validate_common(
     high: &[f64],
     low: &[f64],
     period: usize,
-) -> Result<(), DonchianChannelWidthError> {
+) -> Result<bool, DonchianChannelWidthError> {
     if high.is_empty() || low.is_empty() {
         return Err(DonchianChannelWidthError::EmptyInputData);
     }
@@ -338,7 +337,7 @@ fn validate_common(
         });
     }
 
-    let max_run = longest_valid_pair_run(high, low);
+    let (max_run, all_valid) = valid_pair_run_state(high, low);
     if max_run == 0 {
         return Err(DonchianChannelWidthError::AllValuesNaN);
     }
@@ -348,13 +347,18 @@ fn validate_common(
             valid: max_run,
         });
     }
-    Ok(())
+    Ok(all_valid)
 }
 
 #[inline(always)]
 fn compute_row(high: &[f64], low: &[f64], period: usize, out: &mut [f64]) {
-    let mut max_deque: VecDeque<usize> = VecDeque::with_capacity(period.max(1));
-    let mut min_deque: VecDeque<usize> = VecDeque::with_capacity(period.max(1));
+    let cap = period + 1;
+    let mut max_queue = vec![0usize; cap];
+    let mut min_queue = vec![0usize; cap];
+    let mut max_head = 0usize;
+    let mut max_tail = 0usize;
+    let mut min_head = 0usize;
+    let mut min_tail = 0usize;
     let mut seg_start = 0usize;
     let mut in_segment = false;
 
@@ -363,8 +367,10 @@ fn compute_row(high: &[f64], low: &[f64], period: usize, out: &mut [f64]) {
         let l = low[i];
         if !is_valid_pair(h, l) {
             out[i] = f64::NAN;
-            max_deque.clear();
-            min_deque.clear();
+            max_head = 0;
+            max_tail = 0;
+            min_head = 0;
+            min_tail = 0;
             in_segment = false;
             continue;
         }
@@ -374,46 +380,118 @@ fn compute_row(high: &[f64], low: &[f64], period: usize, out: &mut [f64]) {
             in_segment = true;
         }
 
-        while let Some(&idx) = max_deque.back() {
-            if high[idx] <= h {
-                max_deque.pop_back();
-            } else {
-                break;
-            }
-        }
-        max_deque.push_back(i);
-
-        while let Some(&idx) = min_deque.back() {
-            if low[idx] >= l {
-                min_deque.pop_back();
-            } else {
-                break;
-            }
-        }
-        min_deque.push_back(i);
-
         let raw_start = i.saturating_add(1).saturating_sub(period);
         let window_start = raw_start.max(seg_start);
 
-        while let Some(&idx) = max_deque.front() {
-            if idx < window_start {
-                max_deque.pop_front();
-            } else {
-                break;
+        while max_head != max_tail && max_queue[max_head] < window_start {
+            max_head += 1;
+            if max_head == cap {
+                max_head = 0;
             }
         }
-        while let Some(&idx) = min_deque.front() {
-            if idx < window_start {
-                min_deque.pop_front();
-            } else {
-                break;
+        while min_head != min_tail && min_queue[min_head] < window_start {
+            min_head += 1;
+            if min_head == cap {
+                min_head = 0;
             }
         }
 
+        while max_head != max_tail {
+            let back = if max_tail == 0 { cap - 1 } else { max_tail - 1 };
+            if high[max_queue[back]] <= h {
+                max_tail = back;
+            } else {
+                break;
+            }
+        }
+        max_queue[max_tail] = i;
+        max_tail += 1;
+        if max_tail == cap {
+            max_tail = 0;
+        }
+
+        while min_head != min_tail {
+            let back = if min_tail == 0 { cap - 1 } else { min_tail - 1 };
+            if low[min_queue[back]] >= l {
+                min_tail = back;
+            } else {
+                break;
+            }
+        }
+        min_queue[min_tail] = i;
+        min_tail += 1;
+        if min_tail == cap {
+            min_tail = 0;
+        }
+
         if i + 1 >= seg_start + period {
-            let upper = high[*max_deque.front().unwrap()];
-            let lower = low[*min_deque.front().unwrap()];
+            let upper = high[max_queue[max_head]];
+            let lower = low[min_queue[min_head]];
             out[i] = upper - lower;
+        } else {
+            out[i] = f64::NAN;
+        }
+    }
+}
+
+#[inline(always)]
+fn compute_row_no_nan(high: &[f64], low: &[f64], period: usize, out: &mut [f64]) {
+    let cap = period + 1;
+    let mut max_queue = vec![0usize; cap];
+    let mut min_queue = vec![0usize; cap];
+    let mut max_head = 0usize;
+    let mut max_tail = 0usize;
+    let mut min_head = 0usize;
+    let mut min_tail = 0usize;
+
+    for i in 0..high.len() {
+        let h = high[i];
+        let l = low[i];
+        let window_start = i.saturating_add(1).saturating_sub(period);
+
+        while max_head != max_tail && max_queue[max_head] < window_start {
+            max_head += 1;
+            if max_head == cap {
+                max_head = 0;
+            }
+        }
+        while min_head != min_tail && min_queue[min_head] < window_start {
+            min_head += 1;
+            if min_head == cap {
+                min_head = 0;
+            }
+        }
+
+        while max_head != max_tail {
+            let back = if max_tail == 0 { cap - 1 } else { max_tail - 1 };
+            if high[max_queue[back]] <= h {
+                max_tail = back;
+            } else {
+                break;
+            }
+        }
+        max_queue[max_tail] = i;
+        max_tail += 1;
+        if max_tail == cap {
+            max_tail = 0;
+        }
+
+        while min_head != min_tail {
+            let back = if min_tail == 0 { cap - 1 } else { min_tail - 1 };
+            if low[min_queue[back]] >= l {
+                min_tail = back;
+            } else {
+                break;
+            }
+        }
+        min_queue[min_tail] = i;
+        min_tail += 1;
+        if min_tail == cap {
+            min_tail = 0;
+        }
+
+        if i + 1 >= period {
+            out[i] = high[max_queue[max_head]] - low[min_queue[min_head]];
         } else {
             out[i] = f64::NAN;
         }
@@ -433,16 +511,15 @@ pub fn donchian_channel_width_with_kernel(
 ) -> Result<DonchianChannelWidthOutput, DonchianChannelWidthError> {
     let (high, low) = input_slices(input)?;
     let period = input.get_period();
-    validate_common(high, low, period)?;
-
-    let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
+    let all_valid = validate_common(high, low, period)?;
+    let _ = kernel;
 
     let mut out = alloc_with_nan_prefix(high.len(), 0);
-    out.fill(f64::NAN);
-    compute_row(high, low, period, &mut out);
+    if all_valid {
+        compute_row_no_nan(high, low, period, &mut out);
+    } else {
+        compute_row(high, low, period, &mut out);
+    }
     Ok(DonchianChannelWidthOutput { values: out })
 }
 
@@ -453,7 +530,7 @@ pub fn donchian_channel_width_into_slice(
 ) -> Result<(), DonchianChannelWidthError> {
     let (high, low) = input_slices(input)?;
     let period = input.get_period();
-    validate_common(high, low, period)?;
+    let all_valid = validate_common(high, low, period)?;
 
     if dst.len() != high.len() {
         return Err(DonchianChannelWidthError::OutputLengthMismatch {
@@ -462,13 +539,13 @@ pub fn donchian_channel_width_into_slice(
         });
     }
 
-    let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
+    let _ = kernel;
 
-    dst.fill(f64::NAN);
-    compute_row(high, low, period, dst);
+    if all_valid {
+        compute_row_no_nan(high, low, period, dst);
+    } else {
+        compute_row(high, low, period, dst);
+    }
     Ok(())
 }
 
@@ -769,17 +846,16 @@ fn donchian_channel_width_batch_inner_into(
         .map(|params| params.period.unwrap_or(20))
         .max()
         .unwrap_or(0);
-    validate_common(high, low, max_period)?;
-
-    let _chosen = match kernel {
-        Kernel::Auto => detect_best_batch_kernel(),
-        other => other,
-    };
+    let all_valid = validate_common(high, low, max_period)?;
+    let _ = kernel;
 
     let worker = |row: usize, dst: &mut [f64]| {
-        dst.fill(f64::NAN);
         let period = combos[row].period.unwrap_or(20);
-        compute_row(high, low, period, dst);
+        if all_valid {
+            compute_row_no_nan(high, low, period, dst);
+        } else {
+            compute_row(high, low, period, dst);
+        }
     };
 
     #[cfg(not(target_arch = "wasm32"))]

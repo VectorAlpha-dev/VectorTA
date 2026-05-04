@@ -286,6 +286,76 @@ impl RollingSma {
 }
 
 #[derive(Clone, Debug)]
+struct RollingShortSmas {
+    values: [[f64; LINE_SHORT_END]; LINE_SHORT_COUNT],
+    index: [usize; LINE_SHORT_COUNT],
+    count: [usize; LINE_SHORT_COUNT],
+    sum: [f64; LINE_SHORT_COUNT],
+}
+
+impl RollingShortSmas {
+    #[inline]
+    fn new() -> Self {
+        Self {
+            values: [[0.0; LINE_SHORT_END]; LINE_SHORT_COUNT],
+            index: [0; LINE_SHORT_COUNT],
+            count: [0; LINE_SHORT_COUNT],
+            sum: [0.0; LINE_SHORT_COUNT],
+        }
+    }
+
+    #[inline]
+    fn reset(&mut self) {
+        self.index = [0; LINE_SHORT_COUNT];
+        self.count = [0; LINE_SHORT_COUNT];
+        self.sum = [0.0; LINE_SHORT_COUNT];
+    }
+
+    #[inline]
+    fn update(&mut self, value: f64) -> Option<f64> {
+        let mut short_sum = 0.0;
+        let mut short_ready = 0usize;
+        let mut i = 0usize;
+        while i < LINE_SHORT_COUNT {
+            let period = LINE_SHORT_START + i;
+            let index = self.index[i];
+            if self.count[i] < period {
+                self.values[i][index] = value;
+                self.sum[i] += value;
+                let mut next = index + 1;
+                if next == period {
+                    next = 0;
+                }
+                self.index[i] = next;
+                self.count[i] += 1;
+                if self.count[i] == period {
+                    short_sum += self.sum[i] / period as f64;
+                    short_ready += 1;
+                }
+            } else {
+                let old = self.values[i][index];
+                self.values[i][index] = value;
+                self.sum[i] += value - old;
+                let mut next = index + 1;
+                if next == period {
+                    next = 0;
+                }
+                self.index[i] = next;
+                short_sum += self.sum[i] / period as f64;
+                short_ready += 1;
+            }
+            i += 1;
+        }
+
+        if short_ready == LINE_SHORT_COUNT {
+            Some(short_sum * LINE_SHORT_AVG_INV)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 struct SeededEma {
     period: usize,
     alpha: f64,
@@ -343,7 +413,7 @@ struct CoreState {
     ema_fast: SeededEma,
     ema_slow: SeededEma,
     ema_dea: SeededEma,
-    line_short: Vec<RollingSma>,
+    line_short: RollingShortSmas,
     line_long: RollingSma,
     prev_diff: f64,
     prev_dea: f64,
@@ -352,15 +422,11 @@ struct CoreState {
 impl CoreState {
     #[inline]
     fn new() -> Self {
-        let mut line_short = Vec::with_capacity(LINE_SHORT_COUNT);
-        for period in LINE_SHORT_START..=LINE_SHORT_END {
-            line_short.push(RollingSma::new(period));
-        }
         Self {
             ema_fast: SeededEma::new(DIFF_FAST_PERIOD),
             ema_slow: SeededEma::new(DIFF_SLOW_PERIOD),
             ema_dea: SeededEma::new(DEA_PERIOD),
-            line_short,
+            line_short: RollingShortSmas::new(),
             line_long: RollingSma::new(LINE_LONG_PERIOD),
             prev_diff: f64::NAN,
             prev_dea: f64::NAN,
@@ -372,9 +438,7 @@ impl CoreState {
         self.ema_fast.reset();
         self.ema_slow.reset();
         self.ema_dea.reset();
-        for sma in &mut self.line_short {
-            sma.reset();
-        }
+        self.line_short.reset();
         self.line_long.reset();
         self.prev_diff = f64::NAN;
         self.prev_dea = f64::NAN;
@@ -415,17 +479,10 @@ impl CoreState {
         }
 
         let mid = (MID_CLOSE_WEIGHT.mul_add(close, open + high + low)) / MID_DIVISOR;
-        let mut short_sum = 0.0;
-        let mut short_ready = 0usize;
-        for sma in &mut self.line_short {
-            if let Some(value) = sma.update(mid) {
-                short_sum += value;
-                short_ready += 1;
-            }
-        }
+        let short_avg = self.line_short.update(mid);
         if let Some(long) = self.line_long.update(mid) {
-            if short_ready == LINE_SHORT_COUNT {
-                point.line_convergence = short_sum * LINE_SHORT_AVG_INV - long;
+            if let Some(short_avg) = short_avg {
+                point.line_convergence = short_avg - long;
             }
         }
 
@@ -505,6 +562,24 @@ fn count_valid_ohlc(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> u
 }
 
 #[inline(always)]
+fn valid_ohlc_summary(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> (usize, usize) {
+    let len = close.len();
+    let mut first = len;
+    let mut count = 0usize;
+    let mut i = 0usize;
+    while i < len {
+        if valid_ohlc_bar(open[i], high[i], low[i], close[i]) {
+            if first == len {
+                first = i;
+            }
+            count += 1;
+        }
+        i += 1;
+    }
+    (first, count)
+}
+
+#[inline(always)]
 fn output_warmups(first: usize, len: usize) -> [usize; 6] {
     [
         first
@@ -543,7 +618,15 @@ fn max_required_valid() -> usize {
 fn prepare<'a>(
     input: &'a MacdWaveSignalProInput,
     kernel: Kernel,
-) -> Result<((&'a [f64], &'a [f64], &'a [f64], &'a [f64]), usize, Kernel), MacdWaveSignalProError> {
+) -> Result<
+    (
+        (&'a [f64], &'a [f64], &'a [f64], &'a [f64]),
+        usize,
+        usize,
+        Kernel,
+    ),
+    MacdWaveSignalProError,
+> {
     let (open, high, low, close) = input.as_slices();
     if open.is_empty() || high.is_empty() || low.is_empty() || close.is_empty() {
         return Err(MacdWaveSignalProError::EmptyInputData);
@@ -556,11 +639,10 @@ fn prepare<'a>(
             close_len: close.len(),
         });
     }
-    let first = first_valid_ohlc(open, high, low, close);
+    let (first, valid) = valid_ohlc_summary(open, high, low, close);
     if first >= close.len() {
         return Err(MacdWaveSignalProError::AllValuesNaN);
     }
-    let valid = count_valid_ohlc(open, high, low, close);
     let needed = max_required_valid();
     if valid < needed {
         return Err(MacdWaveSignalProError::NotEnoughValidData { needed, valid });
@@ -569,7 +651,7 @@ fn prepare<'a>(
         Kernel::Auto => detect_best_kernel(),
         other => other.to_non_batch(),
     };
-    Ok(((open, high, low, close), first, chosen))
+    Ok(((open, high, low, close), first, valid, chosen))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -621,6 +703,68 @@ fn macd_wave_signal_pro_row_from_slices(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn macd_wave_signal_pro_row_clean_from_slices(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    first: usize,
+    diff: &mut [f64],
+    dea: &mut [f64],
+    macd_histogram: &mut [f64],
+    line_convergence: &mut [f64],
+    buy_signal: &mut [f64],
+    sell_signal: &mut [f64],
+) {
+    if first > 0 {
+        for dst in [
+            &mut *diff,
+            &mut *dea,
+            &mut *macd_histogram,
+            &mut *line_convergence,
+            &mut *buy_signal,
+            &mut *sell_signal,
+        ] {
+            for v in &mut dst[..first] {
+                *v = f64::NAN;
+            }
+        }
+    }
+
+    let len = close.len();
+    let mut state = CoreState::new();
+    let mut i = first;
+    unsafe {
+        let open_ptr = open.as_ptr();
+        let high_ptr = high.as_ptr();
+        let low_ptr = low.as_ptr();
+        let close_ptr = close.as_ptr();
+        let diff_ptr = diff.as_mut_ptr();
+        let dea_ptr = dea.as_mut_ptr();
+        let hist_ptr = macd_histogram.as_mut_ptr();
+        let line_ptr = line_convergence.as_mut_ptr();
+        let buy_ptr = buy_signal.as_mut_ptr();
+        let sell_ptr = sell_signal.as_mut_ptr();
+        while i < len {
+            let point = state.update(
+                *open_ptr.add(i),
+                *high_ptr.add(i),
+                *low_ptr.add(i),
+                *close_ptr.add(i),
+            );
+            *diff_ptr.add(i) = point.diff;
+            *dea_ptr.add(i) = point.dea;
+            *hist_ptr.add(i) = point.macd_histogram;
+            *line_ptr.add(i) = point.line_convergence;
+            *buy_ptr.add(i) = point.buy_signal;
+            *sell_ptr.add(i) = point.sell_signal;
+            i += 1;
+        }
+    }
+}
+
 #[inline]
 pub fn macd_wave_signal_pro(
     input: &MacdWaveSignalProInput,
@@ -633,7 +777,7 @@ pub fn macd_wave_signal_pro_with_kernel(
     input: &MacdWaveSignalProInput,
     kernel: Kernel,
 ) -> Result<MacdWaveSignalProOutput, MacdWaveSignalProError> {
-    let ((open, high, low, close), first, _chosen) = prepare(input, kernel)?;
+    let ((open, high, low, close), first, valid, _chosen) = prepare(input, kernel)?;
     let len = close.len();
     let warmups = output_warmups(first, len);
     let mut diff = alloc_with_nan_prefix(len, warmups[0]);
@@ -642,18 +786,34 @@ pub fn macd_wave_signal_pro_with_kernel(
     let mut line_convergence = alloc_with_nan_prefix(len, warmups[3]);
     let mut buy_signal = alloc_with_nan_prefix(len, warmups[4]);
     let mut sell_signal = alloc_with_nan_prefix(len, warmups[5]);
-    macd_wave_signal_pro_row_from_slices(
-        open,
-        high,
-        low,
-        close,
-        &mut diff,
-        &mut dea,
-        &mut macd_histogram,
-        &mut line_convergence,
-        &mut buy_signal,
-        &mut sell_signal,
-    );
+    if valid == len - first {
+        macd_wave_signal_pro_row_clean_from_slices(
+            open,
+            high,
+            low,
+            close,
+            first,
+            &mut diff,
+            &mut dea,
+            &mut macd_histogram,
+            &mut line_convergence,
+            &mut buy_signal,
+            &mut sell_signal,
+        );
+    } else {
+        macd_wave_signal_pro_row_from_slices(
+            open,
+            high,
+            low,
+            close,
+            &mut diff,
+            &mut dea,
+            &mut macd_histogram,
+            &mut line_convergence,
+            &mut buy_signal,
+            &mut sell_signal,
+        );
+    }
     Ok(MacdWaveSignalProOutput {
         diff,
         dea,
@@ -676,7 +836,7 @@ pub fn macd_wave_signal_pro_into_slices(
     input: &MacdWaveSignalProInput,
     kernel: Kernel,
 ) -> Result<(), MacdWaveSignalProError> {
-    let ((open, high, low, close), _first, _chosen) = prepare(input, kernel)?;
+    let ((open, high, low, close), first, valid, _chosen) = prepare(input, kernel)?;
     let len = close.len();
     if diff_out.len() != len
         || dea_out.len() != len
@@ -696,18 +856,34 @@ pub fn macd_wave_signal_pro_into_slices(
         });
     }
 
-    macd_wave_signal_pro_row_from_slices(
-        open,
-        high,
-        low,
-        close,
-        diff_out,
-        dea_out,
-        macd_histogram_out,
-        line_convergence_out,
-        buy_signal_out,
-        sell_signal_out,
-    );
+    if valid == len - first {
+        macd_wave_signal_pro_row_clean_from_slices(
+            open,
+            high,
+            low,
+            close,
+            first,
+            diff_out,
+            dea_out,
+            macd_histogram_out,
+            line_convergence_out,
+            buy_signal_out,
+            sell_signal_out,
+        );
+    } else {
+        macd_wave_signal_pro_row_from_slices(
+            open,
+            high,
+            low,
+            close,
+            diff_out,
+            dea_out,
+            macd_histogram_out,
+            line_convergence_out,
+            buy_signal_out,
+            sell_signal_out,
+        );
+    }
     Ok(())
 }
 

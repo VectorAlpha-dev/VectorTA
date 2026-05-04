@@ -42,7 +42,18 @@ impl<'a> AsRef<[f64]> for TilsonInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             TilsonData::Slice(slice) => slice,
-            TilsonData::Candles { candles, source } => source_type(candles, source),
+            TilsonData::Candles { candles, source } => match *source {
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -313,6 +324,9 @@ pub fn tilson_scalar(
             valid: len - first_valid,
         });
     }
+    if v_factor == 0.0 {
+        return unsafe { tilson_scalar_zero_volume(data, period, first_valid, out) };
+    }
 
     let k = 2.0 / (period as f64 + 1.0);
     let omk = 1.0 - k;
@@ -444,6 +458,92 @@ pub fn tilson_scalar(
             dp_cur = dp_cur.add(1);
             out_cur = out_cur.add(1);
         }
+    }
+
+    Ok(())
+}
+
+#[inline]
+unsafe fn tilson_scalar_zero_volume(
+    data: &[f64],
+    period: usize,
+    first_valid: usize,
+    out: &mut [f64],
+) -> Result<(), TilsonError> {
+    let len = data.len();
+    let lookback_total = 6 * (period - 1);
+    let k = 2.0 / (period as f64 + 1.0);
+    let omk = 1.0 - k;
+    let inv_p = 1.0 / (period as f64);
+
+    let dp = data.as_ptr().add(first_valid);
+    let outp = out.as_mut_ptr();
+    let mut today = 0usize;
+
+    let mut sum = 0.0;
+    let mut i = 0usize;
+    while i + 4 <= period {
+        let base = dp.add(today + i);
+        sum += *base + *base.add(1) + *base.add(2) + *base.add(3);
+        i += 4;
+    }
+    while i < period {
+        sum += *dp.add(today + i);
+        i += 1;
+    }
+    let mut e1 = sum * inv_p;
+    today += period;
+
+    let mut acc = e1;
+    let mut j = 1usize;
+    while j < period {
+        let x = *dp.add(today);
+        e1 = k * x + omk * e1;
+        acc += e1;
+        today += 1;
+        j += 1;
+    }
+    let mut e2 = acc * inv_p;
+
+    acc = e2;
+    j = 1usize;
+    while j < period {
+        let x = *dp.add(today);
+        e1 = k * x + omk * e1;
+        e2 = k * e1 + omk * e2;
+        acc += e2;
+        today += 1;
+        j += 1;
+    }
+    let mut e3 = acc * inv_p;
+
+    let remaining = 3 * (period - 1);
+    let mut r = 0usize;
+    while r < remaining {
+        let x = *dp.add(today);
+        e1 = k * x + omk * e1;
+        e2 = k * e1 + omk * e2;
+        e3 = k * e2 + omk * e3;
+        today += 1;
+        r += 1;
+    }
+
+    let start_idx = first_valid + lookback_total;
+    *outp.add(start_idx) = e3;
+
+    let mut dp_cur = dp.add(today);
+    let dp_end = dp.add(len - first_valid);
+    let mut out_cur = outp.add(start_idx + 1);
+    while dp_cur < dp_end {
+        let x = *dp_cur;
+        e1 = k * x + omk * e1;
+        e2 = k * e1 + omk * e2;
+        e3 = k * e2 + omk * e3;
+
+        *out_cur = e3;
+
+        dp_cur = dp_cur.add(1);
+        out_cur = out_cur.add(1);
     }
 
     Ok(())

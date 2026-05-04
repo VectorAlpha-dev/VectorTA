@@ -17,7 +17,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    alloc_uninit_f64, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
 #[cfg(feature = "python")]
@@ -58,6 +58,13 @@ pub struct AbsoluteStrengthIndexOscillatorOutput {
     pub oscillator: Vec<f64>,
     pub signal: Vec<f64>,
     pub histogram: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbsoluteStrengthIndexOscillatorOutputField {
+    Oscillator,
+    Signal,
+    Histogram,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -510,6 +517,26 @@ fn absolute_strength_index_oscillator_row_from_slice(
     }
 }
 
+#[inline]
+fn absolute_strength_index_oscillator_row_field_from_slice(
+    data: &[f64],
+    params: ResolvedParams,
+    out: &mut [f64],
+    field: AbsoluteStrengthIndexOscillatorOutputField,
+) {
+    let mut stream = AbsoluteStrengthIndexOscillatorStream::new_resolved(params);
+    for i in 0..data.len() {
+        out[i] = match stream.update(data[i]) {
+            Some((osc, sig, hist)) => match field {
+                AbsoluteStrengthIndexOscillatorOutputField::Oscillator => osc,
+                AbsoluteStrengthIndexOscillatorOutputField::Signal => sig,
+                AbsoluteStrengthIndexOscillatorOutputField::Histogram => hist,
+            },
+            None => f64::NAN,
+        };
+    }
+}
+
 pub fn absolute_strength_index_oscillator(
     input: &AbsoluteStrengthIndexOscillatorInput,
 ) -> Result<AbsoluteStrengthIndexOscillatorOutput, AbsoluteStrengthIndexOscillatorError> {
@@ -520,10 +547,10 @@ pub fn absolute_strength_index_oscillator_with_kernel(
     input: &AbsoluteStrengthIndexOscillatorInput,
     kernel: Kernel,
 ) -> Result<AbsoluteStrengthIndexOscillatorOutput, AbsoluteStrengthIndexOscillatorError> {
-    let (data, params, first, _chosen) = prepare(input, kernel)?;
-    let mut oscillator = alloc_with_nan_prefix(data.len(), first);
-    let mut signal = alloc_with_nan_prefix(data.len(), first);
-    let mut histogram = alloc_with_nan_prefix(data.len(), first);
+    let (data, params, _first, _chosen) = prepare(input, kernel)?;
+    let mut oscillator = alloc_uninit_f64(data.len());
+    let mut signal = alloc_uninit_f64(data.len());
+    let mut histogram = alloc_uninit_f64(data.len());
 
     absolute_strength_index_oscillator_row_from_slice(
         data,
@@ -568,6 +595,26 @@ pub fn absolute_strength_index_oscillator_into_slices(
         signal_out,
         histogram_out,
     );
+    Ok(())
+}
+
+pub fn absolute_strength_index_oscillator_output_into_slice(
+    out: &mut [f64],
+    input: &AbsoluteStrengthIndexOscillatorInput,
+    kernel: Kernel,
+    field: AbsoluteStrengthIndexOscillatorOutputField,
+) -> Result<(), AbsoluteStrengthIndexOscillatorError> {
+    let (data, params, _first, _chosen) = prepare(input, kernel)?;
+    if out.len() != data.len() {
+        return Err(AbsoluteStrengthIndexOscillatorError::OutputLengthMismatch {
+            expected: data.len(),
+            oscillator_got: out.len(),
+            signal_got: data.len(),
+            histogram_got: data.len(),
+        });
+    }
+
+    absolute_strength_index_oscillator_row_field_from_slice(data, params, out, field);
     Ok(())
 }
 

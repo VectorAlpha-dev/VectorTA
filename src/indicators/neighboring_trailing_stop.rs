@@ -622,6 +622,25 @@ fn neighboring_trailing_stop_row_from_slices(
     debug_assert_eq!(discovery_bull.len(), len);
     debug_assert_eq!(discovery_bear.len(), len);
 
+    if params.buffer_size == DEFAULT_BUFFER_SIZE
+        && params.k == DEFAULT_K
+        && params.percentile == DEFAULT_PERCENTILE
+        && params.smooth == DEFAULT_SMOOTH
+    {
+        neighboring_trailing_stop_default_row(
+            high,
+            low,
+            close,
+            trailing_stop,
+            bullish_band,
+            bearish_band,
+            direction,
+            discovery_bull,
+            discovery_bear,
+        );
+        return;
+    }
+
     let mut state = CoreState::new(params);
     let mut i = 0usize;
     while i < len {
@@ -640,6 +659,197 @@ fn neighboring_trailing_stop_row_from_slices(
         direction[i] = point.direction;
         discovery_bull[i] = point.discovery_bull;
         discovery_bear[i] = point.discovery_bear;
+        i += 1;
+    }
+}
+
+#[derive(Clone, Copy)]
+struct NeighborSma5 {
+    ring: [f64; DEFAULT_SMOOTH],
+    head: usize,
+    count: usize,
+    sum: f64,
+}
+
+impl NeighborSma5 {
+    #[inline(always)]
+    fn new() -> Self {
+        Self {
+            ring: [0.0; DEFAULT_SMOOTH],
+            head: 0,
+            count: 0,
+            sum: 0.0,
+        }
+    }
+
+    #[inline(always)]
+    fn reset(&mut self) {
+        self.head = 0;
+        self.count = 0;
+        self.sum = 0.0;
+    }
+
+    #[inline(always)]
+    fn update(&mut self, value: f64) -> f64 {
+        if value.is_finite() {
+            if self.count == DEFAULT_SMOOTH {
+                let old = self.ring[self.head];
+                self.ring[self.head] = value;
+                self.sum += value;
+                self.sum -= old;
+            } else {
+                self.count += 1;
+                self.ring[self.head] = value;
+                self.sum += value;
+            }
+            self.head += 1;
+            if self.head == DEFAULT_SMOOTH {
+                self.head = 0;
+            }
+        }
+
+        if self.count == DEFAULT_SMOOTH {
+            self.sum / DEFAULT_SMOOTH as f64
+        } else {
+            f64::NAN
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn neighboring_trailing_stop_default_row(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    trailing_stop: &mut [f64],
+    bullish_band: &mut [f64],
+    bearish_band: &mut [f64],
+    direction_out: &mut [f64],
+    discovery_bull_out: &mut [f64],
+    discovery_bear_out: &mut [f64],
+) {
+    let len = close.len();
+    let mut price_ring = [0.0f64; DEFAULT_BUFFER_SIZE];
+    let mut price_head = 0usize;
+    let mut price_count = 0usize;
+    let mut sorted = Vec::with_capacity(DEFAULT_BUFFER_SIZE);
+    let mut bull_sma = NeighborSma5::new();
+    let mut bear_sma = NeighborSma5::new();
+    let mut direction = 0i8;
+    let mut stop = f64::NAN;
+
+    let mut i = 0usize;
+    while i < len {
+        let h = high[i];
+        let l = low[i];
+        let c = close[i];
+        if !h.is_finite() || !l.is_finite() || !c.is_finite() {
+            price_head = 0;
+            price_count = 0;
+            sorted.clear();
+            bull_sma.reset();
+            bear_sma.reset();
+            direction = 0;
+            stop = f64::NAN;
+            trailing_stop[i] = f64::NAN;
+            bullish_band[i] = f64::NAN;
+            bearish_band[i] = f64::NAN;
+            direction_out[i] = f64::NAN;
+            discovery_bull_out[i] = f64::NAN;
+            discovery_bear_out[i] = f64::NAN;
+            i += 1;
+            continue;
+        }
+
+        let mut bear_val = f64::NAN;
+        let mut bull_val = f64::NAN;
+        let size = sorted.len();
+        if size > 5 {
+            let idx = lower_bound(&sorted, c);
+            let bear_start = idx.saturating_sub(DEFAULT_K);
+            if idx > bear_start {
+                bear_val = percentile_sorted_slice(&sorted[bear_start..idx], 10.0);
+            }
+
+            let bull_end = (idx + DEFAULT_K).min(size - 1);
+            if bull_end > idx {
+                bull_val = percentile_sorted_slice(&sorted[idx..(bull_end + 1)], 90.0);
+            }
+        }
+
+        if price_count == DEFAULT_BUFFER_SIZE {
+            let idx = lower_bound(&sorted, price_ring[price_head]);
+            if idx < sorted.len() && sorted[idx] == price_ring[price_head] {
+                sorted.remove(idx);
+            }
+        } else {
+            price_count += 1;
+        }
+        price_ring[price_head] = c;
+        price_head += 1;
+        if price_head == DEFAULT_BUFFER_SIZE {
+            price_head = 0;
+        }
+        let idx = lower_bound(&sorted, c);
+        sorted.insert(idx, c);
+
+        let final_bull = bull_sma.update(bull_val);
+        let final_bear = bear_sma.update(bear_val);
+        let discovery_bull = bull_val.is_nan() && bear_val.is_finite();
+        let discovery_bear = bear_val.is_nan() && bull_val.is_finite();
+
+        let prev_direction = direction;
+        if discovery_bull {
+            direction = 1;
+        } else if discovery_bear {
+            direction = -1;
+        }
+
+        if direction > prev_direction {
+            stop = if final_bear.is_finite() {
+                final_bear
+            } else {
+                l
+            };
+        } else if direction < prev_direction {
+            stop = if final_bull.is_finite() {
+                final_bull
+            } else {
+                h
+            };
+        }
+
+        if direction == 1 {
+            let candidate = if final_bear.is_finite() {
+                final_bear
+            } else {
+                stop
+            };
+            stop = if stop.is_finite() {
+                stop.max(candidate)
+            } else {
+                candidate
+            };
+        } else if direction == -1 {
+            let candidate = if final_bull.is_finite() {
+                final_bull
+            } else {
+                stop
+            };
+            stop = if stop.is_finite() {
+                stop.min(candidate)
+            } else {
+                candidate
+            };
+        }
+
+        trailing_stop[i] = stop;
+        bullish_band[i] = final_bull;
+        bearish_band[i] = final_bear;
+        direction_out[i] = direction as f64;
+        discovery_bull_out[i] = if discovery_bull { 1.0 } else { 0.0 };
+        discovery_bear_out[i] = if discovery_bear { 1.0 } else { 0.0 };
         i += 1;
     }
 }

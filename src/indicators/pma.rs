@@ -147,6 +147,21 @@ pub enum PmaError {
 }
 
 #[inline(always)]
+fn pma_data<'a>(input: &'a PmaInput<'a>) -> &'a [f64] {
+    match &input.data {
+        PmaData::Slice(slice) => slice,
+        PmaData::Candles { candles, source } => match *source {
+            "open" => candles.open.as_slice(),
+            "high" => candles.high.as_slice(),
+            "low" => candles.low.as_slice(),
+            "close" => candles.close.as_slice(),
+            "volume" => candles.volume.as_slice(),
+            _ => source_type(candles, source),
+        },
+    }
+}
+
+#[inline(always)]
 fn pma_first_valid_idx(data: &[f64]) -> Result<usize, PmaError> {
     if data.is_empty() {
         return Err(PmaError::EmptyInputData);
@@ -164,14 +179,13 @@ fn pma_first_valid_idx(data: &[f64]) -> Result<usize, PmaError> {
 
 #[inline]
 pub fn pma(input: &PmaInput) -> Result<PmaOutput, PmaError> {
-    pma_with_kernel(input, Kernel::Auto)
+    let data = pma_data(input);
+    let first = pma_first_valid_idx(data)?;
+    pma_scalar(data, first)
 }
 
 pub fn pma_with_kernel(input: &PmaInput, kernel: Kernel) -> Result<PmaOutput, PmaError> {
-    let data: &[f64] = match &input.data {
-        PmaData::Candles { candles, source } => source_type(candles, source),
-        PmaData::Slice(sl) => sl,
-    };
+    let data = pma_data(input);
 
     let first = pma_first_valid_idx(data)?;
 
@@ -187,6 +201,10 @@ pub fn pma_with_kernel(input: &PmaInput, kernel: Kernel) -> Result<PmaOutput, Pm
             Kernel::Avx2 | Kernel::Avx2Batch => pma_avx2(data, first),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => pma_avx512(data, first),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                pma_scalar(data, first)
+            }
             _ => unreachable!(),
         }
     }

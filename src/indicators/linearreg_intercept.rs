@@ -28,8 +28,26 @@ impl<'a> AsRef<[f64]> for LinearRegInterceptInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             LinearRegInterceptData::Slice(slice) => slice,
-            LinearRegInterceptData::Candles { candles, source } => source_type(candles, source),
+            LinearRegInterceptData::Candles { candles, source } => {
+                linearreg_intercept_source_type(candles, source)
+            }
         }
+    }
+}
+
+#[inline(always)]
+fn linearreg_intercept_source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "close" => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
     }
 }
 
@@ -183,6 +201,19 @@ pub fn linearreg_intercept(
     linearreg_intercept_with_kernel(input, Kernel::Auto)
 }
 
+#[inline(always)]
+fn normalize_single_kernel(kernel: Kernel) -> Kernel {
+    match kernel {
+        Kernel::Auto
+        | Kernel::Scalar
+        | Kernel::ScalarBatch
+        | Kernel::Avx2
+        | Kernel::Avx2Batch
+        | Kernel::Avx512
+        | Kernel::Avx512Batch => Kernel::Scalar,
+    }
+}
+
 pub fn linearreg_intercept_with_kernel(
     input: &LinearRegInterceptInput,
     kernel: Kernel,
@@ -215,10 +246,7 @@ pub fn linearreg_intercept_with_kernel(
 
     let mut out = alloc_with_nan_prefix(len, first + period - 1);
 
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = normalize_single_kernel(kernel);
 
     unsafe {
         match chosen {
@@ -284,7 +312,7 @@ pub fn linearreg_intercept_into(
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    let chosen = detect_best_kernel();
+    let chosen = normalize_single_kernel(detect_best_kernel());
 
     unsafe {
         match chosen {
@@ -343,10 +371,7 @@ pub fn linearreg_intercept_into_slice(
         });
     }
 
-    let chosen = match kern {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = normalize_single_kernel(kern);
 
     unsafe {
         match chosen {
@@ -388,6 +413,8 @@ pub fn linearreg_intercept_scalar(data: &[f64], period: usize, first_val: usize,
     let denom = n * sum_x2 - sum_x * sum_x;
     let bd = 1.0 / denom;
     let k = 1.0 - sum_x * inv_n;
+    let xy_coeff = n * bd * k;
+    let y_coeff = inv_n - sum_x * bd * k;
 
     let start = first_val;
     let end = data.len();
@@ -405,7 +432,7 @@ pub fn linearreg_intercept_scalar(data: &[f64], period: usize, first_val: usize,
     }
 
     let mut i = start + period - 1;
-    out[i] = ((n * sum_xy - sum_x * sum_y) * bd) * k + sum_y * inv_n;
+    out[i] = sum_xy * xy_coeff + sum_y * y_coeff;
 
     while i + 1 < end {
         let y_in = data[i + 1];
@@ -416,7 +443,7 @@ pub fn linearreg_intercept_scalar(data: &[f64], period: usize, first_val: usize,
         sum_xy = (sum_xy - prev_sum_y) + n * y_in;
 
         i += 1;
-        out[i] = ((n * sum_xy - sum_x * sum_y) * bd) * k + sum_y * inv_n;
+        out[i] = sum_xy * xy_coeff + sum_y * y_coeff;
     }
 }
 

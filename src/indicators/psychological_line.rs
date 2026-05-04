@@ -30,9 +30,27 @@ impl<'a> AsRef<[f64]> for PsychologicalLineInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
-            PsychologicalLineData::Candles { candles, source } => source_type(candles, source),
+            PsychologicalLineData::Candles { candles, source } => {
+                psychological_line_source(candles, source)
+            }
             PsychologicalLineData::Slice(slice) => slice,
         }
+    }
+}
+
+#[inline(always)]
+fn psychological_line_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => candles.open.as_slice(),
+        "high" => candles.high.as_slice(),
+        "low" => candles.low.as_slice(),
+        "close" => candles.close.as_slice(),
+        "volume" => candles.volume.as_slice(),
+        "hl2" => candles.hl2.as_slice(),
+        "hlc3" => candles.hlc3.as_slice(),
+        "ohlc4" => candles.ohlc4.as_slice(),
+        "hlcc4" | "hlcc" => candles.hlcc4.as_slice(),
+        _ => source_type(candles, source),
     }
 }
 
@@ -201,11 +219,6 @@ fn first_valid_index(data: &[f64]) -> Option<usize> {
 }
 
 #[inline(always)]
-fn is_fast_path_clean(data: &[f64], first: usize) -> bool {
-    data[first..].iter().all(|x| x.is_finite())
-}
-
-#[inline(always)]
 fn psychological_line_prepare<'a>(
     input: &'a PsychologicalLineInput,
 ) -> Result<(&'a [f64], usize, usize), PsychologicalLineError> {
@@ -233,21 +246,38 @@ fn psychological_line_prepare<'a>(
 }
 
 #[inline(always)]
-fn psychological_line_compute_fast(data: &[f64], length: usize, first: usize, out: &mut [f64]) {
+fn psychological_line_compute_fast_checked(
+    data: &[f64],
+    length: usize,
+    first: usize,
+    out: &mut [f64],
+) -> bool {
     let warmup = first + length;
     let scale = 100.0 / length as f64;
     let mut count = 0usize;
+    let ptr = data.as_ptr();
 
-    for i in (first + 1)..=warmup {
-        count += usize::from(data[i] > data[i - 1]);
-    }
-    out[warmup] = count as f64 * scale;
+    unsafe {
+        for i in (first + 1)..=warmup {
+            let current = *ptr.add(i);
+            if !current.is_finite() {
+                return false;
+            }
+            count += usize::from(current > *ptr.add(i - 1));
+        }
+        *out.get_unchecked_mut(warmup) = count as f64 * scale;
 
-    for i in (warmup + 1)..data.len() {
-        count -= usize::from(data[i - length] > data[i - length - 1]);
-        count += usize::from(data[i] > data[i - 1]);
-        out[i] = count as f64 * scale;
+        for i in (warmup + 1)..data.len() {
+            let current = *ptr.add(i);
+            if !current.is_finite() {
+                return false;
+            }
+            count -= usize::from(*ptr.add(i - length) > *ptr.add(i - length - 1));
+            count += usize::from(current > *ptr.add(i - 1));
+            *out.get_unchecked_mut(i) = count as f64 * scale;
+        }
     }
+    true
 }
 
 #[inline(always)]
@@ -266,9 +296,8 @@ fn psychological_line_compute_into(
     _kernel: Kernel,
     out: &mut [f64],
 ) {
-    if is_fast_path_clean(data, first) {
-        psychological_line_compute_fast(data, length, first, out);
-    } else {
+    if !psychological_line_compute_fast_checked(data, length, first, out) {
+        out.fill(f64::NAN);
         psychological_line_compute_fallback(data, length, first, out);
     }
 }
@@ -313,7 +342,7 @@ pub fn psychological_line_into_slice(
         });
     }
 
-    out.fill(f64::NAN);
+    out[..(first + length)].fill(f64::NAN);
     psychological_line_compute_into(data, length, first, kernel, out);
     Ok(())
 }

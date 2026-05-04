@@ -491,6 +491,77 @@ pub fn correlation_cycle_scalar(
 }
 
 #[inline(always)]
+unsafe fn correlation_cycle_window_sums(
+    dptr: *const f64,
+    cptr: *const f64,
+    sptr: *const f64,
+    i: usize,
+    period: usize,
+) -> (f64, f64, f64, f64) {
+    let mut sum_x = 0.0f64;
+    let mut sum_x2 = 0.0f64;
+    let mut sum_xc = 0.0f64;
+    let mut sum_xs = 0.0f64;
+
+    let mut j = 0usize;
+    while j + 4 <= period {
+        let idx0 = i - (j + 1);
+        let idx1 = idx0 - 1;
+        let idx2 = idx1 - 1;
+        let idx3 = idx2 - 1;
+
+        let mut x0 = *dptr.add(idx0);
+        let mut x1 = *dptr.add(idx1);
+        let mut x2 = *dptr.add(idx2);
+        let mut x3 = *dptr.add(idx3);
+
+        if x0 != x0 {
+            x0 = 0.0;
+        }
+        if x1 != x1 {
+            x1 = 0.0;
+        }
+        if x2 != x2 {
+            x2 = 0.0;
+        }
+        if x3 != x3 {
+            x3 = 0.0;
+        }
+
+        let c0 = *cptr.add(j);
+        let s0 = *sptr.add(j);
+        let c1 = *cptr.add(j + 1);
+        let s1 = *sptr.add(j + 1);
+        let c2 = *cptr.add(j + 2);
+        let s2 = *sptr.add(j + 2);
+        let c3 = *cptr.add(j + 3);
+        let s3 = *sptr.add(j + 3);
+
+        sum_x += x0 + x1 + x2 + x3;
+        sum_x2 = x0.mul_add(x0, x1.mul_add(x1, x2.mul_add(x2, x3.mul_add(x3, sum_x2))));
+        sum_xc = x0.mul_add(c0, x1.mul_add(c1, x2.mul_add(c2, x3.mul_add(c3, sum_xc))));
+        sum_xs = x0.mul_add(s0, x1.mul_add(s1, x2.mul_add(s2, x3.mul_add(s3, sum_xs))));
+        j += 4;
+    }
+    while j < period {
+        let idx = i - (j + 1);
+        let mut x = *dptr.add(idx);
+        if x != x {
+            x = 0.0;
+        }
+        let c = *cptr.add(j);
+        let s = *sptr.add(j);
+        sum_x += x;
+        sum_x2 = x.mul_add(x, sum_x2);
+        sum_xc = x.mul_add(c, sum_xc);
+        sum_xs = x.mul_add(s, sum_xs);
+        j += 1;
+    }
+
+    (sum_x, sum_x2, sum_xc, sum_xs)
+}
+
+#[inline(always)]
 unsafe fn correlation_cycle_compute_into(
     data: &[f64],
     period: usize,
@@ -589,81 +660,39 @@ unsafe fn correlation_cycle_compute_into(
     let dptr = data.as_ptr();
     let cptr = cos_table.as_ptr();
     let sptr = sin_table.as_ptr();
+    let len = data.len();
 
-    for i in start_ria..data.len() {
-        let mut sum_x = 0.0f64;
-        let mut sum_x2 = 0.0f64;
-        let mut sum_xc = 0.0f64;
-        let mut sum_xs = 0.0f64;
+    if start_ria >= len {
+        return;
+    }
 
-        let mut j = 0usize;
-        while j + 4 <= period {
-            let idx0 = i - (j + 1);
-            let idx1 = idx0 - 1;
-            let idx2 = idx1 - 1;
-            let idx3 = idx2 - 1;
+    let rebase_interval = if data[first..].iter().any(|x| x.is_infinite()) {
+        1usize
+    } else {
+        256usize
+    };
+    let z_re = *cptr;
+    let z_im = *sptr;
+    let mut last_rebase = start_ria;
+    let (mut sum_x, mut sum_x2, mut sum_xc, mut sum_xs) =
+        correlation_cycle_window_sums(dptr, cptr, sptr, start_ria, period);
 
-            let mut x0 = *dptr.add(idx0);
-            let mut x1 = *dptr.add(idx1);
-            let mut x2 = *dptr.add(idx2);
-            let mut x3 = *dptr.add(idx3);
-
-            if x0 != x0 {
-                x0 = 0.0;
-            }
-            if x1 != x1 {
-                x1 = 0.0;
-            }
-            if x2 != x2 {
-                x2 = 0.0;
-            }
-            if x3 != x3 {
-                x3 = 0.0;
-            }
-
-            let c0 = *cptr.add(j);
-            let s0 = *sptr.add(j);
-            let c1 = *cptr.add(j + 1);
-            let s1 = *sptr.add(j + 1);
-            let c2 = *cptr.add(j + 2);
-            let s2 = *sptr.add(j + 2);
-            let c3 = *cptr.add(j + 3);
-            let s3 = *sptr.add(j + 3);
-
-            sum_x += x0 + x1 + x2 + x3;
-            sum_x2 = x0.mul_add(x0, x1.mul_add(x1, x2.mul_add(x2, x3.mul_add(x3, sum_x2))));
-            sum_xc = x0.mul_add(c0, x1.mul_add(c1, x2.mul_add(c2, x3.mul_add(c3, sum_xc))));
-            sum_xs = x0.mul_add(s0, x1.mul_add(s1, x2.mul_add(s2, x3.mul_add(s3, sum_xs))));
-            j += 4;
-        }
-        while j < period {
-            let idx = i - (j + 1);
-            let mut x = *dptr.add(idx);
-            if x != x {
-                x = 0.0;
-            }
-            let c = *cptr.add(j);
-            let s = *sptr.add(j);
-            sum_x += x;
-            sum_x2 = x.mul_add(x, sum_x2);
-            sum_xc = x.mul_add(c, sum_xc);
-            sum_xs = x.mul_add(s, sum_xs);
-            j += 1;
-        }
-
+    let mut i = start_ria;
+    while i < len {
         let t1 = n.mul_add(sum_x2, -(sum_x * sum_x));
         let mut r_val = 0.0;
         let mut i_val = 0.0;
 
         if t1 > 0.0 {
+            let sqrt_t1 = t1.sqrt();
             if has_t2 {
-                let denom = t1.sqrt() * sqrt_t2c;
+                let denom = sqrt_t1 * sqrt_t2c;
                 if denom > 0.0 {
                     r_val = (n.mul_add(sum_xc, -(sum_x * sum_cos))) / denom;
                 }
             }
             if has_t4 {
-                let denom = t1.sqrt() * sqrt_t4c;
+                let denom = sqrt_t1 * sqrt_t4c;
                 if denom > 0.0 {
                     i_val = (n.mul_add(sum_xs, -(sum_x * sum_sin))) / denom;
                 }
@@ -700,11 +729,41 @@ unsafe fn correlation_cycle_compute_into(
         }
 
         prev_angle = a;
+        let next_i = i + 1;
+        if next_i < len {
+            if next_i - last_rebase >= rebase_interval {
+                let sums = correlation_cycle_window_sums(dptr, cptr, sptr, next_i, period);
+                sum_x = sums.0;
+                sum_x2 = sums.1;
+                sum_xc = sums.2;
+                sum_xs = sums.3;
+                last_rebase = next_i;
+            } else {
+                let mut x_new = *dptr.add(i);
+                let mut x_old = *dptr.add(i - period);
+                if x_new != x_new {
+                    x_new = 0.0;
+                }
+                if x_old != x_old {
+                    x_old = 0.0;
+                }
+                let dx = x_new - x_old;
+                sum_x += dx;
+                sum_x2 += x_new.mul_add(x_new, -(x_old * x_old));
+                let s = sum_xc + dx;
+                let next_xc = z_re.mul_add(s, -z_im * sum_xs);
+                let next_xs = z_im.mul_add(s, z_re * sum_xs);
+                sum_xc = next_xc;
+                sum_xs = next_xs;
+            }
+        }
+        i = next_i;
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[target_feature(enable = "avx2,fma")]
+#[inline]
 pub unsafe fn correlation_cycle_avx2(
     data: &[f64],
     period: usize,
@@ -870,7 +929,8 @@ pub unsafe fn correlation_cycle_avx2(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-#[inline(always)]
+#[target_feature(enable = "avx512f,fma")]
+#[inline]
 pub unsafe fn correlation_cycle_avx512(
     data: &[f64],
     period: usize,

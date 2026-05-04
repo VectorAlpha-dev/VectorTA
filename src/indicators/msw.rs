@@ -226,15 +226,10 @@ pub fn msw_with_kernel(input: &MswInput, kernel: Kernel) -> Result<MswOutput, Ms
             valid: len - first,
         });
     }
-    let mut chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
         other => other,
     };
-
-    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-    if matches!(kernel, Kernel::Auto) && matches!(chosen, Kernel::Avx512 | Kernel::Avx512Batch) {
-        chosen = Kernel::Avx2;
-    }
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => msw_scalar(data, period, first, len),
@@ -257,6 +252,11 @@ pub unsafe fn msw_scalar(
     let warm = first + period - 1;
     let mut sine = alloc_with_nan_prefix(len, warm);
     let mut lead = alloc_with_nan_prefix(len, warm);
+
+    if period == 5 {
+        msw_period5_into(data, first, len, &mut sine, &mut lead);
+        return Ok(MswOutput { sine, lead });
+    }
 
     let step = TULIP_TPI / period as f64;
     let mut cos_table = Vec::with_capacity(period);
@@ -311,6 +311,10 @@ pub unsafe fn msw_avx2(
     len: usize,
 ) -> Result<MswOutput, MswError> {
     use core::arch::x86_64::*;
+    if period == 5 {
+        return msw_avx2_period5(data, first, len);
+    }
+
     let warm = first + period - 1;
     let mut sine = alloc_with_nan_prefix(len, warm);
     let mut lead = alloc_with_nan_prefix(len, warm);
@@ -418,6 +422,10 @@ pub unsafe fn msw_avx512(
     len: usize,
 ) -> Result<MswOutput, MswError> {
     use core::arch::x86_64::*;
+    if period == 5 {
+        return msw_avx512_period5(data, first, len);
+    }
+
     let warm = first + period - 1;
     let mut sine = alloc_with_nan_prefix(len, warm);
     let mut lead = alloc_with_nan_prefix(len, warm);
@@ -516,6 +524,196 @@ pub unsafe fn msw_avx512(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn msw_avx2_period5(data: &[f64], first: usize, len: usize) -> Result<MswOutput, MswError> {
+    use core::arch::x86_64::*;
+    let warm = first + 4;
+    let mut sine = alloc_with_nan_prefix(len, warm);
+    let mut lead = alloc_with_nan_prefix(len, warm);
+
+    let step = TULIP_TPI * 0.2;
+    let (s0, c0) = 0.0f64.sin_cos();
+    let (s1, c1) = step.sin_cos();
+    let (s2, c2) = (step * 2.0).sin_cos();
+    let (s3, c3) = (step * 3.0).sin_cos();
+    let (s4, c4) = (step * 4.0).sin_cos();
+
+    let c0v = _mm256_set1_pd(c0);
+    let c1v = _mm256_set1_pd(c1);
+    let c2v = _mm256_set1_pd(c2);
+    let c3v = _mm256_set1_pd(c3);
+    let c4v = _mm256_set1_pd(c4);
+    let s0v = _mm256_set1_pd(s0);
+    let s1v = _mm256_set1_pd(s1);
+    let s2v = _mm256_set1_pd(s2);
+    let s3v = _mm256_set1_pd(s3);
+    let s4v = _mm256_set1_pd(s4);
+
+    const LANES: usize = 4;
+    let dptr = data.as_ptr();
+    let mut i = warm;
+    while i + (LANES - 1) < len {
+        let w0 = _mm256_loadu_pd(dptr.add(i));
+        let w1 = _mm256_loadu_pd(dptr.add(i - 1));
+        let w2 = _mm256_loadu_pd(dptr.add(i - 2));
+        let w3 = _mm256_loadu_pd(dptr.add(i - 3));
+        let w4 = _mm256_loadu_pd(dptr.add(i - 4));
+
+        let mut rp = _mm256_mul_pd(c0v, w0);
+        rp = _mm256_fmadd_pd(c1v, w1, rp);
+        rp = _mm256_fmadd_pd(c2v, w2, rp);
+        rp = _mm256_fmadd_pd(c3v, w3, rp);
+        rp = _mm256_fmadd_pd(c4v, w4, rp);
+
+        let mut ip = _mm256_mul_pd(s0v, w0);
+        ip = _mm256_fmadd_pd(s1v, w1, ip);
+        ip = _mm256_fmadd_pd(s2v, w2, ip);
+        ip = _mm256_fmadd_pd(s3v, w3, ip);
+        ip = _mm256_fmadd_pd(s4v, w4, ip);
+
+        let mut rbuf = [0.0f64; LANES];
+        let mut ibuf = [0.0f64; LANES];
+        _mm256_storeu_pd(rbuf.as_mut_ptr(), rp);
+        _mm256_storeu_pd(ibuf.as_mut_ptr(), ip);
+
+        let mut idx = i;
+        for lane in 0..LANES {
+            let (s, l) = msw_phase_outputs(rbuf[lane], ibuf[lane]);
+            *sine.get_unchecked_mut(idx) = s;
+            *lead.get_unchecked_mut(idx) = l;
+            idx += 1;
+        }
+
+        i += LANES;
+    }
+
+    while i < len {
+        let w0 = *data.get_unchecked(i);
+        let w1 = *data.get_unchecked(i - 1);
+        let w2 = *data.get_unchecked(i - 2);
+        let w3 = *data.get_unchecked(i - 3);
+        let w4 = *data.get_unchecked(i - 4);
+
+        let mut rp = 0.0f64;
+        let mut ip = 0.0f64;
+        rp += c0 * w0;
+        ip += s0 * w0;
+        rp += c1 * w1;
+        ip += s1 * w1;
+        rp += c2 * w2;
+        ip += s2 * w2;
+        rp += c3 * w3;
+        ip += s3 * w3;
+        rp += c4 * w4;
+        ip += s4 * w4;
+
+        let (s, l) = msw_phase_outputs(rp, ip);
+        *sine.get_unchecked_mut(i) = s;
+        *lead.get_unchecked_mut(i) = l;
+        i += 1;
+    }
+
+    Ok(MswOutput { sine, lead })
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,fma")]
+unsafe fn msw_avx512_period5(
+    data: &[f64],
+    first: usize,
+    len: usize,
+) -> Result<MswOutput, MswError> {
+    use core::arch::x86_64::*;
+    let warm = first + 4;
+    let mut sine = alloc_with_nan_prefix(len, warm);
+    let mut lead = alloc_with_nan_prefix(len, warm);
+
+    let step = TULIP_TPI * 0.2;
+    let (s0, c0) = 0.0f64.sin_cos();
+    let (s1, c1) = step.sin_cos();
+    let (s2, c2) = (step * 2.0).sin_cos();
+    let (s3, c3) = (step * 3.0).sin_cos();
+    let (s4, c4) = (step * 4.0).sin_cos();
+
+    let c0v = _mm512_set1_pd(c0);
+    let c1v = _mm512_set1_pd(c1);
+    let c2v = _mm512_set1_pd(c2);
+    let c3v = _mm512_set1_pd(c3);
+    let c4v = _mm512_set1_pd(c4);
+    let s0v = _mm512_set1_pd(s0);
+    let s1v = _mm512_set1_pd(s1);
+    let s2v = _mm512_set1_pd(s2);
+    let s3v = _mm512_set1_pd(s3);
+    let s4v = _mm512_set1_pd(s4);
+
+    const LANES: usize = 8;
+    let dptr = data.as_ptr();
+    let mut i = warm;
+    while i + (LANES - 1) < len {
+        let w0 = _mm512_loadu_pd(dptr.add(i));
+        let w1 = _mm512_loadu_pd(dptr.add(i - 1));
+        let w2 = _mm512_loadu_pd(dptr.add(i - 2));
+        let w3 = _mm512_loadu_pd(dptr.add(i - 3));
+        let w4 = _mm512_loadu_pd(dptr.add(i - 4));
+
+        let mut rp = _mm512_mul_pd(c0v, w0);
+        rp = _mm512_fmadd_pd(c1v, w1, rp);
+        rp = _mm512_fmadd_pd(c2v, w2, rp);
+        rp = _mm512_fmadd_pd(c3v, w3, rp);
+        rp = _mm512_fmadd_pd(c4v, w4, rp);
+
+        let mut ip = _mm512_mul_pd(s0v, w0);
+        ip = _mm512_fmadd_pd(s1v, w1, ip);
+        ip = _mm512_fmadd_pd(s2v, w2, ip);
+        ip = _mm512_fmadd_pd(s3v, w3, ip);
+        ip = _mm512_fmadd_pd(s4v, w4, ip);
+
+        let mut rbuf = [0.0f64; LANES];
+        let mut ibuf = [0.0f64; LANES];
+        _mm512_storeu_pd(rbuf.as_mut_ptr(), rp);
+        _mm512_storeu_pd(ibuf.as_mut_ptr(), ip);
+
+        let mut idx = i;
+        for lane in 0..LANES {
+            let (s, l) = msw_phase_outputs(rbuf[lane], ibuf[lane]);
+            *sine.get_unchecked_mut(idx) = s;
+            *lead.get_unchecked_mut(idx) = l;
+            idx += 1;
+        }
+
+        i += LANES;
+    }
+
+    while i < len {
+        let w0 = *data.get_unchecked(i);
+        let w1 = *data.get_unchecked(i - 1);
+        let w2 = *data.get_unchecked(i - 2);
+        let w3 = *data.get_unchecked(i - 3);
+        let w4 = *data.get_unchecked(i - 4);
+
+        let mut rp = 0.0f64;
+        let mut ip = 0.0f64;
+        rp += c0 * w0;
+        ip += s0 * w0;
+        rp += c1 * w1;
+        ip += s1 * w1;
+        rp += c2 * w2;
+        ip += s2 * w2;
+        rp += c3 * w3;
+        ip += s3 * w3;
+        rp += c4 * w4;
+        ip += s4 * w4;
+
+        let (s, l) = msw_phase_outputs(rp, ip);
+        *sine.get_unchecked_mut(i) = s;
+        *lead.get_unchecked_mut(i) = l;
+        i += 1;
+    }
+
+    Ok(MswOutput { sine, lead })
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn msw_avx512_short(
     data: &[f64],
@@ -539,6 +737,68 @@ pub unsafe fn msw_avx512_long(
 
 pub fn atan(x: f64) -> f64 {
     x.atan()
+}
+
+#[inline(always)]
+unsafe fn msw_phase_outputs(rp: f64, ip: f64) -> (f64, f64) {
+    let mut phase = if rp.abs() > 0.001 {
+        atan(ip / rp)
+    } else {
+        TULIP_PI * if ip < 0.0 { -1.0 } else { 1.0 }
+    };
+    if rp < 0.0 {
+        phase += TULIP_PI;
+    }
+    phase += TULIP_PI * 0.5;
+    if phase < 0.0 {
+        phase += TULIP_TPI;
+    }
+    if phase > TULIP_TPI {
+        phase -= TULIP_TPI;
+    }
+    let (s, c) = phase.sin_cos();
+    (s, (s + c) * 0.707106781186547524400844362104849039_f64)
+}
+
+#[inline]
+unsafe fn msw_period5_into(
+    data: &[f64],
+    first: usize,
+    len: usize,
+    sine: &mut [f64],
+    lead: &mut [f64],
+) {
+    let step = TULIP_TPI * 0.2;
+    let (s0, c0) = 0.0f64.sin_cos();
+    let (s1, c1) = step.sin_cos();
+    let (s2, c2) = (step * 2.0).sin_cos();
+    let (s3, c3) = (step * 3.0).sin_cos();
+    let (s4, c4) = (step * 4.0).sin_cos();
+
+    for i in (first + 4)..len {
+        let w0 = *data.get_unchecked(i);
+        let w1 = *data.get_unchecked(i - 1);
+        let w2 = *data.get_unchecked(i - 2);
+        let w3 = *data.get_unchecked(i - 3);
+        let w4 = *data.get_unchecked(i - 4);
+
+        let mut rp = 0.0f64;
+        let mut ip = 0.0f64;
+        rp += c0 * w0;
+        ip += s0 * w0;
+        rp += c1 * w1;
+        ip += s1 * w1;
+        rp += c2 * w2;
+        ip += s2 * w2;
+        rp += c3 * w3;
+        ip += s3 * w3;
+        rp += c4 * w4;
+        ip += s4 * w4;
+
+        let (s, l) = msw_phase_outputs(rp, ip);
+        *sine.get_unchecked_mut(i) = s;
+        *lead.get_unchecked_mut(i) = l;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1451,7 +1711,7 @@ pub fn msw_into_slice(
     }
 
     let chosen = match kern {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => detect_best_kernel(),
         other => other,
     };
 
@@ -1462,11 +1722,13 @@ pub fn msw_into_slice(
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                msw_scalar_into(data, period, first, len, sine_dst, lead_dst)
+                msw_row_avx2(data, first, period, sine_dst, lead_dst);
+                Ok(())
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                msw_scalar_into(data, period, first, len, sine_dst, lead_dst)
+                msw_row_avx512(data, first, period, sine_dst, lead_dst);
+                Ok(())
             }
             _ => unreachable!(),
         }
@@ -1492,6 +1754,11 @@ unsafe fn msw_scalar_into(
     sine: &mut [f64],
     lead: &mut [f64],
 ) -> Result<(), MswError> {
+    if period == 5 {
+        msw_period5_into(data, first, len, sine, lead);
+        return Ok(());
+    }
+
     let step = TULIP_TPI / period as f64;
     let mut cos_table = Vec::with_capacity(period);
     let mut sin_table = Vec::with_capacity(period);

@@ -39,8 +39,24 @@ impl<'a> AsRef<[f64]> for DemaInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             DemaData::Slice(slice) => slice,
-            DemaData::Candles { candles, source } => source_type(candles, source),
+            DemaData::Candles { candles, source } => dema_source_type(candles, source),
         }
+    }
+}
+
+#[inline(always)]
+fn dema_source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "close" => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
     }
 }
 
@@ -191,7 +207,7 @@ fn dema_prepare<'a>(
     kernel: Kernel,
 ) -> Result<(&'a [f64], usize, usize, usize, Kernel), DemaError> {
     let data: &[f64] = match &input.data {
-        DemaData::Candles { candles, source } => source_type(candles, source),
+        DemaData::Candles { candles, source } => dema_source_type(candles, source),
         DemaData::Slice(sl) => sl,
     };
 
@@ -223,11 +239,7 @@ fn dema_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => match detect_best_kernel() {
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => Kernel::Avx512,
-            _ => Kernel::Scalar,
-        },
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -308,13 +320,6 @@ pub unsafe fn dema_scalar(data: &[f64], period: usize, first: usize, out: &mut [
 
     let limit = n.saturating_sub(4);
     while i <= limit {
-        if i + 32 < n {
-            core::arch::x86_64::_mm_prefetch(
-                p.add(32) as *const i8,
-                core::arch::x86_64::_MM_HINT_T0,
-            );
-        }
-
         let x0 = *p;
         ema1 = ema1.mul_add(a, x0 * alpha);
         ema2 = ema2.mul_add(a, ema1 * alpha);
@@ -746,7 +751,7 @@ impl DemaBatchBuilder {
         DemaBatchBuilder::new().kernel(k).apply_slice(data)
     }
     pub fn apply_candles(self, c: &Candles, src: &str) -> Result<DemaBatchOutput, DemaError> {
-        let slice = source_type(c, src);
+        let slice = dema_source_type(c, src);
         self.apply_slice(slice)
     }
     pub fn with_default_candles(c: &Candles) -> Result<DemaBatchOutput, DemaError> {

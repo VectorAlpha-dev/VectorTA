@@ -31,7 +31,7 @@ impl<'a> AsRef<[f64]> for EmdInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
-            EmdData::Candles { candles } => source_type(candles, "close"),
+            EmdData::Candles { candles } => &candles.close,
             EmdData::Slices { close, .. } => close,
         }
     }
@@ -276,9 +276,13 @@ pub fn emd_into_slices(
         });
     }
 
-    emd_compute_into(
-        high, low, period, delta, fraction, first, chosen, ub, mb, lb,
-    );
+    if let Some(prices) = emd_price_source(input, high.len()) {
+        emd_compute_from_prices_into(prices, period, delta, fraction, first, chosen, ub, mb, lb);
+    } else {
+        emd_compute_into(
+            high, low, period, delta, fraction, first, chosen, ub, mb, lb,
+        );
+    }
 
     let up_low_warm = first + 50 - 1;
     let mid_warm = first + 2 * period - 1;
@@ -304,7 +308,7 @@ fn emd_prepare<'a>(
     kernel: Kernel,
 ) -> Result<(&'a [f64], &'a [f64], usize, f64, f64, usize, Kernel), EmdError> {
     let (high, low) = match &input.data {
-        EmdData::Candles { candles } => (source_type(candles, "high"), source_type(candles, "low")),
+        EmdData::Candles { candles } => (&candles.high[..], &candles.low[..]),
         EmdData::Slices { high, low, .. } => (*high, *low),
     };
 
@@ -355,6 +359,14 @@ fn emd_prepare<'a>(
 }
 
 #[inline(always)]
+fn emd_price_source<'a>(input: &'a EmdInput<'a>, len: usize) -> Option<&'a [f64]> {
+    match &input.data {
+        EmdData::Candles { candles } if candles.hl2.len() == len => Some(&candles.hl2),
+        _ => None,
+    }
+}
+
+#[inline(always)]
 fn emd_compute_into(
     high: &[f64],
     low: &[f64],
@@ -374,10 +386,14 @@ fn emd_compute_into(
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                emd_scalar_into(high, low, period, delta, fraction, first, ub, mb, lb)
+                emd_avx2_into(high, low, period, delta, fraction, first, ub, mb, lb)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
+                emd_avx512_into(high, low, period, delta, fraction, first, ub, mb, lb)
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
                 emd_scalar_into(high, low, period, delta, fraction, first, ub, mb, lb)
             }
             _ => unreachable!(),
@@ -395,18 +411,32 @@ pub fn emd_with_kernel(input: &EmdInput, kernel: Kernel) -> Result<EmdOutput, Em
     let mut middleband = alloc_with_nan_prefix(len, mid_warm);
     let mut lowerband = alloc_with_nan_prefix(len, up_low_warm);
 
-    emd_compute_into(
-        high,
-        low,
-        period,
-        delta,
-        fraction,
-        first,
-        chosen,
-        &mut upperband,
-        &mut middleband,
-        &mut lowerband,
-    );
+    if let Some(prices) = emd_price_source(input, len) {
+        emd_compute_from_prices_into(
+            prices,
+            period,
+            delta,
+            fraction,
+            first,
+            chosen,
+            &mut upperband,
+            &mut middleband,
+            &mut lowerband,
+        );
+    } else {
+        emd_compute_into(
+            high,
+            low,
+            period,
+            delta,
+            fraction,
+            first,
+            chosen,
+            &mut upperband,
+            &mut middleband,
+            &mut lowerband,
+        );
+    }
 
     Ok(EmdOutput {
         upperband,
@@ -454,18 +484,32 @@ pub fn emd_into(
         *v = qnan;
     }
 
-    emd_compute_into(
-        high,
-        low,
-        period,
-        delta,
-        fraction,
-        first,
-        chosen,
-        upperband_out,
-        middleband_out,
-        lowerband_out,
-    );
+    if let Some(prices) = emd_price_source(input, high.len()) {
+        emd_compute_from_prices_into(
+            prices,
+            period,
+            delta,
+            fraction,
+            first,
+            chosen,
+            upperband_out,
+            middleband_out,
+            lowerband_out,
+        );
+    } else {
+        emd_compute_into(
+            high,
+            low,
+            period,
+            delta,
+            fraction,
+            first,
+            chosen,
+            upperband_out,
+            middleband_out,
+            lowerband_out,
+        );
+    }
 
     Ok(())
 }
@@ -604,6 +648,38 @@ pub unsafe fn emd_scalar_into(
     }
 }
 
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn emd_avx2_into(
+    high: &[f64],
+    low: &[f64],
+    period: usize,
+    delta: f64,
+    fraction: f64,
+    first: usize,
+    ub: &mut [f64],
+    mb: &mut [f64],
+    lb: &mut [f64],
+) {
+    emd_scalar_into(high, low, period, delta, fraction, first, ub, mb, lb)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,fma")]
+unsafe fn emd_avx512_into(
+    high: &[f64],
+    low: &[f64],
+    period: usize,
+    delta: f64,
+    fraction: f64,
+    first: usize,
+    ub: &mut [f64],
+    mb: &mut [f64],
+    lb: &mut [f64],
+) {
+    emd_scalar_into(high, low, period, delta, fraction, first, ub, mb, lb)
+}
+
 #[inline(always)]
 fn emd_compute_from_prices_into(
     prices: &[f64],
@@ -623,10 +699,14 @@ fn emd_compute_from_prices_into(
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                emd_scalar_prices_into(prices, period, delta, fraction, first, ub, mb, lb)
+                emd_avx2_prices_into(prices, period, delta, fraction, first, ub, mb, lb)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
+                emd_avx512_prices_into(prices, period, delta, fraction, first, ub, mb, lb)
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
                 emd_scalar_prices_into(prices, period, delta, fraction, first, ub, mb, lb)
             }
             _ => unreachable!(),
@@ -760,6 +840,36 @@ unsafe fn emd_scalar_prices_into(
         count += 1;
         i += 1;
     }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn emd_avx2_prices_into(
+    prices: &[f64],
+    period: usize,
+    delta: f64,
+    fraction: f64,
+    first: usize,
+    ub: &mut [f64],
+    mb: &mut [f64],
+    lb: &mut [f64],
+) {
+    emd_scalar_prices_into(prices, period, delta, fraction, first, ub, mb, lb)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,fma")]
+unsafe fn emd_avx512_prices_into(
+    prices: &[f64],
+    period: usize,
+    delta: f64,
+    fraction: f64,
+    first: usize,
+    ub: &mut [f64],
+    mb: &mut [f64],
+    lb: &mut [f64],
+) {
+    emd_scalar_prices_into(prices, period, delta, fraction, first, ub, mb, lb)
 }
 
 #[inline]
@@ -1176,11 +1286,7 @@ impl EmdBatchBuilder {
             .apply_slices(high, low, close, volume)
     }
     pub fn apply_candles(self, c: &Candles) -> Result<EmdBatchOutput, EmdError> {
-        let high = source_type(c, "high");
-        let low = source_type(c, "low");
-        let close = source_type(c, "close");
-        let volume = source_type(c, "volume");
-        self.apply_slices(high, low, close, volume)
+        self.apply_slices(&c.high, &c.low, &c.close, &c.volume)
     }
 }
 
@@ -1302,6 +1408,35 @@ fn expand_grid(r: &EmdBatchRange) -> Result<Vec<EmdParams>, EmdError> {
 }
 
 #[inline(always)]
+fn validate_batch_params(combos: &[EmdParams], len: usize, first: usize) -> Result<(), EmdError> {
+    for combo in combos {
+        let period = combo.period.unwrap_or(20);
+        if period == 0 || period > len {
+            return Err(EmdError::InvalidPeriod {
+                period,
+                data_len: len,
+            });
+        }
+        let needed = (2 * period).max(50);
+        if len - first < needed {
+            return Err(EmdError::NotEnoughValidData {
+                needed,
+                valid: len - first,
+            });
+        }
+        let delta = combo.delta.unwrap_or(0.5);
+        if !delta.is_finite() {
+            return Err(EmdError::InvalidDelta { delta });
+        }
+        let fraction = combo.fraction.unwrap_or(0.1);
+        if !fraction.is_finite() {
+            return Err(EmdError::InvalidFraction { fraction });
+        }
+    }
+    Ok(())
+}
+
+#[inline(always)]
 pub fn emd_batch_slice(
     high: &[f64],
     low: &[f64],
@@ -1345,6 +1480,9 @@ fn emd_batch_inner(
     }
 
     let len = high.len();
+    if len == 0 {
+        return Err(EmdError::EmptyInputData);
+    }
     if low.len() != len {
         return Err(EmdError::InvalidInputLength {
             expected: len,
@@ -1355,14 +1493,7 @@ fn emd_batch_inner(
     let first = (0..len)
         .find(|&i| !high[i].is_nan() && !low[i].is_nan())
         .ok_or(EmdError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    let needed = (2 * max_p).max(50);
-    if len - first < needed {
-        return Err(EmdError::NotEnoughValidData {
-            needed,
-            valid: len - first,
-        });
-    }
+    validate_batch_params(&combos, len, first)?;
 
     let rows = combos.len();
     let cols = len;
@@ -1503,6 +1634,9 @@ fn emd_batch_inner_into(
         });
     }
     let len = high.len();
+    if len == 0 {
+        return Err(EmdError::EmptyInputData);
+    }
     if low.len() != len {
         return Err(EmdError::InvalidInputLength {
             expected: len,
@@ -1533,14 +1667,7 @@ fn emd_batch_inner_into(
     let first = (0..len)
         .find(|&i| !high[i].is_nan() && !low[i].is_nan())
         .ok_or(EmdError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    let needed = (2 * max_p).max(50);
-    if len - first < needed {
-        return Err(EmdError::NotEnoughValidData {
-            needed,
-            valid: len - first,
-        });
-    }
+    validate_batch_params(&combos, len, first)?;
 
     {
         let mut ub_mu = unsafe {

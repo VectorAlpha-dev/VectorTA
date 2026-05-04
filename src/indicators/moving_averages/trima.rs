@@ -10,8 +10,7 @@ use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -562,6 +561,7 @@ pub fn trima_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) 
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx2")]
 pub unsafe fn trima_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     debug_assert_eq!(data.len(), out.len());
     let n = data.len();
@@ -630,6 +630,7 @@ pub unsafe fn trima_avx2(data: &[f64], period: usize, first: usize, out: &mut [f
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx512f")]
 pub unsafe fn trima_avx512_short(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     debug_assert_eq!(data.len(), out.len());
     let n = data.len();
@@ -696,6 +697,7 @@ pub unsafe fn trima_avx512_short(data: &[f64], period: usize, first: usize, out:
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+#[target_feature(enable = "avx512f")]
 pub unsafe fn trima_avx512_long(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     trima_avx512_short(data, period, first, out)
 }

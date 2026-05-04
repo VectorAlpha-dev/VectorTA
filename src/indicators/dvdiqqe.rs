@@ -157,6 +157,14 @@ pub struct DvdiqqeOutput {
     pub center_line: Vec<f64>,
 }
 
+#[derive(Copy, Clone, Debug)]
+pub enum DvdiqqeOutputField {
+    Dvdi,
+    FastTl,
+    SlowTl,
+    CenterLine,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -632,6 +640,200 @@ fn dvdiqqe_compute_into(
     } else {
         for i in warmup..len {
             center_out[i] = 0.0;
+        }
+    }
+
+    Ok(())
+}
+
+#[inline(always)]
+fn dvdiqqe_build_raw_dvdi(
+    open: &[f64],
+    close: &[f64],
+    volume_opt: Option<&[f64]>,
+    period: usize,
+    smoothing_period: usize,
+    volume_type: &str,
+    tick: f64,
+    kernel: Kernel,
+) -> Result<Vec<f64>, DvdiqqeError> {
+    let len = close.len();
+    let mut pvi = alloc_with_nan_prefix(len, 0);
+    let mut nvi = alloc_with_nan_prefix(len, 0);
+
+    let mut pvi_prev = 0.0f64;
+    let mut nvi_prev = 0.0f64;
+    let mut prev_vol = 0.0f64;
+    let mut prev_close = 0.0f64;
+    let mut tickrng_prev = tick;
+    let use_tick_only = volume_type.eq_ignore_ascii_case("tick");
+
+    for i in 0..len {
+        let oi = open[i];
+        let ci = close[i];
+
+        let rng = ci - oi;
+        let tickrng = if rng.abs() < tick { tickrng_prev } else { rng };
+        let tick_vol = (tickrng.abs() / tick).max(0.0);
+
+        let sel_vol = if use_tick_only {
+            tick_vol
+        } else if let Some(vs) = volume_opt {
+            let vv = vs[i];
+            if vv.is_finite() {
+                vv
+            } else {
+                tick_vol
+            }
+        } else {
+            tick_vol
+        };
+
+        let d_close = ci - prev_close;
+        if sel_vol > prev_vol {
+            pvi_prev += d_close;
+        }
+        if sel_vol < prev_vol {
+            nvi_prev -= d_close;
+        }
+
+        pvi[i] = pvi_prev;
+        nvi[i] = nvi_prev;
+        prev_close = ci;
+        prev_vol = sel_vol;
+        tickrng_prev = tickrng;
+    }
+
+    let pvi_ema = {
+        let prm = EmaParams {
+            period: Some(period),
+        };
+        let inp = EmaInput::from_slice(&pvi, prm);
+        ema_with_kernel(&inp, kernel).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
+    };
+    let nvi_ema = {
+        let prm = EmaParams {
+            period: Some(period),
+        };
+        let inp = EmaInput::from_slice(&nvi, prm);
+        ema_with_kernel(&inp, kernel).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
+    };
+
+    for i in 0..len {
+        pvi[i] = pvi[i] - pvi_ema.values[i];
+        nvi[i] = nvi[i] - nvi_ema.values[i];
+    }
+
+    let pdiv_ema = {
+        let prm = EmaParams {
+            period: Some(smoothing_period),
+        };
+        let inp = EmaInput::from_slice(&pvi, prm);
+        ema_with_kernel(&inp, kernel).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
+    };
+    let ndiv_ema = {
+        let prm = EmaParams {
+            period: Some(smoothing_period),
+        };
+        let inp = EmaInput::from_slice(&nvi, prm);
+        ema_with_kernel(&inp, kernel).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
+    };
+
+    let mut dvdi = alloc_with_nan_prefix(len, 0);
+    for i in 0..len {
+        dvdi[i] = pdiv_ema.values[i] - ndiv_ema.values[i];
+    }
+
+    Ok(dvdi)
+}
+
+#[inline]
+pub fn dvdiqqe_output_into_slice(
+    dst: &mut [f64],
+    input: &DvdiqqeInput,
+    kernel: Kernel,
+    field: DvdiqqeOutputField,
+) -> Result<(), DvdiqqeError> {
+    let (o, _h, _l, c, v, period, smoothing, fast, slow, vt, ct, tick, first) =
+        dvdiqqe_prepare(input)?;
+
+    let len = c.len();
+    if dst.len() != len {
+        return Err(DvdiqqeError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
+        });
+    }
+
+    let wper = (period * 2) - 1;
+    let warmup = first + wper;
+    let dvdi = dvdiqqe_build_raw_dvdi(o, c, v, period, smoothing, vt, tick, kernel)?;
+
+    for i in 0..warmup.min(len) {
+        dst[i] = f64::NAN;
+    }
+
+    match field {
+        DvdiqqeOutputField::Dvdi => {
+            if warmup < len {
+                dst[warmup..].copy_from_slice(&dvdi[warmup..]);
+            }
+        }
+        DvdiqqeOutputField::CenterLine => {
+            if ct.eq_ignore_ascii_case("dynamic") {
+                let mut sum = 0.0f64;
+                let mut cnt = 0.0f64;
+                for i in warmup..len {
+                    let value = dvdi[i];
+                    if value.is_finite() {
+                        sum += value;
+                        cnt += 1.0;
+                    }
+                    dst[i] = if cnt > 0.0 { sum / cnt } else { f64::NAN };
+                }
+            } else {
+                for i in warmup..len {
+                    dst[i] = 0.0;
+                }
+            }
+        }
+        DvdiqqeOutputField::FastTl | DvdiqqeOutputField::SlowTl => {
+            let mut ranges = alloc_with_nan_prefix(len, 1);
+            for i in 1..len {
+                ranges[i] = (dvdi[i] - dvdi[i - 1]).abs();
+            }
+
+            let avg_range = {
+                let prm = EmaParams { period: Some(wper) };
+                let inp = EmaInput::from_slice(&ranges, prm);
+                ema_with_kernel(&inp, Kernel::Auto)
+                    .map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
+            };
+            let smooth_range = {
+                let prm = EmaParams { period: Some(wper) };
+                let inp = EmaInput::from_slice(&avg_range.values, prm);
+                ema_with_kernel(&inp, Kernel::Auto)
+                    .map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
+            };
+
+            if warmup < len {
+                let multiplier = match field {
+                    DvdiqqeOutputField::FastTl => fast,
+                    DvdiqqeOutputField::SlowTl => slow,
+                    _ => unreachable!(),
+                };
+                dst[warmup] = dvdi[warmup];
+                for i in (warmup + 1)..len {
+                    let range = smooth_range.values[i] * multiplier;
+                    if dvdi[i] > dst[i - 1] {
+                        let nv = dvdi[i] - range;
+                        dst[i] = if nv < dst[i - 1] { dst[i - 1] } else { nv };
+                    } else {
+                        let nv = dvdi[i] + range;
+                        dst[i] = if nv > dst[i - 1] { dst[i - 1] } else { nv };
+                    }
+                }
+            }
         }
     }
 

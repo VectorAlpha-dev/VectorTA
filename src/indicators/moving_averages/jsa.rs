@@ -193,10 +193,7 @@ fn jsa_compute_into(data: &[f64], period: usize, first: usize, k: Kernel, out: &
 }
 
 pub fn jsa_with_kernel(input: &JsaInput, kernel: Kernel) -> Result<JsaOutput, JsaError> {
-    let data: &[f64] = match &input.data {
-        JsaData::Candles { candles, source } => source_type(candles, source),
-        JsaData::Slice(sl) => sl,
-    };
+    let data: &[f64] = input.as_ref();
 
     if data.is_empty() {
         return Err(JsaError::EmptyInputData);
@@ -226,10 +223,7 @@ pub fn jsa_with_kernel(input: &JsaInput, kernel: Kernel) -> Result<JsaOutput, Js
         .checked_add(period)
         .ok_or(JsaError::ArithmeticOverflow)?;
     let mut out = alloc_with_nan_prefix(len, warm);
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        k => k,
-    };
+    let chosen = choose_jsa_kernel(kernel);
     jsa_compute_into(data, period, first, chosen, &mut out);
     Ok(JsaOutput { values: out })
 }
@@ -250,10 +244,7 @@ pub fn jsa_with_kernel_into(
     kernel: Kernel,
     out: &mut [f64],
 ) -> Result<(), JsaError> {
-    let data: &[f64] = match &input.data {
-        JsaData::Candles { candles, source } => source_type(candles, source),
-        JsaData::Slice(sl) => sl,
-    };
+    let data: &[f64] = input.as_ref();
 
     if data.is_empty() {
         return Err(JsaError::EmptyInputData);
@@ -291,12 +282,19 @@ pub fn jsa_with_kernel_into(
 
     out[..warm].fill(f64::NAN);
 
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        k => k,
-    };
+    let chosen = choose_jsa_kernel(kernel);
     jsa_compute_into(data, period, first, chosen, out);
     Ok(())
+}
+
+#[inline(always)]
+fn choose_jsa_kernel(kernel: Kernel) -> Kernel {
+    match kernel {
+        Kernel::Auto | Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+            Kernel::Scalar
+        }
+        k => k,
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

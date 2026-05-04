@@ -293,6 +293,26 @@ fn max_consecutive_valid_values(data: &[f64]) -> usize {
 }
 
 #[inline(always)]
+fn valid_run_until(data: &[f64], needed: usize) -> usize {
+    let mut best = 0usize;
+    let mut run = 0usize;
+    for &value in data {
+        if value.is_finite() {
+            run += 1;
+            if run > best {
+                best = run;
+                if best >= needed {
+                    return best;
+                }
+            }
+        } else {
+            run = 0;
+        }
+    }
+    best
+}
+
+#[inline(always)]
 fn resolve_params(
     params: &NormalizedResonatorParams,
 ) -> Result<ResolvedParams, NormalizedResonatorError> {
@@ -398,6 +418,70 @@ impl RollingAbsMax {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct RollingAbsMax100 {
+    indices: [usize; 101],
+    values: [f64; 101],
+    head: usize,
+    len: usize,
+    next_index: usize,
+}
+
+impl RollingAbsMax100 {
+    #[inline]
+    fn new() -> Self {
+        Self {
+            indices: [0; 101],
+            values: [0.0; 101],
+            head: 0,
+            len: 0,
+            next_index: 0,
+        }
+    }
+
+    #[inline]
+    fn reset(&mut self) {
+        self.head = 0;
+        self.len = 0;
+        self.next_index = 0;
+    }
+
+    #[inline]
+    fn update(&mut self, value: f64) -> f64 {
+        let index = self.next_index;
+        self.next_index = self.next_index.wrapping_add(1);
+
+        while self.len > 0 {
+            let back = (self.head + self.len - 1) % 101;
+            if self.values[back] <= value {
+                self.len -= 1;
+            } else {
+                break;
+            }
+        }
+
+        let tail = (self.head + self.len) % 101;
+        self.indices[tail] = index;
+        self.values[tail] = value;
+        self.len += 1;
+
+        let min_index = index.saturating_add(1).saturating_sub(DEFAULT_PERIOD);
+        while self.len > 0 && self.indices[self.head] < min_index {
+            self.head += 1;
+            if self.head == 101 {
+                self.head = 0;
+            }
+            self.len -= 1;
+        }
+
+        if self.len > 0 {
+            self.values[self.head]
+        } else {
+            0.0
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct NormalizedResonatorStream {
     params: ResolvedParams,
@@ -415,7 +499,12 @@ impl NormalizedResonatorStream {
     #[inline]
     pub fn try_new(params: NormalizedResonatorParams) -> Result<Self, NormalizedResonatorError> {
         let params = resolve_params(&params)?;
-        Ok(Self {
+        Ok(Self::from_resolved(params))
+    }
+
+    #[inline]
+    fn from_resolved(params: ResolvedParams) -> Self {
+        Self {
             src_prev1: 0.0,
             src_prev2: 0.0,
             src_count: 0,
@@ -425,7 +514,7 @@ impl NormalizedResonatorStream {
             ema_value: 0.0,
             ema_seeded: false,
             params,
-        })
+        }
     }
 
     #[inline]
@@ -513,7 +602,7 @@ fn normalized_resonator_prepare<'a>(
     }
 
     let params = resolve_params(&input.params)?;
-    let valid = max_consecutive_valid_values(data);
+    let valid = valid_run_until(data, MIN_VALID_SAMPLES);
     if valid < MIN_VALID_SAMPLES {
         return Err(NormalizedResonatorError::NotEnoughValidData {
             needed: MIN_VALID_SAMPLES,
@@ -522,7 +611,7 @@ fn normalized_resonator_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other.to_non_batch(),
     };
     Ok((data, first, params, chosen))
@@ -535,13 +624,17 @@ fn normalized_resonator_row_from_slice(
     oscillator_out: &mut [f64],
     signal_out: &mut [f64],
 ) {
-    let mut stream = NormalizedResonatorStream::try_new(NormalizedResonatorParams {
-        period: Some(params.period),
-        delta: Some(params.delta),
-        lookback_mult: Some(params.lookback_mult),
-        signal_length: Some(params.signal_length),
-    })
-    .unwrap();
+    if params.period == DEFAULT_PERIOD
+        && params.delta == DEFAULT_DELTA
+        && params.lookback_mult == DEFAULT_LOOKBACK_MULT
+        && params.signal_length == DEFAULT_SIGNAL_LENGTH
+        && params.peak_lookback == DEFAULT_PERIOD
+    {
+        normalized_resonator_default_row(data, params, oscillator_out, signal_out);
+        return;
+    }
+
+    let mut stream = NormalizedResonatorStream::from_resolved(params);
 
     for ((oscillator_slot, signal_slot), &value) in oscillator_out
         .iter_mut()
@@ -555,6 +648,82 @@ fn normalized_resonator_row_from_slice(
             *oscillator_slot = f64::NAN;
             *signal_slot = f64::NAN;
         }
+    }
+}
+
+#[inline(always)]
+fn normalized_resonator_default_row(
+    data: &[f64],
+    params: ResolvedParams,
+    oscillator_out: &mut [f64],
+    signal_out: &mut [f64],
+) {
+    let mut src_prev1 = 0.0;
+    let mut src_prev2 = 0.0;
+    let mut src_count = 0usize;
+    let mut bp_prev1 = 0.0;
+    let mut bp_prev2 = 0.0;
+    let mut peak_window = RollingAbsMax100::new();
+    let mut ema_value = 0.0;
+    let mut ema_seeded = false;
+
+    let mut i = 0usize;
+    while i < data.len() {
+        let value = data[i];
+        if !value.is_finite() {
+            src_prev1 = 0.0;
+            src_prev2 = 0.0;
+            src_count = 0;
+            bp_prev1 = 0.0;
+            bp_prev2 = 0.0;
+            peak_window.reset();
+            ema_value = 0.0;
+            ema_seeded = false;
+            oscillator_out[i] = f64::NAN;
+            signal_out[i] = f64::NAN;
+            i += 1;
+            continue;
+        }
+
+        if src_count >= 2 {
+            let bp =
+                params.gain * (value - src_prev2) + params.c1 * bp_prev1 + params.c2 * bp_prev2;
+            let peak = peak_window.update(bp.abs());
+            let oscillator = if peak > 0.0 { bp / peak } else { 0.0 };
+            let signal = if ema_seeded {
+                ema_value += params.ema_alpha * (oscillator - ema_value);
+                ema_value
+            } else {
+                ema_value = oscillator;
+                ema_seeded = true;
+                oscillator
+            };
+            bp_prev2 = bp_prev1;
+            bp_prev1 = bp;
+            oscillator_out[i] = oscillator;
+            signal_out[i] = signal;
+        } else {
+            oscillator_out[i] = f64::NAN;
+            signal_out[i] = f64::NAN;
+        }
+
+        match src_count {
+            0 => {
+                src_prev1 = value;
+                src_count = 1;
+            }
+            1 => {
+                src_prev2 = src_prev1;
+                src_prev1 = value;
+                src_count = 2;
+            }
+            _ => {
+                src_prev2 = src_prev1;
+                src_prev1 = value;
+            }
+        }
+
+        i += 1;
     }
 }
 

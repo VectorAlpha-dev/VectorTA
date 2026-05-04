@@ -192,11 +192,10 @@ pub fn minmax_into_slice(
             candles,
             high_src,
             low_src,
-        } => {
-            let h = source_type(candles, high_src);
-            let l = source_type(candles, low_src);
-            (h, l)
-        }
+        } => (
+            minmax_source(candles, high_src),
+            minmax_source(candles, low_src),
+        ),
         MinmaxData::Slices { high, low } => (*high, *low),
     };
 
@@ -230,11 +229,7 @@ pub fn minmax_into_slice(
         });
     }
 
-    let first_valid_idx = high
-        .iter()
-        .zip(low.iter())
-        .position(|(&h, &l)| !(h.is_nan() || l.is_nan()))
-        .ok_or(MinmaxError::AllValuesNaN)?;
+    let first_valid_idx = first_valid_pair(high, low).ok_or(MinmaxError::AllValuesNaN)?;
 
     if (len - first_valid_idx) < order {
         return Err(MinmaxError::NotEnoughValidData {
@@ -334,11 +329,10 @@ pub fn minmax_with_kernel(
             candles,
             high_src,
             low_src,
-        } => {
-            let h = source_type(candles, high_src);
-            let l = source_type(candles, low_src);
-            (h, l)
-        }
+        } => (
+            minmax_source(candles, high_src),
+            minmax_source(candles, low_src),
+        ),
         MinmaxData::Slices { high, low } => (*high, *low),
     };
 
@@ -359,11 +353,7 @@ pub fn minmax_with_kernel(
             data_len: len,
         });
     }
-    let first_valid_idx = high
-        .iter()
-        .zip(low.iter())
-        .position(|(&h, &l)| !(h.is_nan() || l.is_nan()))
-        .ok_or(MinmaxError::AllValuesNaN)?;
+    let first_valid_idx = first_valid_pair(high, low).ok_or(MinmaxError::AllValuesNaN)?;
 
     if (len - first_valid_idx) < order {
         return Err(MinmaxError::NotEnoughValidData {
@@ -722,6 +712,19 @@ pub fn minmax_scalar(
         last_max[i] = f64::NAN;
     }
 
+    if order == 3 && len >= 50_000 {
+        minmax_scalar_order_3(
+            high,
+            low,
+            first_valid_idx,
+            is_min,
+            is_max,
+            last_min,
+            last_max,
+        );
+        return;
+    }
+
     const SMALL_ORDER_THRESHOLD: usize = 8;
     if order <= SMALL_ORDER_THRESHOLD {
         let mut last_min_val = f64::NAN;
@@ -910,6 +913,133 @@ pub fn minmax_scalar(
             }
             *last_min.get_unchecked_mut(i) = last_min_val;
             *last_max.get_unchecked_mut(i) = last_max_val;
+        }
+    }
+}
+
+#[inline(always)]
+fn minmax_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "close" => &candles.close,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
+    }
+}
+
+#[inline(always)]
+fn first_valid_pair(high: &[f64], low: &[f64]) -> Option<usize> {
+    let len = high.len();
+    let mut i = 0usize;
+    unsafe {
+        let high_ptr = high.as_ptr();
+        let low_ptr = low.as_ptr();
+        while i < len {
+            if !(*high_ptr.add(i)).is_nan() && !(*low_ptr.add(i)).is_nan() {
+                return Some(i);
+            }
+            i += 1;
+        }
+    }
+    None
+}
+
+#[inline(always)]
+fn minmax_scalar_order_3(
+    high: &[f64],
+    low: &[f64],
+    first_valid_idx: usize,
+    is_min: &mut [f64],
+    is_max: &mut [f64],
+    last_min: &mut [f64],
+    last_max: &mut [f64],
+) {
+    let len = high.len();
+    let mut last_min_val = f64::NAN;
+    let mut last_max_val = f64::NAN;
+
+    unsafe {
+        let high_ptr = high.as_ptr();
+        let low_ptr = low.as_ptr();
+        let is_min_ptr = is_min.as_mut_ptr();
+        let is_max_ptr = is_max.as_mut_ptr();
+        let last_min_ptr = last_min.as_mut_ptr();
+        let last_max_ptr = last_max.as_mut_ptr();
+
+        for i in first_valid_idx..len {
+            let mut min_here = f64::NAN;
+            let mut max_here = f64::NAN;
+
+            if i >= 3 && i + 3 < len {
+                let ch = *high_ptr.add(i);
+                let cl = *low_ptr.add(i);
+                if ch.is_finite() & cl.is_finite() {
+                    let ll1 = *low_ptr.add(i - 1);
+                    let ll2 = *low_ptr.add(i - 2);
+                    let ll3 = *low_ptr.add(i - 3);
+                    let rl1 = *low_ptr.add(i + 1);
+                    let rl2 = *low_ptr.add(i + 2);
+                    let rl3 = *low_ptr.add(i + 3);
+
+                    let lh1 = *high_ptr.add(i - 1);
+                    let lh2 = *high_ptr.add(i - 2);
+                    let lh3 = *high_ptr.add(i - 3);
+                    let rh1 = *high_ptr.add(i + 1);
+                    let rh2 = *high_ptr.add(i + 2);
+                    let rh3 = *high_ptr.add(i + 3);
+
+                    if ll1.is_finite()
+                        & ll2.is_finite()
+                        & ll3.is_finite()
+                        & rl1.is_finite()
+                        & rl2.is_finite()
+                        & rl3.is_finite()
+                        & (cl < ll1)
+                        & (cl < ll2)
+                        & (cl < ll3)
+                        & (cl < rl1)
+                        & (cl < rl2)
+                        & (cl < rl3)
+                    {
+                        min_here = cl;
+                    }
+
+                    if lh1.is_finite()
+                        & lh2.is_finite()
+                        & lh3.is_finite()
+                        & rh1.is_finite()
+                        & rh2.is_finite()
+                        & rh3.is_finite()
+                        & (ch > lh1)
+                        & (ch > lh2)
+                        & (ch > lh3)
+                        & (ch > rh1)
+                        & (ch > rh2)
+                        & (ch > rh3)
+                    {
+                        max_here = ch;
+                    }
+                }
+            }
+
+            *is_min_ptr.add(i) = min_here;
+            *is_max_ptr.add(i) = max_here;
+
+            if min_here.is_finite() {
+                last_min_val = min_here;
+            }
+            if max_here.is_finite() {
+                last_max_val = max_here;
+            }
+
+            *last_min_ptr.add(i) = last_min_val;
+            *last_max_ptr.add(i) = last_max_val;
         }
     }
 }

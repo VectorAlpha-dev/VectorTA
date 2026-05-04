@@ -132,7 +132,17 @@ impl<'a> AsRef<[f64]> for FwmaInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             FwmaData::Slice(slice) => slice,
-            FwmaData::Candles { candles, source } => source_type(candles, source),
+            FwmaData::Candles { candles, source } => match *source {
+                "close" => candles.close.as_slice(),
+                "open" => candles.open.as_slice(),
+                "high" => candles.high.as_slice(),
+                "low" => candles.low.as_slice(),
+                "volume" => candles.volume.as_slice(),
+                "hl2" => candles.hl2.as_slice(),
+                "hlc3" => candles.hlc3.as_slice(),
+                "ohlc4" => candles.ohlc4.as_slice(),
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -339,6 +349,57 @@ fn fwma_prepare<'a>(
 }
 
 #[inline(always)]
+fn fwma_prepare_period5<'a>(
+    input: &'a FwmaInput,
+    kernel: Kernel,
+) -> Result<Option<(&'a [f64], usize, Kernel)>, FwmaError> {
+    let period = input.get_period();
+    if period != 5 {
+        return Ok(None);
+    }
+
+    let data: &[f64] = input.as_ref();
+    let len = data.len();
+    if len == 0 {
+        return Err(FwmaError::EmptyInputData);
+    }
+    let first = data
+        .iter()
+        .position(|x| !x.is_nan())
+        .ok_or(FwmaError::AllValuesNaN)?;
+    if period > len {
+        return Err(FwmaError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
+    }
+    if len - first < 5 {
+        return Err(FwmaError::NotEnoughValidData {
+            needed: 5,
+            valid: len - first,
+        });
+    }
+
+    let chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+    if matches!(
+        chosen,
+        Kernel::Scalar
+            | Kernel::ScalarBatch
+            | Kernel::Avx2
+            | Kernel::Avx2Batch
+            | Kernel::Avx512
+            | Kernel::Avx512Batch
+    ) {
+        Ok(Some((data, first, chosen)))
+    } else {
+        Ok(None)
+    }
+}
+
+#[inline(always)]
 fn fwma_compute_into(
     data: &[f64],
     fib: &[f64],
@@ -347,6 +408,21 @@ fn fwma_compute_into(
     kernel: Kernel,
     out: &mut [f64],
 ) {
+    if period == 5
+        && matches!(
+            kernel,
+            Kernel::Scalar
+                | Kernel::ScalarBatch
+                | Kernel::Avx2
+                | Kernel::Avx2Batch
+                | Kernel::Avx512
+                | Kernel::Avx512Batch
+        )
+    {
+        unsafe { fwma_scalar_period5(data, first, out) };
+        return;
+    }
+
     unsafe {
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
@@ -372,6 +448,13 @@ fn fwma_compute_into(
 }
 
 pub fn fwma_with_kernel(input: &FwmaInput, kernel: Kernel) -> Result<FwmaOutput, FwmaError> {
+    if let Some((data, first, _chosen)) = fwma_prepare_period5(input, kernel)? {
+        let warm = first + 4;
+        let mut out = alloc_with_nan_prefix(data.len(), warm);
+        unsafe { fwma_scalar_period5(data, first, &mut out) };
+        return Ok(FwmaOutput { values: out });
+    }
+
     let (data, fib, period, first, chosen) = fwma_prepare(input, kernel)?;
 
     let warm = first + period - 1;
@@ -384,6 +467,21 @@ pub fn fwma_with_kernel(input: &FwmaInput, kernel: Kernel) -> Result<FwmaOutput,
 
 #[inline]
 pub fn fwma_into_slice(dst: &mut [f64], input: &FwmaInput, kern: Kernel) -> Result<(), FwmaError> {
+    if let Some((data, first, _chosen)) = fwma_prepare_period5(input, kern)? {
+        if dst.len() != data.len() {
+            return Err(FwmaError::OutputLengthMismatch {
+                expected: data.len(),
+                got: dst.len(),
+            });
+        }
+        let warmup_end = (first + 4).min(dst.len());
+        for v in &mut dst[..warmup_end] {
+            *v = f64::from_bits(0x7ff8_0000_0000_0000);
+        }
+        unsafe { fwma_scalar_period5(data, first, dst) };
+        return Ok(());
+    }
+
     let (data, fib, period, first, chosen) = fwma_prepare(input, kern)?;
 
     if dst.len() != data.len() {
@@ -406,6 +504,21 @@ pub fn fwma_into_slice(dst: &mut [f64], input: &FwmaInput, kern: Kernel) -> Resu
 #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn fwma_into(input: &FwmaInput, out: &mut [f64]) -> Result<(), FwmaError> {
+    if let Some((data, first, _chosen)) = fwma_prepare_period5(input, Kernel::Auto)? {
+        if out.len() != data.len() {
+            return Err(FwmaError::OutputLengthMismatch {
+                expected: data.len(),
+                got: out.len(),
+            });
+        }
+        let warm = (first + 4).min(out.len());
+        for v in &mut out[..warm] {
+            *v = f64::from_bits(0x7ff8_0000_0000_0000);
+        }
+        unsafe { fwma_scalar_period5(data, first, out) };
+        return Ok(());
+    }
+
     let (data, fib, period, first, chosen) = fwma_prepare(input, Kernel::Auto)?;
 
     if out.len() != data.len() {
@@ -422,6 +535,25 @@ pub fn fwma_into(input: &FwmaInput, out: &mut [f64]) -> Result<(), FwmaError> {
 
     fwma_compute_into(data, &fib, period, first, chosen, out);
     Ok(())
+}
+
+#[inline(always)]
+unsafe fn fwma_scalar_period5(data: &[f64], first_val: usize, out: &mut [f64]) {
+    assert!(
+        out.len() >= data.len(),
+        "out must be at least as long as data"
+    );
+    let w0 = 1.0 / 12.0;
+    let w1 = 1.0 / 12.0;
+    let w2 = 2.0 / 12.0;
+    let w3 = 3.0 / 12.0;
+    let w4 = 5.0 / 12.0;
+    for i in (first_val + 4)..data.len() {
+        let start = i - 4;
+        let sum =
+            data[start] * w0 + data[start + 1] * w1 + data[start + 2] * w2 + data[start + 3] * w3;
+        out[i] = sum + data[start + 4] * w4;
+    }
 }
 
 #[inline(always)]

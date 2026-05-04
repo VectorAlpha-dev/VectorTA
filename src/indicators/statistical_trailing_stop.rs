@@ -14,9 +14,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, make_uninit_matrix,
-};
+use crate::utilities::helpers::{alloc_uninit_f64, detect_best_batch_kernel, make_uninit_matrix};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
@@ -330,7 +328,7 @@ struct PreparedInput<'a> {
     data_length: usize,
     normalization_length: usize,
     base_level_index: usize,
-    warmup: usize,
+    all_finite: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -432,13 +430,8 @@ impl RingHistory {
     }
 
     #[inline(always)]
-    fn get_from_end(&self, offset: usize) -> Option<f64> {
-        if offset == 0 || offset > self.count {
-            return None;
-        }
-        let len = self.values.len();
-        let idx = (self.head + len - offset) % len;
-        Some(self.values[idx])
+    fn oldest(&self) -> f64 {
+        self.values[self.head]
     }
 }
 
@@ -449,17 +442,20 @@ struct RollingStats {
     count: usize,
     sum: f64,
     sum_sq: f64,
+    inv_len: f64,
 }
 
 impl RollingStats {
     #[inline(always)]
     fn new(length: usize) -> Self {
+        let len = length.max(1);
         Self {
-            ring: vec![0.0; length.max(1)],
+            ring: vec![0.0; len],
             head: 0,
             count: 0,
             sum: 0.0,
             sum_sq: 0.0,
+            inv_len: 1.0 / len as f64,
         }
     }
 
@@ -473,6 +469,7 @@ impl RollingStats {
 
     #[inline(always)]
     fn push(&mut self, value: f64) -> Option<(f64, f64)> {
+        let value_sq = value * value;
         if self.count < self.ring.len() {
             self.ring[self.head] = value;
             self.head += 1;
@@ -481,7 +478,7 @@ impl RollingStats {
             }
             self.count += 1;
             self.sum += value;
-            self.sum_sq += value * value;
+            self.sum_sq += value_sq;
         } else {
             let old = self.ring[self.head];
             self.ring[self.head] = value;
@@ -490,17 +487,18 @@ impl RollingStats {
                 self.head = 0;
             }
             self.sum += value - old;
-            self.sum_sq += value * value - old * old;
+            self.sum_sq += value_sq - old * old;
         }
         if self.count < self.ring.len() {
             return None;
         }
-        let n = self.ring.len() as f64;
-        let mean = self.sum / n;
-        let variance = (self.sum_sq / n - mean * mean).max(0.0);
+        let mean = self.sum * self.inv_len;
+        let variance = (self.sum_sq * self.inv_len - mean * mean).max(0.0);
         Some((mean, variance.sqrt()))
     }
 }
+
+type StatisticalTrailingStopValues = (f64, f64, f64, f64);
 
 #[derive(Clone, Debug)]
 struct StatisticalTrailingStopState {
@@ -561,12 +559,23 @@ impl StatisticalTrailingStopState {
         high: f64,
         low: f64,
         close: f64,
-    ) -> Option<(f64, f64, f64, f64)> {
+    ) -> Option<StatisticalTrailingStopValues> {
         if !high.is_finite() || !low.is_finite() || !close.is_finite() {
             self.reset();
             return None;
         }
 
+        self.update_finite(index, high, low, close)
+    }
+
+    #[inline(always)]
+    fn update_finite(
+        &mut self,
+        index: usize,
+        high: f64,
+        low: f64,
+        close: f64,
+    ) -> Option<StatisticalTrailingStopValues> {
         self.valid_run += 1;
         self.max_high.push(index, high);
         self.min_low.push(index, low);
@@ -579,7 +588,7 @@ impl StatisticalTrailingStopState {
             return None;
         }
 
-        let previous_close = self.close_history.get_from_end(self.data_length + 2)?;
+        let previous_close = self.close_history.oldest();
         let highest = self.max_high.front_value();
         let lowest = self.min_low.front_value();
         let tr = (highest - lowest)
@@ -876,7 +885,7 @@ fn prepare_input<'a>(
         data_length,
         normalization_length,
         base_level_index,
-        warmup: first_valid + needed - 1,
+        all_finite: first_valid == 0 && max_run == close.len(),
     })
 }
 
@@ -885,7 +894,10 @@ fn compute_row(
     high: &[f64],
     low: &[f64],
     close: &[f64],
-    params: &StatisticalTrailingStopParams,
+    data_length: usize,
+    normalization_length: usize,
+    base_level_index: usize,
+    all_finite: bool,
     level_out: &mut [f64],
     anchor_out: &mut [f64],
     bias_out: &mut [f64],
@@ -908,30 +920,56 @@ fn compute_row(
         });
     }
 
-    let data_length = params.data_length.unwrap_or(DEFAULT_DATA_LENGTH);
-    let normalization_length = params
-        .normalization_length
-        .unwrap_or(DEFAULT_NORMALIZATION_LENGTH);
-    validate_periods(data_length, normalization_length, len)?;
-    let base_level_index =
-        parse_base_level(params.base_level.as_deref().unwrap_or(DEFAULT_BASE_LEVEL))?;
-
     let mut state =
         StatisticalTrailingStopState::new(data_length, normalization_length, base_level_index);
-    for i in 0..len {
-        if let Some((level, anchor, bias, changed)) = state.update(i, high[i], low[i], close[i]) {
-            level_out[i] = level;
-            anchor_out[i] = anchor;
-            bias_out[i] = bias;
-            changed_out[i] = changed;
-        } else {
-            level_out[i] = f64::NAN;
-            anchor_out[i] = f64::NAN;
-            bias_out[i] = f64::NAN;
-            changed_out[i] = f64::NAN;
+
+    if all_finite {
+        for i in 0..len {
+            write_statistical_trailing_stop_values(
+                i,
+                state.update_finite(i, high[i], low[i], close[i]),
+                level_out,
+                anchor_out,
+                bias_out,
+                changed_out,
+            );
         }
+        return Ok(());
+    }
+
+    for i in 0..len {
+        write_statistical_trailing_stop_values(
+            i,
+            state.update(i, high[i], low[i], close[i]),
+            level_out,
+            anchor_out,
+            bias_out,
+            changed_out,
+        );
     }
     Ok(())
+}
+
+#[inline(always)]
+fn write_statistical_trailing_stop_values(
+    i: usize,
+    values: Option<StatisticalTrailingStopValues>,
+    level_out: &mut [f64],
+    anchor_out: &mut [f64],
+    bias_out: &mut [f64],
+    changed_out: &mut [f64],
+) {
+    if let Some((level, anchor, bias, changed)) = values {
+        level_out[i] = level;
+        anchor_out[i] = anchor;
+        bias_out[i] = bias;
+        changed_out[i] = changed;
+    } else {
+        level_out[i] = f64::NAN;
+        anchor_out[i] = f64::NAN;
+        bias_out[i] = f64::NAN;
+        changed_out[i] = f64::NAN;
+    }
 }
 
 #[inline]
@@ -947,27 +985,18 @@ pub fn statistical_trailing_stop_with_kernel(
 ) -> Result<StatisticalTrailingStopOutput, StatisticalTrailingStopError> {
     let prepared = prepare_input(input, kernel)?;
     let len = prepared.close.len();
-    let mut level = alloc_with_nan_prefix(len, prepared.warmup);
-    let mut anchor = alloc_with_nan_prefix(len, prepared.warmup);
-    let mut bias = alloc_with_nan_prefix(len, prepared.warmup);
-    let mut changed = alloc_with_nan_prefix(len, prepared.warmup);
+    let mut level = alloc_uninit_f64(len);
+    let mut anchor = alloc_uninit_f64(len);
+    let mut bias = alloc_uninit_f64(len);
+    let mut changed = alloc_uninit_f64(len);
     compute_row(
         prepared.high,
         prepared.low,
         prepared.close,
-        &StatisticalTrailingStopParams {
-            data_length: Some(prepared.data_length),
-            normalization_length: Some(prepared.normalization_length),
-            base_level: Some(
-                match prepared.base_level_index {
-                    0 => "level0",
-                    1 => "level1",
-                    2 => "level2",
-                    _ => "level3",
-                }
-                .to_string(),
-            ),
-        },
+        prepared.data_length,
+        prepared.normalization_length,
+        prepared.base_level_index,
+        prepared.all_finite,
         &mut level,
         &mut anchor,
         &mut bias,
@@ -1012,19 +1041,10 @@ pub fn statistical_trailing_stop_into_slice(
         prepared.high,
         prepared.low,
         prepared.close,
-        &StatisticalTrailingStopParams {
-            data_length: Some(prepared.data_length),
-            normalization_length: Some(prepared.normalization_length),
-            base_level: Some(
-                match prepared.base_level_index {
-                    0 => "level0",
-                    1 => "level1",
-                    2 => "level2",
-                    _ => "level3",
-                }
-                .to_string(),
-            ),
-        },
+        prepared.data_length,
+        prepared.normalization_length,
+        prepared.base_level_index,
+        prepared.all_finite,
         level_out,
         anchor_out,
         bias_out,
@@ -1205,6 +1225,7 @@ fn statistical_trailing_stop_batch_inner_into(
         });
     }
     let (_, max_run) = analyze_valid_segments(high, low, close)?;
+    let all_finite = max_run == cols;
 
     for params in &combos {
         let data_length = params.data_length.unwrap_or(DEFAULT_DATA_LENGTH);
@@ -1231,7 +1252,17 @@ fn statistical_trailing_stop_batch_inner_into(
             high,
             low,
             close,
-            &combos[row],
+            combos[row].data_length.unwrap_or(DEFAULT_DATA_LENGTH),
+            combos[row]
+                .normalization_length
+                .unwrap_or(DEFAULT_NORMALIZATION_LENGTH),
+            parse_base_level(
+                combos[row]
+                    .base_level
+                    .as_deref()
+                    .unwrap_or(DEFAULT_BASE_LEVEL),
+            )?,
+            all_finite,
             level_row,
             anchor_row,
             bias_row,

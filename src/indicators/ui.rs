@@ -35,7 +35,10 @@ impl<'a> AsRef<[f64]> for UiInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             UiData::Slice(slice) => slice,
-            UiData::Candles { candles, source } => source_type(candles, source),
+            UiData::Candles { candles, source } => match *source {
+                "close" => candles.close.as_slice(),
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -237,7 +240,7 @@ pub fn ui_with_kernel(input: &UiInput, kernel: Kernel) -> Result<UiOutput, UiErr
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -307,7 +310,7 @@ pub fn ui_into(input: &UiInput, out: &mut [f64]) -> Result<(), UiError> {
         return Err(UiError::InvalidScalar { scalar });
     }
 
-    let chosen = detect_best_kernel();
+    let chosen = Kernel::Scalar;
 
     let span =
         period
@@ -377,7 +380,7 @@ pub fn ui_scalar(data: &[f64], period: usize, scalar: f64, first: usize, out: &m
     let mut sum = 0.0f64;
     let mut count = 0usize;
 
-    if false && period <= 64 {
+    if period <= 64 {
         let mut valid_mask: u64 = 0;
 
         for i in first..len {

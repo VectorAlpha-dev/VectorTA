@@ -502,7 +502,7 @@ fn resolve_params(
 fn prepare<'a>(
     input: &'a PremierRsiOscillatorInput<'a>,
     kernel: Kernel,
-) -> Result<(&'a [f64], ResolvedParams, usize, Kernel), PremierRsiOscillatorError> {
+) -> Result<(&'a [f64], ResolvedParams, usize, bool, Kernel), PremierRsiOscillatorError> {
     let data = input.as_ref();
     if data.is_empty() {
         return Err(PremierRsiOscillatorError::EmptyInputData);
@@ -519,17 +519,23 @@ fn prepare<'a>(
     if valid < needed {
         return Err(PremierRsiOscillatorError::NotEnoughValidData { needed, valid });
     }
+    let all_finite_after_first = valid == data.len() - first;
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other.to_non_batch(),
     };
-    Ok((data, params, first, chosen))
+    Ok((data, params, first, all_finite_after_first, chosen))
 }
 
 #[inline]
 fn row_from_slice(data: &[f64], params: ResolvedParams, out: &mut [f64]) {
     out.fill(f64::NAN);
+    row_from_slice_prefilled(data, params, out);
+}
+
+#[inline]
+fn row_from_slice_prefilled(data: &[f64], params: ResolvedParams, out: &mut [f64]) {
     let mut stream = PremierRsiOscillatorStream::new_resolved(params);
     for (i, &value) in data.iter().enumerate() {
         if let Some(out_value) = stream.update(value) {
@@ -543,10 +549,14 @@ pub fn premier_rsi_oscillator_with_kernel(
     input: &PremierRsiOscillatorInput,
     kernel: Kernel,
 ) -> Result<PremierRsiOscillatorOutput, PremierRsiOscillatorError> {
-    let (data, params, first, _chosen) = prepare(input, kernel)?;
+    let (data, params, first, all_finite_after_first, _chosen) = prepare(input, kernel)?;
     let warmup = first + params.rsi_length + params.stoch_length - 1;
     let mut values = alloc_with_nan_prefix(data.len(), warmup);
-    row_from_slice(data, params, &mut values);
+    if all_finite_after_first {
+        row_from_slice_prefilled(data, params, &mut values);
+    } else {
+        row_from_slice(data, params, &mut values);
+    }
     Ok(PremierRsiOscillatorOutput { values })
 }
 
@@ -556,14 +566,22 @@ pub fn premier_rsi_oscillator_into_slice(
     input: &PremierRsiOscillatorInput,
     kernel: Kernel,
 ) -> Result<(), PremierRsiOscillatorError> {
-    let (data, params, _first, _chosen) = prepare(input, kernel)?;
+    let (data, params, first, all_finite_after_first, _chosen) = prepare(input, kernel)?;
     if dst.len() != data.len() {
         return Err(PremierRsiOscillatorError::OutputLengthMismatch {
             expected: data.len(),
             got: dst.len(),
         });
     }
-    row_from_slice(data, params, dst);
+    if all_finite_after_first {
+        let warmup = first + params.rsi_length + params.stoch_length - 1;
+        for value in &mut dst[..warmup] {
+            *value = f64::NAN;
+        }
+        row_from_slice_prefilled(data, params, dst);
+    } else {
+        row_from_slice(data, params, dst);
+    }
     Ok(())
 }
 

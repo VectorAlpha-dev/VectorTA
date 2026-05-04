@@ -31,6 +31,22 @@ pub enum QstickData<'a> {
     },
 }
 
+#[inline(always)]
+fn qstick_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => candles.open.as_slice(),
+        "high" => candles.high.as_slice(),
+        "low" => candles.low.as_slice(),
+        "close" => candles.close.as_slice(),
+        "volume" => candles.volume.as_slice(),
+        "hl2" => candles.hl2.as_slice(),
+        "hlc3" => candles.hlc3.as_slice(),
+        "ohlc4" => candles.ohlc4.as_slice(),
+        "hlcc4" | "hlcc" => candles.hlcc4.as_slice(),
+        _ => source_type(candles, source),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct QstickOutput {
     pub values: Vec<f64>,
@@ -195,8 +211,8 @@ pub fn qstick_with_kernel(
             open_source,
             close_source,
         } => {
-            let open = source_type(candles, open_source);
-            let close = source_type(candles, close_source);
+            let open = qstick_source(candles, open_source);
+            let close = qstick_source(candles, close_source);
             (open, close)
         }
         QstickData::Slices { open, close } => (*open, *close),
@@ -271,8 +287,8 @@ pub fn qstick_into(input: &QstickInput, out: &mut [f64]) -> Result<(), QstickErr
             open_source,
             close_source,
         } => {
-            let open = source_type(candles, open_source);
-            let close = source_type(candles, close_source);
+            let open = qstick_source(candles, open_source);
+            let close = qstick_source(candles, close_source);
             (open, close)
         }
         QstickData::Slices { open, close } => (*open, *close),
@@ -728,8 +744,8 @@ impl QstickBatchBuilder {
         open_src: &str,
         close_src: &str,
     ) -> Result<QstickBatchOutput, QstickError> {
-        let open = source_type(c, open_src);
-        let close = source_type(c, close_src);
+        let open = qstick_source(c, open_src);
+        let close = qstick_source(c, close_src);
         self.apply_slices(open, close)
     }
     pub fn with_default_candles(c: &Candles) -> Result<QstickBatchOutput, QstickError> {

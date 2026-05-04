@@ -64,6 +64,20 @@ pub struct AdaptiveBoundsRsiOutput {
     pub upper_signal: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdaptiveBoundsRsiOutputField {
+    Rsi,
+    LowerBound,
+    LowerMid,
+    Mid,
+    UpperMid,
+    UpperBound,
+    Regime,
+    RegimeFlip,
+    LowerSignal,
+    UpperSignal,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -650,6 +664,46 @@ fn compute_into_slices(
         prev_c1 = Some(c1);
         prev_c5 = Some(c5);
         prev_regime = Some(regime);
+    }
+
+    Ok(())
+}
+
+pub fn adaptive_bounds_rsi_output_into_slice(
+    dst: &mut [f64],
+    input: &AdaptiveBoundsRsiInput<'_>,
+    kernel: Kernel,
+    field: AdaptiveBoundsRsiOutputField,
+) -> Result<(), AdaptiveBoundsRsiError> {
+    let prepared = prepare_input(input, kernel)?;
+    if dst.len() != prepared.len {
+        return Err(AdaptiveBoundsRsiError::OutputLengthMismatch {
+            expected: prepared.len,
+            got: dst.len(),
+        });
+    }
+    dst.fill(f64::NAN);
+
+    let mut stream = AdaptiveBoundsRsiStream::try_new(AdaptiveBoundsRsiParams {
+        rsi_length: Some(prepared.rsi_length),
+        alpha: Some(prepared.alpha),
+    })?;
+
+    for i in 0..prepared.len {
+        if let Some(point) = stream.update(prepared.data[i]) {
+            dst[i] = match field {
+                AdaptiveBoundsRsiOutputField::Rsi => point.rsi,
+                AdaptiveBoundsRsiOutputField::LowerBound => point.lower_bound,
+                AdaptiveBoundsRsiOutputField::LowerMid => point.lower_mid,
+                AdaptiveBoundsRsiOutputField::Mid => point.mid,
+                AdaptiveBoundsRsiOutputField::UpperMid => point.upper_mid,
+                AdaptiveBoundsRsiOutputField::UpperBound => point.upper_bound,
+                AdaptiveBoundsRsiOutputField::Regime => point.regime,
+                AdaptiveBoundsRsiOutputField::RegimeFlip => point.regime_flip,
+                AdaptiveBoundsRsiOutputField::LowerSignal => point.lower_signal,
+                AdaptiveBoundsRsiOutputField::UpperSignal => point.upper_signal,
+            };
+        }
     }
 
     Ok(())

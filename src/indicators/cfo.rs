@@ -209,7 +209,23 @@ impl From<CfoError> for JsValue {
 
 #[inline]
 pub fn cfo(input: &CfoInput) -> Result<CfoOutput, CfoError> {
-    cfo_with_kernel(input, Kernel::Auto)
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        cfo_with_kernel(input, cfo_auto_kernel())
+    }
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    {
+        cfo_with_kernel(input, Kernel::Auto)
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+fn cfo_auto_kernel() -> Kernel {
+    if is_x86_feature_detected!("avx512f") {
+        return Kernel::Avx512;
+    }
+    Kernel::Scalar
 }
 
 #[inline]
@@ -280,7 +296,14 @@ pub fn cfo_into_slice(dst: &mut [f64], input: &CfoInput, kernel: Kernel) -> Resu
 #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn cfo_into(input: &CfoInput, out: &mut [f64]) -> Result<(), CfoError> {
-    cfo_into_slice(out, input, Kernel::Auto)
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        cfo_into_slice(out, input, cfo_auto_kernel())
+    }
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    {
+        cfo_into_slice(out, input, Kernel::Auto)
+    }
 }
 
 pub fn cfo_with_kernel(input: &CfoInput, kernel: Kernel) -> Result<CfoOutput, CfoError> {

@@ -11,8 +11,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -203,10 +202,7 @@ pub fn nvi_with_kernel(input: &NviInput, kernel: Kernel) -> Result<NviOutput, Nv
             close_source,
         } => {
             let close = source_type(candles, close_source);
-            let volume = candles
-                .select_candle_field("volume")
-                .map_err(|_| NviError::EmptyInputData)?;
-            (close, volume)
+            (close, candles.volume.as_slice())
         }
         NviData::Slices { close, volume } => (*close, *volume),
     };
@@ -238,25 +234,16 @@ pub fn nvi_with_kernel(input: &NviInput, kernel: Kernel) -> Result<NviOutput, Nv
         });
     }
     let mut out = alloc_with_nan_prefix(close.len(), first);
-    let mut chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
+    let _chosen = match kernel {
+        Kernel::Auto
+        | Kernel::Scalar
+        | Kernel::ScalarBatch
+        | Kernel::Avx2
+        | Kernel::Avx2Batch
+        | Kernel::Avx512
+        | Kernel::Avx512Batch => Kernel::Scalar,
     };
-
-    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-    if matches!(kernel, Kernel::Auto) && matches!(chosen, Kernel::Avx512 | Kernel::Avx512Batch) {
-        chosen = Kernel::Avx2;
-    }
-    unsafe {
-        match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => nvi_scalar(close, volume, first, &mut out),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => nvi_avx2(close, volume, first, &mut out),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => nvi_avx512(close, volume, first, &mut out),
-            _ => unreachable!(),
-        }
-    }
+    nvi_scalar(close, volume, first, &mut out);
     Ok(NviOutput { values: out })
 }
 
@@ -269,10 +256,7 @@ pub fn nvi_into(input: &NviInput, out: &mut [f64]) -> Result<(), NviError> {
             close_source,
         } => {
             let close = source_type(candles, close_source);
-            let volume = candles
-                .select_candle_field("volume")
-                .map_err(|_| NviError::EmptyInputData)?;
-            (close, volume)
+            (close, candles.volume.as_slice())
         }
         NviData::Slices { close, volume } => (*close, *volume),
     };
@@ -322,25 +306,16 @@ pub fn nvi_into_slice(
         });
     }
 
-    let mut chosen = match kern {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
+    let _chosen = match kern {
+        Kernel::Auto
+        | Kernel::Scalar
+        | Kernel::ScalarBatch
+        | Kernel::Avx2
+        | Kernel::Avx2Batch
+        | Kernel::Avx512
+        | Kernel::Avx512Batch => Kernel::Scalar,
     };
-    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-    if matches!(kern, Kernel::Auto) && matches!(chosen, Kernel::Avx512 | Kernel::Avx512Batch) {
-        chosen = Kernel::Avx2;
-    }
-
-    unsafe {
-        match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => nvi_scalar(close, volume, first, dst),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => nvi_avx2(close, volume, first, dst),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => nvi_avx512(close, volume, first, dst),
-            _ => unreachable!(),
-        }
-    }
+    nvi_scalar(close, volume, first, dst);
 
     for v in &mut dst[..first] {
         *v = f64::NAN;

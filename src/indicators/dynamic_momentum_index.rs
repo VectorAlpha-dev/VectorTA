@@ -617,11 +617,31 @@ fn sum_last_period(gains: &[f64], losses: &[f64], next_idx: usize, period: usize
     let cap = gains.len();
     let mut sum_gain = 0.0;
     let mut sum_loss = 0.0;
-    let mut idx = next_idx;
-    for _ in 0..period {
-        idx = if idx == 0 { cap - 1 } else { idx - 1 };
-        sum_gain += gains[idx];
-        sum_loss += losses[idx];
+    unsafe {
+        if next_idx >= period {
+            let end = next_idx - period;
+            let mut idx = next_idx;
+            while idx > end {
+                idx -= 1;
+                sum_gain += *gains.get_unchecked(idx);
+                sum_loss += *losses.get_unchecked(idx);
+            }
+        } else {
+            let mut idx = next_idx;
+            while idx > 0 {
+                idx -= 1;
+                sum_gain += *gains.get_unchecked(idx);
+                sum_loss += *losses.get_unchecked(idx);
+            }
+            let mut remaining = period - next_idx;
+            idx = cap;
+            while remaining > 0 {
+                idx -= 1;
+                sum_gain += *gains.get_unchecked(idx);
+                sum_loss += *losses.get_unchecked(idx);
+                remaining -= 1;
+            }
+        }
     }
     (sum_gain, sum_loss)
 }
@@ -666,8 +686,6 @@ fn compute_row(
     lower_limit: usize,
     out: &mut [f64],
 ) {
-    out.fill(f64::NAN);
-
     let mut prev_close = f64::NAN;
     let mut has_prev = false;
     let mut close_ring = vec![0.0; volatility_period];
@@ -809,6 +827,7 @@ pub fn dynamic_momentum_index_into_slice(
             got: dst.len(),
         });
     }
+    dst.fill(f64::NAN);
     compute_row(
         data,
         rsi_period,

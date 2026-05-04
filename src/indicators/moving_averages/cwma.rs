@@ -40,12 +40,24 @@ fn cube(x: f64) -> f64 {
     x * x * x
 }
 
+#[inline(always)]
+fn cwma_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "close" => &candles.close,
+        "volume" => &candles.volume,
+        _ => source_type(candles, source),
+    }
+}
+
 impl<'a> AsRef<[f64]> for CwmaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             CwmaData::Slice(slice) => slice,
-            CwmaData::Candles { candles, source } => source_type(candles, source),
+            CwmaData::Candles { candles, source } => cwma_source(candles, source),
         }
     }
 }
@@ -208,7 +220,7 @@ fn cwma_prepare<'a>(
     kernel: Kernel,
 ) -> Result<(&'a [f64], Vec<f64>, usize, usize, f64, usize, Kernel), CwmaError> {
     let data: &[f64] = match &input.data {
-        CwmaData::Candles { candles, source } => source_type(candles, source),
+        CwmaData::Candles { candles, source } => cwma_source(candles, source),
         CwmaData::Slice(sl) => sl,
     };
     let len = data.len();
@@ -273,9 +285,15 @@ fn cwma_compute_into(
 ) {
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                cwma_scalar(data, weights, period, first, inv_norm, out)
-            }
+            Kernel::Scalar | Kernel::ScalarBatch => cwma_row_scalar(
+                data,
+                first,
+                period,
+                period - 1,
+                weights.as_ptr(),
+                inv_norm,
+                out,
+            ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
                 cwma_avx2(data, weights, period, first, inv_norm, out)
@@ -1081,7 +1099,7 @@ impl CwmaBatchBuilder {
     }
 
     pub fn apply_candles(self, c: &Candles, src: &str) -> Result<CwmaBatchOutput, CwmaError> {
-        let slice = source_type(c, src);
+        let slice = cwma_source(c, src);
         self.apply_slice(slice)
     }
 
@@ -1179,11 +1197,6 @@ pub fn cwma_batch_par_slice(
     cwma_batch_inner(data, sweep, kern, true)
 }
 
-#[inline]
-fn round_up8(x: usize) -> usize {
-    (x + 7) & !7
-}
-
 #[inline(always)]
 fn cwma_batch_inner(
     data: &[f64],
@@ -1208,11 +1221,7 @@ fn cwma_batch_inner(
         .position(|x| !x.is_nan())
         .ok_or(CwmaError::AllValuesNaN)?;
 
-    let max_p = combos
-        .iter()
-        .map(|c| round_up8(c.period.unwrap()))
-        .max()
-        .unwrap();
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 
     if (cols - first) < max_p {
         return Err(CwmaError::NotEnoughValidData {
@@ -1268,11 +1277,7 @@ fn cwma_batch_inner_into(
         .position(|x| !x.is_nan())
         .ok_or(CwmaError::AllValuesNaN)?;
 
-    let max_p = combos
-        .iter()
-        .map(|c| round_up8(c.period.unwrap()))
-        .max()
-        .unwrap();
+    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 
     let rows = combos.len();
     let cols = data.len();

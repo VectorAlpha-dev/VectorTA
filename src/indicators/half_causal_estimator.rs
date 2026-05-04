@@ -16,12 +16,13 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix};
+use crate::utilities::helpers::{alloc_uninit_f64, detect_best_batch_kernel, make_uninit_matrix};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 use chrono::{NaiveDateTime, Timelike};
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
 use thiserror::Error;
@@ -580,10 +581,16 @@ struct ResolvedParams {
 }
 
 #[derive(Debug, Clone)]
-struct PreparedInput {
-    values: Vec<f64>,
-    slots: Vec<usize>,
+struct PreparedInput<'a> {
+    values: Cow<'a, [f64]>,
+    slots: PreparedSlots,
     slots_per_day: usize,
+}
+
+#[derive(Debug, Clone)]
+enum PreparedSlots {
+    Sequential { slots_per_day: usize },
+    Explicit(Vec<usize>),
 }
 
 #[derive(Debug, Clone)]
@@ -699,15 +706,15 @@ impl TimeOfDayStore {
     #[inline]
     fn icv(&self, slot: usize, maximum_confidence_adjust_factor: f64) -> f64 {
         let bucket = &self.buckets[slot];
-        let Some(avg) = bucket.mean() else {
+        if bucket.count == 0 {
             return 1.0;
-        };
+        }
+        let avg = bucket.sum / bucket.count as f64;
         if avg.abs() <= f64::EPSILON {
             return 1.0;
         }
-        let Some(stdev) = bucket.stdev() else {
-            return 1.0;
-        };
+        let variance = (bucket.sum_sq / bucket.count as f64) - avg * avg;
+        let stdev = variance.max(0.0).sqrt();
         let ratio = (stdev / avg).clamp(0.0, 1.0);
         1.0 - ratio * maximum_confidence_adjust_factor
     }
@@ -715,16 +722,20 @@ impl TimeOfDayStore {
 
 #[derive(Debug, Clone)]
 struct FixedFrontBuffer {
-    values: VecDeque<f64>,
+    values: Vec<f64>,
     capacity: usize,
+    head: usize,
+    len: usize,
 }
 
 impl FixedFrontBuffer {
     #[inline]
     fn new(capacity: usize) -> Self {
         Self {
-            values: VecDeque::with_capacity(capacity),
+            values: vec![0.0; capacity],
             capacity,
+            head: 0,
+            len: 0,
         }
     }
 
@@ -733,20 +744,37 @@ impl FixedFrontBuffer {
         if self.capacity == 0 {
             return;
         }
-        self.values.push_front(value);
-        if self.values.len() > self.capacity {
-            let _ = self.values.pop_back();
+        if self.len == 0 {
+            self.values[0] = value;
+            self.len = 1;
+            self.head = 0;
+            return;
+        }
+        self.head = if self.head == 0 {
+            self.capacity - 1
+        } else {
+            self.head - 1
+        };
+        self.values[self.head] = value;
+        if self.len < self.capacity {
+            self.len += 1;
         }
     }
 
     #[inline]
     fn is_full(&self) -> bool {
-        self.values.len() == self.capacity
+        self.len == self.capacity
     }
 
     #[inline]
     fn iter(&self) -> impl Iterator<Item = f64> + '_ {
-        self.values.iter().copied()
+        (0..self.len).map(move |offset| {
+            let mut index = self.head + offset;
+            if index >= self.capacity {
+                index -= self.capacity;
+            }
+            self.values[index]
+        })
     }
 }
 
@@ -777,8 +805,6 @@ impl FillWmaState {
         }
         let first = *self.first.get_or_insert(value);
         if self.length == 1 {
-            self.values.clear();
-            self.values.push_front(value);
             return Some(value);
         }
 
@@ -804,6 +830,8 @@ struct HalfCausalEstimatorContext {
     average_buffer: FixedFrontBuffer,
     wma: FillWmaState,
     kernel: Vec<f64>,
+    future_values: Vec<f64>,
+    future_weights: Vec<f64>,
     ready: bool,
     prev_slot: Option<usize>,
     index: usize,
@@ -818,6 +846,8 @@ impl HalfCausalEstimatorContext {
             average_buffer: FixedFrontBuffer::new(params.real_filter_length),
             wma: FillWmaState::new(params.extra_smoothing),
             kernel: build_kernel(params),
+            future_values: Vec::with_capacity(params.real_filter_length.saturating_sub(1)),
+            future_weights: Vec::with_capacity(params.real_filter_length.saturating_sub(1)),
             ready: false,
             prev_slot: None,
             index: 0,
@@ -861,40 +891,92 @@ impl HalfCausalEstimatorContext {
     }
 
     #[inline]
-    fn compute_window(&self, slot: usize, apply_confidence_adjust: bool) -> Option<f64> {
+    fn compute_window(&mut self, slot: usize, apply_confidence_adjust: bool) -> Option<f64> {
         let future_len = self.params.real_filter_length.saturating_sub(1);
-        let (future_values, future_weights) = collect_future(
+        let uses_confidence = apply_confidence_adjust
+            && !matches!(
+                self.params.confidence_adjust,
+                HalfCausalEstimatorConfidenceAdjust::None
+            );
+        collect_future_into(
             &self.store,
             slot,
             future_len,
             self.params.maximum_confidence_adjust_factor,
+            uses_confidence,
+            &mut self.future_values,
+            &mut self.future_weights,
         )?;
 
-        let mut window = Vec::with_capacity(self.params.window_size);
-        window.extend_from_slice(&future_values);
-        if apply_confidence_adjust {
-            window.extend(self.source_buffer.iter());
+        let causal_values = if apply_confidence_adjust {
+            &self.source_buffer
         } else {
-            window.extend(self.average_buffer.iter());
-        }
-
-        if window.len() != self.params.window_size {
+            &self.average_buffer
+        };
+        if causal_values.len != self.params.real_filter_length {
             return None;
         }
-        if !window.iter().all(|value| value.is_finite()) {
+        if self.future_values.len() + causal_values.len != self.params.window_size {
+            return None;
+        }
+        if uses_confidence && self.future_weights.len() != future_len {
             return None;
         }
 
-        if apply_confidence_adjust {
-            apply_confidence_adjustment(
-                &mut window,
-                &future_weights,
-                self.params.real_filter_length,
+        let mut sum = 0.0;
+        let mut kernel_index = 0usize;
+        let linear_fill = if uses_confidence
+            && matches!(
                 self.params.confidence_adjust,
-            );
+                HalfCausalEstimatorConfidenceAdjust::Linear
+            ) {
+            let weight_sum: f64 = self.future_weights.iter().copied().sum();
+            if self.params.real_filter_length > 1 {
+                2.0 - weight_sum / future_len as f64
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        };
+
+        for i in 0..future_len {
+            let value = self.future_values[i];
+            if !value.is_finite() {
+                return None;
+            }
+            let confidence = if uses_confidence {
+                self.future_weights[i]
+            } else {
+                1.0
+            };
+            sum += value * confidence * self.kernel[kernel_index];
+            kernel_index += 1;
         }
 
-        Some(dot(&window, &self.kernel))
+        for (i, value) in causal_values.iter().enumerate() {
+            if !value.is_finite() {
+                return None;
+            }
+            let confidence = match self.params.confidence_adjust {
+                HalfCausalEstimatorConfidenceAdjust::None => 1.0,
+                HalfCausalEstimatorConfidenceAdjust::Symmetric if apply_confidence_adjust => {
+                    if i == 0 {
+                        1.0
+                    } else {
+                        2.0 - self.future_weights[future_len - i]
+                    }
+                }
+                HalfCausalEstimatorConfidenceAdjust::Linear if apply_confidence_adjust => {
+                    linear_fill
+                }
+                _ => 1.0,
+            };
+            sum += value * confidence * self.kernel[kernel_index];
+            kernel_index += 1;
+        }
+
+        Some(sum)
     }
 }
 
@@ -1074,27 +1156,21 @@ fn build_kernel(params: ResolvedParams) -> Vec<f64> {
 }
 
 #[inline(always)]
-fn dot(values: &[f64], weights: &[f64]) -> f64 {
-    values
-        .iter()
-        .zip(weights.iter())
-        .map(|(&value, &weight)| value * weight)
-        .sum()
-}
-
-#[inline(always)]
-fn collect_future(
+fn collect_future_into(
     store: &TimeOfDayStore,
     slot: usize,
     needed: usize,
     maximum_confidence_adjust_factor: f64,
-) -> Option<(Vec<f64>, Vec<f64>)> {
+    collect_weights: bool,
+    values: &mut Vec<f64>,
+    weights: &mut Vec<f64>,
+) -> Option<()> {
+    values.clear();
+    weights.clear();
     if needed == 0 {
-        return Some((Vec::new(), Vec::new()));
+        return Some(());
     }
 
-    let mut values = Vec::with_capacity(needed);
-    let mut weights = Vec::with_capacity(needed);
     let slots_per_day = store.buckets.len();
     if slots_per_day == 0 {
         return None;
@@ -1107,11 +1183,13 @@ fn collect_future(
         if store.has_values(next_slot) {
             saw_valid = true;
             values.push(store.mean(next_slot).unwrap_or(f64::NAN));
-            weights.push(
-                store
-                    .icv(next_slot, maximum_confidence_adjust_factor)
-                    .max(0.0),
-            );
+            if collect_weights {
+                weights.push(
+                    store
+                        .icv(next_slot, maximum_confidence_adjust_factor)
+                        .max(0.0),
+                );
+            }
         }
         offset += 1;
         if offset > slots_per_day.saturating_mul(4) && !saw_valid {
@@ -1119,56 +1197,10 @@ fn collect_future(
         }
     }
     values.reverse();
-    weights.reverse();
-    Some((values, weights))
-}
-
-#[inline(always)]
-fn apply_confidence_adjustment(
-    window: &mut [f64],
-    weights: &[f64],
-    real_filter_length: usize,
-    mode: HalfCausalEstimatorConfidenceAdjust,
-) {
-    if matches!(mode, HalfCausalEstimatorConfidenceAdjust::None) {
-        return;
+    if collect_weights {
+        weights.reverse();
     }
-
-    let mut confidence = Vec::with_capacity(window.len());
-    match mode {
-        HalfCausalEstimatorConfidenceAdjust::Symmetric => {
-            let mut causal = vec![2.0; real_filter_length];
-            if real_filter_length > 0 {
-                for i in 0..real_filter_length.saturating_sub(1) {
-                    causal[i] = 2.0 - weights[i];
-                }
-                causal.reverse();
-                causal[0] = 1.0;
-            }
-            confidence.extend_from_slice(weights);
-            confidence.extend_from_slice(&causal);
-        }
-        HalfCausalEstimatorConfidenceAdjust::Linear => {
-            let mut sum = 0.0;
-            for &weight in weights {
-                sum += weight;
-            }
-            let fill = if real_filter_length > 1 {
-                2.0 - sum / (real_filter_length - 1) as f64
-            } else {
-                1.0
-            };
-            confidence.extend_from_slice(weights);
-            confidence.extend(std::iter::repeat_n(fill, real_filter_length));
-        }
-        HalfCausalEstimatorConfidenceAdjust::None => {}
-    }
-
-    if confidence.len() == window.len() {
-        for (value, weight) in window.iter_mut().zip(confidence.iter()) {
-            *value *= *weight;
-        }
-    }
+    Some(())
 }
 
 #[inline]
@@ -1207,25 +1239,27 @@ fn slot_from_timestamp(
 }
 
 #[inline]
-fn source_from_candles(
-    candles: &Candles,
+fn source_from_candles<'a>(
+    candles: &'a Candles,
     source: &str,
     slots_per_day: usize,
-) -> Result<Vec<f64>, HalfCausalEstimatorError> {
+) -> Result<Cow<'a, [f64]>, HalfCausalEstimatorError> {
     match source.to_ascii_lowercase().as_str() {
-        "volume" => Ok(candles.volume.clone()),
-        "tr" => Ok(candles
-            .high
-            .iter()
-            .zip(candles.low.iter())
-            .map(|(&high, &low)| {
-                if low.is_finite() && low != 0.0 {
-                    (high - low) / low * 100.0
-                } else {
-                    f64::NAN
-                }
-            })
-            .collect()),
+        "volume" => Ok(Cow::Borrowed(&candles.volume)),
+        "tr" => Ok(Cow::Owned(
+            candles
+                .high
+                .iter()
+                .zip(candles.low.iter())
+                .map(|(&high, &low)| {
+                    if low.is_finite() && low != 0.0 {
+                        (high - low) / low * 100.0
+                    } else {
+                        f64::NAN
+                    }
+                })
+                .collect(),
+        )),
         "change" => {
             let mut out = Vec::with_capacity(candles.close.len());
             let mut prev = None;
@@ -1241,7 +1275,7 @@ fn source_from_candles(
                 }
                 prev = Some(close);
             }
-            Ok(out)
+            Ok(Cow::Owned(out))
         }
         "test" => {
             let mut out = Vec::with_capacity(candles.timestamp.len());
@@ -1251,7 +1285,7 @@ fn source_from_candles(
                 let value = ((std::f64::consts::PI / cycle) * slot as f64).sin();
                 out.push((value * value).max(0.0) * 100.0);
             }
-            Ok(out)
+            Ok(Cow::Owned(out))
         }
         _ => Err(HalfCausalEstimatorError::InvalidSource {
             source_name: source.to_string(),
@@ -1260,9 +1294,9 @@ fn source_from_candles(
 }
 
 #[inline]
-fn prepare_source_and_slots(
-    input: &HalfCausalEstimatorInput<'_>,
-) -> Result<PreparedInput, HalfCausalEstimatorError> {
+fn prepare_source_and_slots<'a>(
+    input: &HalfCausalEstimatorInput<'a>,
+) -> Result<PreparedInput<'a>, HalfCausalEstimatorError> {
     match &input.data {
         HalfCausalEstimatorData::Slice(values) => {
             if values.is_empty() {
@@ -1272,10 +1306,9 @@ fn prepare_source_and_slots(
                 .params
                 .slots_per_day
                 .ok_or(HalfCausalEstimatorError::MissingSlotsPerDay)?;
-            let slots = (0..values.len()).map(|i| i % slots_per_day).collect();
             Ok(PreparedInput {
-                values: values.to_vec(),
-                slots,
+                values: Cow::Borrowed(values),
+                slots: PreparedSlots::Sequential { slots_per_day },
                 slots_per_day,
             })
         }
@@ -1294,7 +1327,7 @@ fn prepare_source_and_slots(
             let values = source_from_candles(candles, source, slots_per_day)?;
             Ok(PreparedInput {
                 values,
-                slots,
+                slots: PreparedSlots::Explicit(slots),
                 slots_per_day,
             })
         }
@@ -1310,36 +1343,47 @@ fn first_finite(values: &[f64]) -> usize {
 }
 
 #[inline]
-fn resolve_and_prepare(
-    input: &HalfCausalEstimatorInput<'_>,
-    kernel: Kernel,
-) -> Result<(PreparedInput, ResolvedParams, Kernel), HalfCausalEstimatorError> {
+fn resolve_and_prepare<'a>(
+    input: &HalfCausalEstimatorInput<'a>,
+) -> Result<(PreparedInput<'a>, ResolvedParams), HalfCausalEstimatorError> {
     let prepared = prepare_source_and_slots(input)?;
     let first = first_finite(&prepared.values);
     if first >= prepared.values.len() {
         return Err(HalfCausalEstimatorError::AllValuesNaN);
     }
     let resolved = resolve_params(&input.params, prepared.slots_per_day)?;
-    let kernel = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other.to_non_batch(),
-    };
-    Ok((prepared, resolved, kernel))
+    Ok((prepared, resolved))
 }
 
 #[inline]
 fn compute_row(
     values: &[f64],
-    slots: &[usize],
+    slots: &PreparedSlots,
     params: ResolvedParams,
     estimate_out: &mut [f64],
     expected_value_out: &mut [f64],
 ) {
     let mut ctx = HalfCausalEstimatorContext::new(params);
-    for i in 0..values.len() {
-        let (estimate, expected_value) = ctx.update(values[i], slots[i]);
-        estimate_out[i] = estimate.unwrap_or(f64::NAN);
-        expected_value_out[i] = expected_value.unwrap_or(f64::NAN);
+    match slots {
+        PreparedSlots::Sequential { slots_per_day } => {
+            let mut slot = 0usize;
+            for i in 0..values.len() {
+                let (estimate, expected_value) = ctx.update(values[i], slot);
+                estimate_out[i] = estimate.unwrap_or(f64::NAN);
+                expected_value_out[i] = expected_value.unwrap_or(f64::NAN);
+                slot += 1;
+                if slot == *slots_per_day {
+                    slot = 0;
+                }
+            }
+        }
+        PreparedSlots::Explicit(slots) => {
+            for i in 0..values.len() {
+                let (estimate, expected_value) = ctx.update(values[i], slots[i]);
+                estimate_out[i] = estimate.unwrap_or(f64::NAN);
+                expected_value_out[i] = expected_value.unwrap_or(f64::NAN);
+            }
+        }
     }
 }
 
@@ -1355,9 +1399,10 @@ pub fn half_causal_estimator_with_kernel(
     input: &HalfCausalEstimatorInput<'_>,
     kernel: Kernel,
 ) -> Result<HalfCausalEstimatorOutput, HalfCausalEstimatorError> {
-    let (prepared, params, _kernel) = resolve_and_prepare(input, kernel)?;
-    let mut estimate = vec![f64::NAN; prepared.values.len()];
-    let mut expected_value = vec![f64::NAN; prepared.values.len()];
+    let _ = kernel;
+    let (prepared, params) = resolve_and_prepare(input)?;
+    let mut estimate = alloc_uninit_f64(prepared.values.len());
+    let mut expected_value = alloc_uninit_f64(prepared.values.len());
     compute_row(
         &prepared.values,
         &prepared.slots,
@@ -1378,7 +1423,8 @@ pub fn half_causal_estimator_into_slices(
     input: &HalfCausalEstimatorInput<'_>,
     kernel: Kernel,
 ) -> Result<(), HalfCausalEstimatorError> {
-    let (prepared, params, _kernel) = resolve_and_prepare(input, kernel)?;
+    let _ = kernel;
+    let (prepared, params) = resolve_and_prepare(input)?;
     let expected = prepared.values.len();
     if estimate_out.len() != expected || expected_value_out.len() != expected {
         return Err(HalfCausalEstimatorError::OutputLengthMismatch {
@@ -1387,8 +1433,6 @@ pub fn half_causal_estimator_into_slices(
             expected_value_got: expected_value_out.len(),
         });
     }
-    estimate_out.fill(f64::NAN);
-    expected_value_out.fill(f64::NAN);
     compute_row(
         &prepared.values,
         &prepared.slots,
@@ -1607,7 +1651,9 @@ pub fn half_causal_estimator_batch_inner(
                         .unwrap_or(sweep.slots_per_day.unwrap()),
                 )
                 .unwrap();
-                let slots: Vec<usize> = (0..cols).map(|i| i % params.slots_per_day).collect();
+                let slots = PreparedSlots::Sequential {
+                    slots_per_day: params.slots_per_day,
+                };
                 let _ = kernel;
                 compute_row(data, &slots, params, estimate_row, expected_row);
             });
@@ -1624,7 +1670,9 @@ pub fn half_causal_estimator_batch_inner(
                     .slots_per_day
                     .unwrap_or(sweep.slots_per_day.unwrap()),
             )?;
-            let slots: Vec<usize> = (0..cols).map(|i| i % params.slots_per_day).collect();
+            let slots = PreparedSlots::Sequential {
+                slots_per_day: params.slots_per_day,
+            };
             let _ = kernel;
             compute_row(data, &slots, params, estimate_row, expected_row);
         }
@@ -1640,7 +1688,9 @@ pub fn half_causal_estimator_batch_inner(
                     .slots_per_day
                     .unwrap_or(sweep.slots_per_day.unwrap()),
             )?;
-            let slots: Vec<usize> = (0..cols).map(|i| i % params.slots_per_day).collect();
+            let slots = PreparedSlots::Sequential {
+                slots_per_day: params.slots_per_day,
+            };
             let _ = kernel;
             compute_row(data, &slots, params, estimate_row, expected_row);
         }
@@ -1720,7 +1770,9 @@ pub fn half_causal_estimator_batch_inner_into(
                         .unwrap_or(sweep.slots_per_day.unwrap()),
                 )
                 .unwrap();
-                let slots: Vec<usize> = (0..cols).map(|i| i % params.slots_per_day).collect();
+                let slots = PreparedSlots::Sequential {
+                    slots_per_day: params.slots_per_day,
+                };
                 let _ = kernel;
                 compute_row(data, &slots, params, estimate_row, expected_row);
             });
@@ -1737,7 +1789,9 @@ pub fn half_causal_estimator_batch_inner_into(
                     .slots_per_day
                     .unwrap_or(sweep.slots_per_day.unwrap()),
             )?;
-            let slots: Vec<usize> = (0..cols).map(|i| i % params.slots_per_day).collect();
+            let slots = PreparedSlots::Sequential {
+                slots_per_day: params.slots_per_day,
+            };
             let _ = kernel;
             compute_row(data, &slots, params, estimate_row, expected_row);
         }
@@ -1753,7 +1807,9 @@ pub fn half_causal_estimator_batch_inner_into(
                     .slots_per_day
                     .unwrap_or(sweep.slots_per_day.unwrap()),
             )?;
-            let slots: Vec<usize> = (0..cols).map(|i| i % params.slots_per_day).collect();
+            let slots = PreparedSlots::Sequential {
+                slots_per_day: params.slots_per_day,
+            };
             let _ = kernel;
             compute_row(data, &slots, params, estimate_row, expected_row);
         }

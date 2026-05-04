@@ -80,7 +80,18 @@ impl<'a> AsRef<[f64]> for CciInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             CciData::Slice(slice) => slice,
-            CciData::Candles { candles, source } => source_type(candles, source),
+            CciData::Candles { candles, source } => match *source {
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -305,6 +316,11 @@ pub fn cci_into(input: &CciInput, out: &mut [f64]) -> Result<(), CciError> {
 #[inline]
 pub fn cci_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
     debug_assert_eq!(data.len(), out.len());
+    if period == 14 {
+        cci_scalar_period_14(data, first_valid, out);
+        return;
+    }
+
     let n = data.len();
     if n == 0 {
         return;
@@ -354,6 +370,69 @@ pub fn cci_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f6
                 (entering - sma) / denom
             }
         };
+    }
+}
+
+#[inline(always)]
+fn cci_scalar_period_14(data: &[f64], first_valid: usize, out: &mut [f64]) {
+    debug_assert_eq!(data.len(), out.len());
+    let n = data.len();
+    if n == 0 {
+        return;
+    }
+
+    const PERIOD: usize = 14;
+    const INV_PERIOD: f64 = 1.0 / PERIOD as f64;
+    let first_out = first_valid + PERIOD - 1;
+    let ptr = data.as_ptr();
+    let out_ptr = out.as_mut_ptr();
+
+    unsafe {
+        let mut sum = *ptr.add(first_valid)
+            + *ptr.add(first_valid + 1)
+            + *ptr.add(first_valid + 2)
+            + *ptr.add(first_valid + 3)
+            + *ptr.add(first_valid + 4)
+            + *ptr.add(first_valid + 5)
+            + *ptr.add(first_valid + 6)
+            + *ptr.add(first_valid + 7)
+            + *ptr.add(first_valid + 8)
+            + *ptr.add(first_valid + 9)
+            + *ptr.add(first_valid + 10)
+            + *ptr.add(first_valid + 11)
+            + *ptr.add(first_valid + 12)
+            + *ptr.add(first_valid + 13);
+
+        let mut i = first_out;
+        while i < n {
+            let sma = sum * INV_PERIOD;
+            let w = i + 1 - PERIOD;
+            let sabs = (*ptr.add(w) - sma).abs()
+                + (*ptr.add(w + 1) - sma).abs()
+                + (*ptr.add(w + 2) - sma).abs()
+                + (*ptr.add(w + 3) - sma).abs()
+                + (*ptr.add(w + 4) - sma).abs()
+                + (*ptr.add(w + 5) - sma).abs()
+                + (*ptr.add(w + 6) - sma).abs()
+                + (*ptr.add(w + 7) - sma).abs()
+                + (*ptr.add(w + 8) - sma).abs()
+                + (*ptr.add(w + 9) - sma).abs()
+                + (*ptr.add(w + 10) - sma).abs()
+                + (*ptr.add(w + 11) - sma).abs()
+                + (*ptr.add(w + 12) - sma).abs()
+                + (*ptr.add(w + 13) - sma).abs();
+            let denom = 0.015 * (sabs * INV_PERIOD);
+            *out_ptr.add(i) = if denom == 0.0 {
+                0.0
+            } else {
+                (*ptr.add(i) - sma) / denom
+            };
+
+            i += 1;
+            if i < n {
+                sum = sum - *ptr.add(i - PERIOD) + *ptr.add(i);
+            }
+        }
     }
 }
 

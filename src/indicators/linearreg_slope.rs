@@ -34,8 +34,26 @@ impl<'a> AsRef<[f64]> for LinearRegSlopeInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             LinearRegSlopeData::Slice(slice) => slice,
-            LinearRegSlopeData::Candles { candles, source } => source_type(candles, source),
+            LinearRegSlopeData::Candles { candles, source } => {
+                linearreg_slope_source_type(candles, source)
+            }
         }
+    }
+}
+
+#[inline(always)]
+fn linearreg_slope_source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "close" => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
     }
 }
 
@@ -186,6 +204,19 @@ pub fn linearreg_slope(
     linearreg_slope_with_kernel(input, Kernel::Auto)
 }
 
+#[inline(always)]
+fn normalize_single_kernel(kernel: Kernel) -> Kernel {
+    match kernel {
+        Kernel::Auto
+        | Kernel::Scalar
+        | Kernel::ScalarBatch
+        | Kernel::Avx2
+        | Kernel::Avx2Batch
+        | Kernel::Avx512
+        | Kernel::Avx512Batch => Kernel::Scalar,
+    }
+}
+
 pub fn linearreg_slope_with_kernel(
     input: &LinearRegSlopeInput,
     kernel: Kernel,
@@ -213,10 +244,7 @@ pub fn linearreg_slope_with_kernel(
         });
     }
     let mut out = alloc_with_nan_prefix(data.len(), first_valid_idx + period - 1);
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = normalize_single_kernel(kernel);
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -238,6 +266,11 @@ pub fn linearreg_slope_with_kernel(
 
 #[inline]
 pub fn linearreg_slope_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    if data[first..].iter().all(|value| value.is_finite()) {
+        linearreg_slope_scalar_finite(data, period, first, out);
+        return;
+    }
+
     let len = data.len();
     if len == 0 {
         return;
@@ -317,6 +350,65 @@ pub fn linearreg_slope_scalar(data: &[f64], period: usize, first: usize, out: &m
             kahan_add(&mut xy, &mut xy_c, v * p);
             let b = xy * p_bd - y * x_bd;
             *out_ptr = if b.abs() <= 1.1e-8 { 0.0 } else { b };
+        }
+    }
+}
+
+#[inline]
+fn linearreg_slope_scalar_finite(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    let len = data.len();
+    if len == 0 {
+        return;
+    }
+
+    let p = period as f64;
+    let mut i = first + period - 1;
+    if i >= len {
+        return;
+    }
+
+    let x = 0.5 * p * (p + 1.0);
+    let x2 = (p * (p + 1.0) * (2.0 * p + 1.0)) / 6.0;
+    let denom = p * x2 - x * x;
+    if denom.abs() < f64::EPSILON {
+        for out_i in i..len {
+            out[out_i] = f64::NAN;
+        }
+        return;
+    }
+    let bd = 1.0 / denom;
+    let p_bd = p * bd;
+    let x_bd = x * bd;
+
+    let mut y = 0.0;
+    let mut xy = 0.0;
+    for j in 0..period {
+        let value = data[first + j];
+        y += value;
+        xy += value * ((j + 1) as f64);
+    }
+
+    loop {
+        let b = xy * p_bd - y * x_bd;
+        out[i] = if b.abs() <= 1.1e-8 { 0.0 } else { b };
+        if i + 1 == len {
+            break;
+        }
+        let y_in = data[i + 1];
+        let y_out = data[i + 1 - period];
+        let prev_y = y;
+        y = prev_y + y_in - y_out;
+        xy = (xy - prev_y) + p * y_in;
+        i += 1;
+        if (i & 15) == 0 {
+            y = 0.0;
+            xy = 0.0;
+            let start = i + 1 - period;
+            for j in 0..period {
+                let value = data[start + j];
+                y += value;
+                xy += value * ((j + 1) as f64);
+            }
         }
     }
 }
@@ -1258,10 +1350,7 @@ pub fn linearreg_slope_into_slice(
         });
     }
 
-    let chosen = match kern {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = normalize_single_kernel(kern);
 
     unsafe {
         match chosen {

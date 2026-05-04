@@ -26,7 +26,18 @@ impl<'a> AsRef<[f64]> for JmaInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             JmaData::Slice(slice) => slice,
-            JmaData::Candles { candles, source } => source_type(candles, source),
+            JmaData::Candles { candles, source } => match *source {
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -220,10 +231,7 @@ pub fn jma(input: &JmaInput) -> Result<JmaOutput, JmaError> {
 }
 
 pub fn jma_with_kernel(input: &JmaInput, kernel: Kernel) -> Result<JmaOutput, JmaError> {
-    let data: &[f64] = match &input.data {
-        JmaData::Candles { candles, source } => source_type(candles, source),
-        JmaData::Slice(sl) => sl,
-    };
+    let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
         return Err(JmaError::EmptyInputData);
@@ -252,10 +260,7 @@ pub fn jma_with_kernel(input: &JmaInput, kernel: Kernel) -> Result<JmaOutput, Jm
         return Err(JmaError::InvalidPhase { phase });
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = choose_jma_kernel(kernel);
 
     let mut out = alloc_with_nan_prefix(len, first);
     unsafe {
@@ -282,10 +287,7 @@ pub fn jma_with_kernel_into(
     kernel: Kernel,
     out: &mut [f64],
 ) -> Result<(), JmaError> {
-    let data: &[f64] = match &input.data {
-        JmaData::Candles { candles, source } => source_type(candles, source),
-        JmaData::Slice(sl) => sl,
-    };
+    let data: &[f64] = input.as_ref();
     let len = data.len();
 
     if out.len() != len {
@@ -322,10 +324,7 @@ pub fn jma_with_kernel_into(
         return Err(JmaError::InvalidPhase { phase });
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = choose_jma_kernel(kernel);
 
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     out[..first].fill(qnan);
@@ -350,6 +349,24 @@ pub fn jma_with_kernel_into(
 #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn jma_into(input: &JmaInput, out: &mut [f64]) -> Result<(), JmaError> {
     jma_with_kernel_into(input, Kernel::Auto, out)
+}
+
+#[inline(always)]
+fn choose_jma_kernel(kernel: Kernel) -> Kernel {
+    match kernel {
+        Kernel::Auto => {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            {
+                if std::arch::is_x86_feature_detected!("avx2")
+                    && std::arch::is_x86_feature_detected!("fma")
+                {
+                    return Kernel::Avx2;
+                }
+            }
+            Kernel::Scalar
+        }
+        other => other,
+    }
 }
 
 #[inline]

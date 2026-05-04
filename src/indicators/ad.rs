@@ -168,19 +168,7 @@ pub fn ad(input: &AdInput) -> Result<AdOutput, AdError> {
 pub fn ad_with_kernel(input: &AdInput, kernel: Kernel) -> Result<AdOutput, AdError> {
     let (high, low, close, volume): (&[f64], &[f64], &[f64], &[f64]) = match &input.data {
         AdData::Candles { candles } => {
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| AdError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| AdError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| AdError::CandleFieldError(e.to_string()))?;
-            let volume = candles
-                .select_candle_field("volume")
-                .map_err(|e| AdError::CandleFieldError(e.to_string()))?;
-            (high, low, close, volume)
+            (&candles.high, &candles.low, &candles.close, &candles.volume)
         }
         AdData::Slices {
             high,
@@ -211,7 +199,11 @@ pub fn ad_with_kernel(input: &AdInput, kernel: Kernel) -> Result<AdOutput, AdErr
 
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     if matches!(kernel, Kernel::Auto) && matches!(chosen, Kernel::Avx512 | Kernel::Avx512Batch) {
-        chosen = Kernel::Avx2;
+        chosen = if size >= 262_144 {
+            Kernel::Avx2
+        } else {
+            Kernel::Avx512
+        };
     }
 
     let mut out = alloc_with_nan_prefix(size, 0);
@@ -276,7 +268,11 @@ pub fn ad_into_slice(dst: &mut [f64], input: &AdInput, kern: Kernel) -> Result<(
             let mut k = detect_best_kernel();
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             if matches!(k, Kernel::Avx512) {
-                k = Kernel::Avx2;
+                k = if high.len() >= 262_144 {
+                    Kernel::Avx2
+                } else {
+                    Kernel::Avx512
+                };
             }
             match k {
                 Kernel::Scalar => ad_scalar(high, low, close, volume, dst),

@@ -17,8 +17,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -613,6 +612,17 @@ impl FibonacciEntryBandsStream {
             return None;
         }
 
+        Some(self.update_valid(open, high, low, close))
+    }
+
+    #[inline]
+    fn update_valid(
+        &mut self,
+        open: f64,
+        high: f64,
+        low: f64,
+        close: f64,
+    ) -> FibonacciEntryBandsPoint {
         let source = self.params.source.value(open, high, low, close);
         let ema1 = match self.ema1 {
             Some(prev) => prev + self.params.ema_alpha * (source - prev),
@@ -753,7 +763,7 @@ impl FibonacciEntryBandsStream {
         self.prev_tp_long_band = finite_option(point.tp_long_band);
         self.prev_tp_short_band = finite_option(point.tp_short_band);
 
-        Some(point)
+        point
     }
 
     #[inline]
@@ -923,8 +933,8 @@ fn resolve_params(
 }
 
 #[inline(always)]
-fn full_nan_vec(len: usize) -> Vec<f64> {
-    alloc_with_nan_prefix(len, len)
+fn output_vec(len: usize) -> Vec<f64> {
+    alloc_uninit_f64(len)
 }
 
 #[inline(always)]
@@ -1031,18 +1041,9 @@ fn fibonacci_entry_bands_row_from_slices(
 #[inline]
 fn fibonacci_entry_bands_prepare<'a>(
     input: &'a FibonacciEntryBandsInput,
-    kernel: Kernel,
-) -> Result<
-    (
-        &'a [f64],
-        &'a [f64],
-        &'a [f64],
-        &'a [f64],
-        ResolvedParams,
-        Kernel,
-    ),
-    FibonacciEntryBandsError,
-> {
+    _kernel: Kernel,
+) -> Result<(&'a [f64], &'a [f64], &'a [f64], &'a [f64], ResolvedParams), FibonacciEntryBandsError>
+{
     let (open, high, low, close) = input.as_slices();
     if open.is_empty() || high.is_empty() || low.is_empty() || close.is_empty() {
         return Err(FibonacciEntryBandsError::EmptyInputData);
@@ -1072,11 +1073,7 @@ fn fibonacci_entry_bands_prepare<'a>(
         return Err(FibonacciEntryBandsError::NotEnoughValidData { needed, valid });
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other.to_non_batch(),
-    };
-    Ok((open, high, low, close, params, chosen))
+    Ok((open, high, low, close, params))
 }
 
 #[inline]
@@ -1091,27 +1088,27 @@ pub fn fibonacci_entry_bands_with_kernel(
     input: &FibonacciEntryBandsInput,
     kernel: Kernel,
 ) -> Result<FibonacciEntryBandsOutput, FibonacciEntryBandsError> {
-    let (open, high, low, close, params, _chosen) = fibonacci_entry_bands_prepare(input, kernel)?;
+    let (open, high, low, close, params) = fibonacci_entry_bands_prepare(input, kernel)?;
     let len = close.len();
     let mut out = FibonacciEntryBandsOutput {
-        basis: full_nan_vec(len),
-        trend: full_nan_vec(len),
-        upper_0618: full_nan_vec(len),
-        upper_1000: full_nan_vec(len),
-        upper_1618: full_nan_vec(len),
-        upper_2618: full_nan_vec(len),
-        lower_0618: full_nan_vec(len),
-        lower_1000: full_nan_vec(len),
-        lower_1618: full_nan_vec(len),
-        lower_2618: full_nan_vec(len),
-        tp_long_band: full_nan_vec(len),
-        tp_short_band: full_nan_vec(len),
-        long_entry: full_nan_vec(len),
-        short_entry: full_nan_vec(len),
-        rejection_long: full_nan_vec(len),
-        rejection_short: full_nan_vec(len),
-        long_bounce: full_nan_vec(len),
-        short_bounce: full_nan_vec(len),
+        basis: output_vec(len),
+        trend: output_vec(len),
+        upper_0618: output_vec(len),
+        upper_1000: output_vec(len),
+        upper_1618: output_vec(len),
+        upper_2618: output_vec(len),
+        lower_0618: output_vec(len),
+        lower_1000: output_vec(len),
+        lower_1618: output_vec(len),
+        lower_2618: output_vec(len),
+        tp_long_band: output_vec(len),
+        tp_short_band: output_vec(len),
+        long_entry: output_vec(len),
+        short_entry: output_vec(len),
+        rejection_long: output_vec(len),
+        rejection_short: output_vec(len),
+        long_bounce: output_vec(len),
+        short_bounce: output_vec(len),
     };
     fibonacci_entry_bands_row_from_slices(
         open,
@@ -1188,7 +1185,7 @@ pub fn fibonacci_entry_bands_into_slices(
         return Err(FibonacciEntryBandsError::OutputLengthMismatch { expected });
     }
 
-    let (open, high, low, close, params, _chosen) = fibonacci_entry_bands_prepare(input, kernel)?;
+    let (open, high, low, close, params) = fibonacci_entry_bands_prepare(input, kernel)?;
     fibonacci_entry_bands_row_from_slices(
         open,
         high,
@@ -1504,6 +1501,10 @@ pub fn fibonacci_entry_bands_batch_with_kernel(
             expected: usize::MAX,
         })?;
     let _kernel = validate_batch_kernel(kernel)?;
+    let resolved_params = resolved
+        .iter()
+        .map(|combo| resolve_params(combo, Some(cols)))
+        .collect::<Result<Vec<_>, _>>()?;
     let zero_prefixes = vec![0usize; rows];
 
     macro_rules! alloc_matrix {
@@ -1562,16 +1563,16 @@ pub fn fibonacci_entry_bands_batch_with_kernel(
 
         resolved
             .par_iter()
+            .zip(resolved_params.par_iter())
             .enumerate()
-            .for_each(|(row, combo)| unsafe {
+            .for_each(|(row, (_combo, params))| unsafe {
                 let start = row * cols;
-                let params = resolve_params(combo, Some(cols)).expect("validated");
                 fibonacci_entry_bands_row_from_slices(
                     open,
                     high,
                     low,
                     close,
-                    params,
+                    *params,
                     &mut std::slice::from_raw_parts_mut(basis_ptr as *mut f64, total)
                         [start..start + cols],
                     &mut std::slice::from_raw_parts_mut(trend_ptr as *mut f64, total)
@@ -1614,15 +1615,14 @@ pub fn fibonacci_entry_bands_batch_with_kernel(
 
     #[cfg(target_arch = "wasm32")]
     {
-        for (row, combo) in resolved.iter().enumerate() {
+        for (row, params) in resolved_params.iter().enumerate() {
             let start = row * cols;
-            let params = resolve_params(combo, Some(cols))?;
             fibonacci_entry_bands_row_from_slices(
                 open,
                 high,
                 low,
                 close,
-                params,
+                *params,
                 &mut basis_out[start..start + cols],
                 &mut trend_out[start..start + cols],
                 &mut upper_0618_out[start..start + cols],

@@ -429,6 +429,21 @@ fn count_valid_hlc(high: &[f64], low: &[f64], close: &[f64]) -> usize {
 }
 
 #[inline(always)]
+fn first_and_valid_hlc(high: &[f64], low: &[f64], close: &[f64]) -> (usize, usize) {
+    let mut first = close.len();
+    let mut count = 0usize;
+    for i in 0..close.len() {
+        if valid_hlc_bar(high[i], low[i], close[i]) {
+            if first == close.len() {
+                first = i;
+            }
+            count += 1;
+        }
+    }
+    (first, count)
+}
+
+#[inline(always)]
 fn atr_percentile_row_from_slices(
     high: &[f64],
     low: &[f64],
@@ -560,7 +575,7 @@ fn atr_percentile_prepare<'a>(
         return Err(AtrPercentileError::EmptyInputData);
     }
 
-    let first = first_valid_hlc(high, low, close);
+    let (first, valid) = first_and_valid_hlc(high, low, close);
     if first >= len {
         return Err(AtrPercentileError::AllValuesNaN);
     }
@@ -581,7 +596,6 @@ fn atr_percentile_prepare<'a>(
         });
     }
 
-    let valid = count_valid_hlc(high, low, close);
     let needed = atr_length.saturating_add(percentile_length);
     if valid < needed {
         return Err(AtrPercentileError::NotEnoughValidData { needed, valid });

@@ -19,8 +19,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, CandleFieldFlags, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -345,11 +344,7 @@ pub fn halftrend_with_kernel(
         });
     }
 
-    if matches!(kernel, Kernel::Auto)
-        && amplitude == 2
-        && channel_deviation == 2.0
-        && atr_period == 100
-    {
+    if amplitude == 2 && channel_deviation == 2.0 && atr_period == 100 {
         chosen = Kernel::Scalar;
     }
 
@@ -1194,7 +1189,7 @@ pub fn halftrend_into_slices_kernel(
         k => k,
     };
 
-    if matches!(kern, Kernel::Auto) && amplitude == 2 && ch == 2.0 && atr_period == 100 {
+    if amplitude == 2 && ch == 2.0 && atr_period == 100 {
         chosen = Kernel::Scalar;
     }
 

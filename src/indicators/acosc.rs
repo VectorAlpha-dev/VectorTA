@@ -53,6 +53,12 @@ pub struct AcoscOutput {
     pub change: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcoscOutputField {
+    Osc,
+    Change,
+}
+
 #[derive(Debug, Error)]
 pub enum AcoscError {
     #[error("acosc: Failed to get high/low fields from candles: {msg}")]
@@ -94,12 +100,8 @@ fn acosc_prepare<'a>(
 ) -> Result<(&'a [f64], &'a [f64], usize, Kernel), AcoscError> {
     let (high, low) = match &input.data {
         AcoscData::Candles { candles } => {
-            let h = candles
-                .select_candle_field("high")
-                .map_err(|e| AcoscError::CandleFieldError { msg: e.to_string() })?;
-            let l = candles
-                .select_candle_field("low")
-                .map_err(|e| AcoscError::CandleFieldError { msg: e.to_string() })?;
+            let h = candles.high.as_slice();
+            let l = candles.low.as_slice();
             (h, l)
         }
         AcoscData::Slices { high, low } => (*high, *low),
@@ -1089,6 +1091,141 @@ pub fn acosc_into_slice(
             &mut osc_dst[first..],
             &mut change_dst[first..],
         );
+    }
+    Ok(())
+}
+
+#[inline(always)]
+fn acosc_compute_output_scalar<const CHANGE: bool>(high: &[f64], low: &[f64], dst: &mut [f64]) {
+    const PERIOD_SMA5: usize = 5;
+    const PERIOD_SMA34: usize = 34;
+    const INV5: f64 = 1.0 / 5.0;
+    const INV34: f64 = 1.0 / 34.0;
+    let len = high.len();
+    let mut queue5 = [0.0; PERIOD_SMA5];
+    let mut queue34 = [0.0; PERIOD_SMA34];
+    let mut queue5_ao = [0.0; PERIOD_SMA5];
+    let mut sum5 = 0.0;
+    let mut sum34 = 0.0;
+    let mut sum5_ao = 0.0;
+    let mut idx5 = 0;
+    let mut idx34 = 0;
+    let mut idx5_ao = 0;
+
+    unsafe {
+        let h_ptr = high.as_ptr();
+        let l_ptr = low.as_ptr();
+        let dst_ptr = dst.as_mut_ptr();
+
+        for i in 0..PERIOD_SMA34 {
+            let med = (*h_ptr.add(i) + *l_ptr.add(i)) * 0.5;
+            sum34 += med;
+            queue34[i] = med;
+            if i < PERIOD_SMA5 {
+                sum5 += med;
+                queue5[i] = med;
+            }
+        }
+        for i in PERIOD_SMA34..(PERIOD_SMA34 + PERIOD_SMA5 - 1) {
+            let med = (*h_ptr.add(i) + *l_ptr.add(i)) * 0.5;
+            sum34 += med - queue34[idx34];
+            queue34[idx34] = med;
+            idx34 += 1;
+            if idx34 == PERIOD_SMA34 {
+                idx34 = 0;
+            }
+            let sma34 = sum34 * INV34;
+            sum5 += med - queue5[idx5];
+            queue5[idx5] = med;
+            idx5 += 1;
+            if idx5 == PERIOD_SMA5 {
+                idx5 = 0;
+            }
+            let sma5 = sum5 * INV5;
+            let ao = sma5 - sma34;
+            sum5_ao += ao;
+            queue5_ao[idx5_ao] = ao;
+            idx5_ao += 1;
+        }
+        if idx5_ao == PERIOD_SMA5 {
+            idx5_ao = 0;
+        }
+        let mut prev_res = 0.0;
+        for i in (PERIOD_SMA34 + PERIOD_SMA5 - 1)..len {
+            let med = (*h_ptr.add(i) + *l_ptr.add(i)) * 0.5;
+            sum34 += med - queue34[idx34];
+            queue34[idx34] = med;
+            idx34 += 1;
+            if idx34 == PERIOD_SMA34 {
+                idx34 = 0;
+            }
+            let sma34 = sum34 * INV34;
+            sum5 += med - queue5[idx5];
+            queue5[idx5] = med;
+            idx5 += 1;
+            if idx5 == PERIOD_SMA5 {
+                idx5 = 0;
+            }
+            let sma5 = sum5 * INV5;
+            let ao = sma5 - sma34;
+            let old_ao = queue5_ao[idx5_ao];
+            sum5_ao += ao - old_ao;
+            queue5_ao[idx5_ao] = ao;
+            idx5_ao += 1;
+            if idx5_ao == PERIOD_SMA5 {
+                idx5_ao = 0;
+            }
+            let sma5_ao = sum5_ao * INV5;
+            let res = ao - sma5_ao;
+            if CHANGE {
+                let mom = res - prev_res;
+                prev_res = res;
+                *dst_ptr.add(i) = mom;
+            } else {
+                *dst_ptr.add(i) = res;
+            }
+        }
+    }
+}
+
+pub fn acosc_output_into_slice(
+    dst: &mut [f64],
+    input: &AcoscInput,
+    kern: Kernel,
+    field: AcoscOutputField,
+) -> Result<(), AcoscError> {
+    let _ = kern;
+    let (high, low, first, _) = acosc_prepare(input, Kernel::Scalar)?;
+
+    if dst.len() != high.len() {
+        return Err(AcoscError::OutputLengthMismatch {
+            expected: high.len(),
+            got: dst.len(),
+        });
+    }
+
+    const WARMUP: usize = 38;
+    let warm = first + WARMUP;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+    let prefix_len = warm.min(dst.len());
+    for v in &mut dst[..prefix_len] {
+        *v = qnan;
+    }
+
+    let valid = high.len() - first;
+    if first < high.len() && valid > WARMUP {
+        match field {
+            AcoscOutputField::Osc => acosc_compute_output_scalar::<false>(
+                &high[first..],
+                &low[first..],
+                &mut dst[first..],
+            ),
+            AcoscOutputField::Change => acosc_compute_output_scalar::<true>(
+                &high[first..],
+                &low[first..],
+                &mut dst[first..],
+            ),
+        }
     }
     Ok(())
 }

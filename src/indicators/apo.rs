@@ -42,7 +42,13 @@ impl<'a> AsRef<[f64]> for ApoInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             ApoData::Slice(slice) => slice,
-            ApoData::Candles { candles, source } => source_type(candles, source),
+            ApoData::Candles { candles, source } => {
+                if source.eq_ignore_ascii_case("close") {
+                    candles.close.as_slice()
+                } else {
+                    source_type(candles, source)
+                }
+            }
         }
     }
 }
@@ -260,6 +266,10 @@ fn apo_compute_into(
             Kernel::Avx2 | Kernel::Avx2Batch => apo_avx2(data, short, long, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => apo_avx512(data, short, long, first, out),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                apo_scalar(data, short, long, first, out)
+            }
             _ => unreachable!(),
         }
     }

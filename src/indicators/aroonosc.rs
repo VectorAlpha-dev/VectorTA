@@ -259,6 +259,10 @@ pub fn aroon_osc_with_kernel(
         Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
             aroon_osc_scalar_highlow_into(high, low, length, first, &mut out)
         }
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+            aroon_osc_scalar_highlow_into(high, low, length, first, &mut out)
+        }
         _ => unreachable!(),
     }
     Ok(AroonOscOutput { values: out })
@@ -292,6 +296,10 @@ pub fn aroon_osc_into(input: &AroonOscInput, out: &mut [f64]) -> Result<(), Aroo
             aroon_osc_scalar_highlow_into(high, low, length, first, out)
         }
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+            aroon_osc_scalar_highlow_into(high, low, length, first, out)
+        }
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
         Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
             aroon_osc_scalar_highlow_into(high, low, length, first, out)
         }
@@ -556,6 +564,10 @@ pub fn aroon_osc_into_slice(
             aroon_osc_scalar_highlow_into(high, low, length, first, dst)
         }
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+            aroon_osc_scalar_highlow_into(high, low, length, first, dst)
+        }
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
         Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
             aroon_osc_scalar_highlow_into(high, low, length, first, dst)
         }

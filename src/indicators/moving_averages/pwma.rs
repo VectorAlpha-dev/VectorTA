@@ -18,6 +18,7 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
@@ -34,6 +35,8 @@ use pyo3::types::PyDict;
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
+
+const PWMA_PERIOD5_WEIGHTS: [f64; 5] = [0.0625, 0.25, 0.375, 0.25, 0.0625];
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 pub struct PrimaryCtxGuardPwma {
@@ -74,8 +77,24 @@ impl<'a> AsRef<[f64]> for PwmaInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             PwmaData::Slice(slice) => slice,
-            PwmaData::Candles { candles, source } => source_type(candles, source),
+            PwmaData::Candles { candles, source } => pwma_source(candles, source),
         }
+    }
+}
+
+#[inline(always)]
+fn pwma_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => candles.open.as_slice(),
+        "high" => candles.high.as_slice(),
+        "low" => candles.low.as_slice(),
+        "close" => candles.close.as_slice(),
+        "volume" => candles.volume.as_slice(),
+        "hl2" => candles.hl2.as_slice(),
+        "hlc3" => candles.hlc3.as_slice(),
+        "ohlc4" => candles.ohlc4.as_slice(),
+        "hlcc4" | "hlcc" => candles.hlcc4.as_slice(),
+        _ => source_type(candles, source),
     }
 }
 
@@ -229,7 +248,7 @@ pub fn pwma(input: &PwmaInput) -> Result<PwmaOutput, PwmaError> {
 fn pwma_prepare<'a>(
     input: &'a PwmaInput,
     kernel: Kernel,
-) -> Result<(&'a [f64], Vec<f64>, usize, usize, Kernel), PwmaError> {
+) -> Result<(&'a [f64], Cow<'static, [f64]>, usize, usize, Kernel), PwmaError> {
     let data: &[f64] = input.as_ref();
     if data.is_empty() {
         return Err(PwmaError::EmptyInputData);
@@ -248,14 +267,32 @@ fn pwma_prepare<'a>(
         });
     }
 
-    let weights = pascal_weights(period)?;
-
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        k => k,
+    let weights: Cow<'static, [f64]> = if period == 5 {
+        Cow::Borrowed(PWMA_PERIOD5_WEIGHTS.as_slice())
+    } else {
+        Cow::Owned(pascal_weights(period)?)
     };
 
+    let chosen = pwma_single_kernel(kernel, len, period);
+
     Ok((data, weights, period, first, chosen))
+}
+
+#[inline(always)]
+fn pwma_single_kernel(kernel: Kernel, len: usize, period: usize) -> Kernel {
+    match kernel {
+        Kernel::Auto => {
+            let detected = detect_best_kernel();
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            {
+                if period == 5 {
+                    return Kernel::Scalar;
+                }
+            }
+            detected
+        }
+        k => k,
+    }
 }
 
 #[inline(always)]
@@ -269,7 +306,9 @@ fn pwma_compute_into(
 ) {
     unsafe {
         match kernel {
-            Kernel::Scalar | Kernel::ScalarBatch => pwma_scalar(data, weights, period, first, out),
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                pwma_scalar_dispatch(data, weights, period, first, out)
+            }
 
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => pwma_avx2(data, weights, period, first, out),
@@ -278,7 +317,7 @@ fn pwma_compute_into(
 
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                pwma_scalar(data, weights, period, first, out)
+                pwma_scalar_dispatch(data, weights, period, first, out)
             }
             _ => unreachable!(),
         }
@@ -339,6 +378,47 @@ pub fn pwma_into_slice(dst: &mut [f64], input: &PwmaInput, kern: Kernel) -> Resu
     }
 
     Ok(())
+}
+
+#[inline(always)]
+fn pwma_scalar_dispatch(
+    data: &[f64],
+    weights: &[f64],
+    period: usize,
+    first: usize,
+    out: &mut [f64],
+) {
+    if period == 5 {
+        pwma_scalar_period5(data, first, out)
+    } else {
+        pwma_scalar(data, weights, period, first, out)
+    }
+}
+
+#[inline]
+pub fn pwma_scalar_period5(data: &[f64], first: usize, out: &mut [f64]) {
+    assert!(
+        out.len() >= data.len(),
+        "`out` must be at least as long as `data`"
+    );
+
+    let n = data.len();
+    let d_ptr = data.as_ptr();
+    let o_ptr = out.as_mut_ptr();
+
+    unsafe {
+        let mut i = first + 4;
+        while i < n {
+            let d0 = *d_ptr.add(i - 4);
+            let d1 = *d_ptr.add(i - 3);
+            let d2 = *d_ptr.add(i - 2);
+            let d3 = *d_ptr.add(i - 1);
+            let d4 = *d_ptr.add(i);
+            let sum = ((d0 * 0.0625) + (d1 * 0.25)) + ((d2 * 0.375) + (d3 * 0.25));
+            *o_ptr.add(i) = d4.mul_add(0.0625, sum);
+            i += 1;
+        }
+    }
 }
 
 #[inline]

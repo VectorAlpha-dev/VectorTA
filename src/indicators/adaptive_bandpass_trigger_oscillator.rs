@@ -63,6 +63,12 @@ pub struct AdaptiveBandpassTriggerOscillatorOutput {
     pub lead: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdaptiveBandpassTriggerOscillatorOutputField {
+    InPhase,
+    Lead,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -481,6 +487,34 @@ fn adaptive_bandpass_trigger_oscillator_row_from_slice(
 }
 
 #[inline(always)]
+fn adaptive_bandpass_trigger_oscillator_output_row_from_slice(
+    data: &[f64],
+    params: ResolvedParams,
+    field: AdaptiveBandpassTriggerOscillatorOutputField,
+    out: &mut [f64],
+) {
+    let mut stream = AdaptiveBandpassTriggerOscillatorStream::new_resolved(params);
+    match field {
+        AdaptiveBandpassTriggerOscillatorOutputField::InPhase => {
+            for i in 0..data.len() {
+                out[i] = match stream.update(data[i]) {
+                    Some((in_phase, _)) => in_phase,
+                    None => f64::NAN,
+                };
+            }
+        }
+        AdaptiveBandpassTriggerOscillatorOutputField::Lead => {
+            for i in 0..data.len() {
+                out[i] = match stream.update(data[i]) {
+                    Some((_, lead)) => lead,
+                    None => f64::NAN,
+                };
+            }
+        }
+    }
+}
+
+#[inline(always)]
 fn adaptive_bandpass_trigger_oscillator_prepare<'a>(
     input: &'a AdaptiveBandpassTriggerOscillatorInput,
     kernel: Kernel,
@@ -539,6 +573,28 @@ pub fn adaptive_bandpass_trigger_oscillator_into_slices(
     let (data, _first, params, _chosen) =
         adaptive_bandpass_trigger_oscillator_prepare(input, kernel)?;
     adaptive_bandpass_trigger_oscillator_row_from_slice(data, params, in_phase_out, lead_out);
+    Ok(())
+}
+
+pub fn adaptive_bandpass_trigger_oscillator_output_into_slice(
+    out: &mut [f64],
+    input: &AdaptiveBandpassTriggerOscillatorInput,
+    kernel: Kernel,
+    field: AdaptiveBandpassTriggerOscillatorOutputField,
+) -> Result<(), AdaptiveBandpassTriggerOscillatorError> {
+    let expected = input.as_ref().len();
+    if out.len() != expected {
+        return Err(
+            AdaptiveBandpassTriggerOscillatorError::OutputLengthMismatch {
+                expected,
+                in_phase_got: out.len(),
+                lead_got: out.len(),
+            },
+        );
+    }
+    let (data, _first, params, _chosen) =
+        adaptive_bandpass_trigger_oscillator_prepare(input, kernel)?;
+    adaptive_bandpass_trigger_oscillator_output_row_from_slice(data, params, field, out);
     Ok(())
 }
 

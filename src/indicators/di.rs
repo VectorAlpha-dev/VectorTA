@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
@@ -29,6 +29,11 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
+
+#[inline(always)]
+fn di_candles_slices(candles: &Candles) -> (&[f64], &[f64], &[f64]) {
+    (&candles.high, &candles.low, &candles.close)
+}
 
 #[derive(Debug, Clone)]
 pub enum DiData<'a> {
@@ -103,11 +108,7 @@ impl<'a> DiInput<'a> {
     #[inline(always)]
     pub fn as_slices(&self) -> (&'a [f64], &'a [f64], &'a [f64]) {
         match &self.data {
-            DiData::Candles { candles } => (
-                source_type(candles, "high"),
-                source_type(candles, "low"),
-                source_type(candles, "close"),
-            ),
+            DiData::Candles { candles } => di_candles_slices(candles),
             DiData::Slices { high, low, close } => (*high, *low, *close),
         }
     }
@@ -208,12 +209,7 @@ fn di_prepare<'a>(
     kernel: Kernel,
 ) -> Result<(&'a [f64], &'a [f64], &'a [f64], usize, usize, Kernel), DiError> {
     let (high, low, close) = match &input.data {
-        DiData::Candles { candles } => {
-            let h = source_type(candles, "high");
-            let l = source_type(candles, "low");
-            let c = source_type(candles, "close");
-            (h, l, c)
-        }
+        DiData::Candles { candles } => di_candles_slices(candles),
         DiData::Slices { high, low, close } => (*high, *low, *close),
     };
     let n = high.len();
@@ -261,6 +257,29 @@ pub fn di_with_kernel(input: &DiInput, kernel: Kernel) -> Result<DiOutput, DiErr
             _ => unreachable!(),
         }
     }
+}
+
+#[inline]
+pub fn di_plus_with_kernel(input: &DiInput, kernel: Kernel) -> Result<Vec<f64>, DiError> {
+    di_selected_with_kernel::<true>(input, kernel)
+}
+
+#[inline]
+pub fn di_minus_with_kernel(input: &DiInput, kernel: Kernel) -> Result<Vec<f64>, DiError> {
+    di_selected_with_kernel::<false>(input, kernel)
+}
+
+#[inline]
+fn di_selected_with_kernel<const PLUS: bool>(
+    input: &DiInput,
+    kernel: Kernel,
+) -> Result<Vec<f64>, DiError> {
+    let (high, low, close, period, first_idx, _chosen) = di_prepare(input, kernel)?;
+    let mut out = alloc_with_nan_prefix(high.len(), first_idx + period - 1);
+    unsafe {
+        di_selected_into::<PLUS>(high, low, close, period, first_idx, &mut out);
+    }
+    Ok(out)
 }
 
 #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
@@ -481,6 +500,115 @@ pub unsafe fn di_scalar_into(
         scale = if cur_tr == 0.0 { 0.0 } else { 100.0 / cur_tr };
         out_plus[idx] = cur_plus * scale;
         out_minus[idx] = cur_minus * scale;
+
+        prev_h = ch;
+        prev_l = cl;
+        prev_c = cc;
+        idx += 1;
+    }
+}
+
+#[inline(always)]
+unsafe fn di_selected_into<const PLUS: bool>(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    first_idx: usize,
+    out: &mut [f64],
+) {
+    let n = high.len();
+    if n == 0 {
+        return;
+    }
+
+    let invp = (period as f64).recip();
+    let keep = 1.0 - invp;
+
+    let mut prev_h = high[first_idx];
+    let mut prev_l = low[first_idx];
+    let mut prev_c = close[first_idx];
+
+    let start = first_idx + 1;
+    let stop = first_idx + period;
+    let mut dm_sum = 0.0;
+    let mut tr_sum = 0.0;
+
+    let mut i = start;
+    while i < stop {
+        let ch = high[i];
+        let cl = low[i];
+        let cc = close[i];
+
+        let dp = ch - prev_h;
+        let dm = prev_l - cl;
+        if PLUS {
+            if dp > dm && dp > 0.0 {
+                dm_sum += dp;
+            }
+        } else if dm > dp && dm > 0.0 {
+            dm_sum += dm;
+        }
+
+        let mut tr = ch - cl;
+        let tr2 = (ch - prev_c).abs();
+        let tr3 = (cl - prev_c).abs();
+        if tr2 > tr {
+            tr = tr2;
+        }
+        if tr3 > tr {
+            tr = tr3;
+        }
+        tr_sum += tr;
+
+        prev_h = ch;
+        prev_l = cl;
+        prev_c = cc;
+        i += 1;
+    }
+
+    let mut cur_dm = dm_sum;
+    let mut cur_tr = tr_sum;
+
+    let mut idx = stop - 1;
+    let mut scale = if cur_tr == 0.0 { 0.0 } else { 100.0 / cur_tr };
+    out[idx] = cur_dm * scale;
+    idx += 1;
+
+    while idx < n {
+        let ch = high[idx];
+        let cl = low[idx];
+        let cc = close[idx];
+
+        let dp = ch - prev_h;
+        let dm = prev_l - cl;
+        let inc = if PLUS {
+            if dp > dm && dp > 0.0 {
+                dp
+            } else {
+                0.0
+            }
+        } else if dm > dp && dm > 0.0 {
+            dm
+        } else {
+            0.0
+        };
+
+        cur_dm = cur_dm.mul_add(keep, inc);
+
+        let mut tr = ch - cl;
+        let tr2 = (ch - prev_c).abs();
+        let tr3 = (cl - prev_c).abs();
+        if tr2 > tr {
+            tr = tr2;
+        }
+        if tr3 > tr {
+            tr = tr3;
+        }
+        cur_tr = cur_tr.mul_add(keep, tr);
+
+        scale = if cur_tr == 0.0 { 0.0 } else { 100.0 / cur_tr };
+        out[idx] = cur_dm * scale;
 
         prev_h = ch;
         prev_l = cl;
@@ -775,9 +903,7 @@ impl DiBatchBuilder {
         di_batch_with_kernel(high, low, close, &self.range, self.kernel)
     }
     pub fn apply_candles(self, c: &Candles) -> Result<DiBatchOutput, DiError> {
-        let h = source_type(c, "high");
-        let l = source_type(c, "low");
-        let cl = source_type(c, "close");
+        let (h, l, cl) = di_candles_slices(c);
         self.apply_slices(h, l, cl)
     }
     pub fn with_default_candles(c: &Candles) -> Result<DiBatchOutput, DiError> {
@@ -1961,6 +2087,39 @@ mod tests {
             assert!(
                 eq_or_both_nan(baseline.minus[i], minus[i]),
                 "-DI mismatch at index {}: baseline={} vs into={}",
+                i,
+                baseline.minus[i],
+                minus[i]
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_di_selected_outputs_match_api() -> Result<(), Box<dyn Error>> {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = DiInput::from_candles(&candles, DiParams::default());
+        let baseline = di(&input)?;
+        let plus = di_plus_with_kernel(&input, Kernel::Scalar)?;
+        let minus = di_minus_with_kernel(&input, Kernel::Scalar)?;
+
+        assert_eq!(baseline.plus.len(), plus.len());
+        assert_eq!(baseline.minus.len(), minus.len());
+
+        for i in 0..plus.len() {
+            assert!(
+                (baseline.plus[i].is_nan() && plus[i].is_nan())
+                    || (baseline.plus[i] - plus[i]).abs() <= 1e-12,
+                "+DI selected mismatch at index {}: baseline={} selected={}",
+                i,
+                baseline.plus[i],
+                plus[i]
+            );
+            assert!(
+                (baseline.minus[i].is_nan() && minus[i].is_nan())
+                    || (baseline.minus[i] - minus[i]).abs() <= 1e-12,
+                "-DI selected mismatch at index {}: baseline={} selected={}",
                 i,
                 baseline.minus[i],
                 minus[i]

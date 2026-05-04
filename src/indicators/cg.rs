@@ -258,6 +258,11 @@ const CG_WEIGHTS: [f64; 64] = [
 
 #[inline(always)]
 pub fn cg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    if period == 10 {
+        cg_scalar_period_10(data, first, out);
+        return;
+    }
+
     let start = first + period;
     let len = data.len();
     if start >= len {
@@ -383,6 +388,48 @@ pub fn cg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
             }
 
             out[i] = if den.abs() > f64::EPSILON {
+                -num / den
+            } else {
+                0.0
+            };
+        }
+    }
+}
+
+#[inline(always)]
+fn cg_scalar_period_10(data: &[f64], first: usize, out: &mut [f64]) {
+    let start = first + 10;
+    let len = data.len();
+    if start >= len {
+        return;
+    }
+
+    let ptr = data.as_ptr();
+    let out_ptr = out.as_mut_ptr();
+
+    unsafe {
+        for i in start..len {
+            let base = ptr.add(i);
+            let p0 = *base;
+            let p1 = *base.sub(1);
+            let p2 = *base.sub(2);
+            let p3 = *base.sub(3);
+            let p4 = *base.sub(4);
+            let p5 = *base.sub(5);
+            let p6 = *base.sub(6);
+            let p7 = *base.sub(7);
+            let p8 = *base.sub(8);
+            let num = p0
+                + 2.0 * p1
+                + 3.0 * p2
+                + 4.0 * p3
+                + 5.0 * p4
+                + 6.0 * p5
+                + 7.0 * p6
+                + 8.0 * p7
+                + 9.0 * p8;
+            let den = p0 + p1 + p2 + p3 + p4 + p5 + p6 + p7 + p8;
+            *out_ptr.add(i) = if den.abs() > f64::EPSILON {
                 -num / den
             } else {
                 0.0

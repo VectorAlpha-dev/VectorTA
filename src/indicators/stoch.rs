@@ -15,8 +15,8 @@ use crate::indicators::utility_functions::{max_rolling, min_rolling};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+    init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -260,18 +260,7 @@ pub fn stoch(input: &StochInput) -> Result<StochOutput, StochError> {
 
 pub fn stoch_with_kernel(input: &StochInput, kernel: Kernel) -> Result<StochOutput, StochError> {
     let (high, low, close) = match &input.data {
-        StochData::Candles { candles } => {
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| StochError::Other(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| StochError::Other(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| StochError::Other(e.to_string()))?;
-            (high, low, close)
-        }
+        StochData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
         StochData::Slices { high, low, close } => (*high, *low, *close),
     };
 
@@ -320,6 +309,32 @@ pub fn stoch_with_kernel(input: &StochInput, kernel: Kernel) -> Result<StochOutp
         });
     }
 
+    let chosen = match kernel {
+        Kernel::Auto => Kernel::Scalar,
+        other => other,
+    };
+    let slowk_ma_type = input.params.slowk_ma_type.as_deref().unwrap_or("sma");
+    let slowd_ma_type = input.params.slowd_ma_type.as_deref().unwrap_or("sma");
+
+    if (slowk_ma_type == "sma" || slowk_ma_type == "SMA")
+        && (slowd_ma_type == "sma" || slowd_ma_type == "SMA")
+    {
+        let mut k = alloc_uninit_f64(data_len);
+        let mut d = alloc_uninit_f64(data_len);
+        stoch_classic_sma_into_single_pass(
+            high,
+            low,
+            close,
+            fastk_period,
+            slowk_period,
+            slowd_period,
+            first_valid_idx,
+            &mut k,
+            &mut d,
+        )?;
+        return Ok(StochOutput { k, d });
+    }
+
     let mut hh = alloc_with_nan_prefix(data_len, first_valid_idx + fastk_period - 1);
     let mut ll = alloc_with_nan_prefix(data_len, first_valid_idx + fastk_period - 1);
 
@@ -337,10 +352,6 @@ pub fn stoch_with_kernel(input: &StochInput, kernel: Kernel) -> Result<StochOutp
 
     let mut k_raw = alloc_with_nan_prefix(data_len, first_valid_idx + fastk_period - 1);
 
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => stoch_scalar(
@@ -375,12 +386,22 @@ pub fn stoch_with_kernel(input: &StochInput, kernel: Kernel) -> Result<StochOutp
                 first_valid_idx,
                 &mut k_raw,
             ),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                stoch_scalar(
+                    high,
+                    low,
+                    close,
+                    &hh,
+                    &ll,
+                    fastk_period,
+                    first_valid_idx,
+                    &mut k_raw,
+                )
+            }
             _ => unreachable!(),
         }
     }
-
-    let slowk_ma_type = input.get_slowk_ma_type();
-    let slowd_ma_type = input.get_slowd_ma_type();
 
     let k_first_valid = first_valid_idx + fastk_period - 1;
     if (slowk_ma_type == "sma" || slowk_ma_type == "SMA")
@@ -393,9 +414,9 @@ pub fn stoch_with_kernel(input: &StochInput, kernel: Kernel) -> Result<StochOutp
         return stoch_classic_ema(&k_raw, slowk_period, slowd_period, k_first_valid);
     }
 
-    let k_vec = ma(&slowk_ma_type, MaData::Slice(&k_raw), slowk_period)
+    let k_vec = ma(slowk_ma_type, MaData::Slice(&k_raw), slowk_period)
         .map_err(|e| StochError::Other(e.to_string()))?;
-    let d_vec = ma(&slowd_ma_type, MaData::Slice(&k_vec), slowd_period)
+    let d_vec = ma(slowd_ma_type, MaData::Slice(&k_vec), slowd_period)
         .map_err(|e| StochError::Other(e.to_string()))?;
     Ok(StochOutput { k: k_vec, d: d_vec })
 }
@@ -440,18 +461,7 @@ fn stoch_compute_into(
     kernel: Kernel,
 ) -> Result<(), StochError> {
     let (high, low, close) = match &input.data {
-        StochData::Candles { candles } => {
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| StochError::Other(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| StochError::Other(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| StochError::Other(e.to_string()))?;
-            (high, low, close)
-        }
+        StochData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
         StochData::Slices { high, low, close } => (*high, *low, *close),
     };
 
@@ -512,8 +522,8 @@ fn stoch_compute_into(
         });
     }
 
-    let slowk_ma_type = input.get_slowk_ma_type();
-    let slowd_ma_type = input.get_slowd_ma_type();
+    let slowk_ma_type = input.params.slowk_ma_type.as_deref().unwrap_or("sma");
+    let slowd_ma_type = input.params.slowd_ma_type.as_deref().unwrap_or("sma");
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -521,7 +531,6 @@ fn stoch_compute_into(
 
     if (slowk_ma_type == "sma" || slowk_ma_type == "SMA")
         && (slowd_ma_type == "sma" || slowd_ma_type == "SMA")
-        && matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch)
     {
         return stoch_classic_sma_into_single_pass(
             high,
@@ -563,6 +572,10 @@ fn stoch_compute_into(
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 stoch_avx512(high, low, close, &hh, &ll, fastk_period, first, &mut k_raw)
+            }
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                stoch_scalar(high, low, close, &hh, &ll, fastk_period, first, &mut k_raw)
             }
             _ => unreachable!(),
         }
@@ -683,9 +696,9 @@ fn stoch_compute_into(
         return Ok(());
     }
 
-    let k_vec = ma(&slowk_ma_type, MaData::Slice(&k_raw), slowk_period)
+    let k_vec = ma(slowk_ma_type, MaData::Slice(&k_raw), slowk_period)
         .map_err(|e| StochError::Other(e.to_string()))?;
-    let d_vec = ma(&slowd_ma_type, MaData::Slice(&k_vec), slowd_period)
+    let d_vec = ma(slowd_ma_type, MaData::Slice(&k_vec), slowd_period)
         .map_err(|e| StochError::Other(e.to_string()))?;
     out_k.copy_from_slice(&k_vec);
     out_d.copy_from_slice(&d_vec);
@@ -734,12 +747,21 @@ fn stoch_classic_sma_into_single_pass(
     let mut max = high[first];
     let mut min = low[first];
 
-    let mut k_buf = vec![0.0f64; slowk_period];
+    let mut k_stack = [0.0f64; 64];
+    let mut d_stack = [0.0f64; 64];
+    let mut k_vec: Vec<f64>;
+    let mut d_vec: Vec<f64>;
+    let (k_buf, d_buf): (&mut [f64], &mut [f64]) = if slowk_period <= 64 && slowd_period <= 64 {
+        (&mut k_stack[..slowk_period], &mut d_stack[..slowd_period])
+    } else {
+        k_vec = vec![0.0f64; slowk_period];
+        d_vec = vec![0.0f64; slowd_period];
+        (k_vec.as_mut_slice(), d_vec.as_mut_slice())
+    };
     let mut k_pos: usize = 0;
     let mut k_sum = 0.0f64;
     let mut k_count: usize = 0;
 
-    let mut d_buf = vec![0.0f64; slowd_period];
     let mut d_pos: usize = 0;
     let mut d_sum = 0.0f64;
     let mut d_count: usize = 0;

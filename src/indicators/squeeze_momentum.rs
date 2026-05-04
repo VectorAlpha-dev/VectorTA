@@ -240,11 +240,7 @@ pub fn squeeze_momentum_into_slices(
     kern: Kernel,
 ) -> Result<(), SqueezeMomentumError> {
     let (high, low, close): (&[f64], &[f64], &[f64]) = match &input.data {
-        SqueezeMomentumData::Candles { candles } => (
-            source_type(candles, "high"),
-            source_type(candles, "low"),
-            source_type(candles, "close"),
-        ),
+        SqueezeMomentumData::Candles { candles } => (&candles.high, &candles.low, &candles.close),
         SqueezeMomentumData::Slices { high, low, close } => (*high, *low, *close),
     };
     let n = close.len();
@@ -427,10 +423,7 @@ impl SqueezeMomentumBatchBuilder {
         self,
         c: &Candles,
     ) -> Result<SqueezeMomentumBatchOutput, SqueezeMomentumError> {
-        let high = source_type(c, "high");
-        let low = source_type(c, "low");
-        let close = source_type(c, "close");
-        self.apply_slices(high, low, close)
+        self.apply_slices(&c.high, &c.low, &c.close)
     }
 }
 
@@ -1113,6 +1106,15 @@ pub unsafe fn squeeze_momentum_scalar_classic(
         }
     }
 
+    let mut tr_stack = [0.0_f64; 64];
+    let mut tr_heap: Vec<f64>;
+    let tr_buf: &mut [f64] = if lkc <= 64 {
+        &mut tr_stack[..lkc]
+    } else {
+        tr_heap = vec![0.0; lkc];
+        &mut tr_heap[..]
+    };
+
     let mut sum_kc = 0.0_f64;
     let mut sum_tr = 0.0_f64;
     if start_kc < n {
@@ -1131,18 +1133,40 @@ pub unsafe fn squeeze_momentum_scalar_classic(
                 let tr3 = (l - pc).abs();
                 tr1.max(tr2).max(tr3)
             };
+            tr_buf[j % lkc] = tr;
             sum_tr += tr;
         }
     }
 
-    let mut dq_max_idx = vec![0usize; lkc];
-    let mut dq_min_idx = vec![0usize; lkc];
+    let mut dq_max_stack = [0usize; 64];
+    let mut dq_min_stack = [0usize; 64];
+    let mut raw_stack = [0.0_f64; 64];
+    let mut dq_max_heap: Vec<usize>;
+    let mut dq_min_heap: Vec<usize>;
+    let mut raw_heap: Vec<f64>;
+    let dq_max_idx: &mut [usize] = if lkc <= 64 {
+        &mut dq_max_stack[..lkc]
+    } else {
+        dq_max_heap = vec![0usize; lkc];
+        &mut dq_max_heap[..]
+    };
+    let dq_min_idx: &mut [usize] = if lkc <= 64 {
+        &mut dq_min_stack[..lkc]
+    } else {
+        dq_min_heap = vec![0usize; lkc];
+        &mut dq_min_heap[..]
+    };
+    let raw_buf: &mut [f64] = if lkc <= 64 {
+        &mut raw_stack[..lkc]
+    } else {
+        raw_heap = vec![0.0; lkc];
+        &mut raw_heap[..]
+    };
     let mut max_head: usize = 0;
     let mut max_len: usize = 0;
     let mut min_head: usize = 0;
     let mut min_len: usize = 0;
 
-    let mut raw_buf: Vec<f64> = vec![f64::NAN; lkc];
     let mut rb_pos: usize = 0;
     let mut raw_count: usize = 0;
 
@@ -1151,11 +1175,21 @@ pub unsafe fn squeeze_momentum_scalar_classic(
 
     #[inline(always)]
     fn rb_back(head: usize, len: usize, cap: usize) -> usize {
-        (head + len - 1) % cap
+        let pos = head + len - 1;
+        if pos >= cap {
+            pos - cap
+        } else {
+            pos
+        }
     }
     #[inline(always)]
     fn rb_write_pos(head: usize, len: usize, cap: usize) -> usize {
-        (head + len) % cap
+        let pos = head + len;
+        if pos >= cap {
+            pos - cap
+        } else {
+            pos
+        }
     }
 
     for i in first_valid..n {
@@ -1165,7 +1199,10 @@ pub unsafe fn squeeze_momentum_scalar_classic(
         while max_len > 0 {
             let idx = dq_max_idx[max_head];
             if idx + lkc <= i {
-                max_head = (max_head + 1) % lkc;
+                max_head += 1;
+                if max_head == lkc {
+                    max_head = 0;
+                }
                 max_len -= 1;
             } else {
                 break;
@@ -1175,7 +1212,10 @@ pub unsafe fn squeeze_momentum_scalar_classic(
         while min_len > 0 {
             let idx = dq_min_idx[min_head];
             if idx + lkc <= i {
-                min_head = (min_head + 1) % lkc;
+                min_head += 1;
+                if min_head == lkc {
+                    min_head = 0;
+                }
                 min_len -= 1;
             } else {
                 break;
@@ -1235,20 +1275,9 @@ pub unsafe fn squeeze_momentum_scalar_classic(
                 }
             };
 
-            let old_idx = i - lkc;
-            let tr_old = {
-                let h = *hp.add(old_idx);
-                let l = *lp.add(old_idx);
-                if old_idx == 0 {
-                    (h - l).abs()
-                } else {
-                    let pc = *cp.add(old_idx - 1);
-                    let tr1 = (h - l).abs();
-                    let tr2 = (h - pc).abs();
-                    let tr3 = (l - pc).abs();
-                    tr1.max(tr2).max(tr3)
-                }
-            };
+            let tr_pos = i % lkc;
+            let tr_old = tr_buf[tr_pos];
+            tr_buf[tr_pos] = tr_new;
             sum_tr += tr_new - tr_old;
         }
 

@@ -741,6 +741,71 @@ fn smoothed_gaussian_trend_filter_row_scalar(
     }
 }
 
+fn smoothed_gaussian_trend_filter_filter_row_scalar(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    gaussian_length: usize,
+    poles: usize,
+    smoothing_length: usize,
+    linreg_offset: usize,
+    out_filter: &mut [f64],
+) {
+    out_filter.fill(f64::NAN);
+
+    let mut gaussian = GaussianPoleState::new(gaussian_length, poles);
+    let mut linreg = LinRegOffsetState::new(smoothing_length, linreg_offset);
+
+    for i in 0..close.len() {
+        if !valid_bar(high[i], low[i], close[i]) {
+            gaussian.reset();
+            linreg.reset();
+            continue;
+        }
+
+        let gaussian_value = gaussian.update(close[i]);
+        if let Some(final_value) = linreg.update(gaussian_value) {
+            out_filter[i] = final_value;
+        }
+    }
+}
+
+pub(crate) fn smoothed_gaussian_trend_filter_filter_with_kernel(
+    input: &SmoothedGaussianTrendFilterInput<'_>,
+    kernel: Kernel,
+) -> Result<Vec<f64>, SmoothedGaussianTrendFilterError> {
+    let (high, low, close) = input.as_refs();
+    validate_lengths(high, low, close)?;
+    let len = close.len();
+    let gaussian_length = input.get_gaussian_length();
+    let poles = input.get_poles();
+    let smoothing_length = input.get_smoothing_length();
+    let linreg_offset = input.get_linreg_offset();
+    validate_params(gaussian_length, poles, smoothing_length, len)?;
+
+    let first_valid =
+        first_valid_bar(high, low, close).ok_or(SmoothedGaussianTrendFilterError::AllValuesNaN)?;
+    let valid = len - first_valid;
+    let needed = smoothing_length.max(SUPERTREND_ATR_PERIOD);
+    if valid < needed {
+        return Err(SmoothedGaussianTrendFilterError::NotEnoughValidData { needed, valid });
+    }
+
+    let _chosen = normalize_kernel(kernel);
+    let mut filter = alloc_with_nan_prefix(len, first_valid);
+    smoothed_gaussian_trend_filter_filter_row_scalar(
+        high,
+        low,
+        close,
+        gaussian_length,
+        poles,
+        smoothing_length,
+        linreg_offset,
+        &mut filter,
+    );
+    Ok(filter)
+}
+
 pub fn smoothed_gaussian_trend_filter_with_kernel(
     input: &SmoothedGaussianTrendFilterInput<'_>,
     kernel: Kernel,

@@ -24,6 +24,7 @@ use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::collections::VecDeque;
+use std::sync::OnceLock;
 use thiserror::Error;
 
 const DEFAULT_PERIOD: usize = 100;
@@ -136,7 +137,7 @@ impl<'a> LogarithmicMovingAverageInput<'a> {
     fn prices(&self) -> &'a [f64] {
         match &self.data {
             LogarithmicMovingAverageData::Candles { candles, source } => {
-                source_type(candles, source)
+                logarithmic_moving_average_source_type(candles, source)
             }
             LogarithmicMovingAverageData::Slice { data, .. } => data,
         }
@@ -187,6 +188,22 @@ impl<'a> LogarithmicMovingAverageInput<'a> {
         self.params
             .short_threshold
             .unwrap_or(DEFAULT_SHORT_THRESHOLD)
+    }
+}
+
+#[inline(always)]
+fn logarithmic_moving_average_source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "close" => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
     }
 }
 
@@ -750,8 +767,21 @@ fn compute_weights(period: usize, steepness: f64) -> (Vec<f64>, f64) {
     (weights, total)
 }
 
+fn default_weights() -> &'static (Vec<f64>, f64) {
+    static WEIGHTS: OnceLock<(Vec<f64>, f64)> = OnceLock::new();
+    WEIGHTS.get_or_init(|| compute_weights(DEFAULT_PERIOD, DEFAULT_STEEPNESS))
+}
+
 fn compute_lma(prices: &[f64], period: usize, steepness: f64, out: &mut [f64]) {
-    let (weights, total_weight) = compute_weights(period, steepness);
+    let owned_weights;
+    let (weights, total_weight) =
+        if period == DEFAULT_PERIOD && steepness.to_bits() == DEFAULT_STEEPNESS.to_bits() {
+            let cached = default_weights();
+            (cached.0.as_slice(), cached.1)
+        } else {
+            owned_weights = compute_weights(period, steepness);
+            (owned_weights.0.as_slice(), owned_weights.1)
+        };
     let mut run = 0usize;
     for (i, &price) in prices.iter().enumerate() {
         if price.is_finite() {
@@ -764,8 +794,25 @@ fn compute_lma(prices: &[f64], period: usize, steepness: f64, out: &mut [f64]) {
             continue;
         }
         let mut acc = 0.0;
-        for k in 0..period {
-            acc += prices[i - k] * weights[k];
+        let mut k = 0usize;
+        unsafe {
+            let price_ptr = prices.as_ptr().add(i);
+            let weight_ptr = weights.as_ptr();
+            while k + 7 < period {
+                acc += *price_ptr.sub(k) * *weight_ptr.add(k)
+                    + *price_ptr.sub(k + 1) * *weight_ptr.add(k + 1)
+                    + *price_ptr.sub(k + 2) * *weight_ptr.add(k + 2)
+                    + *price_ptr.sub(k + 3) * *weight_ptr.add(k + 3)
+                    + *price_ptr.sub(k + 4) * *weight_ptr.add(k + 4)
+                    + *price_ptr.sub(k + 5) * *weight_ptr.add(k + 5)
+                    + *price_ptr.sub(k + 6) * *weight_ptr.add(k + 6)
+                    + *price_ptr.sub(k + 7) * *weight_ptr.add(k + 7);
+                k += 8;
+            }
+            while k < period {
+                acc += *price_ptr.sub(k) * *weight_ptr.add(k);
+                k += 1;
+            }
         }
         out[i] = acc / total_weight;
     }
@@ -1228,10 +1275,10 @@ pub fn logarithmic_moving_average_with_kernel(
     kernel: Kernel,
 ) -> Result<LogarithmicMovingAverageOutput, LogarithmicMovingAverageError> {
     let len = input.prices().len();
-    let mut lma = alloc_with_nan_prefix(len, len);
-    let mut signal = alloc_with_nan_prefix(len, len);
-    let mut position = alloc_with_nan_prefix(len, len);
-    let mut momentum_confirmed = alloc_with_nan_prefix(len, len);
+    let mut lma = alloc_with_nan_prefix(len, 0);
+    let mut signal = alloc_with_nan_prefix(len, 0);
+    let mut position = alloc_with_nan_prefix(len, 0);
+    let mut momentum_confirmed = alloc_with_nan_prefix(len, 0);
     logarithmic_moving_average_into_slice(
         &mut lma,
         &mut signal,

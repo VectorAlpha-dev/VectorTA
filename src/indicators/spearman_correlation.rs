@@ -15,7 +15,8 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
+    alloc_uninit_f64, alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -265,8 +266,8 @@ fn extract_pair<'a>(
             source,
             comparison_source,
         } => (
-            source_type(candles, source),
-            source_type(candles, comparison_source),
+            spearman_source_type(candles, source),
+            spearman_source_type(candles, comparison_source),
         ),
         SpearmanCorrelationData::Slices { main, compare } => (*main, *compare),
     };
@@ -280,6 +281,22 @@ fn extract_pair<'a>(
         });
     }
     Ok((main, compare))
+}
+
+#[inline(always)]
+fn spearman_source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "close" => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
+    }
 }
 
 #[inline(always)]
@@ -363,19 +380,13 @@ fn rank_average(values: &[f64], indices: &mut [usize], ranks: &mut [f64]) {
 }
 
 #[inline(always)]
-fn pearson_correlation(x: &[f64], y: &[f64]) -> f64 {
-    let n = x.len();
-    if n == 0 || y.len() != n {
-        return f64::NAN;
-    }
-    let mean_x = x.iter().sum::<f64>() / n as f64;
-    let mean_y = y.iter().sum::<f64>() / n as f64;
+fn rank_pearson_correlation(x: &[f64], y: &[f64], mean: f64) -> f64 {
     let mut cov = 0.0;
     let mut var_x = 0.0;
     let mut var_y = 0.0;
-    for i in 0..n {
-        let dx = x[i] - mean_x;
-        let dy = y[i] - mean_y;
+    for i in 0..x.len() {
+        let dx = x[i] - mean;
+        let dy = y[i] - mean;
         cov += dx * dy;
         var_x += dx * dx;
         var_y += dy * dy;
@@ -389,7 +400,20 @@ fn pearson_correlation(x: &[f64], y: &[f64]) -> f64 {
 }
 
 #[inline(always)]
-fn compute_raw_into(
+#[inline(always)]
+fn valid_return_pair(main_returns: &[f64], compare_returns: &[f64], idx: usize) -> bool {
+    main_returns[idx].is_finite() && compare_returns[idx].is_finite()
+}
+
+#[inline(always)]
+fn all_pairs_finite(main: &[f64], compare: &[f64]) -> bool {
+    main.iter()
+        .zip(compare)
+        .all(|(main, compare)| main.is_finite() && compare.is_finite())
+}
+
+#[inline(always)]
+fn compute_raw_all_finite_into(
     main: &[f64],
     compare: &[f64],
     lookback: usize,
@@ -397,10 +421,57 @@ fn compute_raw_into(
     raw_out: &mut [f64],
 ) {
     let n = main.len();
-    raw_out.fill(f64::NAN);
+    let warm = first_return + lookback - 1;
+    raw_out[..warm.min(n)].fill(f64::NAN);
 
-    let mut main_returns = vec![f64::NAN; n];
-    let mut compare_returns = vec![f64::NAN; n];
+    let mut main_returns = alloc_uninit_f64(n);
+    let mut compare_returns = alloc_uninit_f64(n);
+    main_returns[0] = f64::NAN;
+    compare_returns[0] = f64::NAN;
+    for i in 1..n {
+        main_returns[i] = main[i] - main[i - 1];
+        compare_returns[i] = compare[i] - compare[i - 1];
+    }
+
+    let mut main_indices = vec![0usize; lookback];
+    let mut compare_indices = vec![0usize; lookback];
+    let mut main_ranks = vec![0.0; lookback];
+    let mut compare_ranks = vec![0.0; lookback];
+    let rank_mean = (lookback as f64 + 1.0) * 0.5;
+
+    for i in warm..n {
+        let start = i + 1 - lookback;
+        rank_average(&main_returns[start..=i], &mut main_indices, &mut main_ranks);
+        rank_average(
+            &compare_returns[start..=i],
+            &mut compare_indices,
+            &mut compare_ranks,
+        );
+        raw_out[i] = rank_pearson_correlation(&main_ranks, &compare_ranks, rank_mean);
+    }
+}
+
+#[inline(always)]
+fn compute_raw_into(
+    main: &[f64],
+    compare: &[f64],
+    lookback: usize,
+    first_return: usize,
+    raw_out: &mut [f64],
+) {
+    if all_pairs_finite(main, compare) {
+        compute_raw_all_finite_into(main, compare, lookback, first_return, raw_out);
+        return;
+    }
+
+    let n = main.len();
+    let warm = first_return + lookback - 1;
+    raw_out[..warm.min(n)].fill(f64::NAN);
+
+    let mut main_returns = alloc_uninit_f64(n);
+    let mut compare_returns = alloc_uninit_f64(n);
+    main_returns[0] = f64::NAN;
+    compare_returns[0] = f64::NAN;
     for i in 1..n {
         let m0 = main[i - 1];
         let m1 = main[i];
@@ -409,52 +480,69 @@ fn compute_raw_into(
         if m0.is_finite() && m1.is_finite() && c0.is_finite() && c1.is_finite() {
             main_returns[i] = m1 - m0;
             compare_returns[i] = c1 - c0;
+        } else {
+            main_returns[i] = f64::NAN;
+            compare_returns[i] = f64::NAN;
         }
     }
 
-    let warm = first_return + lookback - 1;
     let mut main_indices = vec![0usize; lookback];
     let mut compare_indices = vec![0usize; lookback];
     let mut main_ranks = vec![0.0; lookback];
     let mut compare_ranks = vec![0.0; lookback];
+    let rank_mean = (lookback as f64 + 1.0) * 0.5;
+    let mut valid_pairs = 0usize;
+    for idx in first_return..=warm {
+        if valid_return_pair(&main_returns, &compare_returns, idx) {
+            valid_pairs += 1;
+        }
+    }
 
     for i in warm..n {
+        if i != warm {
+            let old = i - lookback;
+            if valid_return_pair(&main_returns, &compare_returns, old) {
+                valid_pairs -= 1;
+            }
+            if valid_return_pair(&main_returns, &compare_returns, i) {
+                valid_pairs += 1;
+            }
+        }
         let start = i + 1 - lookback;
         let main_window = &main_returns[start..=i];
         let compare_window = &compare_returns[start..=i];
-        if !main_window.iter().all(|value| value.is_finite())
-            || !compare_window.iter().all(|value| value.is_finite())
-        {
+        if valid_pairs != lookback {
+            raw_out[i] = f64::NAN;
             continue;
         }
         rank_average(main_window, &mut main_indices, &mut main_ranks);
         rank_average(compare_window, &mut compare_indices, &mut compare_ranks);
-        raw_out[i] = pearson_correlation(&main_ranks, &compare_ranks);
+        raw_out[i] = rank_pearson_correlation(&main_ranks, &compare_ranks, rank_mean);
     }
 }
 
 #[inline(always)]
 fn compute_smoothed_into(raw: &[f64], smoothing_length: usize, smoothed_out: &mut [f64]) {
-    smoothed_out.fill(f64::NAN);
     let mut sum = 0.0;
     let mut finite_count = 0usize;
-    let mut window = VecDeque::with_capacity(smoothing_length + 1);
-    for (i, value) in raw.iter().copied().enumerate() {
-        window.push_back(value);
+    let denom = smoothing_length as f64;
+    for i in 0..raw.len() {
+        let value = raw[i];
         if value.is_finite() {
             sum += value;
             finite_count += 1;
         }
-        if window.len() > smoothing_length {
-            if let Some(old) = window.pop_front() {
-                if old.is_finite() {
-                    sum -= old;
-                    finite_count -= 1;
-                }
+        if i >= smoothing_length {
+            let old = raw[i - smoothing_length];
+            if old.is_finite() {
+                sum -= old;
+                finite_count -= 1;
             }
         }
-        if window.len() == smoothing_length && finite_count == smoothing_length {
-            smoothed_out[i] = sum / smoothing_length as f64;
+        if i + 1 >= smoothing_length && finite_count == smoothing_length {
+            smoothed_out[i] = sum / denom;
+        } else {
+            smoothed_out[i] = f64::NAN;
         }
     }
 }
@@ -485,9 +573,13 @@ pub fn spearman_correlation_with_kernel(
     kernel: Kernel,
 ) -> Result<SpearmanCorrelationOutput, SpearmanCorrelationError> {
     let (main, compare, lookback, smoothing_length, first_return, _) = prepare(input, kernel)?;
+    let raw_warm = first_return + lookback - 1;
+    let smoothed_warm = raw_warm
+        .saturating_add(smoothing_length.saturating_sub(1))
+        .min(main.len());
     let mut out = SpearmanCorrelationOutput {
-        raw: vec![f64::NAN; main.len()],
-        smoothed: vec![f64::NAN; main.len()],
+        raw: alloc_with_nan_prefix(main.len(), raw_warm),
+        smoothed: alloc_with_nan_prefix(main.len(), smoothed_warm),
     };
     compute_spearman_correlation_into(
         main,
@@ -673,7 +765,11 @@ impl SpearmanCorrelationStream {
                 &mut self.compare_indices,
                 &mut self.compare_ranks,
             );
-            pearson_correlation(&self.main_ranks, &self.compare_ranks)
+            rank_pearson_correlation(
+                &self.main_ranks,
+                &self.compare_ranks,
+                (self.lookback as f64 + 1.0) * 0.5,
+            )
         } else {
             f64::NAN
         };

@@ -204,6 +204,8 @@ pub enum KvoError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("kvo: Output buffer length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
+    #[error("kvo: Input length mismatch: expected {expected}, got {got}")]
+    InputLengthMismatch { expected: usize, got: usize },
     #[error("kvo: Invalid range: start={start}, end={end}, step={step}")]
     InvalidRange {
         start: usize,
@@ -219,25 +221,64 @@ pub fn kvo(input: &KvoInput) -> Result<KvoOutput, KvoError> {
     kvo_with_kernel(input, Kernel::Auto)
 }
 
-pub fn kvo_with_kernel(input: &KvoInput, kernel: Kernel) -> Result<KvoOutput, KvoError> {
-    let (high, low, close, volume): (&[f64], &[f64], &[f64], &[f64]) = match &input.data {
-        KvoData::Candles { candles } => (
-            source_type(candles, "high"),
-            source_type(candles, "low"),
-            source_type(candles, "close"),
-            source_type(candles, "volume"),
-        ),
+#[inline(always)]
+fn kvo_slices<'a>(input: &'a KvoInput<'a>) -> (&'a [f64], &'a [f64], &'a [f64], &'a [f64]) {
+    match &input.data {
+        KvoData::Candles { candles } => {
+            (&candles.high, &candles.low, &candles.close, &candles.volume)
+        }
         KvoData::Slices {
             high,
             low,
             close,
             volume,
         } => (*high, *low, *close, *volume),
-    };
+    }
+}
 
+#[inline(always)]
+fn validate_kvo_lengths(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+) -> Result<(), KvoError> {
     if high.is_empty() || low.is_empty() || close.is_empty() || volume.is_empty() {
         return Err(KvoError::EmptyInputData);
     }
+    let len = high.len();
+    if low.len() != len {
+        return Err(KvoError::InputLengthMismatch {
+            expected: len,
+            got: low.len(),
+        });
+    }
+    if close.len() != len {
+        return Err(KvoError::InputLengthMismatch {
+            expected: len,
+            got: close.len(),
+        });
+    }
+    if volume.len() != len {
+        return Err(KvoError::InputLengthMismatch {
+            expected: len,
+            got: volume.len(),
+        });
+    }
+    Ok(())
+}
+
+#[inline(always)]
+fn kvo_single_kernel(kernel: Kernel) -> Kernel {
+    match kernel {
+        Kernel::Auto => Kernel::Scalar,
+        other => other.to_non_batch(),
+    }
+}
+
+pub fn kvo_with_kernel(input: &KvoInput, kernel: Kernel) -> Result<KvoOutput, KvoError> {
+    let (high, low, close, volume) = kvo_slices(input);
+    validate_kvo_lengths(high, low, close, volume)?;
 
     let short_period = input.get_short_period();
     let long_period = input.get_long_period();
@@ -265,10 +306,7 @@ pub fn kvo_with_kernel(input: &KvoInput, kernel: Kernel) -> Result<KvoOutput, Kv
     }
 
     let mut out = alloc_with_nan_prefix(high.len(), first_valid_idx + 1);
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = kvo_single_kernel(kernel);
 
     unsafe {
         match chosen {
@@ -304,6 +342,17 @@ pub fn kvo_with_kernel(input: &KvoInput, kernel: Kernel) -> Result<KvoOutput, Kv
                 first_valid_idx,
                 &mut out,
             ),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx512 => kvo_scalar(
+                high,
+                low,
+                close,
+                volume,
+                short_period,
+                long_period,
+                first_valid_idx,
+                &mut out,
+            ),
             _ => unreachable!(),
         }
     }
@@ -312,24 +361,8 @@ pub fn kvo_with_kernel(input: &KvoInput, kernel: Kernel) -> Result<KvoOutput, Kv
 
 #[inline]
 pub fn kvo_compute_into(out: &mut [f64], input: &KvoInput, kernel: Kernel) -> Result<(), KvoError> {
-    let (high, low, close, volume): (&[f64], &[f64], &[f64], &[f64]) = match &input.data {
-        KvoData::Candles { candles } => (
-            source_type(candles, "high"),
-            source_type(candles, "low"),
-            source_type(candles, "close"),
-            source_type(candles, "volume"),
-        ),
-        KvoData::Slices {
-            high,
-            low,
-            close,
-            volume,
-        } => (*high, *low, *close, *volume),
-    };
-
-    if high.is_empty() || low.is_empty() || close.is_empty() || volume.is_empty() {
-        return Err(KvoError::EmptyInputData);
-    }
+    let (high, low, close, volume) = kvo_slices(input);
+    validate_kvo_lengths(high, low, close, volume)?;
 
     if out.len() != high.len() {
         return Err(KvoError::OutputLengthMismatch {
@@ -363,10 +396,7 @@ pub fn kvo_compute_into(out: &mut [f64], input: &KvoInput, kernel: Kernel) -> Re
         return Err(KvoError::NotEnoughValidData { needed: 2, valid });
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = kvo_single_kernel(kernel);
 
     unsafe {
         match chosen {
@@ -393,6 +423,17 @@ pub fn kvo_compute_into(out: &mut [f64], input: &KvoInput, kernel: Kernel) -> Re
             ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => kvo_avx512(
+                high,
+                low,
+                close,
+                volume,
+                short_period,
+                long_period,
+                first_valid_idx,
+                out,
+            ),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx512 => kvo_scalar(
                 high,
                 low,
                 close,
@@ -435,6 +476,11 @@ pub unsafe fn kvo_scalar(
     first_valid_idx: usize,
     out: &mut [f64],
 ) {
+    if short_period == 2 && long_period == 5 {
+        kvo_scalar_default_2_5(high, low, close, volume, first_valid_idx, out);
+        return;
+    }
+
     let short_alpha = 2.0 / (short_period as f64 + 1.0);
     let long_alpha = 2.0 / (long_period as f64 + 1.0);
 
@@ -445,6 +491,7 @@ pub unsafe fn kvo_scalar(
     let outp = out.as_mut_ptr();
 
     let mut trend: i32 = -1;
+    let mut sign = -1.0f64;
     let mut cm: f64 = 0.0;
 
     let mut prev_hlc =
@@ -456,6 +503,40 @@ pub unsafe fn kvo_scalar(
 
     let mut i = first_valid_idx + 1;
     let len = high.len();
+
+    if i < len {
+        let h = *hp.add(i);
+        let l = *lp.add(i);
+        let c = *cp.add(i);
+        let v = *vp.add(i);
+
+        let hlc = h + l + c;
+        let dm = h - l;
+
+        if hlc > prev_hlc && trend != 1 {
+            trend = 1;
+            cm = prev_dm;
+            sign = 1.0;
+        } else if hlc < prev_hlc && trend != 0 {
+            trend = 0;
+            cm = prev_dm;
+            sign = -1.0;
+        }
+        cm += dm;
+
+        let temp = ((dm / cm) * 2.0 - 1.0).abs();
+        let vf = v * temp * 100.0 * sign;
+
+        short_ema = vf;
+        long_ema = vf;
+
+        *outp.add(i) = short_ema - long_ema;
+
+        prev_hlc = hlc;
+        prev_dm = dm;
+        i += 1;
+    }
+
     while i < len {
         let h = *hp.add(i);
         let l = *lp.add(i);
@@ -468,23 +549,115 @@ pub unsafe fn kvo_scalar(
         if hlc > prev_hlc && trend != 1 {
             trend = 1;
             cm = prev_dm;
+            sign = 1.0;
         } else if hlc < prev_hlc && trend != 0 {
             trend = 0;
             cm = prev_dm;
+            sign = -1.0;
         }
         cm += dm;
 
         let temp = ((dm / cm) * 2.0 - 1.0).abs();
-        let sign = if trend == 1 { 1.0 } else { -1.0 };
         let vf = v * temp * 100.0 * sign;
 
-        if i == first_valid_idx + 1 {
-            short_ema = vf;
-            long_ema = vf;
-        } else {
-            short_ema += (vf - short_ema) * short_alpha;
-            long_ema += (vf - long_ema) * long_alpha;
+        short_ema += (vf - short_ema) * short_alpha;
+        long_ema += (vf - long_ema) * long_alpha;
+
+        *outp.add(i) = short_ema - long_ema;
+
+        prev_hlc = hlc;
+        prev_dm = dm;
+        i += 1;
+    }
+}
+
+#[inline(always)]
+unsafe fn kvo_scalar_default_2_5(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    first_valid_idx: usize,
+    out: &mut [f64],
+) {
+    let hp = high.as_ptr();
+    let lp = low.as_ptr();
+    let cp = close.as_ptr();
+    let vp = volume.as_ptr();
+    let outp = out.as_mut_ptr();
+
+    let mut trend: i32 = -1;
+    let mut sign = -1.0f64;
+    let mut cm: f64 = 0.0;
+
+    let mut prev_hlc =
+        *hp.add(first_valid_idx) + *lp.add(first_valid_idx) + *cp.add(first_valid_idx);
+    let mut prev_dm = *hp.add(first_valid_idx) - *lp.add(first_valid_idx);
+
+    let mut short_ema = 0.0f64;
+    let mut long_ema = 0.0f64;
+
+    let mut i = first_valid_idx + 1;
+    let len = high.len();
+
+    if i < len {
+        let h = *hp.add(i);
+        let l = *lp.add(i);
+        let c = *cp.add(i);
+        let v = *vp.add(i);
+
+        let hlc = h + l + c;
+        let dm = h - l;
+
+        if hlc > prev_hlc && trend != 1 {
+            trend = 1;
+            cm = prev_dm;
+            sign = 1.0;
+        } else if hlc < prev_hlc && trend != 0 {
+            trend = 0;
+            cm = prev_dm;
+            sign = -1.0;
         }
+        cm += dm;
+
+        let temp = ((dm / cm) * 2.0 - 1.0).abs();
+        let vf = v * temp * 100.0 * sign;
+
+        short_ema = vf;
+        long_ema = vf;
+
+        *outp.add(i) = short_ema - long_ema;
+
+        prev_hlc = hlc;
+        prev_dm = dm;
+        i += 1;
+    }
+
+    while i < len {
+        let h = *hp.add(i);
+        let l = *lp.add(i);
+        let c = *cp.add(i);
+        let v = *vp.add(i);
+
+        let hlc = h + l + c;
+        let dm = h - l;
+
+        if hlc > prev_hlc && trend != 1 {
+            trend = 1;
+            cm = prev_dm;
+            sign = 1.0;
+        } else if hlc < prev_hlc && trend != 0 {
+            trend = 0;
+            cm = prev_dm;
+            sign = -1.0;
+        }
+        cm += dm;
+
+        let temp = ((dm / cm) * 2.0 - 1.0).abs();
+        let vf = v * temp * 100.0 * sign;
+
+        short_ema += (vf - short_ema) * (2.0 / 3.0);
+        long_ema += (vf - long_ema) * (1.0 / 3.0);
 
         *outp.add(i) = short_ema - long_ema;
 

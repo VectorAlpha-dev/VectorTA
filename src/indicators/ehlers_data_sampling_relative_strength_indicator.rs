@@ -16,7 +16,7 @@ use crate::indicators::rsi::{rsi_into_slice, RsiInput, RsiParams};
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    alloc_uninit_f64, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
 #[cfg(feature = "python")]
@@ -503,13 +503,9 @@ pub fn ehlers_data_sampling_relative_strength_indicator_with_kernel(
         other => other,
     };
 
-    let warmup = length;
-    let mut ds_rsi = alloc_with_nan_prefix(close.len(), warmup);
-    let mut original_rsi = alloc_with_nan_prefix(close.len(), warmup);
-    let mut signal = alloc_with_nan_prefix(close.len(), warmup);
-    ds_rsi.fill(f64::NAN);
-    original_rsi.fill(f64::NAN);
-    signal.fill(f64::NAN);
+    let mut ds_rsi = alloc_uninit_f64(close.len());
+    let mut original_rsi = alloc_uninit_f64(close.len());
+    let mut signal = alloc_uninit_f64(close.len());
 
     compute_into_outputs(
         open,

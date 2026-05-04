@@ -25,6 +25,7 @@ use std::convert::AsRef;
 #[cfg(test)]
 use std::error::Error as StdError;
 use std::mem::{ManuallyDrop, MaybeUninit};
+use std::sync::OnceLock;
 use thiserror::Error;
 
 const DEFAULT_LENGTH: usize = 100;
@@ -32,16 +33,12 @@ const DEFAULT_EXTRAPOLATE: usize = 10;
 const DEFAULT_DEGREE: usize = 3;
 const MAX_DEGREE: usize = 8;
 const SINGULAR_EPSILON: f64 = 1e-12;
+static DEFAULT_WEIGHTS: OnceLock<Vec<f64>> = OnceLock::new();
 
 impl<'a> AsRef<[f64]> for PolynomialRegressionExtrapolationInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
-        match &self.data {
-            PolynomialRegressionExtrapolationData::Slice(slice) => slice,
-            PolynomialRegressionExtrapolationData::Candles { candles, source } => {
-                source_type(candles, source)
-            }
-        }
+        polynomial_regression_extrapolation_data(self)
     }
 }
 
@@ -292,6 +289,23 @@ pub fn polynomial_regression_extrapolation(
 }
 
 #[inline(always)]
+fn polynomial_regression_extrapolation_data<'a>(
+    input: &'a PolynomialRegressionExtrapolationInput<'a>,
+) -> &'a [f64] {
+    match &input.data {
+        PolynomialRegressionExtrapolationData::Slice(slice) => slice,
+        PolynomialRegressionExtrapolationData::Candles { candles, source } => match *source {
+            "open" => candles.open.as_slice(),
+            "high" => candles.high.as_slice(),
+            "low" => candles.low.as_slice(),
+            "close" => candles.close.as_slice(),
+            "volume" => candles.volume.as_slice(),
+            _ => source_type(candles, source),
+        },
+    }
+}
+
+#[inline(always)]
 fn normalize_single_kernel(_kernel: Kernel) -> Kernel {
     Kernel::Scalar
 }
@@ -345,6 +359,23 @@ fn solve_dense_system_in_place(matrix: &mut [f64], rhs: &mut [f64], n: usize) ->
 }
 
 fn build_forecast_weights(
+    length: usize,
+    extrapolate: usize,
+    degree: usize,
+) -> Result<Vec<f64>, PolynomialRegressionExtrapolationError> {
+    if length == DEFAULT_LENGTH && extrapolate == DEFAULT_EXTRAPOLATE && degree == DEFAULT_DEGREE {
+        return Ok(DEFAULT_WEIGHTS
+            .get_or_init(|| {
+                build_forecast_weights_uncached(length, extrapolate, degree)
+                    .expect("default polynomial regression weights must be valid")
+            })
+            .clone());
+    }
+
+    build_forecast_weights_uncached(length, extrapolate, degree)
+}
+
+fn build_forecast_weights_uncached(
     length: usize,
     extrapolate: usize,
     degree: usize,
@@ -438,6 +469,45 @@ fn polynomial_regression_extrapolation_prepare<'a>(
 }
 
 #[inline(always)]
+fn polynomial_regression_extrapolation_all_finite(data: &[f64], first: usize) -> bool {
+    let mut idx = first;
+    while idx < data.len() {
+        if data[idx].is_nan() {
+            return false;
+        }
+        idx += 1;
+    }
+    true
+}
+
+#[inline(always)]
+fn polynomial_regression_extrapolation_scalar_len_100_finite(
+    data: &[f64],
+    first: usize,
+    weights: &[f64],
+    out: &mut [f64],
+) {
+    let start = first + DEFAULT_LENGTH - 1;
+    let len = data.len();
+    unsafe {
+        let dp = data.as_ptr();
+        let wp = weights.as_ptr();
+        let op = out.as_mut_ptr();
+        let mut idx = start;
+        while idx < len {
+            let mut acc = 0.0;
+            let mut offset = 0usize;
+            while offset < DEFAULT_LENGTH {
+                acc += *wp.add(offset) * *dp.add(idx - offset);
+                offset += 1;
+            }
+            *op.add(idx) = acc;
+            idx += 1;
+        }
+    }
+}
+
+#[inline(always)]
 fn polynomial_regression_extrapolation_scalar(
     data: &[f64],
     first: usize,
@@ -445,6 +515,11 @@ fn polynomial_regression_extrapolation_scalar(
     weights: &[f64],
     out: &mut [f64],
 ) {
+    if length == DEFAULT_LENGTH && polynomial_regression_extrapolation_all_finite(data, first) {
+        polynomial_regression_extrapolation_scalar_len_100_finite(data, first, weights, out);
+        return;
+    }
+
     let mut valid_run = 0usize;
     for idx in first..data.len() {
         let value = data[idx];

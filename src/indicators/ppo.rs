@@ -410,7 +410,7 @@ pub unsafe fn ppo_scalar(
     while i < n {
         let sf = *slow_ma.get_unchecked(i);
         let ff = *fast_ma.get_unchecked(i);
-        let y = if sf == 0.0 || sf.is_nan() || ff.is_nan() {
+        let y = if sf == 0.0 {
             f64::NAN
         } else {
             let ratio = ff / sf;
@@ -460,8 +460,7 @@ pub unsafe fn ppo_scalar_classic_ema(
         i += 1;
     }
 
-    *out.get_unchecked_mut(start_idx) = if slow_ema == 0.0 || slow_ema.is_nan() || fast_ema.is_nan()
-    {
+    *out.get_unchecked_mut(start_idx) = if slow_ema == 0.0 {
         f64::NAN
     } else {
         let ratio = fast_ema / slow_ema;
@@ -474,7 +473,7 @@ pub unsafe fn ppo_scalar_classic_ema(
         fast_ema = f64::mul_add(fa, x, fb * fast_ema);
         slow_ema = f64::mul_add(sa, x, sb * slow_ema);
 
-        let y = if slow_ema == 0.0 || slow_ema.is_nan() || fast_ema.is_nan() {
+        let y = if slow_ema == 0.0 {
             f64::NAN
         } else {
             let ratio = fast_ema / slow_ema;
@@ -511,8 +510,7 @@ pub unsafe fn ppo_scalar_classic_sma(
         t += 1;
     }
 
-    *out.get_unchecked_mut(start_idx) = if slow_sum == 0.0 || slow_sum.is_nan() || fast_sum.is_nan()
-    {
+    *out.get_unchecked_mut(start_idx) = if slow_sum == 0.0 {
         f64::NAN
     } else {
         let ratio = (fast_sum * k) / slow_sum;
@@ -529,7 +527,7 @@ pub unsafe fn ppo_scalar_classic_sma(
         fast_sum += add - sub_fast;
         slow_sum += add - sub_slow;
 
-        let y = if slow_sum == 0.0 || slow_sum.is_nan() || fast_sum.is_nan() {
+        let y = if slow_sum == 0.0 {
             f64::NAN
         } else {
             let ratio = (fast_sum * k) / slow_sum;

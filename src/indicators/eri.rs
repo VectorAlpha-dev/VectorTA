@@ -45,9 +45,21 @@ impl<'a> AsRef<[f64]> for EriInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
-            EriData::Candles { candles, source } => source_type(candles, source),
+            EriData::Candles { candles, source } => eri_source(candles, source),
             EriData::Slices { source, .. } => source,
         }
+    }
+}
+
+#[inline(always)]
+fn eri_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "close" => &candles.close,
+        "volume" => &candles.volume,
+        _ => source_type(candles, source),
     }
 }
 
@@ -213,16 +225,11 @@ pub fn eri(input: &EriInput) -> Result<EriOutput, EriError> {
 
 pub fn eri_with_kernel(input: &EriInput, kernel: Kernel) -> Result<EriOutput, EriError> {
     let (high, low, source_data) = match &input.data {
-        EriData::Candles { candles, source } => {
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|_| EriError::EmptyInputData)?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|_| EriError::EmptyInputData)?;
-            let src = source_type(candles, source);
-            (high, low, src)
-        }
+        EriData::Candles { candles, source } => (
+            &candles.high[..],
+            &candles.low[..],
+            eri_source(candles, source),
+        ),
         EriData::Slices { high, low, source } => (*high, *low, *source),
     };
 
@@ -321,6 +328,16 @@ pub fn eri_with_kernel(input: &EriInput, kernel: Kernel) -> Result<EriOutput, Er
             ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => eri_avx512(
+                high,
+                low,
+                &full_ma,
+                period,
+                first_valid_idx,
+                &mut bull,
+                &mut bear,
+            ),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => eri_scalar(
                 high,
                 low,
                 &full_ma,
@@ -805,6 +822,37 @@ fn expand_grid(r: &EriBatchRange) -> Result<Vec<EriParams>, EriError> {
 }
 
 #[inline(always)]
+fn validate_eri_batch_inputs(
+    high: &[f64],
+    low: &[f64],
+    source: &[f64],
+    combos: &[EriParams],
+) -> Result<usize, EriError> {
+    if high.is_empty() || low.is_empty() || source.is_empty() {
+        return Err(EriError::EmptyInputData);
+    }
+    if high.len() != source.len() || low.len() != source.len() {
+        return Err(EriError::OutputLengthMismatch {
+            expected: source.len(),
+            got: high.len().max(low.len()),
+        });
+    }
+
+    let mut max_p = 0usize;
+    for combo in combos {
+        let period = combo.period.unwrap();
+        if period == 0 || period > source.len() {
+            return Err(EriError::InvalidPeriod {
+                period,
+                data_len: source.len(),
+            });
+        }
+        max_p = max_p.max(period);
+    }
+    Ok(max_p)
+}
+
+#[inline(always)]
 pub fn eri_batch_slice(
     high: &[f64],
     low: &[f64],
@@ -836,6 +884,7 @@ fn eri_batch_inner(
     parallel: bool,
 ) -> Result<EriBatchOutput, EriError> {
     let combos = expand_grid(sweep)?;
+    let max_p = validate_eri_batch_inputs(high, low, source, &combos)?;
 
     let first = high
         .iter()
@@ -843,7 +892,6 @@ fn eri_batch_inner(
         .zip(source.iter())
         .position(|((h, l), s)| !h.is_nan() && !l.is_nan() && !s.is_nan())
         .ok_or(EriError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if source.len() - first < max_p {
         return Err(EriError::NotEnoughValidData {
             needed: max_p,
@@ -868,13 +916,8 @@ fn eri_batch_inner(
     init_matrix_prefixes(&mut buf_bull, cols, &warmup_periods);
     init_matrix_prefixes(&mut buf_bear, cols, &warmup_periods);
 
-    let mut buf_bull_guard = std::mem::ManuallyDrop::new(buf_bull);
-    let mut buf_bear_guard = std::mem::ManuallyDrop::new(buf_bear);
-
-    let mut bull =
-        unsafe { std::slice::from_raw_parts_mut(buf_bull_guard.as_mut_ptr() as *mut f64, total) };
-    let mut bear =
-        unsafe { std::slice::from_raw_parts_mut(buf_bear_guard.as_mut_ptr() as *mut f64, total) };
+    let bull = unsafe { std::slice::from_raw_parts_mut(buf_bull.as_mut_ptr() as *mut f64, total) };
+    let bear = unsafe { std::slice::from_raw_parts_mut(buf_bear.as_mut_ptr() as *mut f64, total) };
 
     let do_row = |row: usize, bull_row: &mut [f64], bear_row: &mut [f64]| -> Result<(), EriError> {
         let period = combos[row].period.unwrap();
@@ -904,25 +947,27 @@ fn eri_batch_inner(
             bull.par_chunks_mut(cols)
                 .zip(bear.par_chunks_mut(cols))
                 .enumerate()
-                .for_each(|(row, (bull_row, bear_row))| {
-                    let _ = do_row(row, bull_row, bear_row);
-                });
+                .map(|(row, (bull_row, bear_row))| do_row(row, bull_row, bear_row))
+                .collect::<Result<Vec<_>, _>>()?;
         }
         #[cfg(target_arch = "wasm32")]
         {
             for (row, (bull_row, bear_row)) in
                 bull.chunks_mut(cols).zip(bear.chunks_mut(cols)).enumerate()
             {
-                let _ = do_row(row, bull_row, bear_row);
+                do_row(row, bull_row, bear_row)?;
             }
         }
     } else {
         for (row, (bull_row, bear_row)) in
             bull.chunks_mut(cols).zip(bear.chunks_mut(cols)).enumerate()
         {
-            let _ = do_row(row, bull_row, bear_row);
+            do_row(row, bull_row, bear_row)?;
         }
     }
+
+    let mut buf_bull_guard = std::mem::ManuallyDrop::new(buf_bull);
+    let mut buf_bear_guard = std::mem::ManuallyDrop::new(buf_bear);
 
     let bull_vec =
         unsafe { Vec::from_raw_parts(buf_bull_guard.as_mut_ptr() as *mut f64, total, total) };
@@ -950,6 +995,7 @@ pub fn eri_batch_inner_into(
     bear_out: &mut [f64],
 ) -> Result<Vec<EriParams>, EriError> {
     let combos = expand_grid(sweep)?;
+    let max_p = validate_eri_batch_inputs(high, low, source, &combos)?;
 
     let first = high
         .iter()
@@ -957,7 +1003,6 @@ pub fn eri_batch_inner_into(
         .zip(source.iter())
         .position(|((h, l), s)| !h.is_nan() && !l.is_nan() && !s.is_nan())
         .ok_or(EriError::AllValuesNaN)?;
-    let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if source.len() - first < max_p {
         return Err(EriError::NotEnoughValidData {
             needed: max_p,
@@ -1010,21 +1055,20 @@ pub fn eri_batch_inner_into(
                 .par_chunks_mut(cols)
                 .zip(bear_out.par_chunks_mut(cols))
                 .enumerate()
-                .for_each(|(row, (bull_row, bear_row))| {
-                    let _ = do_row(row, bull_row, bear_row);
-                });
+                .map(|(row, (bull_row, bear_row))| do_row(row, bull_row, bear_row))
+                .collect::<Result<Vec<_>, _>>()?;
         }
         #[cfg(target_arch = "wasm32")]
         for row in 0..rows {
             let bull_row = &mut bull_out[row * cols..(row + 1) * cols];
             let bear_row = &mut bear_out[row * cols..(row + 1) * cols];
-            let _ = do_row(row, bull_row, bear_row);
+            do_row(row, bull_row, bear_row)?;
         }
     } else {
         for row in 0..rows {
             let bull_row = &mut bull_out[row * cols..(row + 1) * cols];
             let bear_row = &mut bear_out[row * cols..(row + 1) * cols];
-            let _ = do_row(row, bull_row, bear_row);
+            do_row(row, bull_row, bear_row)?;
         }
     }
 
@@ -1643,16 +1687,11 @@ pub fn eri_into_slice(
     kern: Kernel,
 ) -> Result<(), EriError> {
     let (high, low, source_data) = match &input.data {
-        EriData::Candles { candles, source } => {
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|_| EriError::EmptyInputData)?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|_| EriError::EmptyInputData)?;
-            let src = source_type(candles, source);
-            (high, low, src)
-        }
+        EriData::Candles { candles, source } => (
+            &candles.high[..],
+            &candles.low[..],
+            eri_source(candles, source),
+        ),
         EriData::Slices { high, low, source } => (*high, *low, *source),
     };
 
@@ -1695,9 +1734,6 @@ pub fn eri_into_slice(
     }
 
     let ma_type = input.get_ma_type();
-    let full_ma = ma(&ma_type, MaData::Slice(&source_data), period)
-        .map_err(|e| EriError::MaCalculationError(e.to_string()))?;
-
     let warmup_period = first_valid_idx + period - 1;
 
     for v in &mut dst_bull[..warmup_period] {
@@ -1706,6 +1742,37 @@ pub fn eri_into_slice(
     for v in &mut dst_bear[..warmup_period] {
         *v = f64::NAN;
     }
+
+    if ma_type == "sma" || ma_type == "SMA" {
+        unsafe {
+            eri_scalar_classic_sma(
+                high,
+                low,
+                source_data,
+                period,
+                first_valid_idx,
+                dst_bull,
+                dst_bear,
+            )?;
+        }
+        return Ok(());
+    } else if ma_type == "ema" || ma_type == "EMA" {
+        unsafe {
+            eri_scalar_classic_ema(
+                high,
+                low,
+                source_data,
+                period,
+                first_valid_idx,
+                dst_bull,
+                dst_bear,
+            )?;
+        }
+        return Ok(());
+    }
+
+    let full_ma = ma(&ma_type, MaData::Slice(source_data), period)
+        .map_err(|e| EriError::MaCalculationError(e.to_string()))?;
 
     let chosen = match kern {
         Kernel::Auto => Kernel::Scalar,
@@ -1735,6 +1802,16 @@ pub fn eri_into_slice(
             ),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => eri_avx512(
+                high,
+                low,
+                &full_ma,
+                period,
+                first_valid_idx,
+                dst_bull,
+                dst_bear,
+            ),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => eri_scalar(
                 high,
                 low,
                 &full_ma,
@@ -2105,6 +2182,11 @@ pub unsafe fn eri_scalar_classic_ema(
     bull: &mut [f64],
     bear: &mut [f64],
 ) -> Result<(), EriError> {
+    if period == 13 && use_eri_ema13_fast_path(source.len()) {
+        eri_scalar_classic_ema_13(high, low, source, first_valid_idx, bull, bear);
+        return Ok(());
+    }
+
     let start_idx = first_valid_idx + period - 1;
     let alpha = 2.0 / (period as f64 + 1.0);
     let beta = 1.0 - alpha;
@@ -2126,6 +2208,58 @@ pub unsafe fn eri_scalar_classic_ema(
     }
 
     Ok(())
+}
+
+#[inline(always)]
+fn use_eri_ema13_fast_path(len: usize) -> bool {
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        len >= 500_000
+    }
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    {
+        len >= 50_000
+    }
+}
+
+#[inline(always)]
+unsafe fn eri_scalar_classic_ema_13(
+    high: &[f64],
+    low: &[f64],
+    source: &[f64],
+    first_valid_idx: usize,
+    bull: &mut [f64],
+    bear: &mut [f64],
+) {
+    const PERIOD: usize = 13;
+    let start_idx = first_valid_idx + PERIOD - 1;
+    let alpha = 2.0 / (PERIOD as f64 + 1.0);
+    let beta = 1.0 - alpha;
+
+    let src_ptr = source.as_ptr();
+    let high_ptr = high.as_ptr();
+    let low_ptr = low.as_ptr();
+    let bull_ptr = bull.as_mut_ptr();
+    let bear_ptr = bear.as_mut_ptr();
+
+    let mut sum = 0.0;
+    let mut j = 0usize;
+    while j < PERIOD {
+        sum += *src_ptr.add(first_valid_idx + j);
+        j += 1;
+    }
+    let mut ema = sum / PERIOD as f64;
+
+    *bull_ptr.add(start_idx) = *high_ptr.add(start_idx) - ema;
+    *bear_ptr.add(start_idx) = *low_ptr.add(start_idx) - ema;
+
+    let mut i = start_idx + 1;
+    while i < source.len() {
+        ema = alpha * *src_ptr.add(i) + beta * ema;
+        *bull_ptr.add(i) = *high_ptr.add(i) - ema;
+        *bear_ptr.add(i) = *low_ptr.add(i) - ema;
+        i += 1;
+    }
 }
 
 #[cfg(test)]

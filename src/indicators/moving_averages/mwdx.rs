@@ -41,7 +41,18 @@ impl<'a> AsRef<[f64]> for MwdxInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             MwdxData::Slice(slice) => slice,
-            MwdxData::Candles { candles, source } => source_type(candles, source),
+            MwdxData::Candles { candles, source } => match *source {
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -217,7 +228,7 @@ fn mwdx_prepare<'a>(
     let warm = data.iter().position(|x| !x.is_nan()).unwrap_or(len);
 
     let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => detect_best_kernel(),
         other => other,
     };
 

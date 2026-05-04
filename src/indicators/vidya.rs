@@ -38,12 +38,30 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
 
+const DEFAULT_SOURCE: &str = "close";
+
+#[inline(always)]
+fn source_slice<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        DEFAULT_SOURCE => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
+    }
+}
+
 impl<'a> AsRef<[f64]> for VidyaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             VidyaData::Slice(slice) => slice,
-            VidyaData::Candles { candles, source } => source_type(candles, source),
+            VidyaData::Candles { candles, source } => source_slice(candles, source),
         }
     }
 }
@@ -152,7 +170,7 @@ impl<'a> VidyaInput<'a> {
     }
     #[inline]
     pub fn with_default_candles(c: &'a Candles) -> Self {
-        Self::from_candles(c, "close", VidyaParams::default())
+        Self::from_candles(c, DEFAULT_SOURCE, VidyaParams::default())
     }
     #[inline]
     pub fn get_short_period(&self) -> usize {
@@ -274,7 +292,7 @@ pub fn vidya(input: &VidyaInput) -> Result<VidyaOutput, VidyaError> {
 
 pub fn vidya_with_kernel(input: &VidyaInput, kernel: Kernel) -> Result<VidyaOutput, VidyaError> {
     let data: &[f64] = match &input.data {
-        VidyaData::Candles { candles, source } => source_type(candles, source),
+        VidyaData::Candles { candles, source } => source_slice(candles, source),
         VidyaData::Slice(sl) => sl,
     };
 
@@ -350,7 +368,7 @@ pub fn vidya_into_slice(
     kern: Kernel,
 ) -> Result<(), VidyaError> {
     let data: &[f64] = match &input.data {
-        VidyaData::Candles { candles, source } => source_type(candles, source),
+        VidyaData::Candles { candles, source } => source_slice(candles, source),
         VidyaData::Slice(sl) => sl,
     };
 

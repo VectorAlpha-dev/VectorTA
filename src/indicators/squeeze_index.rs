@@ -37,8 +37,24 @@ impl<'a> AsRef<[f64]> for SqueezeIndexInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             SqueezeIndexData::Slice(slice) => slice,
-            SqueezeIndexData::Candles { candles, source } => source_type(candles, source),
+            SqueezeIndexData::Candles { candles, source } => squeeze_source_type(candles, source),
         }
+    }
+}
+
+#[inline(always)]
+fn squeeze_source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "close" => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
     }
 }
 
@@ -220,7 +236,12 @@ pub enum SqueezeIndexError {
 #[derive(Debug, Clone, Copy)]
 struct ResolvedParams {
     conv: f64,
+    inv_conv: f64,
     length: usize,
+    length_f: f64,
+    sum_y: f64,
+    denom_y: f64,
+    last_index_f: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -263,7 +284,16 @@ impl SqueezeIndexStream {
 
     #[inline]
     fn reset(&mut self) {
-        *self = Self::new_resolved(self.params);
+        self.max_state = 0.0;
+        self.min_state = 0.0;
+        self.ring_vals.fill(0.0);
+        self.ring_valid.fill(0);
+        self.head = 0;
+        self.filled = 0;
+        self.valid_count = 0;
+        self.sum_x = 0.0;
+        self.sum_x2 = 0.0;
+        self.weighted = 0.0;
     }
 
     #[inline]
@@ -278,9 +308,9 @@ impl SqueezeIndexStream {
             return None;
         }
 
-        let conv = self.params.conv;
-        let max_next = value.max(self.max_state - (self.max_state - value) / conv);
-        let min_next = value.min(self.min_state + (value - self.min_state) / conv);
+        let inv_conv = self.params.inv_conv;
+        let max_next = value.max(self.max_state - (self.max_state - value) * inv_conv);
+        let min_next = value.min(self.min_state + (value - self.min_state) * inv_conv);
         self.max_state = max_next;
         self.min_state = min_next;
 
@@ -314,8 +344,7 @@ impl SqueezeIndexStream {
             let old_valid = self.ring_valid[self.head] as usize;
             let old_sum = self.sum_x;
 
-            self.weighted =
-                self.weighted - old_sum + old_value + (n.saturating_sub(1) as f64) * value;
+            self.weighted = self.weighted - old_sum + old_value + self.params.last_index_f * value;
             self.sum_x = old_sum - old_value + value;
             self.sum_x2 = self.sum_x2 - old_value * old_value + value * value;
             self.valid_count = self.valid_count + if is_valid { 1 } else { 0 } - old_valid;
@@ -332,7 +361,12 @@ impl SqueezeIndexStream {
             return Some(f64::NAN);
         }
 
-        Some(psi_from_corr(self.sum_x, self.sum_x2, self.weighted, n))
+        Some(psi_from_corr(
+            self.sum_x,
+            self.sum_x2,
+            self.weighted,
+            self.params,
+        ))
     }
 }
 
@@ -364,17 +398,14 @@ fn first_valid_value(data: &[f64]) -> usize {
 }
 
 #[inline(always)]
-fn psi_from_corr(sum_x: f64, sum_x2: f64, weighted: f64, length: usize) -> f64 {
-    let n = length as f64;
-    let sum_y = n * (n - 1.0) * 0.5;
-    let sum_y2 = (n - 1.0) * n * (2.0 * n - 1.0) / 6.0;
-    let denom_x = n * sum_x2 - sum_x * sum_x;
-    let denom_y = n * sum_y2 - sum_y * sum_y;
+fn psi_from_corr(sum_x: f64, sum_x2: f64, weighted: f64, params: ResolvedParams) -> f64 {
+    let denom_x = params.length_f * sum_x2 - sum_x * sum_x;
+    let denom_y = params.denom_y;
     let denom = denom_x * denom_y;
     if denom <= 0.0 || !denom.is_finite() {
         return f64::NAN;
     }
-    let corr = (n * weighted - sum_x * sum_y) / denom.sqrt();
+    let corr = (params.length_f * weighted - sum_x * params.sum_y) / denom.sqrt();
     -50.0 * corr + 50.0
 }
 
@@ -391,14 +422,26 @@ fn resolve_params(
     if length == 0 || (data_len > 0 && length > data_len) {
         return Err(SqueezeIndexError::InvalidLength { length, data_len });
     }
-    Ok(ResolvedParams { conv, length })
+    let length_f = length as f64;
+    let sum_y = length_f * (length_f - 1.0) * 0.5;
+    let sum_y2 = (length_f - 1.0) * length_f * (2.0 * length_f - 1.0) / 6.0;
+    let denom_y = length_f * sum_y2 - sum_y * sum_y;
+    Ok(ResolvedParams {
+        conv,
+        inv_conv: 1.0 / conv,
+        length,
+        length_f,
+        sum_y,
+        denom_y,
+        last_index_f: length.saturating_sub(1) as f64,
+    })
 }
 
 #[inline]
 fn squeeze_index_prepare<'a>(
     input: &'a SqueezeIndexInput,
     kernel: Kernel,
-) -> Result<(&'a [f64], ResolvedParams, Kernel), SqueezeIndexError> {
+) -> Result<(&'a [f64], ResolvedParams, Kernel, bool), SqueezeIndexError> {
     let data = input.as_ref();
     let len = data.len();
     if len == 0 {
@@ -424,18 +467,107 @@ fn squeeze_index_prepare<'a>(
         other => other.to_non_batch(),
     };
 
-    Ok((data, params, chosen))
+    Ok((data, params, chosen, valid == len))
 }
 
 #[inline(always)]
-fn squeeze_index_row_from_slice(data: &[f64], params: ResolvedParams, out: &mut [f64]) {
-    out.fill(f64::NAN);
+fn squeeze_index_row_from_slice(
+    data: &[f64],
+    params: ResolvedParams,
+    all_finite: bool,
+    out: &mut [f64],
+) {
+    if all_finite && squeeze_index_row_all_finite(data, params, out) {
+        return;
+    }
+
+    let warm = params.length.saturating_sub(1).min(out.len());
+    out[..warm].fill(f64::NAN);
     let mut stream = SqueezeIndexStream::new_resolved(params);
     for (i, &value) in data.iter().enumerate() {
         if let Some(out_value) = stream.update(value) {
             out[i] = out_value;
+        } else if i >= warm {
+            out[i] = f64::NAN;
         }
     }
+}
+
+#[inline(always)]
+fn squeeze_index_row_all_finite(data: &[f64], params: ResolvedParams, out: &mut [f64]) -> bool {
+    if params.length <= 64 {
+        let mut ring_vals = [0.0_f64; 64];
+        return squeeze_index_row_all_finite_with_ring(
+            data,
+            params,
+            out,
+            &mut ring_vals[..params.length],
+        );
+    }
+    let mut ring_vals = vec![0.0; params.length];
+    squeeze_index_row_all_finite_with_ring(data, params, out, &mut ring_vals)
+}
+
+#[inline(always)]
+fn squeeze_index_row_all_finite_with_ring(
+    data: &[f64],
+    params: ResolvedParams,
+    out: &mut [f64],
+    ring_vals: &mut [f64],
+) -> bool {
+    let warm = params.length.saturating_sub(1).min(out.len());
+    out[..warm].fill(f64::NAN);
+
+    let n = params.length;
+    let mut head = 0usize;
+    let mut filled = 0usize;
+    let mut sum_x = 0.0;
+    let mut sum_x2 = 0.0;
+    let mut weighted = 0.0;
+    let mut max_state = 0.0;
+    let mut min_state = 0.0;
+
+    for i in 0..data.len() {
+        let value = data[i];
+        let max_next = value.max(max_state - (max_state - value) * params.inv_conv);
+        let min_next = value.min(min_state + (value - min_state) * params.inv_conv);
+        max_state = max_next;
+        min_state = min_next;
+
+        let spread = max_next - min_next;
+        if spread <= 0.0 || !spread.is_finite() {
+            return false;
+        }
+        let diff = spread.ln();
+        if !diff.is_finite() {
+            return false;
+        }
+
+        if filled < n {
+            ring_vals[filled] = diff;
+            sum_x += diff;
+            sum_x2 += diff * diff;
+            weighted += filled as f64 * diff;
+            filled += 1;
+            if filled == n {
+                out[i] = psi_from_corr(sum_x, sum_x2, weighted, params);
+            }
+        } else {
+            let old_value = ring_vals[head];
+            let old_sum = sum_x;
+            weighted = weighted - old_sum + old_value + params.last_index_f * diff;
+            sum_x = old_sum - old_value + diff;
+            sum_x2 = sum_x2 - old_value * old_value + diff * diff;
+            ring_vals[head] = diff;
+            head += 1;
+            if head == n {
+                head = 0;
+            }
+            out[i] = psi_from_corr(sum_x, sum_x2, weighted, params);
+        }
+    }
+
+    true
 }
 
 #[inline]
@@ -443,9 +575,9 @@ pub fn squeeze_index_with_kernel(
     input: &SqueezeIndexInput,
     kernel: Kernel,
 ) -> Result<SqueezeIndexOutput, SqueezeIndexError> {
-    let (data, params, _chosen) = squeeze_index_prepare(input, kernel)?;
+    let (data, params, _chosen, all_finite) = squeeze_index_prepare(input, kernel)?;
     let mut values = alloc_with_nan_prefix(data.len(), params.length.saturating_sub(1));
-    squeeze_index_row_from_slice(data, params, &mut values);
+    squeeze_index_row_from_slice(data, params, all_finite, &mut values);
     Ok(SqueezeIndexOutput { values })
 }
 
@@ -455,14 +587,14 @@ pub fn squeeze_index_into_slice(
     input: &SqueezeIndexInput,
     kernel: Kernel,
 ) -> Result<(), SqueezeIndexError> {
-    let (data, params, _chosen) = squeeze_index_prepare(input, kernel)?;
+    let (data, params, _chosen, all_finite) = squeeze_index_prepare(input, kernel)?;
     if dst.len() != data.len() {
         return Err(SqueezeIndexError::OutputLengthMismatch {
             expected: data.len(),
             got: dst.len(),
         });
     }
-    squeeze_index_row_from_slice(data, params, dst);
+    squeeze_index_row_from_slice(data, params, all_finite, dst);
     Ok(())
 }
 
@@ -543,7 +675,7 @@ impl SqueezeIndexBatchBuilder {
         candles: &Candles,
         source: &str,
     ) -> Result<SqueezeIndexBatchOutput, SqueezeIndexError> {
-        self.apply_slice(source_type(candles, source))
+        self.apply_slice(squeeze_source_type(candles, source))
     }
 
     #[inline]
@@ -752,6 +884,7 @@ fn squeeze_index_batch_inner(
         return Err(SqueezeIndexError::AllValuesNaN);
     }
     let valid = count_valid_values(data);
+    let all_finite = valid == cols;
     let max_length = combos
         .iter()
         .map(|combo| combo.length.unwrap_or(DEFAULT_LENGTH))
@@ -781,18 +914,18 @@ fn squeeze_index_batch_inner(
             .enumerate()
             .for_each(|(row, out_row)| {
                 let params = resolve_params(&combos[row], cols).unwrap();
-                squeeze_index_row_from_slice(data, params, out_row);
+                squeeze_index_row_from_slice(data, params, all_finite, out_row);
             });
 
         #[cfg(target_arch = "wasm32")]
         for (row, out_row) in out.chunks_mut(cols).enumerate() {
             let params = resolve_params(&combos[row], cols).unwrap();
-            squeeze_index_row_from_slice(data, params, out_row);
+            squeeze_index_row_from_slice(data, params, all_finite, out_row);
         }
     } else {
         for (row, out_row) in out.chunks_mut(cols).enumerate() {
             let params = resolve_params(&combos[row], cols).unwrap();
-            squeeze_index_row_from_slice(data, params, out_row);
+            squeeze_index_row_from_slice(data, params, all_finite, out_row);
         }
     }
 
@@ -845,6 +978,7 @@ pub fn squeeze_index_batch_inner_into(
         return Err(SqueezeIndexError::AllValuesNaN);
     }
     let valid = count_valid_values(data);
+    let all_finite = valid == cols;
     let max_length = combos
         .iter()
         .map(|combo| combo.length.unwrap_or(DEFAULT_LENGTH))
@@ -863,18 +997,18 @@ pub fn squeeze_index_batch_inner_into(
             .enumerate()
             .for_each(|(row, out_row)| {
                 let params = resolve_params(&combos[row], cols).unwrap();
-                squeeze_index_row_from_slice(data, params, out_row);
+                squeeze_index_row_from_slice(data, params, all_finite, out_row);
             });
 
         #[cfg(target_arch = "wasm32")]
         for (row, out_row) in out.chunks_mut(cols).enumerate() {
             let params = resolve_params(&combos[row], cols).unwrap();
-            squeeze_index_row_from_slice(data, params, out_row);
+            squeeze_index_row_from_slice(data, params, all_finite, out_row);
         }
     } else {
         for (row, out_row) in out.chunks_mut(cols).enumerate() {
             let params = resolve_params(&combos[row], cols).unwrap();
-            squeeze_index_row_from_slice(data, params, out_row);
+            squeeze_index_row_from_slice(data, params, all_finite, out_row);
         }
     }
 

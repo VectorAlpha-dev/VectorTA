@@ -16,7 +16,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix};
+use crate::utilities::helpers::{detect_best_batch_kernel, make_uninit_matrix};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
@@ -619,7 +619,7 @@ impl NormalizedVolumeTrueRangeCore {
 #[inline(always)]
 fn normalize_single_kernel(kernel: Kernel) -> Kernel {
     match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     }
 }
@@ -641,7 +641,21 @@ fn normalize_single_kernel_to_scalar(kernel: Kernel) -> Kernel {
 fn validate_params(
     params: &NormalizedVolumeTrueRangeParams,
 ) -> Result<(), NormalizedVolumeTrueRangeError> {
-    let _ = NormalizedVolumeTrueRangeCore::try_new(params)?;
+    let outlier_range = params.outlier_range.unwrap_or(DEFAULT_OUTLIER_RANGE);
+    if !outlier_range.is_finite() || outlier_range < MIN_OUTLIER_RANGE {
+        return Err(NormalizedVolumeTrueRangeError::InvalidOutlierRange { outlier_range });
+    }
+
+    let atr_length = params.atr_length.unwrap_or(DEFAULT_ATR_LENGTH);
+    if atr_length < MIN_LENGTH {
+        return Err(NormalizedVolumeTrueRangeError::InvalidAtrLength { atr_length });
+    }
+
+    let volume_length = params.volume_length.unwrap_or(DEFAULT_VOLUME_LENGTH);
+    if volume_length < MIN_LENGTH {
+        return Err(NormalizedVolumeTrueRangeError::InvalidVolumeLength { volume_length });
+    }
+
     Ok(())
 }
 
@@ -741,12 +755,6 @@ fn compute_into_slices(
     ensure_output_len(len, atr.len())?;
     ensure_output_len(len, average_volume.len())?;
 
-    normalized_volume.fill(f64::NAN);
-    normalized_true_range.fill(f64::NAN);
-    baseline.fill(f64::NAN);
-    atr.fill(f64::NAN);
-    average_volume.fill(f64::NAN);
-
     let mut core = NormalizedVolumeTrueRangeCore::try_new(&NormalizedVolumeTrueRangeParams {
         true_range_style: Some(prepared.style),
         outlier_range: Some(prepared.outlier_range),
@@ -767,6 +775,12 @@ fn compute_into_slices(
             baseline[idx] = base;
             atr[idx] = atr_value;
             average_volume[idx] = avg_vol;
+        } else {
+            normalized_volume[idx] = f64::NAN;
+            normalized_true_range[idx] = f64::NAN;
+            baseline[idx] = f64::NAN;
+            atr[idx] = f64::NAN;
+            average_volume[idx] = f64::NAN;
         }
     }
 

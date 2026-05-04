@@ -13,6 +13,7 @@ use std::convert::AsRef;
 use std::error::Error;
 use std::f64::consts::PI;
 use std::mem::MaybeUninit;
+use std::sync::OnceLock;
 use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -44,7 +45,18 @@ impl<'a> AsRef<[f64]> for SinWmaInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             SinWmaData::Slice(slice) => slice,
-            SinWmaData::Candles { candles, source } => source_type(candles, source),
+            SinWmaData::Candles { candles, source } => match *source {
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -203,7 +215,7 @@ pub fn sinwma_with_kernel(
 
     let mut out = alloc_with_nan_prefix(data.len(), first + period - 1);
 
-    sinwma_compute_into(data, &weights, period, first, chosen, &mut out);
+    sinwma_compute_into(data, weights.as_slice(), period, first, chosen, &mut out);
 
     Ok(SinWmaOutput { values: out })
 }
@@ -223,7 +235,7 @@ pub fn sinwma_into_slice(
         });
     }
 
-    sinwma_compute_into(data, &weights, period, first, chosen, dst);
+    sinwma_compute_into(data, weights.as_slice(), period, first, chosen, dst);
 
     let warmup_end = first + period - 1;
     for v in &mut dst[..warmup_end] {
@@ -239,11 +251,63 @@ pub fn sinwma_into(input: &SinWmaInput, out: &mut [f64]) -> Result<(), SinWmaErr
     sinwma_into_slice(out, input, Kernel::Auto)
 }
 
+static SINWMA_DEFAULT_WEIGHTS_14: OnceLock<AVec<f64>> = OnceLock::new();
+
+#[derive(Clone)]
+enum SinWmaWeights {
+    Static(&'static [f64]),
+    Owned(AVec<f64>),
+}
+
+impl SinWmaWeights {
+    #[inline(always)]
+    fn as_slice(&self) -> &[f64] {
+        match self {
+            Self::Static(weights) => weights,
+            Self::Owned(weights) => weights,
+        }
+    }
+}
+
+#[inline]
+fn build_sinwma_weights(period: usize) -> Result<AVec<f64>, SinWmaError> {
+    let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period);
+    weights.resize(period, 0.0);
+    let mut sum_sines = 0.0;
+    for k in 0..period {
+        let angle = (k as f64 + 1.0) * PI / (period as f64 + 1.0);
+        let val = angle.sin();
+        weights[k] = val;
+        sum_sines += val;
+    }
+
+    if sum_sines.abs() < f64::EPSILON {
+        return Err(SinWmaError::ZeroSumSines { sum_sines });
+    }
+    let inv_sum = 1.0 / sum_sines;
+    for w in &mut weights[..] {
+        *w *= inv_sum;
+    }
+
+    Ok(weights)
+}
+
+#[inline]
+fn sinwma_weights(period: usize) -> Result<SinWmaWeights, SinWmaError> {
+    if period == 14 {
+        let weights = SINWMA_DEFAULT_WEIGHTS_14
+            .get_or_init(|| build_sinwma_weights(14).expect("valid default SINWMA weights"));
+        Ok(SinWmaWeights::Static(weights.as_slice()))
+    } else {
+        Ok(SinWmaWeights::Owned(build_sinwma_weights(period)?))
+    }
+}
+
 #[inline(always)]
 fn sinwma_prepare<'a>(
     input: &'a SinWmaInput,
     kernel: Kernel,
-) -> Result<(&'a [f64], AVec<f64>, usize, usize, Kernel), SinWmaError> {
+) -> Result<(&'a [f64], SinWmaWeights, usize, usize, Kernel), SinWmaError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
 
@@ -271,23 +335,7 @@ fn sinwma_prepare<'a>(
         });
     }
 
-    let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period);
-    weights.resize(period, 0.0);
-    let mut sum_sines = 0.0;
-    for k in 0..period {
-        let angle = (k as f64 + 1.0) * PI / (period as f64 + 1.0);
-        let val = angle.sin();
-        weights[k] = val;
-        sum_sines += val;
-    }
-
-    if sum_sines.abs() < f64::EPSILON {
-        return Err(SinWmaError::ZeroSumSines { sum_sines });
-    }
-    let inv_sum = 1.0 / sum_sines;
-    for w in &mut weights[..] {
-        *w *= inv_sum;
-    }
+    let weights = sinwma_weights(period)?;
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -307,6 +355,22 @@ fn sinwma_compute_into(
     out: &mut [f64],
 ) {
     unsafe {
+        if period == 14 {
+            match kernel {
+                Kernel::Scalar | Kernel::ScalarBatch => sinwma_scalar_14(data, weights, first, out),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx2 | Kernel::Avx2Batch => sinwma_avx2_14(data, weights, first, out),
+                #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+                Kernel::Avx512 | Kernel::Avx512Batch => sinwma_avx512_14(data, weights, first, out),
+                #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+                Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                    sinwma_scalar_14(data, weights, first, out)
+                }
+                _ => unreachable!(),
+            }
+            return;
+        }
+
         match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => {
                 sinwma_scalar(data, weights, period, first, out)
@@ -331,6 +395,83 @@ fn sinwma_compute_into(
 #[target_feature(enable = "avx512f")]
 unsafe fn hsum_pd_zmm(v: __m512d) -> f64 {
     _mm512_reduce_add_pd(v)
+}
+
+#[inline(always)]
+fn sinwma_scalar_14(data: &[f64], weights: &[f64], first_val: usize, out: &mut [f64]) {
+    let w0 = weights[0];
+    let w1 = weights[1];
+    let w2 = weights[2];
+    let w3 = weights[3];
+    let w4 = weights[4];
+    let w5 = weights[5];
+    let w6 = weights[6];
+    let w7 = weights[7];
+    let w8 = weights[8];
+    let w9 = weights[9];
+    let w10 = weights[10];
+    let w11 = weights[11];
+    let w12 = weights[12];
+    let w13 = weights[13];
+
+    for i in (first_val + 13)..data.len() {
+        let start = i - 13;
+        unsafe {
+            let d = data.as_ptr().add(start);
+            let mut sum = ((*d.add(0) * w0 + *d.add(1) * w1) + *d.add(2) * w2) + *d.add(3) * w3;
+            sum += ((*d.add(4) * w4 + *d.add(5) * w5) + *d.add(6) * w6) + *d.add(7) * w7;
+            sum += ((*d.add(8) * w8 + *d.add(9) * w9) + *d.add(10) * w10) + *d.add(11) * w11;
+            sum += *d.add(12) * w12;
+            sum += *d.add(13) * w13;
+            *out.get_unchecked_mut(i) = sum;
+        }
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn sinwma_avx2_14(data: &[f64], weights: &[f64], first_valid: usize, out: &mut [f64]) {
+    let w0 = _mm256_loadu_pd(weights.as_ptr());
+    let w4 = _mm256_loadu_pd(weights.as_ptr().add(4));
+    let w8 = _mm256_loadu_pd(weights.as_ptr().add(8));
+    let w12 = *weights.get_unchecked(12);
+    let w13 = *weights.get_unchecked(13);
+
+    for i in (first_valid + 13)..data.len() {
+        let start = i - 13;
+        let d0 = _mm256_loadu_pd(data.as_ptr().add(start));
+        let d4 = _mm256_loadu_pd(data.as_ptr().add(start + 4));
+        let d8 = _mm256_loadu_pd(data.as_ptr().add(start + 8));
+        let mut acc = _mm256_setzero_pd();
+        acc = _mm256_fmadd_pd(d0, w0, acc);
+        acc = _mm256_fmadd_pd(d4, w4, acc);
+        acc = _mm256_fmadd_pd(d8, w8, acc);
+
+        let sum128 = _mm_add_pd(_mm256_castpd256_pd128(acc), _mm256_extractf128_pd(acc, 1));
+        let mut sum = _mm_cvtsd_f64(_mm_hadd_pd(sum128, sum128));
+        sum = (*data.get_unchecked(start + 12)).mul_add(w12, sum);
+        sum = (*data.get_unchecked(start + 13)).mul_add(w13, sum);
+        *out.get_unchecked_mut(i) = sum;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+#[target_feature(enable = "avx512f,fma")]
+unsafe fn sinwma_avx512_14(data: &[f64], weights: &[f64], first_valid: usize, out: &mut [f64]) {
+    let w0 = _mm512_loadu_pd(weights.as_ptr());
+    let wt = _mm512_maskz_loadu_pd(0b0011_1111, weights.as_ptr().add(8));
+
+    for i in (first_valid + 13)..data.len() {
+        let start = i - 13;
+        let d0 = _mm512_loadu_pd(data.as_ptr().add(start));
+        let dt = _mm512_maskz_loadu_pd(0b0011_1111, data.as_ptr().add(start + 8));
+        let mut acc = _mm512_setzero_pd();
+        acc = _mm512_fmadd_pd(d0, w0, acc);
+        acc = _mm512_fmadd_pd(dt, wt, acc);
+        *out.get_unchecked_mut(i) = hsum_pd_zmm(acc);
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

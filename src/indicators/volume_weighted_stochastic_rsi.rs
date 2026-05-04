@@ -15,8 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -33,7 +32,11 @@ impl<'a> AsRef<[f64]> for VolumeWeightedStochasticRsiInput<'a> {
         match &self.data {
             VolumeWeightedStochasticRsiData::Slice { source, .. } => source,
             VolumeWeightedStochasticRsiData::Candles { candles, source } => {
-                source_type(candles, source)
+                if source.eq_ignore_ascii_case("close") {
+                    candles.close.as_slice()
+                } else {
+                    source_type(candles, source)
+                }
             }
         }
     }
@@ -150,9 +153,14 @@ impl<'a> VolumeWeightedStochasticRsiInput<'a> {
     #[inline]
     pub fn as_refs(&'a self) -> (&'a [f64], &'a [f64]) {
         match &self.data {
-            VolumeWeightedStochasticRsiData::Candles { candles, source } => {
-                (source_type(candles, source), candles.volume.as_slice())
-            }
+            VolumeWeightedStochasticRsiData::Candles { candles, source } => (
+                if source.eq_ignore_ascii_case("close") {
+                    candles.close.as_slice()
+                } else {
+                    source_type(candles, source)
+                },
+                candles.volume.as_slice(),
+            ),
             VolumeWeightedStochasticRsiData::Slice { source, volume } => (*source, *volume),
         }
     }
@@ -335,16 +343,26 @@ enum VwsrsiMaType {
 
 #[inline(always)]
 fn parse_ma_type(value: &str) -> Result<VwsrsiMaType, VolumeWeightedStochasticRsiError> {
-    let normalized = value.trim().to_ascii_uppercase();
-    match normalized.as_str() {
-        "WSMA" | "SMMA" | "RMA" | "WILDERS" | "WILDER" => Ok(VwsrsiMaType::Wsma),
-        "SMA" => Ok(VwsrsiMaType::Sma),
-        "EMA" => Ok(VwsrsiMaType::Ema),
-        "WMA" => Ok(VwsrsiMaType::Wma),
-        "VWMA" => Ok(VwsrsiMaType::Vwma),
-        _ => Err(VolumeWeightedStochasticRsiError::InvalidMaType {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("WSMA")
+        || value.eq_ignore_ascii_case("SMMA")
+        || value.eq_ignore_ascii_case("RMA")
+        || value.eq_ignore_ascii_case("WILDERS")
+        || value.eq_ignore_ascii_case("WILDER")
+    {
+        Ok(VwsrsiMaType::Wsma)
+    } else if value.eq_ignore_ascii_case("SMA") {
+        Ok(VwsrsiMaType::Sma)
+    } else if value.eq_ignore_ascii_case("EMA") {
+        Ok(VwsrsiMaType::Ema)
+    } else if value.eq_ignore_ascii_case("WMA") {
+        Ok(VwsrsiMaType::Wma)
+    } else if value.eq_ignore_ascii_case("VWMA") {
+        Ok(VwsrsiMaType::Vwma)
+    } else {
+        Err(VolumeWeightedStochasticRsiError::InvalidMaType {
             ma_type: value.to_string(),
-        }),
+        })
     }
 }
 
@@ -814,6 +832,12 @@ struct VolumeWeightedStochasticRsiState {
     d_ma: WeightedMaState,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum VolumeWeightedStochasticRsiOutputField {
+    K,
+    D,
+}
+
 impl VolumeWeightedStochasticRsiState {
     #[inline]
     fn new(
@@ -846,6 +870,30 @@ impl VolumeWeightedStochasticRsiState {
             f64::NAN
         };
         (k, d)
+    }
+}
+
+#[inline(always)]
+fn volume_weighted_stochastic_rsi_compute_k_into(
+    source: &[f64],
+    volume: &[f64],
+    rsi_length: usize,
+    stoch_length: usize,
+    k_length: usize,
+    ma_type: VwsrsiMaType,
+    out_k: &mut [f64],
+) {
+    let mut rsi = WeightedRsiState::new(rsi_length);
+    let mut stoch_state = StochState::new(stoch_length);
+    let mut k_ma = WeightedMaState::new(ma_type, k_length);
+    for i in 0..source.len() {
+        let rsi_value = rsi.update(source[i], volume[i]);
+        let stoch = stoch_state.update(rsi_value);
+        out_k[i] = if stoch.is_finite() {
+            k_ma.update(stoch, volume[i])
+        } else {
+            f64::NAN
+        };
     }
 }
 
@@ -941,10 +989,7 @@ fn volume_weighted_stochastic_rsi_prepare<'a>(
         return Err(VolumeWeightedStochasticRsiError::NotEnoughValidData { needed, valid });
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other.to_non_batch(),
-    };
+    let chosen = kernel.to_non_batch();
 
     Ok((
         source,
@@ -973,10 +1018,9 @@ pub fn volume_weighted_stochastic_rsi_with_kernel(
 ) -> Result<VolumeWeightedStochasticRsiOutput, VolumeWeightedStochasticRsiError> {
     let (source, volume, rsi_length, stoch_length, k_length, d_length, ma_type, first, _chosen) =
         volume_weighted_stochastic_rsi_prepare(input, kernel)?;
-    let k_first = k_warmup(first, rsi_length, stoch_length, k_length, ma_type);
-    let d_first = d_warmup(first, rsi_length, stoch_length, k_length, d_length, ma_type);
-    let mut k = alloc_with_nan_prefix(source.len(), k_first);
-    let mut d = alloc_with_nan_prefix(source.len(), d_first);
+    let _ = first;
+    let mut k = alloc_uninit_f64(source.len());
+    let mut d = alloc_uninit_f64(source.len());
     volume_weighted_stochastic_rsi_compute_into(
         source,
         volume,
@@ -1017,6 +1061,51 @@ pub fn volume_weighted_stochastic_rsi_into_slice(
         dst_k,
         dst_d,
     );
+    Ok(())
+}
+
+#[inline]
+pub(crate) fn volume_weighted_stochastic_rsi_output_into_slice(
+    dst: &mut [f64],
+    input: &VolumeWeightedStochasticRsiInput,
+    kernel: Kernel,
+    field: VolumeWeightedStochasticRsiOutputField,
+) -> Result<(), VolumeWeightedStochasticRsiError> {
+    let (source, volume, rsi_length, stoch_length, k_length, d_length, ma_type, _first, _chosen) =
+        volume_weighted_stochastic_rsi_prepare(input, kernel)?;
+    if dst.len() != source.len() {
+        return Err(VolumeWeightedStochasticRsiError::OutputLengthMismatch {
+            expected: source.len(),
+            got: dst.len(),
+        });
+    }
+    match field {
+        VolumeWeightedStochasticRsiOutputField::K => {
+            volume_weighted_stochastic_rsi_compute_k_into(
+                source,
+                volume,
+                rsi_length,
+                stoch_length,
+                k_length,
+                ma_type,
+                dst,
+            );
+        }
+        VolumeWeightedStochasticRsiOutputField::D => {
+            let mut k = alloc_uninit_f64(source.len());
+            volume_weighted_stochastic_rsi_compute_into(
+                source,
+                volume,
+                rsi_length,
+                stoch_length,
+                k_length,
+                d_length,
+                ma_type,
+                &mut k,
+                dst,
+            );
+        }
+    }
     Ok(())
 }
 

@@ -15,7 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -460,7 +460,7 @@ fn validate_common(
 #[inline(always)]
 fn normalize_single_kernel(kernel: Kernel) -> Result<Kernel, ReversalSignalsError> {
     match kernel {
-        Kernel::Auto => Ok(detect_best_kernel()),
+        Kernel::Auto => Ok(Kernel::Scalar),
         Kernel::Scalar | Kernel::ScalarBatch => Ok(Kernel::Scalar),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2 | Kernel::Avx2Batch => Ok(Kernel::Avx2),
@@ -857,6 +857,10 @@ fn compute_row(
         let v = volume[i];
 
         if !is_valid_ohlcv(o, h, l, c, v) {
+            out_buy_signal[i] = f64::NAN;
+            out_sell_signal[i] = f64::NAN;
+            out_stepped_ma[i] = f64::NAN;
+            out_state[i] = f64::NAN;
             reset_runtime(
                 &mut trend_ma_state,
                 &mut volume_sma,
@@ -973,6 +977,9 @@ fn compute_row(
 
             out_stepped_ma[i] = stepped_ma;
             out_state[i] = ma_direction as f64;
+        } else {
+            out_stepped_ma[i] = f64::NAN;
+            out_state[i] = f64::NAN;
         }
 
         prev_lows.push(i, l);
@@ -980,6 +987,231 @@ fn compute_row(
         let min_index = i.saturating_add(1).saturating_sub(prev_span);
         prev_lows.prune(min_index);
         prev_highs.prune(min_index);
+    }
+}
+
+#[inline(always)]
+fn is_default_single_params(
+    lookback_period: usize,
+    confirmation_period: usize,
+    use_volume_confirmation: bool,
+    trend_ma_period: usize,
+    trend_ma_kind: TrendMaKind,
+    ma_step_period: usize,
+) -> bool {
+    lookback_period == DEFAULT_LOOKBACK_PERIOD
+        && confirmation_period == DEFAULT_CONFIRMATION_PERIOD
+        && use_volume_confirmation == DEFAULT_USE_VOLUME_CONFIRMATION
+        && trend_ma_period == DEFAULT_TREND_MA_PERIOD
+        && trend_ma_kind == TrendMaKind::Ema
+        && ma_step_period == DEFAULT_MA_STEP_PERIOD
+}
+
+#[inline(always)]
+fn compute_default_row(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    out_buy_signal: &mut [f64],
+    out_sell_signal: &mut [f64],
+    out_stepped_ma: &mut [f64],
+    out_state: &mut [f64],
+) {
+    const PREV_SPAN: usize = DEFAULT_LOOKBACK_PERIOD - 1;
+    const CONFIRM_LIMIT: usize = DEFAULT_CONFIRMATION_PERIOD + 1;
+    const VOLUME_DENOM: f64 = VOLUME_SMA_PERIOD as f64;
+    const EMA_ALPHA: f64 = 2.0 / (DEFAULT_TREND_MA_PERIOD as f64 + 1.0);
+
+    let mut volume_buf = [0.0; VOLUME_SMA_PERIOD];
+    let mut volume_pos = 0usize;
+    let mut volume_count = 0usize;
+    let mut volume_sum = 0.0;
+
+    let mut lows = [0.0; PREV_SPAN];
+    let mut highs = [0.0; PREV_SPAN];
+    let mut prev_pos = 0usize;
+    let mut prev_count = 0usize;
+
+    let mut reversal = ReversalCandidateState::default();
+    let mut valid_run = 0usize;
+    let mut ema_value = f64::NAN;
+    let mut ema_initialized = false;
+    let mut stepped_ma = f64::NAN;
+    let mut ma_last_update_bar = 0usize;
+    let mut ma_direction = 1i8;
+
+    for i in 0..close.len() {
+        let o = open[i];
+        let h = high[i];
+        let l = low[i];
+        let c = close[i];
+        let v = volume[i];
+
+        if !is_valid_ohlcv(o, h, l, c, v) {
+            out_buy_signal[i] = f64::NAN;
+            out_sell_signal[i] = f64::NAN;
+            out_stepped_ma[i] = f64::NAN;
+            out_state[i] = f64::NAN;
+            volume_pos = 0;
+            volume_count = 0;
+            volume_sum = 0.0;
+            prev_pos = 0;
+            prev_count = 0;
+            reversal.reset();
+            valid_run = 0;
+            ema_value = f64::NAN;
+            ema_initialized = false;
+            stepped_ma = f64::NAN;
+            ma_last_update_bar = 0;
+            ma_direction = 1;
+            continue;
+        }
+
+        valid_run += 1;
+        out_buy_signal[i] = 0.0;
+        out_sell_signal[i] = 0.0;
+
+        if !ema_initialized {
+            ema_initialized = true;
+            ema_value = c;
+        } else {
+            ema_value = EMA_ALPHA * c + (1.0 - EMA_ALPHA) * ema_value;
+        }
+
+        let volume_avg = if volume_count < VOLUME_SMA_PERIOD {
+            volume_buf[volume_count] = v;
+            volume_count += 1;
+            volume_sum += v;
+            if volume_count == VOLUME_SMA_PERIOD {
+                Some(volume_sum / VOLUME_DENOM)
+            } else {
+                None
+            }
+        } else {
+            let old = volume_buf[volume_pos];
+            volume_buf[volume_pos] = v;
+            volume_pos += 1;
+            if volume_pos == VOLUME_SMA_PERIOD {
+                volume_pos = 0;
+            }
+            volume_sum += v - old;
+            Some(volume_sum / VOLUME_DENOM)
+        };
+        let volume_is_high = volume_avg.is_some_and(|avg| v > avg);
+
+        let mut min_prev = f64::INFINITY;
+        let mut max_prev = f64::NEG_INFINITY;
+        if valid_run > PREV_SPAN {
+            for j in 0..PREV_SPAN {
+                let prev_low = lows[j];
+                let prev_high = highs[j];
+                if prev_low < min_prev {
+                    min_prev = prev_low;
+                }
+                if prev_high > max_prev {
+                    max_prev = prev_high;
+                }
+            }
+        }
+        let bull_candidate_trigger = valid_run > PREV_SPAN && c < min_prev;
+        let bear_candidate_trigger = valid_run > PREV_SPAN && c > max_prev;
+
+        if bear_candidate_trigger {
+            reversal.bear_candidate = true;
+            reversal.bear_low = l;
+            reversal.bear_high = h;
+            reversal.bear_confirmed = false;
+            reversal.bear_counter = 0;
+        }
+
+        if reversal.bear_candidate {
+            reversal.bear_counter = reversal.bear_counter.saturating_add(1);
+            if c > reversal.bear_high {
+                reversal.bear_candidate = false;
+            }
+        }
+
+        let mut bear_condition = false;
+        if reversal.bear_candidate
+            && c < reversal.bear_low
+            && !reversal.bear_confirmed
+            && reversal.bear_counter <= CONFIRM_LIMIT
+        {
+            reversal.bear_confirmed = true;
+            bear_condition = true;
+        }
+
+        if bear_condition && volume_is_high {
+            out_sell_signal[i] = 1.0;
+        }
+
+        if bull_candidate_trigger {
+            reversal.bull_candidate = true;
+            reversal.bull_low = l;
+            reversal.bull_high = h;
+            reversal.bull_confirmed = false;
+            reversal.bull_counter = 0;
+        }
+
+        if reversal.bull_candidate {
+            reversal.bull_counter = reversal.bull_counter.saturating_add(1);
+            if c < reversal.bull_low {
+                reversal.bull_candidate = false;
+            }
+        }
+
+        let mut bull_condition = false;
+        if reversal.bull_candidate
+            && c > reversal.bull_high
+            && !reversal.bull_confirmed
+            && reversal.bull_counter <= CONFIRM_LIMIT
+        {
+            reversal.bull_confirmed = true;
+            bull_condition = true;
+        }
+
+        if bull_condition && volume_is_high {
+            out_buy_signal[i] = 1.0;
+        }
+
+        if stepped_ma.is_nan() {
+            stepped_ma = ema_value;
+            ma_last_update_bar = i;
+        } else if ma_direction == 1 {
+            if c < stepped_ma {
+                ma_direction = -1;
+                stepped_ma = ema_value;
+                ma_last_update_bar = i;
+            } else if i.saturating_sub(ma_last_update_bar) >= DEFAULT_MA_STEP_PERIOD {
+                stepped_ma = stepped_ma.max(ema_value);
+                ma_last_update_bar = i;
+            }
+        } else if c > stepped_ma {
+            ma_direction = 1;
+            stepped_ma = ema_value;
+            ma_last_update_bar = i;
+        } else if i.saturating_sub(ma_last_update_bar) >= DEFAULT_MA_STEP_PERIOD {
+            stepped_ma = stepped_ma.min(ema_value);
+            ma_last_update_bar = i;
+        }
+
+        out_stepped_ma[i] = stepped_ma;
+        out_state[i] = ma_direction as f64;
+
+        if prev_count < PREV_SPAN {
+            lows[prev_count] = l;
+            highs[prev_count] = h;
+            prev_count += 1;
+        } else {
+            lows[prev_pos] = l;
+            highs[prev_pos] = h;
+            prev_pos += 1;
+            if prev_pos == PREV_SPAN {
+                prev_pos = 0;
+            }
+        }
     }
 }
 
@@ -1018,28 +1250,45 @@ pub fn reversal_signals_with_kernel(
     let mut sell_signal = alloc_with_nan_prefix(close.len(), 0);
     let mut stepped_ma = alloc_with_nan_prefix(close.len(), 0);
     let mut state = alloc_with_nan_prefix(close.len(), 0);
-    buy_signal.fill(f64::NAN);
-    sell_signal.fill(f64::NAN);
-    stepped_ma.fill(f64::NAN);
-    state.fill(f64::NAN);
 
-    compute_row(
-        open,
-        high,
-        low,
-        close,
-        volume,
+    if is_default_single_params(
         lookback_period,
         confirmation_period,
         use_volume_confirmation,
         trend_ma_period,
         trend_ma_kind,
         ma_step_period,
-        &mut buy_signal,
-        &mut sell_signal,
-        &mut stepped_ma,
-        &mut state,
-    );
+    ) {
+        compute_default_row(
+            open,
+            high,
+            low,
+            close,
+            volume,
+            &mut buy_signal,
+            &mut sell_signal,
+            &mut stepped_ma,
+            &mut state,
+        );
+    } else {
+        compute_row(
+            open,
+            high,
+            low,
+            close,
+            volume,
+            lookback_period,
+            confirmation_period,
+            use_volume_confirmation,
+            trend_ma_period,
+            trend_ma_kind,
+            ma_step_period,
+            &mut buy_signal,
+            &mut sell_signal,
+            &mut stepped_ma,
+            &mut state,
+        );
+    }
 
     Ok(ReversalSignalsOutput {
         buy_signal,
@@ -1088,27 +1337,47 @@ pub fn reversal_signals_into_slice(
                 got: out.len(),
             });
         }
-        out.fill(f64::NAN);
     }
 
     let _chosen = normalize_single_kernel(kernel)?;
-    compute_row(
-        open,
-        high,
-        low,
-        close,
-        volume,
+    if is_default_single_params(
         lookback_period,
         confirmation_period,
         use_volume_confirmation,
         trend_ma_period,
         trend_ma_kind,
         ma_step_period,
-        out_buy_signal,
-        out_sell_signal,
-        out_stepped_ma,
-        out_state,
-    );
+    ) {
+        compute_default_row(
+            open,
+            high,
+            low,
+            close,
+            volume,
+            out_buy_signal,
+            out_sell_signal,
+            out_stepped_ma,
+            out_state,
+        );
+    } else {
+        compute_row(
+            open,
+            high,
+            low,
+            close,
+            volume,
+            lookback_period,
+            confirmation_period,
+            use_volume_confirmation,
+            trend_ma_period,
+            trend_ma_kind,
+            ma_step_period,
+            out_buy_signal,
+            out_sell_signal,
+            out_stepped_ma,
+            out_state,
+        );
+    }
     Ok(())
 }
 
@@ -1548,10 +1817,6 @@ fn reversal_signals_batch_inner_into(
                   sell_row: &mut [f64],
                   stepped_row: &mut [f64],
                   state_row: &mut [f64]| {
-        buy_row.fill(f64::NAN);
-        sell_row.fill(f64::NAN);
-        stepped_row.fill(f64::NAN);
-        state_row.fill(f64::NAN);
         let params = &combos[row];
         compute_row(
             open,
@@ -2599,6 +2864,40 @@ mod tests {
         let mut sell_signal = vec![f64::NAN; close.len()];
         let mut stepped_ma = vec![f64::NAN; close.len()];
         let mut state = vec![f64::NAN; close.len()];
+        reversal_signals_into_slice(
+            &mut buy_signal,
+            &mut sell_signal,
+            &mut stepped_ma,
+            &mut state,
+            &input,
+            Kernel::Scalar,
+        )?;
+        assert_vec_eq_nan(&baseline.buy_signal, &buy_signal);
+        assert_vec_eq_nan(&baseline.sell_signal, &sell_signal);
+        assert_vec_eq_nan(&baseline.stepped_ma, &stepped_ma);
+        assert_vec_eq_nan(&baseline.state, &state);
+        Ok(())
+    }
+
+    #[test]
+    fn reversal_signals_into_overwrites_stale_buffers() -> Result<(), Box<dyn Error>> {
+        let (open, high, low, close, volume) = sample_ohlcv(180);
+        let input = ReversalSignalsInput::from_slices(
+            &open,
+            &high,
+            &low,
+            &close,
+            &volume,
+            ReversalSignalsParams {
+                trend_ma_type: Some("SMA".to_string()),
+                ..ReversalSignalsParams::default()
+            },
+        );
+        let baseline = reversal_signals_with_kernel(&input, Kernel::Scalar)?;
+        let mut buy_signal = vec![12345.0; close.len()];
+        let mut sell_signal = vec![12345.0; close.len()];
+        let mut stepped_ma = vec![12345.0; close.len()];
+        let mut state = vec![12345.0; close.len()];
         reversal_signals_into_slice(
             &mut buy_signal,
             &mut sell_signal,

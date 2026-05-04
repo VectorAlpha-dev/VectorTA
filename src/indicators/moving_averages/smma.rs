@@ -35,7 +35,18 @@ impl<'a> AsRef<[f64]> for SmmaInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             SmmaData::Slice(slice) => slice,
-            SmmaData::Candles { candles, source } => source_type(candles, source),
+            SmmaData::Candles { candles, source } => match *source {
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -189,53 +200,10 @@ pub fn smma(input: &SmmaInput) -> Result<SmmaOutput, SmmaError> {
 }
 
 pub fn smma_with_kernel(input: &SmmaInput, kernel: Kernel) -> Result<SmmaOutput, SmmaError> {
-    let data: &[f64] = match &input.data {
-        SmmaData::Candles { candles, source } => source_type(candles, source),
-        SmmaData::Slice(sl) => sl,
-    };
-
-    if data.is_empty() {
-        return Err(SmmaError::EmptyInputData);
-    }
-
-    let first = data
-        .iter()
-        .position(|x| !x.is_nan())
-        .ok_or(SmmaError::AllValuesNaN)?;
-    let len = data.len();
-    let period = input.get_period();
-
-    if period == 0 || period > len {
-        return Err(SmmaError::InvalidPeriod {
-            period,
-            data_len: len,
-        });
-    }
-    if (len - first) < period {
-        return Err(SmmaError::NotEnoughValidData {
-            needed: period,
-            valid: len - first,
-        });
-    }
-
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
-
+    let (data, period, first, chosen) = smma_prepare(input, kernel)?;
     let warm = first + period - 1;
-    let mut out = alloc_with_nan_prefix(len, warm);
-
-    unsafe {
-        match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => smma_scalar(data, period, first, &mut out),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => smma_avx2(data, period, first, &mut out),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => smma_avx512(data, period, first, &mut out),
-            _ => smma_scalar(data, period, first, &mut out),
-        }
-    }
+    let mut out = alloc_with_nan_prefix(data.len(), warm);
+    smma_compute_into(data, period, first, chosen, &mut out);
     Ok(SmmaOutput { values: out })
 }
 
@@ -261,13 +229,36 @@ pub fn smma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 
     let pf64 = period as f64;
     let pm1 = pf64 - 1.0;
+    let inv_p = 1.0 / pf64;
 
-    let mut prev = sum / pf64;
+    let mut prev = sum * inv_p;
     out[end - 1] = prev;
 
-    for i in end..len {
-        prev = (prev * pm1 + data[i]) / pf64;
+    let mut i = end;
+    while i + 4 <= len {
+        let x0 = data[i];
+        prev = f64::mul_add(prev, pm1, x0) * inv_p;
         out[i] = prev;
+
+        let x1 = data[i + 1];
+        prev = f64::mul_add(prev, pm1, x1) * inv_p;
+        out[i + 1] = prev;
+
+        let x2 = data[i + 2];
+        prev = f64::mul_add(prev, pm1, x2) * inv_p;
+        out[i + 2] = prev;
+
+        let x3 = data[i + 3];
+        prev = f64::mul_add(prev, pm1, x3) * inv_p;
+        out[i + 3] = prev;
+
+        i += 4;
+    }
+    while i < len {
+        let x = data[i];
+        prev = f64::mul_add(prev, pm1, x) * inv_p;
+        out[i] = prev;
+        i += 1;
     }
 }
 
@@ -418,9 +409,9 @@ fn smma_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, 
         match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => smma_scalar(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => smma_avx2(data, period, first, out),
+            Kernel::Avx2 | Kernel::Avx2Batch => smma_scalar(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => smma_avx512(data, period, first, out),
+            Kernel::Avx512 | Kernel::Avx512Batch => smma_scalar(data, period, first, out),
             _ => smma_scalar(data, period, first, out),
         }
     }
@@ -539,7 +530,7 @@ impl SmmaStream {
                 }
             }
             Ready { value } => {
-                let next = (*value * self.pm1 + v) / self.pf64;
+                let next = f64::mul_add(*value, self.pm1, v) * self.inv_p;
                 *value = next;
                 Some(next)
             }

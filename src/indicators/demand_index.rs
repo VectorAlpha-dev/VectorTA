@@ -17,7 +17,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    alloc_uninit_f64, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
 #[cfg(feature = "python")]
@@ -722,6 +722,30 @@ fn count_valid_ohlcv(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -
 }
 
 #[inline]
+fn scan_valid_ohlcv(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+) -> Option<(usize, usize)> {
+    let mut first = usize::MAX;
+    let mut count = 0usize;
+    for i in 0..high.len() {
+        if valid_ohlcv_bar(high[i], low[i], close[i], volume[i]) {
+            if count == 0 {
+                first = i;
+            }
+            count += 1;
+        }
+    }
+    if count == 0 {
+        None
+    } else {
+        Some((first, count))
+    }
+}
+
+#[inline]
 fn di_warmup(ma_type: MaType, len_bs: usize, len_bs_ma: usize) -> usize {
     match ma_type {
         MaType::Ema | MaType::Rma => 1,
@@ -819,6 +843,18 @@ fn demand_index_finalize(
 }
 
 #[inline]
+fn demand_index_finalize_exp(
+    bp: Option<f64>,
+    sp: Option<f64>,
+    bp_avg: &mut ExpState,
+    sp_avg: &mut ExpState,
+) -> Option<f64> {
+    let bp_ma = bp_avg.update(bp.filter(|v| v.is_finite()));
+    let sp_ma = sp_avg.update(sp.filter(|v| v.is_finite()));
+    finalize_di(bp_ma, sp_ma)
+}
+
+#[inline]
 fn update_signal(signal_avg: &mut SmaState, di: Option<f64>) -> Option<f64> {
     signal_avg.update(di.filter(|v| v.is_finite()))
 }
@@ -836,6 +872,21 @@ fn demand_index_compute_into(
     demand_index_out: &mut [f64],
     signal_out: &mut [f64],
 ) {
+    if ma_type == MaType::Ema {
+        demand_index_compute_ema_into(
+            high,
+            low,
+            close,
+            volume,
+            len_bs,
+            len_bs_ma,
+            len_di_ma,
+            demand_index_out,
+            signal_out,
+        );
+        return;
+    }
+
     let mut volume_avg = MaState::new(ma_type, len_bs);
     let mut bp_avg = MaState::new(ma_type, len_bs_ma);
     let mut sp_avg = MaState::new(ma_type, len_bs_ma);
@@ -897,6 +948,77 @@ fn demand_index_compute_into(
 }
 
 #[inline]
+fn demand_index_compute_ema_into(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    len_bs: usize,
+    len_bs_ma: usize,
+    len_di_ma: usize,
+    demand_index_out: &mut [f64],
+    signal_out: &mut [f64],
+) {
+    let mut volume_avg = ExpState::ema(len_bs);
+    let mut bp_avg = ExpState::ema(len_bs_ma);
+    let mut sp_avg = ExpState::ema(len_bs_ma);
+    let mut signal_avg = SmaState::new(len_di_ma);
+    let mut h0 = f64::NAN;
+    let mut l0 = f64::NAN;
+    let mut has_h0_l0 = false;
+    let mut prev_p = f64::NAN;
+    let mut has_prev_p = false;
+
+    for i in 0..high.len() {
+        let h = high[i];
+        let l = low[i];
+        let c = close[i];
+        let v = volume[i];
+
+        if !valid_ohlcv_bar(h, l, c, v) {
+            volume_avg.update(None);
+            let di = demand_index_finalize_exp(None, None, &mut bp_avg, &mut sp_avg);
+            let signal = update_signal(&mut signal_avg, di);
+            demand_index_out[i] = di.unwrap_or(f64::NAN);
+            signal_out[i] = signal.unwrap_or(f64::NAN);
+            has_prev_p = false;
+            continue;
+        }
+
+        if !has_h0_l0 {
+            h0 = h;
+            l0 = l;
+            has_h0_l0 = true;
+        }
+
+        let volume_avg_now = volume_avg.update(Some(v));
+        let p = h + l + 2.0 * c;
+
+        if !has_prev_p {
+            let di = demand_index_finalize_exp(None, None, &mut bp_avg, &mut sp_avg);
+            let signal = update_signal(&mut signal_avg, di);
+            demand_index_out[i] = di.unwrap_or(f64::NAN);
+            signal_out[i] = signal.unwrap_or(f64::NAN);
+            prev_p = p;
+            has_prev_p = true;
+            continue;
+        }
+
+        let bp_sp = compute_bp_sp(volume_avg_now, v, p, prev_p, h0, l0);
+        let (bp, sp) = match bp_sp {
+            Some((bp, sp)) => (Some(bp), Some(sp)),
+            None => (None, None),
+        };
+        let di = demand_index_finalize_exp(bp, sp, &mut bp_avg, &mut sp_avg);
+        let signal = update_signal(&mut signal_avg, di);
+        demand_index_out[i] = di.unwrap_or(f64::NAN);
+        signal_out[i] = signal.unwrap_or(f64::NAN);
+        prev_p = p;
+        has_prev_p = true;
+    }
+}
+
+#[inline]
 pub fn demand_index_with_kernel(
     input: &DemandIndexInput,
     kernel: Kernel,
@@ -928,9 +1050,8 @@ pub fn demand_index_with_kernel(
         });
     }
 
-    let first =
-        first_valid_ohlcv(high, low, close, volume).ok_or(DemandIndexError::AllValuesNaN)?;
-    let valid = count_valid_ohlcv(high, low, close, volume);
+    let (_, valid) =
+        scan_valid_ohlcv(high, low, close, volume).ok_or(DemandIndexError::AllValuesNaN)?;
     let needed = needed_valid_bars(ma_type, len_bs, len_bs_ma, len_di_ma);
     if valid < needed {
         return Err(DemandIndexError::NotEnoughValidData { needed, valid });
@@ -941,8 +1062,8 @@ pub fn demand_index_with_kernel(
         other => other.to_non_batch(),
     };
 
-    let mut demand_index_out = alloc_with_nan_prefix(len, first);
-    let mut signal_out = alloc_with_nan_prefix(len, first);
+    let mut demand_index_out = alloc_uninit_f64(len);
+    let mut signal_out = alloc_uninit_f64(len);
     demand_index_compute_into(
         high,
         low,
@@ -1261,9 +1382,8 @@ fn demand_index_batch_inner(
     let combos = expand_grid_demand_index(sweep)?;
     let rows = combos.len();
     let cols = high.len();
-    let first =
-        first_valid_ohlcv(high, low, close, volume).ok_or(DemandIndexError::AllValuesNaN)?;
-    let valid = count_valid_ohlcv(high, low, close, volume);
+    let (first, valid) =
+        scan_valid_ohlcv(high, low, close, volume).ok_or(DemandIndexError::AllValuesNaN)?;
 
     let mut di_mu = make_uninit_matrix(rows, cols);
     let mut signal_mu = make_uninit_matrix(rows, cols);

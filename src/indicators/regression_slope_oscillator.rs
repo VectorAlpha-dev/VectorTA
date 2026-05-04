@@ -382,14 +382,14 @@ fn check_output_len(out: &[f64], expected: usize) -> Result<(), RegressionSlopeO
 }
 
 #[inline(always)]
-fn build_prefixes(data: &[f64]) -> (Vec<usize>, Vec<f64>, Vec<f64>) {
+fn build_prefixes(data: &[f64]) -> (Option<Vec<usize>>, Vec<f64>, Vec<f64>) {
     let len = data.len();
-    let mut invalid_prefix = vec![0usize; len + 1];
     let mut sum_prefix = vec![0.0; len + 1];
     let mut weighted_prefix = vec![0.0; len + 1];
+    let mut invalid_prefix = Vec::new();
+    let mut invalid_count = 0usize;
 
     for i in 0..len {
-        invalid_prefix[i + 1] = invalid_prefix[i];
         sum_prefix[i + 1] = sum_prefix[i];
         weighted_prefix[i + 1] = weighted_prefix[i];
         let value = data[i];
@@ -397,17 +397,36 @@ fn build_prefixes(data: &[f64]) -> (Vec<usize>, Vec<f64>, Vec<f64>) {
             let logged = value.ln();
             sum_prefix[i + 1] += logged;
             weighted_prefix[i + 1] += logged * i as f64;
+            if !invalid_prefix.is_empty() {
+                invalid_prefix.push(invalid_count);
+            }
         } else {
-            invalid_prefix[i + 1] += 1;
+            if invalid_prefix.is_empty() {
+                invalid_prefix.resize(i + 1, 0);
+            }
+            invalid_count += 1;
+            invalid_prefix.push(invalid_count);
         }
     }
 
+    let invalid_prefix = if invalid_prefix.is_empty() {
+        None
+    } else {
+        Some(invalid_prefix)
+    };
     (invalid_prefix, sum_prefix, weighted_prefix)
 }
 
 #[inline(always)]
-fn window_has_invalid(invalid_prefix: &[usize], start: usize, end_exclusive: usize) -> bool {
-    invalid_prefix[end_exclusive] != invalid_prefix[start]
+fn window_has_invalid(
+    invalid_prefix: Option<&[usize]>,
+    start: usize,
+    end_exclusive: usize,
+) -> bool {
+    match invalid_prefix {
+        Some(prefix) => prefix[end_exclusive] != prefix[start],
+        None => false,
+    }
 }
 
 #[inline(always)]
@@ -437,22 +456,30 @@ fn fill_signal_and_reversals(
     check_output_len(out_bullish_reversal, len)?;
     check_output_len(out_bearish_reversal, len)?;
 
-    let mut queue = VecDeque::with_capacity(params.signal_line);
+    let mut signal_ring = vec![0.0; params.signal_line];
+    let mut signal_head = 0usize;
+    let mut signal_count = 0usize;
     let mut sum = 0.0;
 
     for i in 0..len {
         let value = out_value[i];
         if value.is_finite() {
-            queue.push_back(value);
-            sum += value;
-            if queue.len() > params.signal_line {
-                if let Some(old) = queue.pop_front() {
-                    sum -= old;
+            if signal_count < params.signal_line {
+                signal_ring[signal_count] = value;
+                signal_count += 1;
+                sum += value;
+            } else {
+                let old = signal_ring[signal_head];
+                signal_ring[signal_head] = value;
+                sum += value - old;
+                signal_head += 1;
+                if signal_head == params.signal_line {
+                    signal_head = 0;
                 }
             }
         }
 
-        out_signal[i] = if queue.len() == params.signal_line {
+        out_signal[i] = if signal_count == params.signal_line {
             sum / params.signal_line as f64
         } else {
             f64::NAN
@@ -503,17 +530,15 @@ fn regression_slope_oscillator_compute_into(
     check_output_len(out_signal, len)?;
     check_output_len(out_bullish_reversal, len)?;
     check_output_len(out_bearish_reversal, len)?;
-    out_value.fill(f64::NAN);
-    out_signal.fill(f64::NAN);
-    out_bullish_reversal.fill(f64::NAN);
-    out_bearish_reversal.fill(f64::NAN);
+    out_value[..params.value_warmup.min(len)].fill(f64::NAN);
 
     let (invalid_prefix, sum_prefix, weighted_prefix) = build_prefixes(data);
+    let invalid_prefix = invalid_prefix.as_deref();
     let spec_count = params.specs.len() as f64;
 
     for i in params.value_warmup..len {
         let max_start = i + 1 - params.max_range;
-        if window_has_invalid(&invalid_prefix, max_start, i + 1) {
+        if window_has_invalid(invalid_prefix, max_start, i + 1) {
             out_value[i] = f64::NAN;
             continue;
         }
@@ -548,10 +573,10 @@ pub fn regression_slope_oscillator_with_kernel(
 ) -> Result<RegressionSlopeOscillatorOutput, RegressionSlopeOscillatorError> {
     let (data, params, _, _) = validate_input(input, kernel)?;
     let len = data.len();
-    let mut value = alloc_with_nan_prefix(len, params.value_warmup);
-    let mut signal = alloc_with_nan_prefix(len, params.signal_warmup);
-    let mut bullish_reversal = alloc_with_nan_prefix(len, params.signal_warmup);
-    let mut bearish_reversal = alloc_with_nan_prefix(len, params.signal_warmup);
+    let mut value = alloc_with_nan_prefix(len, 0);
+    let mut signal = alloc_with_nan_prefix(len, 0);
+    let mut bullish_reversal = alloc_with_nan_prefix(len, 0);
+    let mut bearish_reversal = alloc_with_nan_prefix(len, 0);
     regression_slope_oscillator_compute_into(
         data,
         &params,

@@ -575,16 +575,36 @@ fn ssf_filter(data: &[f64], period: usize, first: usize) -> Vec<f64> {
     let c2 = b;
     let c1 = 1.0 - c2 - c3;
 
-    let mut y1 = f64::NAN;
-    let mut y2 = f64::NAN;
-
-    for i in first..len {
+    let x0 = data[first];
+    let y0 = c1 * x0 + c2 * x0 + c3 * x0;
+    out[first] = y0;
+    let mut y1 = y0;
+    let mut y2 = y0;
+    let mut i = first + 1;
+    while i < len {
+        let x = data[i];
+        if !x.is_finite() {
+            let y = c1 * x + c2 * y1 + c3 * y2;
+            out[i] = y;
+            y2 = y1;
+            y1 = y;
+            i += 1;
+            break;
+        }
+        let y = c1 * x + c2 * y1 + c3 * y2;
+        out[i] = y;
+        y2 = y1;
+        y1 = y;
+        i += 1;
+    }
+    while i < len {
         let prev1 = if y1.is_nan() { data[i] } else { y1 };
         let prev2 = if y2.is_nan() { prev1 } else { y2 };
         let y = c1 * data[i] + c2 * prev1 + c3 * prev2;
         out[i] = y;
         y2 = y1;
         y1 = y;
+        i += 1;
     }
     out
 }

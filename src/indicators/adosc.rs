@@ -322,7 +322,10 @@ fn adosc_prepare<'a>(
     }
 
     let chosen = match kernel {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Auto => detect_best_kernel(),
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((high, low, close, volume, short, long, 0, len, chosen))
@@ -336,12 +339,8 @@ pub fn adosc_with_kernel(input: &AdoscInput, kernel: Kernel) -> Result<AdoscOutp
             adosc_scalar(high, low, close, volume, short, long, first, len)
         },
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx2 | Kernel::Avx2Batch => unsafe {
-            adosc_avx2(high, low, close, volume, short, long, first, len)
-        },
-        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        Kernel::Avx512 | Kernel::Avx512Batch => unsafe {
-            adosc_avx512(high, low, close, volume, short, long, first, len)
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => unsafe {
+            adosc_scalar(high, low, close, volume, short, long, first, len)
         },
         #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
         Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => unsafe {
@@ -369,6 +368,10 @@ pub unsafe fn adosc_scalar(
     len: usize,
 ) -> Result<AdoscOutput, AdoscError> {
     debug_assert!(len > 0);
+
+    if short == 3 && long == 10 {
+        return adosc_scalar_3_10(high, low, close, volume, len);
+    }
 
     let alpha_short = 2.0 / (short as f64 + 1.0);
     let alpha_long = 2.0 / (long as f64 + 1.0);
@@ -415,6 +418,66 @@ pub unsafe fn adosc_scalar(
         let mfv = mfm * v;
         sum_ad += mfv;
         short_ema = alpha_short * sum_ad + one_minus_alpha_short * short_ema;
+        long_ema = alpha_long * sum_ad + one_minus_alpha_long * long_ema;
+        *op.add(i) = short_ema - long_ema;
+
+        i += 1;
+    }
+
+    Ok(AdoscOutput { values: out })
+}
+
+#[inline(always)]
+unsafe fn adosc_scalar_3_10(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    len: usize,
+) -> Result<AdoscOutput, AdoscError> {
+    let mut out = alloc_with_nan_prefix(len, 0);
+
+    let hp = high.as_ptr();
+    let lp = low.as_ptr();
+    let cp = close.as_ptr();
+    let vp = volume.as_ptr();
+    let op = out.as_mut_ptr();
+
+    let h0 = *hp;
+    let l0 = *lp;
+    let c0 = *cp;
+    let v0 = *vp;
+    let hl0 = h0 - l0;
+    let mfm0 = if hl0 != 0.0 {
+        ((c0 - l0) - (h0 - c0)) / hl0
+    } else {
+        0.0
+    };
+    let mfv0 = mfm0 * v0;
+    let mut sum_ad = mfv0;
+    let mut short_ema = sum_ad;
+    let mut long_ema = sum_ad;
+    *op = short_ema - long_ema;
+
+    let alpha_long = 2.0 / 11.0;
+    let one_minus_alpha_long = 1.0 - alpha_long;
+
+    let mut i = 1usize;
+    while i < len {
+        let h = *hp.add(i);
+        let l = *lp.add(i);
+        let c = *cp.add(i);
+        let v = *vp.add(i);
+
+        let hl = h - l;
+        let mfm = if hl != 0.0 {
+            ((c - l) - (h - c)) / hl
+        } else {
+            0.0
+        };
+        let mfv = mfm * v;
+        sum_ad += mfv;
+        short_ema = 0.5 * sum_ad + 0.5 * short_ema;
         long_ema = alpha_long * sum_ad + one_minus_alpha_long * long_ema;
         *op.add(i) = short_ema - long_ema;
 

@@ -410,6 +410,12 @@ pub fn ehlers_ecema(input: &EhlersEcemaInput) -> Result<EhlersEcemaOutput, Ehler
 }
 
 #[inline(always)]
+fn is_finite_fast(x: f64) -> bool {
+    const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
+    (x.to_bits() & EXP_MASK) != EXP_MASK
+}
+
+#[inline(always)]
 fn ehlers_ecema_prepare<'a>(
     input: &'a EhlersEcemaInput,
     kernel: Kernel,
@@ -449,7 +455,7 @@ fn ehlers_ecema_prepare<'a>(
     let alpha = 2.0 / (length as f64 + 1.0);
     let beta = 1.0 - alpha;
     let chosen = if matches!(kernel, Kernel::Auto) {
-        Kernel::Scalar
+        detect_best_kernel()
     } else {
         kernel
     };
@@ -531,6 +537,70 @@ fn ehlers_ecema_compute_into_with_mode(
     }
 }
 
+#[inline(always)]
+fn ehlers_ecema_compute_direct_into_with_mode(
+    data: &[f64],
+    length: usize,
+    gain_limit: usize,
+    first: usize,
+    alpha: f64,
+    beta: f64,
+    kernel: Kernel,
+    confirmed_only: bool,
+    out: &mut [f64],
+) {
+    unsafe {
+        match kernel {
+            Kernel::Scalar | Kernel::ScalarBatch => ehlers_ecema_scalar_direct_into_with_mode(
+                data,
+                length,
+                gain_limit,
+                first,
+                alpha,
+                beta,
+                confirmed_only,
+                out,
+            ),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => ehlers_ecema_avx2_direct_into_with_mode(
+                data,
+                length,
+                gain_limit,
+                first,
+                alpha,
+                beta,
+                confirmed_only,
+                out,
+            ),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => ehlers_ecema_avx512_direct_into_with_mode(
+                data,
+                length,
+                gain_limit,
+                first,
+                alpha,
+                beta,
+                confirmed_only,
+                out,
+            ),
+            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+                ehlers_ecema_scalar_direct_into_with_mode(
+                    data,
+                    length,
+                    gain_limit,
+                    first,
+                    alpha,
+                    beta,
+                    confirmed_only,
+                    out,
+                )
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 pub fn ehlers_ecema_with_kernel(
     input: &EhlersEcemaInput,
     kernel: Kernel,
@@ -539,36 +609,32 @@ pub fn ehlers_ecema_with_kernel(
         ehlers_ecema_prepare(input, kernel)?;
     let pine_compatible = input.get_pine_compatible();
     let confirmed_only = input.get_confirmed_only();
-
-    let mut ema_buf = alloc_with_nan_prefix(
-        data.len(),
-        if pine_compatible {
-            first
-        } else {
-            first + length - 1
-        },
-    );
-    if pine_compatible {
-        calculate_pine_ema_into(&mut ema_buf, data, length, alpha, beta, first);
+    let warmup_end = if pine_compatible {
+        first
     } else {
-        let ema_input = EmaInput::from_slice(
+        first + length - 1
+    };
+
+    let mut out = alloc_with_nan_prefix(data.len(), warmup_end);
+
+    if !pine_compatible {
+        ehlers_ecema_compute_direct_into_with_mode(
             data,
-            EmaParams {
-                period: Some(length),
-            },
+            length,
+            gain_limit,
+            first,
+            alpha,
+            beta,
+            chosen,
+            confirmed_only,
+            &mut out,
         );
-        ema_into_slice(&mut ema_buf, &ema_input, chosen)
-            .map_err(|e| EhlersEcemaError::EmaError(e.to_string()))?;
+
+        return Ok(EhlersEcemaOutput { values: out });
     }
 
-    let mut out = alloc_with_nan_prefix(
-        data.len(),
-        if pine_compatible {
-            first
-        } else {
-            first + length - 1
-        },
-    );
+    let mut ema_buf = alloc_with_nan_prefix(data.len(), first);
+    calculate_pine_ema_into(&mut ema_buf, data, length, alpha, beta, first);
 
     ehlers_ecema_compute_into_with_mode(
         data,
@@ -603,27 +669,6 @@ pub fn ehlers_ecema_into_slice(
     let pine_compatible = input.get_pine_compatible();
     let confirmed_only = input.get_confirmed_only();
 
-    let mut ema_buf = alloc_with_nan_prefix(
-        data.len(),
-        if pine_compatible {
-            first
-        } else {
-            first + length - 1
-        },
-    );
-    if pine_compatible {
-        calculate_pine_ema_into(&mut ema_buf, data, length, alpha, beta, first);
-    } else {
-        let ema_input = EmaInput::from_slice(
-            data,
-            EmaParams {
-                period: Some(length),
-            },
-        );
-        ema_into_slice(&mut ema_buf, &ema_input, chosen)
-            .map_err(|e| EhlersEcemaError::EmaError(e.to_string()))?;
-    }
-
     let warmup_end = if pine_compatible {
         first
     } else {
@@ -633,6 +678,25 @@ pub fn ehlers_ecema_into_slice(
     for v in &mut dst[..warmup_end.min(dst_len)] {
         *v = f64::NAN;
     }
+
+    if !pine_compatible {
+        ehlers_ecema_compute_direct_into_with_mode(
+            data,
+            length,
+            gain_limit,
+            first,
+            alpha,
+            beta,
+            chosen,
+            confirmed_only,
+            dst,
+        );
+
+        return Ok(());
+    }
+
+    let mut ema_buf = alloc_with_nan_prefix(data.len(), first);
+    calculate_pine_ema_into(&mut ema_buf, data, length, alpha, beta, first);
 
     ehlers_ecema_compute_into_with_mode(
         data,
@@ -755,6 +819,103 @@ unsafe fn ehlers_ecema_scalar_into_with_mode(
     }
 }
 
+#[inline(always)]
+unsafe fn ehlers_ecema_scalar_direct_into_with_mode(
+    data: &[f64],
+    length: usize,
+    gain_limit: usize,
+    first: usize,
+    alpha: f64,
+    beta: f64,
+    confirmed_only: bool,
+    out: &mut [f64],
+) {
+    let len = data.len();
+    debug_assert_eq!(out.len(), len);
+
+    let start_idx = first + length - 1;
+    if start_idx >= len {
+        return;
+    }
+
+    let data_ptr = data.as_ptr();
+    let out_ptr = out.as_mut_ptr();
+
+    let mut ema = *data_ptr.add(first);
+    let mut valid_count = 1usize;
+    for i in (first + 1)..=start_idx {
+        let x = *data_ptr.add(i);
+        if is_finite_fast(x) {
+            valid_count += 1;
+            let vc = valid_count as f64;
+            ema = ((vc - 1.0) * ema + x) / vc;
+        }
+    }
+
+    let gL: i32 = gain_limit as i32;
+    let step_s: f64 = 0.1;
+    let mut prev_ec = ema;
+
+    for i in start_idx..len {
+        if i > start_idx {
+            let x = *data_ptr.add(i);
+            if is_finite_fast(x) {
+                ema = beta.mul_add(ema, alpha * x);
+            }
+        }
+
+        let src = if confirmed_only && i > 0 {
+            *data_ptr.add(i - 1)
+        } else {
+            *data_ptr.add(i)
+        };
+
+        let delta = src - prev_ec;
+        let c = alpha * delta;
+        let base = alpha.mul_add(ema, beta * prev_ec);
+        let d = src - base;
+        let s = c * step_s;
+
+        let k_best: i32 = if !s.is_finite() || !d.is_finite() || s.abs() <= f64::MIN_POSITIVE {
+            -gL
+        } else {
+            let k_cont = d / s;
+
+            if k_cont <= (-(gL as f64) - 1.0) {
+                -gL
+            } else if k_cont >= (gL as f64 + 1.0) {
+                gL
+            } else {
+                let mut k0 = k_cont.floor() as i32;
+                let mut k1 = k0 + 1;
+
+                if k0 < -gL {
+                    k0 = -gL;
+                } else if k0 > gL {
+                    k0 = gL;
+                }
+                if k1 < -gL {
+                    k1 = -gL;
+                } else if k1 > gL {
+                    k1 = gL;
+                }
+
+                let e0 = (d - s * (k0 as f64)).abs();
+                let e1 = (d - s * (k1 as f64)).abs();
+
+                if e0 <= e1 {
+                    k0
+                } else {
+                    k1
+                }
+            }
+        };
+
+        prev_ec = (k_best as f64).mul_add(s, base);
+        *out_ptr.add(i) = prev_ec;
+    }
+}
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn ehlers_ecema_avx2_into_with_mode(
@@ -784,6 +945,30 @@ unsafe fn ehlers_ecema_avx2_into_with_mode(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn ehlers_ecema_avx2_direct_into_with_mode(
+    data: &[f64],
+    length: usize,
+    gain_limit: usize,
+    first: usize,
+    alpha: f64,
+    beta: f64,
+    confirmed_only: bool,
+    out: &mut [f64],
+) {
+    ehlers_ecema_scalar_direct_into_with_mode(
+        data,
+        length,
+        gain_limit,
+        first,
+        alpha,
+        beta,
+        confirmed_only,
+        out,
+    )
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn ehlers_ecema_avx512_into_with_mode(
     data: &[f64],
@@ -806,6 +991,30 @@ unsafe fn ehlers_ecema_avx512_into_with_mode(
         alpha,
         beta,
         pine_compatible,
+        confirmed_only,
+        out,
+    )
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,fma")]
+unsafe fn ehlers_ecema_avx512_direct_into_with_mode(
+    data: &[f64],
+    length: usize,
+    gain_limit: usize,
+    first: usize,
+    alpha: f64,
+    beta: f64,
+    confirmed_only: bool,
+    out: &mut [f64],
+) {
+    ehlers_ecema_scalar_direct_into_with_mode(
+        data,
+        length,
+        gain_limit,
+        first,
+        alpha,
+        beta,
         confirmed_only,
         out,
     )

@@ -27,8 +27,20 @@ impl<'a> AsRef<[f64]> for EpmaInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             EpmaData::Slice(slice) => slice,
-            EpmaData::Candles { candles, source } => source_type(candles, source),
+            EpmaData::Candles { candles, source } => epma_source(candles, source),
         }
+    }
+}
+
+#[inline(always)]
+fn epma_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "close" => &candles.close,
+        "volume" => &candles.volume,
+        _ => source_type(candles, source),
     }
 }
 
@@ -258,6 +270,11 @@ fn epma_compute_into(
     kernel: Kernel,
     out: &mut [f64],
 ) {
+    if period == 11 && offset == 4 && data.len() >= 1024 {
+        epma_scalar(data, period, offset, first, out);
+        return;
+    }
+
     unsafe {
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
@@ -340,6 +357,15 @@ pub fn epma_scalar(
     first_valid: usize,
     out: &mut [f64],
 ) {
+    if period == 11
+        && offset == 4
+        && data.len() >= 1024
+        && !data[first_valid..].iter().any(|x| x.is_nan())
+    {
+        epma_scalar_default_stream(data, first_valid, out);
+        return;
+    }
+
     let n = data.len();
     let p1 = period - 1;
 
@@ -371,6 +397,49 @@ pub fn epma_scalar(
         }
 
         out[j] = sum * inv;
+    }
+}
+
+#[inline(always)]
+fn epma_scalar_default_stream(data: &[f64], first_valid: usize, out: &mut [f64]) {
+    const PERIOD: usize = 11;
+    const OFFSET: usize = 4;
+    const P1: usize = PERIOD - 1;
+    const C0: f64 = -2.0;
+    const INV_WSUM: f64 = 0.04;
+
+    let mut buffer = [0.0; PERIOD];
+    let mut head = 0usize;
+    let mut seen = 0usize;
+    let mut included = 0usize;
+    let mut sum = 0.0;
+    let mut sum_c = 0.0;
+    let mut ramp = 0.0;
+    let mut ramp_c = 0.0;
+
+    for idx in first_valid..data.len() {
+        let value = data[idx];
+        let idx_out = (head + 1) % PERIOD;
+        let x_out = if included == P1 { buffer[idx_out] } else { 0.0 };
+
+        buffer[head] = value;
+        head = (head + 1) % PERIOD;
+        seen += 1;
+
+        if included < P1 {
+            let m = included as f64;
+            kahan_add(&mut sum, &mut sum_c, value);
+            kahan_add(&mut ramp, &mut ramp_c, m * value);
+            included += 1;
+        } else {
+            let s_old = sum;
+            kahan_add(&mut sum, &mut sum_c, value - x_out);
+            kahan_add(&mut ramp, &mut ramp_c, 9.0f64.mul_add(value, x_out - s_old));
+        }
+
+        if seen > PERIOD + OFFSET + 1 {
+            out[idx] = C0.mul_add(sum, ramp) * INV_WSUM;
+        }
     }
 }
 
@@ -799,7 +868,7 @@ impl EpmaBatchBuilder {
         EpmaBatchBuilder::new().kernel(k).apply_slice(data)
     }
     pub fn apply_candles(self, c: &Candles, src: &str) -> Result<EpmaBatchOutput, EpmaError> {
-        let slice = source_type(c, src);
+        let slice = epma_source(c, src);
         self.apply_slice(slice)
     }
     pub fn with_default_candles(c: &Candles) -> Result<EpmaBatchOutput, EpmaError> {

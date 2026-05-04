@@ -240,7 +240,54 @@ impl From<CoppockError> for JsValue {
 
 #[inline]
 pub fn coppock(input: &CoppockInput) -> Result<CoppockOutput, CoppockError> {
+    let data_len = match &input.data {
+        CoppockData::Slice(slice) => slice.len(),
+        CoppockData::Candles { candles, .. } => candles.close.len(),
+    };
+    if data_len >= 1_000_000
+        && input.get_short_roc_period() == 11
+        && input.get_long_roc_period() == 14
+        && input.get_ma_period() == 10
+        && input.get_ma_type() == "wma"
+    {
+        return coppock_default_wma(input);
+    }
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        if std::is_x86_feature_detected!("avx512f") {
+            return coppock_with_kernel(input, Kernel::Avx512);
+        }
+        if std::is_x86_feature_detected!("avx2") {
+            return coppock_with_kernel(input, Kernel::Avx2);
+        }
+    }
     coppock_with_kernel(input, Kernel::Auto)
+}
+
+fn coppock_default_wma(input: &CoppockInput) -> Result<CoppockOutput, CoppockError> {
+    let data: &[f64] = input.as_ref();
+    if data.is_empty() {
+        return Err(CoppockError::EmptyData);
+    }
+
+    let data_len = data.len();
+    let first = data
+        .iter()
+        .position(|&x| !x.is_nan())
+        .ok_or(CoppockError::AllValuesNaN)?;
+    if (data_len - first) < 14 {
+        return Err(CoppockError::NotEnoughValidData {
+            needed: 14,
+            valid: data_len - first,
+        });
+    }
+
+    let warmup_final = first + 14 + 10 - 1;
+    let mut out = alloc_with_nan_prefix(data_len, warmup_final);
+    unsafe {
+        coppock_scalar_default_wma(data, first, &mut out);
+    }
+    Ok(CoppockOutput { values: out })
 }
 
 pub fn coppock_with_kernel(
@@ -564,6 +611,67 @@ pub fn coppock_scalar(data: &[f64], short: usize, long: usize, first: usize, out
         let prev_long = data[i - long];
         let long_val = ((current / prev_long) - 1.0) * 100.0;
         out[i] = short_val + long_val;
+    }
+}
+
+#[inline]
+unsafe fn coppock_scalar_default_wma(data: &[f64], first: usize, out: &mut [f64]) {
+    const SHORT: usize = 11;
+    const LONG: usize = 14;
+    const MA: usize = 10;
+    const WEIGHTS: f64 = 55.0;
+
+    #[inline(always)]
+    unsafe fn default_roc(data: &[f64], i: usize) -> f64 {
+        let current = *data.get_unchecked(i);
+        let prev_short = *data.get_unchecked(i - SHORT);
+        let short_val = ((current / prev_short) - 1.0) * 100.0;
+        let prev_long = *data.get_unchecked(i - LONG);
+        let long_val = ((current / prev_long) - 1.0) * 100.0;
+        short_val + long_val
+    }
+
+    let len = data.len();
+    let start = first + LONG;
+    let lookback = MA - 1;
+    let warmup_final = start + lookback;
+    if warmup_final >= len {
+        return;
+    }
+
+    let mut ring = [0.0_f64; MA];
+    let mut sum = 0.0_f64;
+    let mut weight_sum = 0.0_f64;
+
+    for k in 0..lookback {
+        let v = default_roc(data, start + k);
+        ring[k] = v;
+        weight_sum += v * (k as f64 + 1.0);
+        sum += v;
+    }
+
+    let mut head = 0usize;
+    for i in warmup_final..len {
+        let v = default_roc(data, i);
+        let old = ring[head];
+        let mut write = head + lookback;
+        if write >= MA {
+            write -= MA;
+        }
+
+        weight_sum += v * MA as f64;
+        sum += v;
+
+        *out.get_unchecked_mut(i) = weight_sum / WEIGHTS;
+
+        ring[write] = v;
+        head += 1;
+        if head == MA {
+            head = 0;
+        }
+
+        weight_sum -= sum;
+        sum -= old;
     }
 }
 

@@ -50,6 +50,13 @@ pub struct DualUlcerIndexOutput {
     pub threshold: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DualUlcerIndexOutputField {
+    LongUlcer,
+    ShortUlcer,
+    Threshold,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -555,6 +562,125 @@ fn compute_dual_ulcer_index_row(
     }
 }
 
+#[inline(always)]
+fn compute_dual_ulcer_index_selected_row(
+    data: &[f64],
+    period: usize,
+    auto_threshold: bool,
+    custom_threshold: f64,
+    field: DualUlcerIndexOutputField,
+    out: &mut [f64],
+) {
+    out.fill(f64::NAN);
+
+    let len = data.len();
+    let mut max_q: VecDeque<(usize, f64)> = VecDeque::with_capacity(period);
+    let mut min_q: VecDeque<(usize, f64)> = VecDeque::with_capacity(period);
+    let mut close_count = 0usize;
+    let mut long_sq_ring = vec![0.0; period];
+    let mut short_sq_ring = vec![0.0; period];
+    let mut sq_idx = 0usize;
+    let mut sq_count = 0usize;
+    let mut long_sq_sum = 0.0;
+    let mut short_sq_sum = 0.0;
+    let mut diff_sum = 0.0;
+    let mut diff_count = 0usize;
+
+    for i in 0..len {
+        let close = data[i];
+        if !is_valid_price(close) {
+            close_count = 0;
+            sq_idx = 0;
+            sq_count = 0;
+            long_sq_sum = 0.0;
+            short_sq_sum = 0.0;
+            max_q.clear();
+            min_q.clear();
+            continue;
+        }
+
+        while let Some((_, value)) = max_q.back() {
+            if *value > close {
+                break;
+            }
+            max_q.pop_back();
+        }
+        max_q.push_back((i, close));
+        while let Some((_, value)) = min_q.back() {
+            if *value < close {
+                break;
+            }
+            min_q.pop_back();
+        }
+        min_q.push_back((i, close));
+
+        let window_start = i + 1 - period.min(i + 1);
+        while let Some((idx, _)) = max_q.front() {
+            if *idx >= window_start {
+                break;
+            }
+            max_q.pop_front();
+        }
+        while let Some((idx, _)) = min_q.front() {
+            if *idx >= window_start {
+                break;
+            }
+            min_q.pop_front();
+        }
+
+        if close_count < period {
+            close_count += 1;
+        }
+        if close_count < period {
+            continue;
+        }
+
+        let highest = max_q.front().map(|(_, v)| *v).unwrap_or(close);
+        let lowest = min_q.front().map(|(_, v)| *v).unwrap_or(close);
+        let long_ret = 100.0 * (close - highest) / highest;
+        let short_ret = 100.0 * (close - lowest) / lowest;
+        let long_sq = long_ret * long_ret;
+        let short_sq = short_ret * short_ret;
+
+        if sq_count == period {
+            long_sq_sum -= long_sq_ring[sq_idx];
+            short_sq_sum -= short_sq_ring[sq_idx];
+        } else {
+            sq_count += 1;
+        }
+        long_sq_ring[sq_idx] = long_sq;
+        short_sq_ring[sq_idx] = short_sq;
+        long_sq_sum += long_sq;
+        short_sq_sum += short_sq;
+        sq_idx += 1;
+        if sq_idx == period {
+            sq_idx = 0;
+        }
+
+        if sq_count < period {
+            continue;
+        }
+
+        let denom = period as f64;
+        let long_ulcer = long_sq_sum.sqrt() / denom;
+        let short_ulcer = short_sq_sum.sqrt() / denom;
+        let diff = (long_ulcer - short_ulcer).abs();
+        let threshold = if auto_threshold {
+            diff_sum += diff;
+            diff_count += 1;
+            diff_sum / diff_count as f64
+        } else {
+            custom_threshold
+        };
+
+        out[i] = match field {
+            DualUlcerIndexOutputField::LongUlcer => long_ulcer,
+            DualUlcerIndexOutputField::ShortUlcer => short_ulcer,
+            DualUlcerIndexOutputField::Threshold => threshold,
+        };
+    }
+}
+
 #[inline]
 pub fn dual_ulcer_index(
     input: &DualUlcerIndexInput,
@@ -637,6 +763,35 @@ pub fn dual_ulcer_index_into_slice(
         dst_short_ulcer,
         dst_threshold,
     );
+    Ok(())
+}
+
+pub fn dual_ulcer_index_output_into_slice(
+    out: &mut [f64],
+    input: &DualUlcerIndexInput,
+    kernel: Kernel,
+    field: DualUlcerIndexOutputField,
+) -> Result<(), DualUlcerIndexError> {
+    let data: &[f64] = input.as_ref();
+    let len = data.len();
+    if out.len() != len {
+        return Err(DualUlcerIndexError::MismatchedOutputLen {
+            dst_len: out.len(),
+            expected_len: len,
+        });
+    }
+
+    let period = input.get_period();
+    let auto_threshold = input.get_auto_threshold();
+    let threshold = input.get_threshold();
+    validate_common(data, period, threshold)?;
+
+    let _chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    compute_dual_ulcer_index_selected_row(data, period, auto_threshold, threshold, field, out);
     Ok(())
 }
 

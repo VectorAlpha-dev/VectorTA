@@ -37,12 +37,35 @@ use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
+const DEFAULT_BASE_PERIOD: usize = 113;
+const DEFAULT_VOL_PERIOD: usize = 51;
+const DEFAULT_SMOOTHING: bool = true;
+const DEFAULT_SMOOTH_TYPE: usize = 3;
+const DEFAULT_SMOOTH_PERIOD: usize = 5;
+const DEFAULT_SOURCE: &str = "close";
+
+#[inline(always)]
+fn source_slice<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        DEFAULT_SOURCE => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
+    }
+}
+
 impl<'a> AsRef<[f64]> for VamaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             VamaData::Slice(slice) => slice,
-            VamaData::Candles { candles, source } => source_type(candles, source),
+            VamaData::Candles { candles, source } => source_slice(candles, source),
         }
     }
 }
@@ -77,11 +100,11 @@ pub struct VamaParams {
 impl Default for VamaParams {
     fn default() -> Self {
         Self {
-            base_period: Some(113),
-            vol_period: Some(51),
-            smoothing: Some(true),
-            smooth_type: Some(3),
-            smooth_period: Some(5),
+            base_period: Some(DEFAULT_BASE_PERIOD),
+            vol_period: Some(DEFAULT_VOL_PERIOD),
+            smoothing: Some(DEFAULT_SMOOTHING),
+            smooth_type: Some(DEFAULT_SMOOTH_TYPE),
+            smooth_period: Some(DEFAULT_SMOOTH_PERIOD),
         }
     }
 }
@@ -114,32 +137,32 @@ impl<'a> VamaInput<'a> {
 
     #[inline]
     pub fn with_default_candles(c: &'a Candles) -> Self {
-        Self::from_candles(c, "close", VamaParams::default())
+        Self::from_candles(c, DEFAULT_SOURCE, VamaParams::default())
     }
 
     #[inline]
     pub fn get_base_period(&self) -> usize {
-        self.params.base_period.unwrap_or(113)
+        self.params.base_period.unwrap_or(DEFAULT_BASE_PERIOD)
     }
 
     #[inline]
     pub fn get_vol_period(&self) -> usize {
-        self.params.vol_period.unwrap_or(51)
+        self.params.vol_period.unwrap_or(DEFAULT_VOL_PERIOD)
     }
 
     #[inline]
     pub fn get_smoothing(&self) -> bool {
-        self.params.smoothing.unwrap_or(true)
+        self.params.smoothing.unwrap_or(DEFAULT_SMOOTHING)
     }
 
     #[inline]
     pub fn get_smooth_type(&self) -> usize {
-        self.params.smooth_type.unwrap_or(3)
+        self.params.smooth_type.unwrap_or(DEFAULT_SMOOTH_TYPE)
     }
 
     #[inline]
     pub fn get_smooth_period(&self) -> usize {
-        self.params.smooth_period.unwrap_or(5)
+        self.params.smooth_period.unwrap_or(DEFAULT_SMOOTH_PERIOD)
     }
 }
 
@@ -217,7 +240,7 @@ impl VamaBuilder {
             smooth_type: self.smooth_type,
             smooth_period: self.smooth_period,
         };
-        let i = VamaInput::from_candles(c, "close", p);
+        let i = VamaInput::from_candles(c, DEFAULT_SOURCE, p);
         vama_with_kernel(&i, self.kernel)
     }
 
@@ -395,6 +418,142 @@ fn vama_core_into(
     Ok(())
 }
 
+#[inline(always)]
+fn is_default_smoothed_vama(
+    base_period: usize,
+    vol_period: usize,
+    smoothing: bool,
+    smooth_type: usize,
+    smooth_period: usize,
+) -> bool {
+    base_period == DEFAULT_BASE_PERIOD
+        && vol_period == DEFAULT_VOL_PERIOD
+        && smoothing == DEFAULT_SMOOTHING
+        && smooth_type == DEFAULT_SMOOTH_TYPE
+        && smooth_period == DEFAULT_SMOOTH_PERIOD
+}
+
+#[inline(always)]
+fn can_use_default_fused(data: &[f64], first: usize, final_warmup: usize) -> bool {
+    final_warmup < data.len() && data[first..].iter().all(|x| x.is_finite())
+}
+
+#[inline(always)]
+fn vama_default_fused_wma_into(data: &[f64], first: usize, out: &mut [f64]) {
+    debug_assert_eq!(out.len(), data.len());
+
+    let len = data.len();
+    let warmup = first + DEFAULT_BASE_PERIOD.max(DEFAULT_VOL_PERIOD) - 1;
+    let alpha = 2.0 / (DEFAULT_BASE_PERIOD as f64 + 1.0);
+    let beta = 1.0 - alpha;
+
+    let cap = DEFAULT_VOL_PERIOD;
+    let mut idx_max = vec![0usize; cap];
+    let mut val_max = vec![0.0f64; cap];
+    let mut head_max = 0usize;
+    let mut tail_max = 0usize;
+
+    let mut idx_min = vec![0usize; cap];
+    let mut val_min = vec![0.0f64; cap];
+    let mut head_min = 0usize;
+    let mut tail_min = 0usize;
+
+    let mut mean = data[first];
+    let mut ema_value = mean;
+    let mut valid_count = 1usize;
+    let ema_warmup_end = (first + DEFAULT_BASE_PERIOD).min(len);
+
+    let mut wma_ring = [0.0_f64; DEFAULT_SMOOTH_PERIOD];
+    let mut wma_sum = 0.0_f64;
+    let mut wma_weight_sum = 0.0_f64;
+    const WMA_DEN: f64 = 15.0;
+
+    for i in first..len {
+        let x = data[i];
+        if i == first {
+            ema_value = mean;
+        } else if i < ema_warmup_end {
+            valid_count += 1;
+            let vc = valid_count as f64;
+            mean = ((vc - 1.0) * mean + x) / vc;
+            ema_value = mean;
+        } else {
+            ema_value = beta.mul_add(ema_value, alpha * x);
+        }
+
+        let window_len = DEFAULT_VOL_PERIOD.min(i + 1 - first);
+        let window_start = i + 1 - window_len;
+
+        while head_max != tail_max && idx_max[head_max] < window_start {
+            head_max += 1;
+            if head_max == cap {
+                head_max = 0;
+            }
+        }
+
+        while head_min != tail_min && idx_min[head_min] < window_start {
+            head_min += 1;
+            if head_min == cap {
+                head_min = 0;
+            }
+        }
+
+        let d = x - ema_value;
+        while head_max != tail_max {
+            let last = if tail_max == 0 { cap - 1 } else { tail_max - 1 };
+            if val_max[last] <= d {
+                tail_max = last;
+            } else {
+                break;
+            }
+        }
+        idx_max[tail_max] = i;
+        val_max[tail_max] = d;
+        tail_max += 1;
+        if tail_max == cap {
+            tail_max = 0;
+        }
+
+        while head_min != tail_min {
+            let last = if tail_min == 0 { cap - 1 } else { tail_min - 1 };
+            if val_min[last] >= d {
+                tail_min = last;
+            } else {
+                break;
+            }
+        }
+        idx_min[tail_min] = i;
+        val_min[tail_min] = d;
+        tail_min += 1;
+        if tail_min == cap {
+            tail_min = 0;
+        }
+
+        if i >= warmup {
+            let core = if head_max != tail_max && head_min != tail_min {
+                (0.5f64).mul_add(val_max[head_max] + val_min[head_min], ema_value)
+            } else {
+                ema_value
+            };
+
+            let k = i - warmup;
+            let ring_idx = k % DEFAULT_SMOOTH_PERIOD;
+            wma_ring[ring_idx] = core;
+            if k < DEFAULT_SMOOTH_PERIOD - 1 {
+                wma_weight_sum += core * (k as f64 + 1.0);
+                wma_sum += core;
+            } else {
+                wma_weight_sum += core * DEFAULT_SMOOTH_PERIOD as f64;
+                wma_sum += core;
+                out[i] = wma_weight_sum / WMA_DEN;
+                let old = wma_ring[(k + 1) % DEFAULT_SMOOTH_PERIOD];
+                wma_weight_sum -= wma_sum;
+                wma_sum -= old;
+            }
+        }
+    }
+}
+
 #[inline]
 pub fn vama(input: &VamaInput) -> Result<VamaOutput, VamaError> {
     vama_with_kernel(input, Kernel::Auto)
@@ -404,6 +563,15 @@ pub fn vama_with_kernel(input: &VamaInput, kernel: Kernel) -> Result<VamaOutput,
     let (data, base_p, vol_p, smoothing, smooth_ty, smooth_p, first, chosen) =
         vama_prepare(input, kernel)?;
     let warmup = first + base_p.max(vol_p) - 1;
+
+    if is_default_smoothed_vama(base_p, vol_p, smoothing, smooth_ty, smooth_p) {
+        let final_warmup = warmup + DEFAULT_SMOOTH_PERIOD - 1;
+        if can_use_default_fused(data, first, final_warmup) {
+            let mut out = alloc_with_nan_prefix(data.len(), final_warmup);
+            vama_default_fused_wma_into(data, first, &mut out);
+            return Ok(VamaOutput { values: out });
+        }
+    }
 
     if !smoothing {
         let mut out = alloc_with_nan_prefix(data.len(), warmup);
@@ -468,6 +636,17 @@ pub fn vama_into_slice(dst: &mut [f64], input: &VamaInput, kern: Kernel) -> Resu
     }
 
     let warmup = first + base_p.max(vol_p) - 1;
+
+    if is_default_smoothed_vama(base_p, vol_p, smoothing, smooth_ty, smooth_p) {
+        let final_warmup = warmup + DEFAULT_SMOOTH_PERIOD - 1;
+        if can_use_default_fused(data, first, final_warmup) {
+            for v in &mut dst[..final_warmup] {
+                *v = f64::NAN;
+            }
+            vama_default_fused_wma_into(data, first, dst);
+            return Ok(());
+        }
+    }
 
     if !smoothing {
         for v in &mut dst[..warmup] {
@@ -1009,7 +1188,7 @@ impl VamaBatchBuilder {
         vama_batch_with_kernel(data, &self.range, self.kernel)
     }
     pub fn apply_candles(self, c: &Candles, src: &str) -> Result<VamaBatchOutput, VamaError> {
-        self.apply_slice(source_type(c, src))
+        self.apply_slice(source_slice(c, src))
     }
     pub fn with_default_slice(data: &[f64], k: Kernel) -> Result<VamaBatchOutput, VamaError> {
         VamaBatchBuilder::new().kernel(k).apply_slice(data)
@@ -1017,7 +1196,7 @@ impl VamaBatchBuilder {
     pub fn with_default_candles(c: &Candles) -> Result<VamaBatchOutput, VamaError> {
         VamaBatchBuilder::new()
             .kernel(Kernel::Auto)
-            .apply_candles(c, "close")
+            .apply_candles(c, DEFAULT_SOURCE)
     }
 }
 

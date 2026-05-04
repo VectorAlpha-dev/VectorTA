@@ -17,8 +17,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -649,7 +648,7 @@ impl EhlersLinearExtrapolationPredictorBatchBuilder {
 pub fn ehlers_linear_extrapolation_predictor(
     input: &EhlersLinearExtrapolationPredictorInput,
 ) -> Result<EhlersLinearExtrapolationPredictorOutput, EhlersLinearExtrapolationPredictorError> {
-    ehlers_linear_extrapolation_predictor_with_kernel(input, Kernel::Auto)
+    ehlers_linear_extrapolation_predictor_with_kernel(input, Kernel::Scalar)
 }
 
 #[inline]
@@ -763,6 +762,171 @@ fn extrapolate_prediction(history: &VecDeque<f64>, bars_forward: usize, gain: f6
     (current + bars_forward as f64 * step) * gain
 }
 
+#[inline(always)]
+fn write_predictor_nan(
+    i: usize,
+    prediction_out: &mut [f64],
+    filter_out: &mut [f64],
+    state_out: &mut [f64],
+    go_long_out: &mut [f64],
+    go_short_out: &mut [f64],
+) {
+    prediction_out[i] = f64::NAN;
+    filter_out[i] = f64::NAN;
+    state_out[i] = f64::NAN;
+    go_long_out[i] = f64::NAN;
+    go_short_out[i] = f64::NAN;
+}
+
+#[inline]
+fn row_from_slice_lowpass12(
+    data: &[f64],
+    params: ResolvedParams,
+    prediction_out: &mut [f64],
+    filter_out: &mut [f64],
+    state_out: &mut [f64],
+    go_long_out: &mut [f64],
+    go_short_out: &mut [f64],
+) {
+    let pix2 = 2.0 * PI / (DEFAULT_LOW_PASS_LENGTH + 1) as f64;
+    let mut weights = [0.0; DEFAULT_LOW_PASS_LENGTH];
+    let mut weight_sum = 0.0;
+    for count in 1..=DEFAULT_LOW_PASS_LENGTH {
+        let coef = 1.0 - (count as f64 * pix2).cos();
+        weights[count - 1] = coef;
+        weight_sum += coef;
+    }
+
+    let mut source_count = 0usize;
+    let mut prev_source_1 = 0.0;
+    let mut prev_source_2 = 0.0;
+    let mut hp_prev_1 = 0.0;
+    let mut hp_prev_2 = 0.0;
+    let mut hp_history = [0.0; DEFAULT_LOW_PASS_LENGTH];
+    let mut hp_len = 0usize;
+    let mut filter_history = [0.0; HISTORY_LENGTH];
+    let mut filter_len = 0usize;
+    let mut prev_prediction = 0.0;
+    let mut prev_filter = 0.0;
+    let mut have_prev = false;
+
+    for i in 0..data.len() {
+        let value = data[i];
+        if !value.is_finite() {
+            source_count = 0;
+            prev_source_1 = 0.0;
+            prev_source_2 = 0.0;
+            hp_prev_1 = 0.0;
+            hp_prev_2 = 0.0;
+            hp_len = 0;
+            filter_len = 0;
+            have_prev = false;
+            write_predictor_nan(
+                i,
+                prediction_out,
+                filter_out,
+                state_out,
+                go_long_out,
+                go_short_out,
+            );
+            continue;
+        }
+
+        source_count += 1;
+        let hp = if source_count <= 4 {
+            0.0
+        } else {
+            params.hp_c1 * (value - 2.0 * prev_source_1 + prev_source_2)
+                + params.hp_c2 * hp_prev_1
+                + params.hp_c3 * hp_prev_2
+        };
+
+        prev_source_2 = prev_source_1;
+        prev_source_1 = value;
+        hp_prev_2 = hp_prev_1;
+        hp_prev_1 = hp;
+
+        let mut j = DEFAULT_LOW_PASS_LENGTH - 1;
+        while j > 0 {
+            hp_history[j] = hp_history[j - 1];
+            j -= 1;
+        }
+        hp_history[0] = hp;
+        if hp_len < DEFAULT_LOW_PASS_LENGTH {
+            hp_len += 1;
+        }
+
+        if source_count < 4 + DEFAULT_LOW_PASS_LENGTH - 1 || hp_len < DEFAULT_LOW_PASS_LENGTH {
+            write_predictor_nan(
+                i,
+                prediction_out,
+                filter_out,
+                state_out,
+                go_long_out,
+                go_short_out,
+            );
+            continue;
+        }
+
+        let mut filter = 0.0;
+        for j in 0..DEFAULT_LOW_PASS_LENGTH {
+            filter += weights[j] * hp_history[j];
+        }
+        filter /= weight_sum;
+
+        if filter_len < HISTORY_LENGTH {
+            filter_history[filter_len] = filter;
+            filter_len += 1;
+        } else {
+            for j in 0..(HISTORY_LENGTH - 1) {
+                filter_history[j] = filter_history[j + 1];
+            }
+            filter_history[HISTORY_LENGTH - 1] = filter;
+        }
+
+        if filter_len < HISTORY_LENGTH {
+            write_predictor_nan(
+                i,
+                prediction_out,
+                filter_out,
+                state_out,
+                go_long_out,
+                go_short_out,
+            );
+            continue;
+        }
+
+        let current = filter_history[HISTORY_LENGTH - 1];
+        let previous = filter_history[HISTORY_LENGTH - 2];
+        let prediction =
+            (current + params.bars_forward as f64 * (current - previous)) * params.gain;
+        let filter = current;
+        let state = params.signal_mode.state(prediction, filter);
+        let (go_long, go_short) = if have_prev {
+            (
+                params
+                    .signal_mode
+                    .go_long(prev_prediction, prev_filter, prediction, filter),
+                params
+                    .signal_mode
+                    .go_short(prev_prediction, prev_filter, prediction, filter),
+            )
+        } else {
+            (0.0, 0.0)
+        };
+
+        prev_prediction = prediction;
+        prev_filter = filter;
+        have_prev = true;
+
+        prediction_out[i] = prediction;
+        filter_out[i] = filter;
+        state_out[i] = state;
+        go_long_out[i] = go_long;
+        go_short_out[i] = go_short;
+    }
+}
+
 #[inline]
 fn prepare<'a>(
     input: &'a EhlersLinearExtrapolationPredictorInput<'a>,
@@ -783,7 +947,7 @@ fn prepare<'a>(
         return Err(EhlersLinearExtrapolationPredictorError::NotEnoughValidData { needed, valid });
     }
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other.to_non_batch(),
     };
     Ok((data, params, first, chosen))
@@ -799,6 +963,19 @@ fn row_from_slice(
     go_long_out: &mut [f64],
     go_short_out: &mut [f64],
 ) {
+    if params.low_pass_length == DEFAULT_LOW_PASS_LENGTH {
+        row_from_slice_lowpass12(
+            data,
+            params,
+            prediction_out,
+            filter_out,
+            state_out,
+            go_long_out,
+            go_short_out,
+        );
+        return;
+    }
+
     let mut stream = EhlersLinearExtrapolationPredictorStream::new_resolved(params);
     for i in 0..data.len() {
         match stream.update(data[i]) {
@@ -825,13 +1002,12 @@ pub fn ehlers_linear_extrapolation_predictor_with_kernel(
     input: &EhlersLinearExtrapolationPredictorInput,
     kernel: Kernel,
 ) -> Result<EhlersLinearExtrapolationPredictorOutput, EhlersLinearExtrapolationPredictorError> {
-    let (data, params, first, _chosen) = prepare(input, kernel)?;
-    let warmup = first + warmup_period(params.low_pass_length);
-    let mut prediction = alloc_with_nan_prefix(data.len(), warmup);
-    let mut filter = alloc_with_nan_prefix(data.len(), warmup);
-    let mut state = alloc_with_nan_prefix(data.len(), warmup);
-    let mut go_long = alloc_with_nan_prefix(data.len(), warmup);
-    let mut go_short = alloc_with_nan_prefix(data.len(), warmup);
+    let (data, params, _first, _chosen) = prepare(input, kernel)?;
+    let mut prediction = alloc_uninit_f64(data.len());
+    let mut filter = alloc_uninit_f64(data.len());
+    let mut state = alloc_uninit_f64(data.len());
+    let mut go_long = alloc_uninit_f64(data.len());
+    let mut go_short = alloc_uninit_f64(data.len());
     row_from_slice(
         data,
         params,

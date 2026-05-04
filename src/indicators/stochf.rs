@@ -17,8 +17,8 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+    init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -239,69 +239,19 @@ pub fn stochf_into(
     out_k: &mut [f64],
     out_d: &mut [f64],
 ) -> Result<(), StochfError> {
-    let (high, low, close) = match &input.data {
-        StochfData::Candles { candles } => {
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|_| StochfError::EmptyInputData)?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|_| StochfError::EmptyInputData)?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|_| StochfError::EmptyInputData)?;
-            (high, low, close)
-        }
-        StochfData::Slices { high, low, close } => (*high, *low, *close),
-    };
-
-    if high.is_empty() || low.is_empty() || close.is_empty() {
-        return Err(StochfError::EmptyInputData);
-    }
-    let len = high.len();
-    if low.len() != len || close.len() != len {
-        return Err(StochfError::EmptyInputData);
-    }
-    if out_k.len() != len || out_d.len() != len {
-        return Err(StochfError::OutputLengthMismatch {
-            expected: len,
-            k_got: out_k.len(),
-            d_got: out_d.len(),
-        });
-    }
-
-    let fastk = input.get_fastk_period();
-    let fastd = input.get_fastd_period();
-    let _matype = input.get_fastd_matype();
-    if fastk == 0 || fastd == 0 || fastk > len || fastd > len {
-        return Err(StochfError::InvalidPeriod {
-            fastk,
-            fastd,
-            data_len: len,
-        });
-    }
-
-    let first = (0..len)
-        .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
-        .ok_or(StochfError::AllValuesNaN)?;
-    if (len - first) < fastk {
-        return Err(StochfError::NotEnoughValidData {
-            needed: fastk,
-            valid: len - first,
-        });
-    }
-
-    let k_warm = first + fastk - 1;
-    let d_warm = first + fastk + fastd - 2;
-    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
-    for v in &mut out_k[..k_warm.min(len)] {
-        *v = qnan;
-    }
-    for v in &mut out_d[..d_warm.min(len)] {
-        *v = qnan;
-    }
-
     stochf_into_slice(out_k, out_d, input, Kernel::Auto)
+}
+
+#[inline(always)]
+fn slices_from_input<'a>(input: &'a StochfInput<'a>) -> (&'a [f64], &'a [f64], &'a [f64]) {
+    match &input.data {
+        StochfData::Candles { candles } => (
+            candles.high.as_slice(),
+            candles.low.as_slice(),
+            candles.close.as_slice(),
+        ),
+        StochfData::Slices { high, low, close } => (*high, *low, *close),
+    }
 }
 
 #[inline]
@@ -311,21 +261,7 @@ pub fn stochf_into_slice(
     input: &StochfInput,
     kernel: Kernel,
 ) -> Result<(), StochfError> {
-    let (high, low, close) = match &input.data {
-        StochfData::Candles { candles } => {
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|_| StochfError::EmptyInputData)?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|_| StochfError::EmptyInputData)?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|_| StochfError::EmptyInputData)?;
-            (high, low, close)
-        }
-        StochfData::Slices { high, low, close } => (*high, *low, *close),
-    };
+    let (high, low, close) = slices_from_input(input);
 
     if high.is_empty() || low.is_empty() || close.is_empty() {
         return Err(StochfError::EmptyInputData);
@@ -364,7 +300,9 @@ pub fn stochf_into_slice(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto | Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+            Kernel::Scalar
+        }
         other => other,
     };
 
@@ -425,21 +363,7 @@ pub fn stochf_with_kernel(
     input: &StochfInput,
     kernel: Kernel,
 ) -> Result<StochfOutput, StochfError> {
-    let (high, low, close) = match &input.data {
-        StochfData::Candles { candles } => {
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|_| StochfError::EmptyInputData)?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|_| StochfError::EmptyInputData)?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|_| StochfError::EmptyInputData)?;
-            (high, low, close)
-        }
-        StochfData::Slices { high, low, close } => (*high, *low, *close),
-    };
+    let (high, low, close) = slices_from_input(input);
 
     if high.is_empty() || low.is_empty() || close.is_empty() {
         return Err(StochfError::EmptyInputData);
@@ -472,11 +396,13 @@ pub fn stochf_with_kernel(
 
     let k_warmup = first_valid_idx + fastk_period - 1;
     let d_warmup = first_valid_idx + fastk_period + fastd_period - 2;
-    let mut k_vals = alloc_with_nan_prefix(len, k_warmup.min(len));
-    let mut d_vals = alloc_with_nan_prefix(len, d_warmup.min(len));
+    let mut k_vals = alloc_uninit_f64(len);
+    let mut d_vals = alloc_uninit_f64(len);
 
     let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto | Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
+            Kernel::Scalar
+        }
         other => other,
     };
 
@@ -521,10 +447,117 @@ pub fn stochf_with_kernel(
         }
     }
 
+    for v in &mut k_vals[..k_warmup.min(len)] {
+        *v = f64::NAN;
+    }
+    for v in &mut d_vals[..d_warmup.min(len)] {
+        *v = f64::NAN;
+    }
+
     Ok(StochfOutput {
         k: k_vals,
         d: d_vals,
     })
+}
+
+#[inline(always)]
+unsafe fn stochf_scalar_default_5_3_sma(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    first_valid_idx: usize,
+    k_vals: &mut [f64],
+    d_vals: &mut [f64],
+) {
+    let len = high.len();
+    let hp = high.as_ptr();
+    let lp = low.as_ptr();
+    let cp = close.as_ptr();
+    let k_start = first_valid_idx + 4;
+    let mut d_sum = 0.0f64;
+    let mut d_cnt = 0usize;
+    let mut i = k_start;
+    while i < len {
+        let start = i - 4;
+        let mut hh = f64::NEG_INFINITY;
+        let mut ll = f64::INFINITY;
+
+        let h0 = *hp.add(start);
+        let l0 = *lp.add(start);
+        if h0 > hh {
+            hh = h0;
+        }
+        if l0 < ll {
+            ll = l0;
+        }
+
+        let h1 = *hp.add(start + 1);
+        let l1 = *lp.add(start + 1);
+        if h1 > hh {
+            hh = h1;
+        }
+        if l1 < ll {
+            ll = l1;
+        }
+
+        let h2 = *hp.add(start + 2);
+        let l2 = *lp.add(start + 2);
+        if h2 > hh {
+            hh = h2;
+        }
+        if l2 < ll {
+            ll = l2;
+        }
+
+        let h3 = *hp.add(start + 3);
+        let l3 = *lp.add(start + 3);
+        if h3 > hh {
+            hh = h3;
+        }
+        if l3 < ll {
+            ll = l3;
+        }
+
+        let h4 = *hp.add(start + 4);
+        let l4 = *lp.add(start + 4);
+        if h4 > hh {
+            hh = h4;
+        }
+        if l4 < ll {
+            ll = l4;
+        }
+
+        let c = *cp.add(i);
+        let denom = hh - ll;
+        let kv = if denom == 0.0 {
+            if c == hh {
+                100.0
+            } else {
+                0.0
+            }
+        } else {
+            let inv = 100.0 / denom;
+            c.mul_add(inv, (-ll) * inv)
+        };
+        *k_vals.get_unchecked_mut(i) = kv;
+
+        if kv.is_nan() {
+            *d_vals.get_unchecked_mut(i) = f64::NAN;
+        } else if d_cnt < 3 {
+            d_sum += kv;
+            d_cnt += 1;
+            if d_cnt == 3 {
+                *d_vals.get_unchecked_mut(i) = d_sum / 3.0;
+            } else {
+                *d_vals.get_unchecked_mut(i) = f64::NAN;
+            }
+        } else {
+            d_sum += kv - *k_vals.get_unchecked(i - 3);
+            *d_vals.get_unchecked_mut(i) = d_sum / 3.0;
+        }
+
+        i += 1;
+    }
 }
 
 #[inline]
@@ -546,6 +579,11 @@ pub unsafe fn stochf_scalar(
 
     let len = high.len();
     if len == 0 {
+        return;
+    }
+
+    if fastk_period == 5 && fastd_period == 3 && matype == 0 {
+        stochf_scalar_default_5_3_sma(high, low, close, first_valid_idx, k_vals, d_vals);
         return;
     }
 

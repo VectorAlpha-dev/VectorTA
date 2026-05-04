@@ -14,10 +14,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
-};
+use crate::utilities::helpers::make_uninit_matrix;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 
@@ -36,9 +33,25 @@ impl<'a> AsRef<[f64]> for LeavittConvolutionAccelerationInput<'a> {
         match &self.data {
             LeavittConvolutionAccelerationData::Slice(slice) => slice,
             LeavittConvolutionAccelerationData::Candles { candles, source } => {
-                source_type(candles, source)
+                leavitt_source(candles, source)
             }
         }
+    }
+}
+
+#[inline(always)]
+fn leavitt_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "close" => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        _ => source_type(candles, source),
     }
 }
 
@@ -287,14 +300,9 @@ fn required_valid_bars(length: usize, norm_length: usize) -> usize {
 }
 
 #[inline(always)]
-fn output_warmup(first: usize, length: usize, norm_length: usize) -> usize {
-    first + length + sqrt_length(length) + norm_length - 3
-}
-
-#[inline(always)]
 fn normalized_kernel(kernel: Kernel) -> Kernel {
     match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other if other.is_batch() => other.to_non_batch(),
         other => other,
     }
@@ -362,7 +370,11 @@ impl RollingLinRegState {
             self.reset();
             return None;
         }
+        self.update_clean(value)
+    }
 
+    #[inline(always)]
+    fn update_clean(&mut self, value: f64) -> Option<(f64, f64)> {
         if self.period == 1 {
             self.buffer[0] = value;
             self.count = 1;
@@ -373,7 +385,10 @@ impl RollingLinRegState {
         if !self.filled {
             let j = self.count as f64;
             self.buffer[self.head] = value;
-            self.head = (self.head + 1) % self.period;
+            self.head += 1;
+            if self.head == self.period {
+                self.head = 0;
+            }
             self.sum_y += value;
             self.sum_xy += j * value;
             self.count += 1;
@@ -390,7 +405,10 @@ impl RollingLinRegState {
         let new_sum_xy = self.n * value + self.sum_xy - new_sum_y;
         self.sum_y = new_sum_y;
         self.sum_xy = new_sum_xy;
-        self.head = (self.head + 1) % self.period;
+        self.head += 1;
+        if self.head == self.period {
+            self.head = 0;
+        }
         Some((self.forecast_next(), self.slope()))
     }
 
@@ -454,10 +472,17 @@ impl RollingMeanStdState {
             self.reset();
             return None;
         }
+        self.update_clean(value)
+    }
 
+    #[inline(always)]
+    fn update_clean(&mut self, value: f64) -> Option<(f64, f64)> {
         if !self.filled {
             self.buffer[self.head] = value;
-            self.head = (self.head + 1) % self.period;
+            self.head += 1;
+            if self.head == self.period {
+                self.head = 0;
+            }
             self.count += 1;
             self.sum += value;
             self.sum_sq += value * value;
@@ -468,7 +493,10 @@ impl RollingMeanStdState {
         } else {
             let old = self.buffer[self.head];
             self.buffer[self.head] = value;
-            self.head = (self.head + 1) % self.period;
+            self.head += 1;
+            if self.head == self.period {
+                self.head = 0;
+            }
             self.sum += value - old;
             self.sum_sq += value * value - old * old;
         }
@@ -559,12 +587,16 @@ impl LeavittConvolutionAccelerationStream {
             self.reset();
             return None;
         }
+        self.update_clean(value)
+    }
 
+    #[inline(always)]
+    pub fn update_clean(&mut self, value: f64) -> Option<(f64, f64)> {
         let src1 = if self.have_src1 { self.prev_src1 } else { 0.0 };
         let src2 = if self.have_src2 { self.prev_src2 } else { 0.0 };
         let is_accelerated = src2 - 2.0 * src1 + value > 0.0;
 
-        let projection = match self.source_projection.update(value) {
+        let projection = match self.source_projection.update_clean(value) {
             Some((forecast, _)) if forecast.is_finite() => forecast,
             Some(_) => {
                 self.projection_slope.reset();
@@ -581,7 +613,7 @@ impl LeavittConvolutionAccelerationStream {
             }
         };
 
-        let conv_slope = match self.projection_slope.update(projection) {
+        let conv_slope = match self.projection_slope.update_clean(projection) {
             Some((_, slope)) if slope.is_finite() => slope,
             Some(_) => {
                 self.norm.reset();
@@ -597,7 +629,7 @@ impl LeavittConvolutionAccelerationStream {
             }
         };
 
-        let scaled = match self.norm.update(conv_slope) {
+        let scaled = match self.norm.update_clean(conv_slope) {
             Some((mean, dev)) => {
                 let z = if dev != 0.0 {
                     (conv_slope - mean) / dev
@@ -703,10 +735,23 @@ fn leavitt_convolution_acceleration_compute_into(
     length: usize,
     norm_length: usize,
     use_norm_hyperbolic: bool,
+    first: usize,
     _kernel: Kernel,
     out_conv_acceleration: &mut [f64],
     out_signal: &mut [f64],
 ) {
+    if leavitt_convolution_acceleration_compute_clean(
+        data,
+        length,
+        norm_length,
+        use_norm_hyperbolic,
+        first,
+        out_conv_acceleration,
+        out_signal,
+    ) {
+        return;
+    }
+
     let mut stream =
         LeavittConvolutionAccelerationStream::try_new(LeavittConvolutionAccelerationParams {
             length: Some(length),
@@ -719,8 +764,61 @@ fn leavitt_convolution_acceleration_compute_into(
         if let Some((conv_acceleration, signal)) = stream.update_reset_on_nan(data[i]) {
             out_conv_acceleration[i] = conv_acceleration;
             out_signal[i] = signal;
+        } else {
+            out_conv_acceleration[i] = f64::NAN;
+            out_signal[i] = f64::NAN;
         }
     }
+}
+
+#[inline(always)]
+fn leavitt_convolution_acceleration_compute_clean(
+    data: &[f64],
+    length: usize,
+    norm_length: usize,
+    use_norm_hyperbolic: bool,
+    first: usize,
+    out_conv_acceleration: &mut [f64],
+    out_signal: &mut [f64],
+) -> bool {
+    for value in &mut out_conv_acceleration[..first] {
+        *value = f64::NAN;
+    }
+    for value in &mut out_signal[..first] {
+        *value = f64::NAN;
+    }
+
+    let mut stream =
+        LeavittConvolutionAccelerationStream::try_new(LeavittConvolutionAccelerationParams {
+            length: Some(length),
+            norm_length: Some(norm_length),
+            use_norm_hyperbolic: Some(use_norm_hyperbolic),
+        })
+        .expect("validated stream params");
+
+    for i in first..data.len() {
+        let value = data[i];
+        if !value.is_finite() {
+            return false;
+        }
+        if let Some((conv_acceleration, signal)) = stream.update_clean(value) {
+            out_conv_acceleration[i] = conv_acceleration;
+            out_signal[i] = signal;
+        } else {
+            out_conv_acceleration[i] = f64::NAN;
+            out_signal[i] = f64::NAN;
+        }
+    }
+    true
+}
+
+#[inline(always)]
+fn alloc_leavitt_output(len: usize) -> Vec<f64> {
+    let mut out = Vec::with_capacity(len);
+    unsafe {
+        out.set_len(len);
+    }
+    out
 }
 
 #[inline]
@@ -736,14 +834,14 @@ pub fn leavitt_convolution_acceleration_with_kernel(
 ) -> Result<LeavittConvolutionAccelerationOutput, LeavittConvolutionAccelerationError> {
     let (data, length, norm_length, use_norm_hyperbolic, first) =
         leavitt_convolution_acceleration_prepare(input)?;
-    let warmup = output_warmup(first, length, norm_length).min(data.len());
-    let mut conv_acceleration = alloc_with_nan_prefix(data.len(), warmup);
-    let mut signal = alloc_with_nan_prefix(data.len(), warmup);
+    let mut conv_acceleration = alloc_leavitt_output(data.len());
+    let mut signal = alloc_leavitt_output(data.len());
     leavitt_convolution_acceleration_compute_into(
         data,
         length,
         norm_length,
         use_norm_hyperbolic,
+        first,
         normalized_kernel(kernel),
         &mut conv_acceleration,
         &mut signal,
@@ -783,13 +881,12 @@ pub fn leavitt_convolution_acceleration_into_slice(
             got: out_conv_acceleration.len().max(out_signal.len()),
         });
     }
-    out_conv_acceleration.fill(f64::NAN);
-    out_signal.fill(f64::NAN);
     leavitt_convolution_acceleration_compute_into(
         data,
         length,
         norm_length,
         use_norm_hyperbolic,
+        _first,
         normalized_kernel(kernel),
         out_conv_acceleration,
         out_signal,
@@ -976,7 +1073,7 @@ pub fn leavitt_convolution_acceleration_batch_with_kernel(
     kernel: Kernel,
 ) -> Result<LeavittConvolutionAccelerationBatchOutput, LeavittConvolutionAccelerationError> {
     let chosen = match kernel {
-        Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::Auto => Kernel::ScalarBatch,
         other => other,
     };
     match chosen {
@@ -1028,22 +1125,8 @@ fn leavitt_convolution_acceleration_batch_impl(
         }
     }
 
-    let warmups: Vec<usize> = combos
-        .iter()
-        .map(|params| {
-            output_warmup(
-                first,
-                params.length.unwrap_or(DEFAULT_LENGTH),
-                params.norm_length.unwrap_or(DEFAULT_NORM_LENGTH),
-            )
-            .min(cols)
-        })
-        .collect();
-
     let mut conv_matrix = make_uninit_matrix(rows, cols);
-    init_matrix_prefixes(&mut conv_matrix, cols, &warmups);
     let mut signal_matrix = make_uninit_matrix(rows, cols);
-    init_matrix_prefixes(&mut signal_matrix, cols, &warmups);
 
     let mut conv_guard = ManuallyDrop::new(conv_matrix);
     let mut signal_guard = ManuallyDrop::new(signal_matrix);
@@ -1070,6 +1153,7 @@ fn leavitt_convolution_acceleration_batch_impl(
             params.length.unwrap_or(DEFAULT_LENGTH),
             params.norm_length.unwrap_or(DEFAULT_NORM_LENGTH),
             params.use_norm_hyperbolic.unwrap_or(true),
+            first,
             kernel,
             out_conv,
             out_signal,
@@ -1142,9 +1226,7 @@ fn leavitt_convolution_acceleration_batch_inner_into(
             got: out_conv_acceleration.len().max(out_signal.len()),
         });
     }
-
-    out_conv_acceleration.fill(f64::NAN);
-    out_signal.fill(f64::NAN);
+    let first = first_valid_source(data).unwrap_or(0);
 
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
@@ -1164,6 +1246,7 @@ fn leavitt_convolution_acceleration_batch_inner_into(
                     params.length.unwrap_or(DEFAULT_LENGTH),
                     params.norm_length.unwrap_or(DEFAULT_NORM_LENGTH),
                     params.use_norm_hyperbolic.unwrap_or(true),
+                    first,
                     kernel,
                     out_conv,
                     out_sig,
@@ -1179,6 +1262,7 @@ fn leavitt_convolution_acceleration_batch_inner_into(
                 params.length.unwrap_or(DEFAULT_LENGTH),
                 params.norm_length.unwrap_or(DEFAULT_NORM_LENGTH),
                 params.use_norm_hyperbolic.unwrap_or(true),
+                first,
                 kernel,
                 &mut out_conv_acceleration[start..end],
                 &mut out_signal[start..end],
@@ -1193,6 +1277,7 @@ fn leavitt_convolution_acceleration_batch_inner_into(
                 params.length.unwrap_or(DEFAULT_LENGTH),
                 params.norm_length.unwrap_or(DEFAULT_NORM_LENGTH),
                 params.use_norm_hyperbolic.unwrap_or(true),
+                first,
                 kernel,
                 &mut out_conv_acceleration[start..end],
                 &mut out_signal[start..end],

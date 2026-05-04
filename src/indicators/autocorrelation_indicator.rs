@@ -58,6 +58,12 @@ pub struct AutocorrelationIndicatorOutput {
     pub cols: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutocorrelationIndicatorOutputField {
+    Filtered,
+    Correlation { lag: usize },
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -652,6 +658,52 @@ fn compute_segment_correlations(
 }
 
 #[inline(always)]
+fn compute_segment_correlation_lag(
+    filtered: &[f64],
+    length: usize,
+    lag: usize,
+    offset: usize,
+    out: &mut [f64],
+) {
+    if lag == 0 || filtered.len() < length + lag {
+        return;
+    }
+    let mut prefix = vec![0.0; filtered.len() + 1];
+    let mut prefix_sq = vec![0.0; filtered.len() + 1];
+    for (i, &value) in filtered.iter().enumerate() {
+        prefix[i + 1] = prefix[i] + value;
+        prefix_sq[i + 1] = prefix_sq[i] + value * value;
+    }
+
+    let length_f = length as f64;
+    let t0 = lag + length - 1;
+    let mut cross = 0.0;
+    for j in 0..length {
+        cross += filtered[lag + j] * filtered[j];
+    }
+    for t in t0..filtered.len() {
+        let x_start = t + 1 - length;
+        let y_start = x_start - lag;
+        let sx = prefix[t + 1] - prefix[x_start];
+        let sxx = prefix_sq[t + 1] - prefix_sq[x_start];
+        let sy = prefix[y_start + length] - prefix[y_start];
+        let syy = prefix_sq[y_start + length] - prefix_sq[y_start];
+        let ca1 = length_f * sxx - sx * sx;
+        let ca2 = length_f * syy - sy * sy;
+        out[offset + t] = if ca1 > 0.0 && ca2 > 0.0 {
+            let ca3 = length_f * cross - sx * sy;
+            ca3 / (ca1 * ca2).sqrt()
+        } else {
+            0.0
+        };
+        if t + 1 < filtered.len() {
+            cross +=
+                filtered[t + 1] * filtered[t + 1 - lag] - filtered[x_start] * filtered[y_start];
+        }
+    }
+}
+
+#[inline(always)]
 fn compute_full(
     data: &[f64],
     length: usize,
@@ -776,6 +828,68 @@ pub fn autocorrelation_indicator_into_slice(
         filtered_out,
         correlations_out,
     );
+    Ok(())
+}
+
+pub fn autocorrelation_indicator_output_into_slice(
+    dst: &mut [f64],
+    input: &AutocorrelationIndicatorInput,
+    kernel: Kernel,
+    field: AutocorrelationIndicatorOutputField,
+) -> Result<(), AutocorrelationIndicatorError> {
+    let data = input.as_ref();
+    let length = input.get_length();
+    let max_lag = input.get_max_lag();
+    let use_test_signal = input.get_use_test_signal();
+    validate_common(data, length, max_lag, use_test_signal)?;
+    if dst.len() != data.len() {
+        return Err(
+            AutocorrelationIndicatorError::FilteredOutputLengthMismatch {
+                expected: data.len(),
+                got: dst.len(),
+            },
+        );
+    }
+    let _chosen = match kernel {
+        Kernel::Auto => detect_best_kernel(),
+        other => other,
+    };
+
+    match field {
+        AutocorrelationIndicatorOutputField::Filtered => {
+            filter_series(data, length, use_test_signal, dst);
+        }
+        AutocorrelationIndicatorOutputField::Correlation { lag } => {
+            if lag == 0 || lag > max_lag {
+                return Err(AutocorrelationIndicatorError::InvalidMaxLag { max_lag: lag });
+            }
+            let mut filtered = alloc_with_nan_prefix(data.len(), 0);
+            filter_series(data, length, use_test_signal, &mut filtered);
+            dst.fill(f64::NAN);
+
+            let mut seg_start = 0usize;
+            while seg_start < filtered.len() {
+                while seg_start < filtered.len() && !filtered[seg_start].is_finite() {
+                    seg_start += 1;
+                }
+                if seg_start >= filtered.len() {
+                    break;
+                }
+                let mut seg_end = seg_start + 1;
+                while seg_end < filtered.len() && filtered[seg_end].is_finite() {
+                    seg_end += 1;
+                }
+                compute_segment_correlation_lag(
+                    &filtered[seg_start..seg_end],
+                    length,
+                    lag,
+                    seg_start,
+                    dst,
+                );
+                seg_start = seg_end;
+            }
+        }
+    }
     Ok(())
 }
 

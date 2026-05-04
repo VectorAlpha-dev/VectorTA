@@ -49,6 +49,13 @@ pub struct DailyFactorOutput {
     pub signal: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DailyFactorOutputField {
+    Value,
+    Ema,
+    Signal,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -453,6 +460,71 @@ pub fn daily_factor_into_slice(
         params.threshold_level,
         out_signal,
     )
+}
+
+#[inline]
+pub fn daily_factor_output_into_slice(
+    dst: &mut [f64],
+    input: &DailyFactorInput,
+    kernel: Kernel,
+    field: DailyFactorOutputField,
+) -> Result<(), DailyFactorError> {
+    let (open, high, low, close, params, first, _kernel) = validate_input(input, kernel)?;
+    if dst.len() != close.len() {
+        return Err(DailyFactorError::OutputLengthMismatch {
+            expected: close.len(),
+            got: dst.len(),
+        });
+    }
+    dst.fill(f64::NAN);
+
+    let alpha = ema_alpha();
+    let mut prev_open = f64::NAN;
+    let mut prev_high = f64::NAN;
+    let mut prev_low = f64::NAN;
+    let mut prev_close = f64::NAN;
+    let mut prev_ema = f64::NAN;
+    let mut has_prev = false;
+
+    for i in first..close.len() {
+        let o = open[i];
+        let h = high[i];
+        let l = low[i];
+        let c = close[i];
+        if !(o.is_finite() && h.is_finite() && l.is_finite() && c.is_finite()) {
+            continue;
+        }
+
+        let ema = if prev_ema.is_finite() {
+            prev_ema + alpha * (c - prev_ema)
+        } else {
+            c
+        };
+        let value = if has_prev {
+            let range = prev_high - prev_low;
+            if range.is_finite() && range != 0.0 {
+                (prev_open - prev_close).abs() / range
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        dst[i] = match field {
+            DailyFactorOutputField::Value => value,
+            DailyFactorOutputField::Ema => ema,
+            DailyFactorOutputField::Signal => compute_signal(value, ema, c, params.threshold_level),
+        };
+
+        prev_open = o;
+        prev_high = h;
+        prev_low = l;
+        prev_close = c;
+        prev_ema = ema;
+        has_prev = true;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]

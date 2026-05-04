@@ -18,8 +18,8 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+    init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -343,6 +343,30 @@ fn count_valid_ohlc(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> u
 }
 
 #[inline(always)]
+fn validity_summary(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+) -> (usize, usize, bool) {
+    let len = close.len();
+    let mut first = len;
+    let mut valid = 0usize;
+    let mut all_valid = true;
+    for i in 0..len {
+        if valid_ohlc_bar(open[i], high[i], low[i], close[i]) {
+            if first == len {
+                first = i;
+            }
+            valid += 1;
+        } else {
+            all_valid = false;
+        }
+    }
+    (first, valid, all_valid)
+}
+
+#[inline(always)]
 fn build_prefix_terms(
     open: &[f64],
     high: &[f64],
@@ -364,6 +388,21 @@ fn build_prefix_terms(
     }
 
     (prefix_valid, prefix_sum)
+}
+
+#[inline(always)]
+fn build_prefix_sum_terms_all_valid(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+) -> Vec<f64> {
+    let len = close.len();
+    let mut prefix_sum = vec![0.0f64; len + 1];
+    for i in 0..len {
+        prefix_sum[i + 1] = prefix_sum[i] + gk_term(open[i], high[i], low[i], close[i]);
+    }
+    prefix_sum
 }
 
 #[inline(always)]
@@ -400,9 +439,34 @@ fn gk_row_from_prefix(
 }
 
 #[inline(always)]
+fn gk_row_from_prefix_all_valid(
+    prefix_sum: &[f64],
+    lookback: usize,
+    first: usize,
+    out: &mut [f64],
+) {
+    let warmup = first.saturating_add(lookback.saturating_sub(1));
+    let inv_lb = 1.0 / lookback as f64;
+
+    for (t, slot) in out.iter_mut().enumerate() {
+        if t < warmup {
+            *slot = f64::NAN;
+            continue;
+        }
+
+        let window_start = t + 1 - lookback;
+        let mut variance = (prefix_sum[t + 1] - prefix_sum[window_start]) * inv_lb;
+        if variance < 0.0 {
+            variance = 0.0;
+        }
+        *slot = variance.sqrt();
+    }
+}
+
+#[inline(always)]
 fn garman_klass_prepare<'a>(
     input: &'a GarmanKlassVolatilityInput,
-    kernel: Kernel,
+    _kernel: Kernel,
 ) -> Result<
     (
         &'a [f64],
@@ -411,7 +475,7 @@ fn garman_klass_prepare<'a>(
         &'a [f64],
         usize,
         usize,
-        Kernel,
+        bool,
     ),
     GarmanKlassVolatilityError,
 > {
@@ -440,7 +504,7 @@ fn garman_klass_prepare<'a>(
         });
     }
 
-    let first = first_valid_ohlc(open, high, low, close);
+    let (first, valid, all_valid) = validity_summary(open, high, low, close);
     if first >= len {
         return Err(GarmanKlassVolatilityError::AllValuesNaN);
     }
@@ -453,7 +517,6 @@ fn garman_klass_prepare<'a>(
         });
     }
 
-    let valid = count_valid_ohlc(open, high, low, close);
     if valid < lookback {
         return Err(GarmanKlassVolatilityError::NotEnoughValidData {
             needed: lookback,
@@ -461,12 +524,7 @@ fn garman_klass_prepare<'a>(
         });
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other.to_non_batch(),
-    };
-
-    Ok((open, high, low, close, lookback, first, chosen))
+    Ok((open, high, low, close, lookback, first, all_valid))
 }
 
 #[inline]
@@ -474,12 +532,16 @@ pub fn garman_klass_volatility_with_kernel(
     input: &GarmanKlassVolatilityInput,
     kernel: Kernel,
 ) -> Result<GarmanKlassVolatilityOutput, GarmanKlassVolatilityError> {
-    let (open, high, low, close, lookback, first, _chosen) = garman_klass_prepare(input, kernel)?;
+    let (open, high, low, close, lookback, first, all_valid) = garman_klass_prepare(input, kernel)?;
     let len = close.len();
-    let warmup = first.saturating_add(lookback.saturating_sub(1));
-    let mut values = alloc_with_nan_prefix(len, warmup);
-    let (prefix_valid, prefix_sum) = build_prefix_terms(open, high, low, close);
-    gk_row_from_prefix(&prefix_valid, &prefix_sum, lookback, first, &mut values);
+    let mut values = alloc_uninit_f64(len);
+    if all_valid {
+        let prefix_sum = build_prefix_sum_terms_all_valid(open, high, low, close);
+        gk_row_from_prefix_all_valid(&prefix_sum, lookback, first, &mut values);
+    } else {
+        let (prefix_valid, prefix_sum) = build_prefix_terms(open, high, low, close);
+        gk_row_from_prefix(&prefix_valid, &prefix_sum, lookback, first, &mut values);
+    }
     Ok(GarmanKlassVolatilityOutput { values })
 }
 
@@ -489,7 +551,7 @@ pub fn garman_klass_volatility_into_slice(
     input: &GarmanKlassVolatilityInput,
     kernel: Kernel,
 ) -> Result<(), GarmanKlassVolatilityError> {
-    let (open, high, low, close, lookback, first, _chosen) = garman_klass_prepare(input, kernel)?;
+    let (open, high, low, close, lookback, first, all_valid) = garman_klass_prepare(input, kernel)?;
     let expected = close.len();
     if dst.len() != expected {
         return Err(GarmanKlassVolatilityError::OutputLengthMismatch {
@@ -497,8 +559,13 @@ pub fn garman_klass_volatility_into_slice(
             got: dst.len(),
         });
     }
-    let (prefix_valid, prefix_sum) = build_prefix_terms(open, high, low, close);
-    gk_row_from_prefix(&prefix_valid, &prefix_sum, lookback, first, dst);
+    if all_valid {
+        let prefix_sum = build_prefix_sum_terms_all_valid(open, high, low, close);
+        gk_row_from_prefix_all_valid(&prefix_sum, lookback, first, dst);
+    } else {
+        let (prefix_valid, prefix_sum) = build_prefix_terms(open, high, low, close);
+        gk_row_from_prefix(&prefix_valid, &prefix_sum, lookback, first, dst);
+    }
     Ok(())
 }
 

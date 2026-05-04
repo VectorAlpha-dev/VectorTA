@@ -59,7 +59,18 @@ impl<'a> AsRef<[f64]> for KamaInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             KamaData::Slice(slice) => slice,
-            KamaData::Candles { candles, source } => source_type(candles, source),
+            KamaData::Candles { candles, source } => match *source {
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -205,10 +216,7 @@ fn kama_prepare<'a>(
         });
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
+    let chosen = choose_kama_kernel(kernel);
 
     Ok((data, period, first, chosen))
 }
@@ -224,6 +232,24 @@ fn kama_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, 
             Kernel::Avx512 | Kernel::Avx512Batch => kama_avx512(data, period, first, out),
             _ => kama_scalar(data, period, first, out),
         }
+    }
+}
+
+#[inline(always)]
+fn choose_kama_kernel(kernel: Kernel) -> Kernel {
+    match kernel {
+        Kernel::Auto => {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            {
+                if std::arch::is_x86_feature_detected!("avx2")
+                    && std::arch::is_x86_feature_detected!("fma")
+                {
+                    return Kernel::Avx2;
+                }
+            }
+            Kernel::Scalar
+        }
+        other => other,
     }
 }
 

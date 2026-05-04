@@ -14,12 +14,11 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::detect_best_batch_kernel;
+use crate::utilities::helpers::{alloc_uninit_f64, detect_best_batch_kernel};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-use std::collections::VecDeque;
 use thiserror::Error;
 
 const DEFAULT_SOURCE: &str = "close";
@@ -195,13 +194,31 @@ fn extract_source<'a>(
     input: &'a MesaStochasticMultiLengthInput<'a>,
 ) -> Result<&'a [f64], MesaStochasticMultiLengthError> {
     let source = match &input.data {
-        MesaStochasticMultiLengthData::Candles { candles, source } => source_type(candles, source),
+        MesaStochasticMultiLengthData::Candles { candles, source } => {
+            mesa_stochastic_multi_length_source(candles, source)
+        }
         MesaStochasticMultiLengthData::Slice { source } => *source,
     };
     if source.is_empty() {
         return Err(MesaStochasticMultiLengthError::EmptyInputData);
     }
     Ok(source)
+}
+
+#[inline(always)]
+fn mesa_stochastic_multi_length_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "close" => &candles.close,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
+    }
 }
 
 #[inline(always)]
@@ -335,7 +352,9 @@ fn nz(value: f64) -> f64 {
 #[derive(Clone, Debug)]
 struct RollingSmaState {
     length: usize,
-    window: VecDeque<f64>,
+    window: Vec<f64>,
+    index: usize,
+    count: usize,
     finite_sum: f64,
     finite_count: usize,
 }
@@ -344,27 +363,41 @@ impl RollingSmaState {
     fn new(length: usize) -> Self {
         Self {
             length,
-            window: VecDeque::with_capacity(length + 1),
+            window: vec![0.0; length],
+            index: 0,
+            count: 0,
             finite_sum: 0.0,
             finite_count: 0,
         }
     }
 
     fn update(&mut self, value: f64) -> f64 {
-        self.window.push_back(value);
+        let old = if self.count == self.length {
+            Some(self.window[self.index])
+        } else {
+            None
+        };
+
+        self.window[self.index] = value;
+        if self.count != self.length {
+            self.count += 1;
+        }
         if value.is_finite() {
             self.finite_sum += value;
             self.finite_count += 1;
         }
-        if self.window.len() > self.length {
-            if let Some(old) = self.window.pop_front() {
-                if old.is_finite() {
-                    self.finite_sum -= old;
-                    self.finite_count -= 1;
-                }
+        if let Some(old) = old {
+            if old.is_finite() {
+                self.finite_sum -= old;
+                self.finite_count -= 1;
             }
         }
-        if self.window.len() == self.length && self.finite_count == self.length {
+        self.index += 1;
+        if self.index == self.length {
+            self.index = 0;
+        }
+
+        if self.count == self.length && self.finite_count == self.length {
             self.finite_sum / self.length as f64
         } else {
             f64::NAN
@@ -375,7 +408,9 @@ impl RollingSmaState {
 #[derive(Clone, Debug)]
 struct MesaLineState {
     length: usize,
-    filt_window: VecDeque<f64>,
+    filt_window: Vec<f64>,
+    index: usize,
+    count: usize,
     prev_1: f64,
     prev_2: f64,
 }
@@ -384,7 +419,9 @@ impl MesaLineState {
     fn new(length: usize) -> Self {
         Self {
             length,
-            filt_window: VecDeque::with_capacity(length + 1),
+            filt_window: vec![0.0; length],
+            index: 0,
+            count: 0,
             prev_1: f64::NAN,
             prev_2: f64::NAN,
         }
@@ -392,15 +429,19 @@ impl MesaLineState {
 
     fn update(&mut self, filt: f64, c1: f64, c2: f64, c3: f64) -> f64 {
         let filt_nz = nz(filt);
-        self.filt_window.push_back(filt_nz);
-        if self.filt_window.len() > self.length {
-            self.filt_window.pop_front();
+        self.filt_window[self.index] = filt_nz;
+        self.index += 1;
+        if self.index == self.length {
+            self.index = 0;
+        }
+        if self.count < self.length {
+            self.count += 1;
         }
 
         let out = if filt.is_finite() {
             let mut highest = filt;
             let mut lowest = filt;
-            for &value in &self.filt_window {
+            for &value in &self.filt_window[..self.count] {
                 if value > highest {
                     highest = value;
                 }
@@ -408,7 +449,7 @@ impl MesaLineState {
                     lowest = value;
                 }
             }
-            if self.filt_window.len() < self.length {
+            if self.count < self.length {
                 if 0.0 > highest {
                     highest = 0.0;
                 }
@@ -602,15 +643,6 @@ fn compute_mesa_stochastic_multi_length_into(
         return Err(MesaStochasticMultiLengthError::OutputLengthMismatch { expected: n, got });
     }
 
-    mesa_1_out.fill(f64::NAN);
-    mesa_2_out.fill(f64::NAN);
-    mesa_3_out.fill(f64::NAN);
-    mesa_4_out.fill(f64::NAN);
-    trigger_1_out.fill(f64::NAN);
-    trigger_2_out.fill(f64::NAN);
-    trigger_3_out.fill(f64::NAN);
-    trigger_4_out.fill(f64::NAN);
-
     let mut stream = MesaStochasticMultiLengthStream::try_new(params.into_params())?;
     for (i, value) in source.iter().copied().enumerate() {
         let (mesa_1, mesa_2, mesa_3, mesa_4, trigger_1, trigger_2, trigger_3, trigger_4) =
@@ -643,14 +675,14 @@ pub fn mesa_stochastic_multi_length_with_kernel(
     let params = ValidatedParams::from_params(&input.params)?;
     let n = source.len();
     let mut out = MesaStochasticMultiLengthOutput {
-        mesa_1: vec![f64::NAN; n],
-        mesa_2: vec![f64::NAN; n],
-        mesa_3: vec![f64::NAN; n],
-        mesa_4: vec![f64::NAN; n],
-        trigger_1: vec![f64::NAN; n],
-        trigger_2: vec![f64::NAN; n],
-        trigger_3: vec![f64::NAN; n],
-        trigger_4: vec![f64::NAN; n],
+        mesa_1: alloc_uninit_f64(n),
+        mesa_2: alloc_uninit_f64(n),
+        mesa_3: alloc_uninit_f64(n),
+        mesa_4: alloc_uninit_f64(n),
+        trigger_1: alloc_uninit_f64(n),
+        trigger_2: alloc_uninit_f64(n),
+        trigger_3: alloc_uninit_f64(n),
+        trigger_4: alloc_uninit_f64(n),
     };
     compute_mesa_stochastic_multi_length_into(
         source,
@@ -827,7 +859,8 @@ impl MesaStochasticMultiLengthBatchBuilder {
         self,
         candles: &Candles,
     ) -> Result<MesaStochasticMultiLengthBatchOutput, MesaStochasticMultiLengthError> {
-        let source = source_type(candles, self.source.unwrap_or(DEFAULT_SOURCE));
+        let source =
+            mesa_stochastic_multi_length_source(candles, self.source.unwrap_or(DEFAULT_SOURCE));
         mesa_stochastic_multi_length_batch_with_kernel(
             source,
             &MesaStochasticMultiLengthBatchRange {

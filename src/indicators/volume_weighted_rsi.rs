@@ -15,8 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -340,7 +339,11 @@ fn input_slices<'a>(
             candles,
             close_source,
         } => Ok((
-            source_type(candles, close_source),
+            if close_source.eq_ignore_ascii_case("close") {
+                candles.close.as_slice()
+            } else {
+                source_type(candles, close_source)
+            },
             candles.volume.as_slice(),
         )),
         VolumeWeightedRsiData::Slices { close, volume } => Ok((*close, *volume)),
@@ -389,76 +392,65 @@ fn compute_row(close: &[f64], volume: &[f64], period: usize, out: &mut [f64]) {
 
     let len = close.len();
     let mut i = 0usize;
+    let mut prev_close = f64::NAN;
+    let mut has_prev = false;
+    let mut seeded = 0usize;
+    let mut sum_up = 0.0f64;
+    let mut sum_down = 0.0f64;
+    let mut avg_up = 0.0f64;
+    let mut avg_down = 0.0f64;
+
     while i < len {
-        while i < len && !is_valid_pair(close[i], volume[i]) {
+        let c = close[i];
+        let vol = volume[i];
+        if !is_valid_pair(c, vol) {
+            prev_close = f64::NAN;
+            has_prev = false;
+            seeded = 0;
+            sum_up = 0.0;
+            sum_down = 0.0;
+            avg_up = 0.0;
+            avg_down = 0.0;
             out[i] = f64::NAN;
             i += 1;
-        }
-        if i >= len {
-            break;
-        }
-
-        let seg_start = i;
-        i += 1;
-        while i < len && is_valid_pair(close[i], volume[i]) {
-            i += 1;
-        }
-        let seg_end = i;
-        let seg_len = seg_end - seg_start;
-
-        let warm_end = seg_start + period.saturating_sub(1);
-        let prefix_end = warm_end.min(seg_end);
-        for v in &mut out[seg_start..prefix_end] {
-            *v = f64::NAN;
-        }
-        if seg_len < period {
             continue;
         }
 
-        let mut sum_up = 0.0f64;
-        let mut sum_down = 0.0f64;
-        let mut prev_close = close[seg_start];
-        let seed_end = seg_start + period;
-        let mut j = seg_start;
-        while j < seed_end {
-            let c = close[j];
-            let vol = volume[j];
-            let (up, down) = if j == seg_start {
-                (0.0, 0.0)
-            } else if c > prev_close {
+        let (up, down) = if has_prev {
+            if c > prev_close {
                 (vol, 0.0)
             } else if c < prev_close {
                 (0.0, vol)
             } else {
                 (0.0, 0.0)
-            };
+            }
+        } else {
+            (0.0, 0.0)
+        };
+
+        prev_close = c;
+        has_prev = true;
+
+        if seeded < period {
             sum_up += up;
             sum_down += down;
-            prev_close = c;
-            j += 1;
+            seeded += 1;
+            if seeded < period {
+                out[i] = f64::NAN;
+                i += 1;
+                continue;
+            }
+            avg_up = sum_up * inv_period;
+            avg_down = sum_down * inv_period;
+            out[i] = rsi_from_components(avg_up, avg_down);
+            i += 1;
+            continue;
         }
 
-        let mut avg_up = sum_up * inv_period;
-        let mut avg_down = sum_down * inv_period;
-        out[seed_end - 1] = rsi_from_components(avg_up, avg_down);
-
-        let mut k = seed_end;
-        while k < seg_end {
-            let c = close[k];
-            let vol = volume[k];
-            let (up, down) = if c > prev_close {
-                (vol, 0.0)
-            } else if c < prev_close {
-                (0.0, vol)
-            } else {
-                (0.0, 0.0)
-            };
-            avg_up = avg_up.mul_add(beta, inv_period * up);
-            avg_down = avg_down.mul_add(beta, inv_period * down);
-            out[k] = rsi_from_components(avg_up, avg_down);
-            prev_close = c;
-            k += 1;
-        }
+        avg_up = avg_up.mul_add(beta, inv_period * up);
+        avg_down = avg_down.mul_add(beta, inv_period * down);
+        out[i] = rsi_from_components(avg_up, avg_down);
+        i += 1;
     }
 }
 
@@ -477,13 +469,9 @@ pub fn volume_weighted_rsi_with_kernel(
     let period = input.get_period();
     validate_common(close, volume, period)?;
 
-    let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
+    let _ = kernel;
 
-    let mut out = alloc_with_nan_prefix(close.len(), 0);
-    out.fill(f64::NAN);
+    let mut out = alloc_uninit_f64(close.len());
     compute_row(close, volume, period, &mut out);
     Ok(VolumeWeightedRsiOutput { values: out })
 }
@@ -504,12 +492,8 @@ pub fn volume_weighted_rsi_into_slice(
         });
     }
 
-    let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
+    let _ = kernel;
 
-    dst.fill(f64::NAN);
     compute_row(close, volume, period, dst);
     Ok(())
 }
@@ -814,13 +798,12 @@ fn volume_weighted_rsi_batch_inner_into(
         .unwrap_or(0);
     validate_common(close, volume, max_period)?;
 
-    let _chosen = match kernel {
+    let _ = match kernel {
         Kernel::Auto => detect_best_batch_kernel(),
         other => other,
     };
 
     let worker = |row: usize, dst: &mut [f64]| {
-        dst.fill(f64::NAN);
         let period = combos[row].period.unwrap_or(14);
         compute_row(close, volume, period, dst);
     };

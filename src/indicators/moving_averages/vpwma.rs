@@ -40,7 +40,10 @@ impl<'a> AsRef<[f64]> for VpwmaInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             VpwmaData::Slice(slice) => slice,
-            VpwmaData::Candles { candles, source } => source_type(candles, source),
+            VpwmaData::Candles { candles, source } => match *source {
+                "close" => candles.close.as_slice(),
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -210,9 +213,23 @@ pub fn vpwma(input: &VpwmaInput) -> Result<VpwmaOutput, VpwmaError> {
     vpwma_with_kernel(input, Kernel::Auto)
 }
 
+#[inline(always)]
+fn vpwma_auto_kernel() -> Kernel {
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+            return Kernel::Avx2;
+        }
+    }
+    Kernel::Scalar
+}
+
 pub fn vpwma_with_kernel(input: &VpwmaInput, kernel: Kernel) -> Result<VpwmaOutput, VpwmaError> {
     let data: &[f64] = match &input.data {
-        VpwmaData::Candles { candles, source } => source_type(candles, source),
+        VpwmaData::Candles { candles, source } => match *source {
+            "close" => candles.close.as_slice(),
+            _ => source_type(candles, source),
+        },
         VpwmaData::Slice(sl) => sl,
     };
 
@@ -260,7 +277,7 @@ pub fn vpwma_with_kernel(input: &VpwmaInput, kernel: Kernel) -> Result<VpwmaOutp
     let mut out = alloc_with_nan_prefix(len, warm);
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => vpwma_auto_kernel(),
         other => other,
     };
 
@@ -939,7 +956,10 @@ impl VpwmaBatchBuilder {
         VpwmaBatchBuilder::new().kernel(k).apply_slice(data)
     }
     pub fn apply_candles(self, c: &Candles, src: &str) -> Result<VpwmaBatchOutput, VpwmaError> {
-        let slice = source_type(c, src);
+        let slice = match src {
+            "close" => c.close.as_slice(),
+            _ => source_type(c, src),
+        };
         self.apply_slice(slice)
     }
     pub fn with_default_candles(c: &Candles) -> Result<VpwmaBatchOutput, VpwmaError> {
@@ -1416,7 +1436,7 @@ pub fn vpwma_into_slice(
     let inv_norm = 1.0 / norm;
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => vpwma_auto_kernel(),
         k => k,
     };
 

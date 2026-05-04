@@ -16,9 +16,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
-};
+use crate::utilities::helpers::{alloc_uninit_f64, detect_best_batch_kernel, detect_best_kernel};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
@@ -559,6 +557,7 @@ impl RollingStd {
 #[derive(Debug, Clone)]
 pub struct KasePeakOscillatorWithDivergencesStream {
     params: ResolvedParams,
+    roots: Vec<f64>,
     prev_close: Option<f64>,
     cc_dev: RollingStd,
     avg: RollingSma,
@@ -566,8 +565,6 @@ pub struct KasePeakOscillatorWithDivergencesStream {
     xs_sma: RollingSma,
     xp_abs_sma: RollingSma,
     xp_abs_std: RollingStd,
-    highs: Vec<f64>,
-    lows: Vec<f64>,
     osc_history: Vec<f64>,
     high_history: Vec<f64>,
     low_history: Vec<f64>,
@@ -582,8 +579,19 @@ impl KasePeakOscillatorWithDivergencesStream {
         params: KasePeakOscillatorWithDivergencesParams,
     ) -> Result<Self, KasePeakOscillatorWithDivergencesError> {
         let params = resolve_params(&params, 0)?;
-        Ok(Self {
+        Ok(Self::from_resolved(params))
+    }
+
+    fn from_resolved(params: ResolvedParams) -> Self {
+        let mut roots = vec![1.0; params.long_cycle.max(1)];
+        let mut k = params.short_cycle;
+        while k < params.long_cycle {
+            roots[k] = (k as f64).sqrt();
+            k += 1;
+        }
+        Self {
             params,
+            roots,
             prev_close: None,
             cc_dev: RollingStd::new(9),
             avg: RollingSma::new(30),
@@ -591,8 +599,6 @@ impl KasePeakOscillatorWithDivergencesStream {
             xs_sma: RollingSma::new(3),
             xp_abs_sma: RollingSma::new(50),
             xp_abs_std: RollingStd::new(50),
-            highs: Vec::with_capacity(params.long_cycle + 1),
-            lows: Vec::with_capacity(params.long_cycle + 1),
             osc_history: Vec::with_capacity(params.long_cycle + params.lb_l + params.lb_r + 64),
             high_history: Vec::with_capacity(params.long_cycle + params.lb_l + params.lb_r + 64),
             low_history: Vec::with_capacity(params.long_cycle + params.lb_l + params.lb_r + 64),
@@ -600,7 +606,7 @@ impl KasePeakOscillatorWithDivergencesStream {
             prev_osc_2: None,
             last_pivot_low: None,
             last_pivot_high: None,
-        })
+        }
     }
 
     #[inline]
@@ -612,8 +618,6 @@ impl KasePeakOscillatorWithDivergencesStream {
         self.xs_sma.reset();
         self.xp_abs_sma.reset();
         self.xp_abs_std.reset();
-        self.highs.clear();
-        self.lows.clear();
         self.osc_history.clear();
         self.high_history.clear();
         self.low_history.clear();
@@ -640,8 +644,6 @@ impl KasePeakOscillatorWithDivergencesStream {
             return None;
         }
 
-        self.highs.push(high);
-        self.lows.push(low);
         self.high_history.push(high);
         self.low_history.push(low);
 
@@ -671,18 +673,18 @@ impl KasePeakOscillatorWithDivergencesStream {
             }
         };
 
-        if self.highs.len() < self.params.long_cycle {
+        if self.high_history.len() < self.params.long_cycle {
             self.osc_history.push(f64::NAN);
             return None;
         }
 
-        let current_hist_len = self.highs.len();
+        let current_hist_len = self.high_history.len();
         let mut max1 = 0.0;
         let mut maxs = 0.0;
         for k in self.params.short_cycle..self.params.long_cycle {
-            let past_low = self.lows[current_hist_len - 1 - k];
-            let past_high = self.highs[current_hist_len - 1 - k];
-            let root = (k as f64).sqrt();
+            let past_low = self.low_history[current_hist_len - 1 - k];
+            let past_high = self.high_history[current_hist_len - 1 - k];
+            let root = self.roots[k];
             let v1 = (high / past_low).ln() / root;
             let vs = (past_high / low).ln() / root;
             if v1.is_finite() && v1 > max1 {
@@ -1066,7 +1068,7 @@ fn prepare_input<'a>(
         return Err(KasePeakOscillatorWithDivergencesError::NotEnoughValidData { needed, valid });
     }
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other.to_non_batch(),
     };
     Ok((high, low, close, first, params, chosen))
@@ -1096,7 +1098,44 @@ fn row_from_slices(
     go_long_out: &mut [f64],
     go_short_out: &mut [f64],
 ) -> Result<(), KasePeakOscillatorWithDivergencesError> {
-    let mut stream = KasePeakOscillatorWithDivergencesStream::try_new(params.clone())?;
+    let params = resolve_params(params, 0)?;
+    row_from_slices_resolved(
+        high,
+        low,
+        close,
+        params,
+        oscillator_out,
+        histogram_out,
+        max_peak_out,
+        min_peak_out,
+        market_extreme_out,
+        regular_bullish_out,
+        hidden_bullish_out,
+        regular_bearish_out,
+        hidden_bearish_out,
+        go_long_out,
+        go_short_out,
+    )
+}
+
+fn row_from_slices_resolved(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    params: ResolvedParams,
+    oscillator_out: &mut [f64],
+    histogram_out: &mut [f64],
+    max_peak_out: &mut [f64],
+    min_peak_out: &mut [f64],
+    market_extreme_out: &mut [f64],
+    regular_bullish_out: &mut [f64],
+    hidden_bullish_out: &mut [f64],
+    regular_bearish_out: &mut [f64],
+    hidden_bearish_out: &mut [f64],
+    go_long_out: &mut [f64],
+    go_short_out: &mut [f64],
+) -> Result<(), KasePeakOscillatorWithDivergencesError> {
+    let mut stream = KasePeakOscillatorWithDivergencesStream::from_resolved(params);
     let mut i = 0usize;
     while i < high.len() {
         if let Some((
@@ -1146,36 +1185,26 @@ pub fn kase_peak_oscillator_with_divergences_with_kernel(
     input: &KasePeakOscillatorWithDivergencesInput,
     kernel: Kernel,
 ) -> Result<KasePeakOscillatorWithDivergencesOutput, KasePeakOscillatorWithDivergencesError> {
-    let (high, low, close, first, params, _chosen) = prepare_input(input, kernel)?;
+    let (high, low, close, _first, params, _chosen) = prepare_input(input, kernel)?;
     let len = high.len();
-    let osc_warm = (first + main_warmup(params.short_cycle, params.long_cycle)).min(len);
-    let peak_warm = (first + threshold_warmup(params.short_cycle, params.long_cycle)).min(len);
-    let div_warm = (first
-        + divergence_warmup(
-            params.short_cycle,
-            params.long_cycle,
-            params.lb_l,
-            params.lb_r,
-        ))
-    .min(len);
 
-    let mut oscillator = alloc_with_nan_prefix(len, osc_warm);
-    let mut histogram = alloc_with_nan_prefix(len, osc_warm);
-    let mut max_peak_value = alloc_with_nan_prefix(len, peak_warm);
-    let mut min_peak_value = alloc_with_nan_prefix(len, peak_warm);
-    let mut market_extreme = alloc_with_nan_prefix(len, peak_warm);
-    let mut regular_bullish = alloc_with_nan_prefix(len, div_warm);
-    let mut hidden_bullish = alloc_with_nan_prefix(len, div_warm);
-    let mut regular_bearish = alloc_with_nan_prefix(len, div_warm);
-    let mut hidden_bearish = alloc_with_nan_prefix(len, div_warm);
-    let mut go_long = alloc_with_nan_prefix(len, peak_warm);
-    let mut go_short = alloc_with_nan_prefix(len, peak_warm);
+    let mut oscillator = alloc_uninit_f64(len);
+    let mut histogram = alloc_uninit_f64(len);
+    let mut max_peak_value = alloc_uninit_f64(len);
+    let mut min_peak_value = alloc_uninit_f64(len);
+    let mut market_extreme = alloc_uninit_f64(len);
+    let mut regular_bullish = alloc_uninit_f64(len);
+    let mut hidden_bullish = alloc_uninit_f64(len);
+    let mut regular_bearish = alloc_uninit_f64(len);
+    let mut hidden_bearish = alloc_uninit_f64(len);
+    let mut go_long = alloc_uninit_f64(len);
+    let mut go_short = alloc_uninit_f64(len);
 
-    row_from_slices(
+    row_from_slices_resolved(
         high,
         low,
         close,
-        &input.params,
+        params,
         &mut oscillator,
         &mut histogram,
         &mut max_peak_value,
@@ -1219,7 +1248,7 @@ pub fn kase_peak_oscillator_with_divergences_into_slices(
     go_long_out: &mut [f64],
     go_short_out: &mut [f64],
 ) -> Result<(), KasePeakOscillatorWithDivergencesError> {
-    let (high, low, close, _first, _params, _chosen) = prepare_input(input, kernel)?;
+    let (high, low, close, _first, params, _chosen) = prepare_input(input, kernel)?;
     let len = high.len();
     if oscillator_out.len() != len
         || histogram_out.len() != len
@@ -1251,23 +1280,11 @@ pub fn kase_peak_oscillator_with_divergences_into_slices(
         );
     }
 
-    oscillator_out.fill(f64::NAN);
-    histogram_out.fill(f64::NAN);
-    max_peak_out.fill(f64::NAN);
-    min_peak_out.fill(f64::NAN);
-    market_extreme_out.fill(f64::NAN);
-    regular_bullish_out.fill(f64::NAN);
-    hidden_bullish_out.fill(f64::NAN);
-    regular_bearish_out.fill(f64::NAN);
-    hidden_bearish_out.fill(f64::NAN);
-    go_long_out.fill(f64::NAN);
-    go_short_out.fill(f64::NAN);
-
-    row_from_slices(
+    row_from_slices_resolved(
         high,
         low,
         close,
-        &input.params,
+        params,
         oscillator_out,
         histogram_out,
         max_peak_out,

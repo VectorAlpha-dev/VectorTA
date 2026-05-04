@@ -227,7 +227,6 @@ struct PreparedInput<'a> {
     period: usize,
 }
 
-#[inline(always)]
 fn normalize_single_kernel(_kernel: Kernel) -> Kernel {
     Kernel::Scalar
 }
@@ -349,9 +348,11 @@ fn compute_scalar_into(prepared: PreparedInput<'_>, out: &mut [f64]) {
         ss1 = value;
         valid_count += 1;
 
-        if valid_count > warmup_bars {
-            out[i] = value;
-        }
+        out[i] = if valid_count > warmup_bars {
+            value
+        } else {
+            f64::NAN
+        };
     }
 }
 
@@ -368,10 +369,7 @@ pub fn ehlers_fm_demodulator_with_kernel(
     kernel: Kernel,
 ) -> Result<EhlersFmDemodulatorOutput, EhlersFmDemodulatorError> {
     let (prepared, _) = prepare_input(input, kernel)?;
-    let mut out = alloc_with_nan_prefix(
-        prepared.len,
-        warmup_prefix_len(prepared.first_valid, prepared.period),
-    );
+    let mut out = alloc_with_nan_prefix(prepared.len, prepared.first_valid);
     compute_scalar_into(prepared, &mut out);
     Ok(EhlersFmDemodulatorOutput { values: out })
 }
@@ -390,7 +388,9 @@ pub fn ehlers_fm_demodulator_into_slice(
         });
     }
 
-    dst.fill(f64::NAN);
+    for value in &mut dst[..prepared.first_valid] {
+        *value = f64::NAN;
+    }
     compute_scalar_into(prepared, dst);
     Ok(())
 }

@@ -22,7 +22,7 @@ impl<'a> AsRef<[f64]> for FramaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
-            FramaData::Candles { candles } => candles.select_candle_field("close").unwrap(),
+            FramaData::Candles { candles } => &candles.close,
             FramaData::Slices { close, .. } => close,
         }
     }
@@ -121,11 +121,7 @@ impl<'a> FramaInput<'a> {
     #[inline]
     pub fn slices(&self) -> (&'a [f64], &'a [f64], &'a [f64]) {
         match &self.data {
-            FramaData::Candles { candles } => (
-                candles.select_candle_field("high").unwrap(),
-                candles.select_candle_field("low").unwrap(),
-                candles.select_candle_field("close").unwrap(),
-            ),
+            FramaData::Candles { candles } => (&candles.high, &candles.low, &candles.close),
             FramaData::Slices { high, low, close } => (*high, *low, *close),
         }
     }
@@ -311,10 +307,7 @@ fn frama_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => match detect_best_kernel() {
-            Kernel::Avx512 => Kernel::Avx2,
-            k => k,
-        },
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -348,7 +341,21 @@ fn frama_compute_into(
         Kernel::Scalar | Kernel::ScalarBatch => {
             if win <= 32 {
                 unsafe {
-                    frama_small_scan(high, low, close, win, sc, fc, first, len, out)?;
+                    match win {
+                        10 => {
+                            frama_small_scan_const::<10>(high, low, close, sc, fc, first, len, out)
+                        }
+                        14 => {
+                            frama_small_scan_const::<14>(high, low, close, sc, fc, first, len, out)
+                        }
+                        20 => {
+                            frama_small_scan_const::<20>(high, low, close, sc, fc, first, len, out)
+                        }
+                        32 => {
+                            frama_small_scan_const::<32>(high, low, close, sc, fc, first, len, out)
+                        }
+                        _ => frama_small_scan(high, low, close, win, sc, fc, first, len, out)?,
+                    }
                 }
             } else {
                 frama_scalar_deque(high, low, close, win, sc, fc, first, len, out)?;
@@ -719,6 +726,71 @@ unsafe fn frama_small_scan(
     Ok(())
 }
 
+#[inline(always)]
+unsafe fn frama_small_scan_const<const WIN: usize>(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    sc: usize,
+    fc: usize,
+    first: usize,
+    len: usize,
+    out: &mut [f64],
+) {
+    let half = WIN >> 1;
+    let win_f64 = WIN as f64;
+    let half_f64 = half as f64;
+    let w_ln = (2.0 / (sc as f64 + 1.0)).ln();
+    let sc_floor = 2.0 / (sc as f64 + 1.0);
+    let sc_diff = (sc - fc) as f64;
+    let sc_denom = sc as f64 - 1.0;
+    let fc_f64 = fc as f64;
+    let mut d_prev = 1.0_f64;
+
+    for i in (first + WIN)..len {
+        let seg_start = i - WIN;
+        let mid = seg_start + half;
+
+        let mut max2 = f64::MIN;
+        let mut min2 = f64::MAX;
+        for off in 0..half {
+            let j = seg_start + off;
+            max2 = f64::max(max2, *high.get_unchecked(j));
+            min2 = f64::min(min2, *low.get_unchecked(j));
+        }
+
+        let mut max1 = f64::MIN;
+        let mut min1 = f64::MAX;
+        for off in 0..half {
+            let j = mid + off;
+            max1 = f64::max(max1, *high.get_unchecked(j));
+            min1 = f64::min(min1, *low.get_unchecked(j));
+        }
+
+        let max3 = f64::max(max1, max2);
+        let min3 = f64::min(min1, min2);
+
+        let n1 = (max1 - min1) / half_f64;
+        let n2 = (max2 - min2) / half_f64;
+        let n3 = (max3 - min3) / win_f64;
+
+        let d_cur = if n1 > 0.0 && n2 > 0.0 && n3 > 0.0 {
+            ((n1 + n2).ln() - n3.ln()) / std::f64::consts::LN_2
+        } else {
+            d_prev
+        };
+        d_prev = d_cur;
+
+        let alpha0 = (w_ln * (d_cur - 1.0)).exp().clamp(0.1, 1.0);
+        let old_n = (2.0 - alpha0) / alpha0;
+        let new_n = sc_diff * ((old_n - 1.0) / sc_denom) + fc_f64;
+        let alpha = (2.0 / (new_n + 1.0)).clamp(sc_floor, 1.0);
+
+        *out.get_unchecked_mut(i) =
+            (*close.get_unchecked(i)).mul_add(alpha, (1.0 - alpha) * *out.get_unchecked(i - 1));
+    }
+}
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn hmax_pd256(v: __m256d) -> f64 {
@@ -762,12 +834,6 @@ unsafe fn frama_avx2_small<const WIN: usize>(
     let mut d_prev = 1.0;
 
     for i in (first + WIN)..len {
-        if i + 1 < len {
-            _mm_prefetch(high.as_ptr().add(i + 1 - WIN) as *const i8, _MM_HINT_T0);
-            _mm_prefetch(low.as_ptr().add(i + 1 - WIN) as *const i8, _MM_HINT_T0);
-            _mm_prefetch(close.as_ptr().add(i + 1) as *const i8, _MM_HINT_T0);
-        }
-
         if unlikely(
             (*high.get_unchecked(i)).is_nan()
                 || (*low.get_unchecked(i)).is_nan()
@@ -876,12 +942,6 @@ unsafe fn frama_avx512_small<const WIN: usize>(
     let mut d_prev = 1.0;
 
     for i in (first + WIN)..len {
-        if i + 1 < len {
-            _mm_prefetch(high.as_ptr().add(i + 1 - WIN) as *const i8, _MM_HINT_T0);
-            _mm_prefetch(low.as_ptr().add(i + 1 - WIN) as *const i8, _MM_HINT_T0);
-            _mm_prefetch(close.as_ptr().add(i + 1) as *const i8, _MM_HINT_T0);
-        }
-
         if unlikely(
             (*high.get_unchecked(i)).is_nan()
                 || (*low.get_unchecked(i)).is_nan()
@@ -1711,7 +1771,13 @@ pub unsafe fn frama_row_scalar(
     seed_sma(close, first, win, out);
 
     if win <= 32 {
-        frama_small_scan(high, low, close, win, sc, fc, first, len, out).unwrap();
+        match win {
+            10 => frama_small_scan_const::<10>(high, low, close, sc, fc, first, len, out),
+            14 => frama_small_scan_const::<14>(high, low, close, sc, fc, first, len, out),
+            20 => frama_small_scan_const::<20>(high, low, close, sc, fc, first, len, out),
+            32 => frama_small_scan_const::<32>(high, low, close, sc, fc, first, len, out),
+            _ => frama_small_scan(high, low, close, win, sc, fc, first, len, out).unwrap(),
+        }
     } else {
         frama_scalar_deque(high, low, close, win, sc, fc, first, len, out).unwrap();
     }

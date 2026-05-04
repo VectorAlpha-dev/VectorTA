@@ -16,14 +16,16 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
-};
+use crate::utilities::helpers::{alloc_uninit_f64, detect_best_batch_kernel, make_uninit_matrix};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use std::arch::is_x86_feature_detected;
 use std::mem::ManuallyDrop;
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use std::sync::OnceLock;
 use thiserror::Error;
 
 const DEFAULT_SOURCE: &str = "hl2";
@@ -31,6 +33,8 @@ const DEFAULT_ALPHA: f64 = 0.07;
 const DEFAULT_CUTOFF: f64 = 8.0;
 const MAX_ADAPTIVE_LOOKBACK: usize = 75;
 const REQUIRED_VALID_SAMPLES: usize = MAX_ADAPTIVE_LOOKBACK + 1;
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+static ESAM_AUTO_KERNEL: OnceLock<Kernel> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub enum EhlersSmoothedAdaptiveMomentumData<'a> {
@@ -235,10 +239,9 @@ pub enum EhlersSmoothedAdaptiveMomentumError {
 
 #[derive(Debug, Clone, Copy)]
 struct ResolvedParams {
-    alpha: f64,
-    cutoff: f64,
     coef_c: f64,
-    one_minus_alpha: f64,
+    coef_prev1: f64,
+    coef_prev2: f64,
     coef1: f64,
     coef2: f64,
     coef3: f64,
@@ -305,10 +308,9 @@ fn resolve_params(
     let coef4 = c1 * c1;
     let coef1 = 1.0 - coef2 - coef3 - coef4;
     Ok(ResolvedParams {
-        alpha,
-        cutoff,
         coef_c,
-        one_minus_alpha,
+        coef_prev1: 2.0 * one_minus_alpha,
+        coef_prev2: one_minus_alpha * one_minus_alpha,
         coef1,
         coef2,
         coef3,
@@ -365,8 +367,6 @@ struct EsamCore {
 impl EsamCore {
     #[inline(always)]
     fn new(params: ResolvedParams) -> Self {
-        let _ = params.alpha;
-        let _ = params.cutoff;
         Self {
             params,
             src_ring: [f64::NAN; MAX_ADAPTIVE_LOOKBACK + 1],
@@ -412,8 +412,8 @@ impl EsamCore {
         let c_prev2 = nz(ring_get(&self.c_ring, self.c_idx, 2));
         let c_main = if smooth.is_finite() {
             self.params.coef_c * (smooth - 2.0 * smooth1 + smooth2)
-                + 2.0 * self.params.one_minus_alpha * c_prev1
-                - self.params.one_minus_alpha * self.params.one_minus_alpha * c_prev2
+                + self.params.coef_prev1 * c_prev1
+                - self.params.coef_prev2 * c_prev2
         } else {
             f64::NAN
         };
@@ -545,6 +545,63 @@ fn compute_esam_into(
     Ok(())
 }
 
+#[inline(always)]
+fn compute_esam_with_kernel(
+    data: &[f64],
+    params: ResolvedParams,
+    out: &mut [f64],
+    kernel: Kernel,
+) -> Result<(), EhlersSmoothedAdaptiveMomentumError> {
+    let chosen = match kernel {
+        Kernel::Auto => detect_esam_kernel(),
+        other if other.is_batch() => other.to_non_batch(),
+        other => other,
+    };
+
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    unsafe {
+        match chosen {
+            Kernel::Avx2 => compute_esam_avx2(data, params, out),
+            _ => compute_esam_into(data, params, out),
+        }
+    }
+
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    {
+        let _ = chosen;
+        compute_esam_into(data, params, out)
+    }
+}
+
+#[inline(always)]
+fn detect_esam_kernel() -> Kernel {
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        return *ESAM_AUTO_KERNEL.get_or_init(|| {
+            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                Kernel::Avx2
+            } else {
+                Kernel::Scalar
+            }
+        });
+    }
+
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    {
+        Kernel::Scalar
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn compute_esam_avx2(
+    data: &[f64],
+    params: ResolvedParams,
+    out: &mut [f64],
+) -> Result<(), EhlersSmoothedAdaptiveMomentumError> {
+    compute_esam_into(data, params, out)
+}
+
 #[inline]
 pub fn ehlers_smoothed_adaptive_momentum(
     input: &EhlersSmoothedAdaptiveMomentumInput,
@@ -557,10 +614,9 @@ pub fn ehlers_smoothed_adaptive_momentum_with_kernel(
     input: &EhlersSmoothedAdaptiveMomentumInput,
     kernel: Kernel,
 ) -> Result<EhlersSmoothedAdaptiveMomentumOutput, EhlersSmoothedAdaptiveMomentumError> {
-    let (data, params, first, _kernel) = validate_input(input, kernel)?;
-    let mut out =
-        alloc_with_nan_prefix(data.len(), (first + MAX_ADAPTIVE_LOOKBACK).min(data.len()));
-    compute_esam_into(data, params, &mut out)?;
+    let (data, params, _first, kernel) = validate_input(input, kernel)?;
+    let mut out = alloc_uninit_f64(data.len());
+    compute_esam_with_kernel(data, params, &mut out, kernel)?;
     Ok(EhlersSmoothedAdaptiveMomentumOutput { values: out })
 }
 
@@ -580,9 +636,8 @@ pub fn ehlers_smoothed_adaptive_momentum_into_slice(
     input: &EhlersSmoothedAdaptiveMomentumInput,
     kernel: Kernel,
 ) -> Result<(), EhlersSmoothedAdaptiveMomentumError> {
-    let (data, params, _first, _kernel) = validate_input(input, kernel)?;
-    out.fill(f64::NAN);
-    compute_esam_into(data, params, out)
+    let (data, params, _first, kernel) = validate_input(input, kernel)?;
+    compute_esam_with_kernel(data, params, out, kernel)
 }
 
 #[derive(Clone, Debug)]
@@ -812,7 +867,6 @@ fn ehlers_smoothed_adaptive_momentum_batch_inner(
     parallel: bool,
 ) -> Result<EhlersSmoothedAdaptiveMomentumBatchOutput, EhlersSmoothedAdaptiveMomentumError> {
     let combos = expand_grid(sweep)?;
-    let first = validate_raw_slice(data)?;
     let rows = combos.len();
     let cols = data.len();
     let expected = rows.checked_mul(cols).ok_or_else(|| {
@@ -822,9 +876,7 @@ fn ehlers_smoothed_adaptive_momentum_batch_inner(
             step: "rows*cols".to_string(),
         }
     })?;
-    let warmups = vec![(first + MAX_ADAPTIVE_LOOKBACK).min(cols); rows];
     let mut buf = make_uninit_matrix(rows, cols);
-    init_matrix_prefixes(&mut buf, cols, &warmups);
     let mut guard = ManuallyDrop::new(buf);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };

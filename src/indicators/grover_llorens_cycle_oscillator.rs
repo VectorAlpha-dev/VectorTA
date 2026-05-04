@@ -17,9 +17,7 @@ use wasm_bindgen::prelude::*;
 use crate::indicators::rsi::{RsiParams, RsiStream};
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix,
-};
+use crate::utilities::helpers::{alloc_uninit_f64, detect_best_batch_kernel, make_uninit_matrix};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
@@ -480,6 +478,21 @@ impl GroverLlorensCycleOscillatorStream {
         }
 
         let src = self.params.source.value(open, high, low, close);
+        self.update_source(src, high, low, close)
+    }
+
+    #[inline]
+    fn update_close(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+        if !(high.is_finite() && low.is_finite() && close.is_finite()) {
+            self.reset();
+            return None;
+        }
+
+        self.update_source(close, high, low, close)
+    }
+
+    #[inline]
+    fn update_source(&mut self, src: f64, high: f64, low: f64, close: f64) -> Option<f64> {
         let diff = match self.prev_src {
             Some(prev_src) => src - self.prev_ts.unwrap_or(prev_src),
             None => f64::NAN,
@@ -670,38 +683,25 @@ fn valid_bar(source: SourceKind, open: f64, high: f64, low: f64, close: f64) -> 
 }
 
 #[inline(always)]
-fn first_valid_bar(
+fn scan_valid_bars(
     source: SourceKind,
     open: &[f64],
     high: &[f64],
     low: &[f64],
     close: &[f64],
-) -> usize {
-    let mut i = 0usize;
-    while i < close.len() {
-        if valid_bar(source, open[i], high[i], low[i], close[i]) {
-            return i;
-        }
-        i += 1;
-    }
-    close.len()
-}
-
-#[inline(always)]
-fn count_valid_bars(
-    source: SourceKind,
-    open: &[f64],
-    high: &[f64],
-    low: &[f64],
-    close: &[f64],
-) -> usize {
+) -> (usize, usize) {
+    let len = close.len();
+    let mut first = len;
     let mut count = 0usize;
-    for i in 0..close.len() {
+    for i in 0..len {
         if valid_bar(source, open[i], high[i], low[i], close[i]) {
+            if first == len {
+                first = i;
+            }
             count += 1;
         }
     }
-    count
+    (first, count)
 }
 
 #[inline(always)]
@@ -763,16 +763,9 @@ fn input_slices<'a>(
 #[inline(always)]
 fn prepare_input<'a>(
     input: &'a GroverLlorensCycleOscillatorInput,
-    kernel: Kernel,
+    _kernel: Kernel,
 ) -> Result<
-    (
-        &'a [f64],
-        &'a [f64],
-        &'a [f64],
-        &'a [f64],
-        ResolvedParams,
-        Kernel,
-    ),
+    (&'a [f64], &'a [f64], &'a [f64], &'a [f64], ResolvedParams),
     GroverLlorensCycleOscillatorError,
 > {
     let (open, high, low, close) = input_slices(input);
@@ -792,23 +785,17 @@ fn prepare_input<'a>(
     }
 
     let params = resolve_params(&input.params, len)?;
-    let first = first_valid_bar(params.source, open, high, low, close);
+    let (first, valid) = scan_valid_bars(params.source, open, high, low, close);
     if first >= len {
         return Err(GroverLlorensCycleOscillatorError::AllValuesNaN);
     }
 
-    let valid = count_valid_bars(params.source, open, high, low, close);
     let needed = params.length.max(params.rsi_period);
     if valid < needed {
         return Err(GroverLlorensCycleOscillatorError::NotEnoughValidData { needed, valid });
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
-
-    Ok((open, high, low, close, params, chosen))
+    Ok((open, high, low, close, params))
 }
 
 #[inline(always)]
@@ -820,11 +807,227 @@ fn compute_row(
     params: ResolvedParams,
     out: &mut [f64],
 ) {
+    if params.length == DEFAULT_LENGTH
+        && params.mult == DEFAULT_MULT
+        && matches!(params.source, SourceKind::Close)
+        && params.smooth == DEFAULT_SMOOTH
+        && params.rsi_period == DEFAULT_RSI_PERIOD
+    {
+        compute_row_default_close(high, low, close, out);
+        return;
+    }
+
     let mut stream = GroverLlorensCycleOscillatorStream::new_resolved(params);
+    if matches!(params.source, SourceKind::Close) {
+        for i in 0..close.len() {
+            out[i] = stream
+                .update_close(high[i], low[i], close[i])
+                .unwrap_or(f64::NAN);
+        }
+    } else {
+        for i in 0..close.len() {
+            out[i] = stream
+                .update(open[i], high[i], low[i], close[i])
+                .unwrap_or(f64::NAN);
+        }
+    }
+}
+
+#[inline(always)]
+fn compute_row_default_close(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
+    const CAP: usize = 128;
+    const MASK: usize = CAP - 1;
+    let ema_alpha = 2.0 / (DEFAULT_RSI_PERIOD as f64 + 1.0);
+    let ema_omalpha = 1.0 - ema_alpha;
+    let mut rsi_stream = RsiStream::try_new(RsiParams {
+        period: Some(DEFAULT_RSI_PERIOD),
+    })
+    .expect("default RSI params must be valid");
+
+    let mut max_idx = [0usize; CAP];
+    let mut min_idx = [0usize; CAP];
+    let mut max_val = [0.0; CAP];
+    let mut min_val = [0.0; CAP];
+    let mut max_head = 0usize;
+    let mut max_tail = 0usize;
+    let mut min_head = 0usize;
+    let mut min_tail = 0usize;
+    let mut valid_src_count = 0usize;
+    let mut prev_src: Option<f64> = None;
+    let mut prev_close: Option<f64> = None;
+    let mut atr_seed_count = 0usize;
+    let mut atr_seed_sum = 0.0;
+    let mut atr_value: Option<f64> = None;
+    let mut os = 0i8;
+    let mut prev_diff: Option<f64> = None;
+    let mut prev_ts: Option<f64> = None;
+    let mut last_event_step: Option<f64> = None;
+    let mut bars_since_event = 0usize;
+    let mut ema_value: Option<f64> = None;
+
     for i in 0..close.len() {
-        out[i] = stream
-            .update(open[i], high[i], low[i], close[i])
-            .unwrap_or(f64::NAN);
+        let high_i = high[i];
+        let low_i = low[i];
+        let close_i = close[i];
+        if !(high_i.is_finite() && low_i.is_finite() && close_i.is_finite()) {
+            rsi_stream = RsiStream::try_new(RsiParams {
+                period: Some(DEFAULT_RSI_PERIOD),
+            })
+            .expect("default RSI params must be valid");
+            max_head = 0;
+            max_tail = 0;
+            min_head = 0;
+            min_tail = 0;
+            valid_src_count = 0;
+            prev_src = None;
+            prev_close = None;
+            atr_seed_count = 0;
+            atr_seed_sum = 0.0;
+            atr_value = None;
+            os = 0;
+            prev_diff = None;
+            prev_ts = None;
+            last_event_step = None;
+            bars_since_event = 0;
+            ema_value = None;
+            out[i] = f64::NAN;
+            continue;
+        }
+
+        let src = close_i;
+        let diff = match prev_src {
+            Some(previous) => src - prev_ts.unwrap_or(previous),
+            None => f64::NAN,
+        };
+
+        let tr = match prev_close {
+            Some(previous_close) => {
+                let hl = high_i - low_i;
+                let hc = (high_i - previous_close).abs();
+                let lc = (low_i - previous_close).abs();
+                hl.max(hc).max(lc)
+            }
+            None => high_i - low_i,
+        };
+        prev_close = Some(close_i);
+
+        if atr_seed_count < DEFAULT_LENGTH {
+            atr_seed_count += 1;
+            atr_seed_sum += tr;
+            if atr_seed_count == DEFAULT_LENGTH {
+                atr_value = Some(atr_seed_sum / DEFAULT_LENGTH as f64);
+            }
+        } else if let Some(previous_atr) = atr_value {
+            atr_value =
+                Some(((DEFAULT_LENGTH - 1) as f64 * previous_atr + tr) / DEFAULT_LENGTH as f64);
+        }
+
+        let rising = if valid_src_count >= DEFAULT_LENGTH && max_head < max_tail {
+            src > max_val[max_head & MASK] + FLOAT_TOL
+        } else {
+            false
+        };
+        let falling = if valid_src_count >= DEFAULT_LENGTH && min_head < min_tail {
+            src < min_val[min_head & MASK] - FLOAT_TOL
+        } else {
+            false
+        };
+
+        let prev_os = os;
+        let new_os = if rising {
+            1
+        } else if falling {
+            -1
+        } else {
+            prev_os
+        };
+
+        let previous_diff = prev_diff.unwrap_or(f64::NAN);
+        let rise = new_os - prev_os == 2 && previous_diff.is_finite() && previous_diff < 0.0;
+        let fall = new_os - prev_os == -2 && previous_diff.is_finite() && previous_diff > 0.0;
+        let up =
+            previous_diff.is_finite() && previous_diff <= 0.0 && diff.is_finite() && diff > 0.0;
+        let dn =
+            previous_diff.is_finite() && previous_diff >= 0.0 && diff.is_finite() && diff < 0.0;
+        let event = up || dn || rise || fall;
+
+        let mut ts = f64::NAN;
+        if let Some(atr) = atr_value {
+            let step = atr / DEFAULT_LENGTH as f64;
+            if event {
+                last_event_step = Some(step);
+                bars_since_event = 0;
+            } else if last_event_step.is_some() {
+                bars_since_event = bars_since_event.saturating_add(1);
+            }
+
+            let prev_ts_or_src = prev_ts.unwrap_or(src);
+            if up {
+                ts = prev_ts_or_src - atr * DEFAULT_MULT;
+            } else if dn {
+                ts = prev_ts_or_src + atr * DEFAULT_MULT;
+            } else if rise {
+                ts = src - atr * DEFAULT_MULT;
+            } else if fall {
+                ts = src + atr * DEFAULT_MULT;
+            } else if let Some(event_step) = last_event_step {
+                ts = prev_ts_or_src + signum_with_tol(diff) * event_step * bars_since_event as f64;
+            }
+        }
+
+        let result = if ts.is_finite() {
+            let osc = src - ts;
+            let next = match ema_value {
+                Some(previous) => ema_alpha.mul_add(osc, ema_omalpha * previous),
+                None => osc,
+            };
+            ema_value = Some(next);
+            rsi_stream.update(next)
+        } else {
+            None
+        };
+
+        prev_src = Some(src);
+        prev_diff = if diff.is_finite() { Some(diff) } else { None };
+        prev_ts = if ts.is_finite() { Some(ts) } else { None };
+        os = new_os;
+
+        while max_tail > max_head {
+            let pos = (max_tail - 1) & MASK;
+            if max_val[pos] <= src {
+                max_tail -= 1;
+            } else {
+                break;
+            }
+        }
+        let max_pos = max_tail & MASK;
+        max_idx[max_pos] = valid_src_count;
+        max_val[max_pos] = src;
+        max_tail += 1;
+
+        while min_tail > min_head {
+            let pos = (min_tail - 1) & MASK;
+            if min_val[pos] >= src {
+                min_tail -= 1;
+            } else {
+                break;
+            }
+        }
+        let min_pos = min_tail & MASK;
+        min_idx[min_pos] = valid_src_count;
+        min_val[min_pos] = src;
+        min_tail += 1;
+
+        valid_src_count += 1;
+        let window_start = valid_src_count.saturating_sub(DEFAULT_LENGTH);
+        while max_head < max_tail && max_idx[max_head & MASK] < window_start {
+            max_head += 1;
+        }
+        while min_head < min_tail && min_idx[min_head & MASK] < window_start {
+            min_head += 1;
+        }
+
+        out[i] = result.unwrap_or(f64::NAN);
     }
 }
 
@@ -832,8 +1035,8 @@ pub fn grover_llorens_cycle_oscillator_with_kernel(
     input: &GroverLlorensCycleOscillatorInput,
     kernel: Kernel,
 ) -> Result<GroverLlorensCycleOscillatorOutput, GroverLlorensCycleOscillatorError> {
-    let (open, high, low, close, params, _chosen) = prepare_input(input, kernel)?;
-    let mut values = alloc_with_nan_prefix(close.len(), close.len());
+    let (open, high, low, close, params) = prepare_input(input, kernel)?;
+    let mut values = alloc_uninit_f64(close.len());
     compute_row(open, high, low, close, params, &mut values);
     Ok(GroverLlorensCycleOscillatorOutput { values })
 }
@@ -844,7 +1047,7 @@ pub fn grover_llorens_cycle_oscillator_into_slice(
     input: &GroverLlorensCycleOscillatorInput,
     kernel: Kernel,
 ) -> Result<(), GroverLlorensCycleOscillatorError> {
-    let (open, high, low, close, params, _chosen) = prepare_input(input, kernel)?;
+    let (open, high, low, close, params) = prepare_input(input, kernel)?;
     if dst.len() != close.len() {
         return Err(GroverLlorensCycleOscillatorError::OutputLengthMismatch {
             expected: close.len(),
@@ -1168,11 +1371,10 @@ fn grover_llorens_cycle_oscillator_batch_inner(
     }
 
     let source = parse_source(&sweep.source)?;
-    let first = first_valid_bar(source, open, high, low, close);
+    let (first, valid) = scan_valid_bars(source, open, high, low, close);
     if first >= len {
         return Err(GroverLlorensCycleOscillatorError::AllValuesNaN);
     }
-    let valid = count_valid_bars(source, open, high, low, close);
     let needed = combos
         .iter()
         .map(|combo| {
@@ -1272,11 +1474,10 @@ pub fn grover_llorens_cycle_oscillator_batch_inner_into(
     }
 
     let source = parse_source(&sweep.source)?;
-    let first = first_valid_bar(source, open, high, low, close);
+    let (first, valid) = scan_valid_bars(source, open, high, low, close);
     if first >= cols {
         return Err(GroverLlorensCycleOscillatorError::AllValuesNaN);
     }
-    let valid = count_valid_bars(source, open, high, low, close);
     let needed = combos
         .iter()
         .map(|combo| {

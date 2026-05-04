@@ -83,6 +83,16 @@ impl VolumeEnergyReservoirsPoint {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum VolumeEnergyReservoirsOutputField {
+    Momentum,
+    Reservoir,
+    SqueezeActive,
+    SqueezeStart,
+    RangeHigh,
+    RangeLow,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -631,6 +641,53 @@ fn volume_energy_reservoirs_row_from_slices(
     }
 }
 
+#[inline(always)]
+fn volume_energy_reservoirs_selected_row_from_slices(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    params: ResolvedParams,
+    field: VolumeEnergyReservoirsOutputField,
+    out: &mut [f64],
+) {
+    let len = high.len();
+    debug_assert_eq!(low.len(), len);
+    debug_assert_eq!(close.len(), len);
+    debug_assert_eq!(volume.len(), len);
+    debug_assert_eq!(out.len(), len);
+
+    macro_rules! write_field {
+        ($member:ident) => {{
+            let mut state = ReservoirCoreState::new(params);
+            let mut i = 0usize;
+            while i < len {
+                let h = high[i];
+                let l = low[i];
+                let c = close[i];
+                let v = volume[i];
+                let point = if h.is_finite() && l.is_finite() && c.is_finite() && v.is_finite() {
+                    state.update(h, l, c, v)
+                } else {
+                    state.reset();
+                    VolumeEnergyReservoirsPoint::nan()
+                };
+                out[i] = point.$member;
+                i += 1;
+            }
+        }};
+    }
+
+    match field {
+        VolumeEnergyReservoirsOutputField::Momentum => write_field!(momentum),
+        VolumeEnergyReservoirsOutputField::Reservoir => write_field!(reservoir),
+        VolumeEnergyReservoirsOutputField::SqueezeActive => write_field!(squeeze_active),
+        VolumeEnergyReservoirsOutputField::SqueezeStart => write_field!(squeeze_start),
+        VolumeEnergyReservoirsOutputField::RangeHigh => write_field!(range_high),
+        VolumeEnergyReservoirsOutputField::RangeLow => write_field!(range_low),
+    }
+}
+
 #[inline]
 pub fn volume_energy_reservoirs(
     input: &VolumeEnergyReservoirsInput,
@@ -740,6 +797,37 @@ pub fn volume_energy_reservoirs_into_slices(
         range_high_out,
         range_low_out,
     );
+    Ok(())
+}
+
+#[inline]
+pub(crate) fn volume_energy_reservoirs_output_into_slice(
+    out: &mut [f64],
+    input: &VolumeEnergyReservoirsInput,
+    _kernel: Kernel,
+    field: VolumeEnergyReservoirsOutputField,
+) -> Result<(), VolumeEnergyReservoirsError> {
+    let (high, low, close, volume) = input.as_slices();
+    if high.is_empty() || low.is_empty() || close.is_empty() || volume.is_empty() {
+        return Err(VolumeEnergyReservoirsError::EmptyInputData);
+    }
+    if high.len() != low.len() || high.len() != close.len() || high.len() != volume.len() {
+        return Err(VolumeEnergyReservoirsError::MismatchedInputLengths {
+            high_len: high.len(),
+            low_len: low.len(),
+            close_len: close.len(),
+            volume_len: volume.len(),
+        });
+    }
+    let expected = high.len();
+    if out.len() != expected {
+        return Err(VolumeEnergyReservoirsError::OutputLengthMismatch { expected });
+    }
+    if first_valid_ohlcv(high, low, close, volume) >= high.len() {
+        return Err(VolumeEnergyReservoirsError::AllValuesNaN);
+    }
+    let params = resolve_params(&input.params, Some(high.len()))?;
+    volume_energy_reservoirs_selected_row_from_slices(high, low, close, volume, params, field, out);
     Ok(())
 }
 

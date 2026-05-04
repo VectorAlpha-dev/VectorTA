@@ -423,7 +423,18 @@ struct PointOutput {
 fn extract_slice<'a>(input: &'a SmoothTheilSenInput<'a>) -> Result<&'a [f64], SmoothTheilSenError> {
     let data = match &input.data {
         SmoothTheilSenData::Candles { candles, source } => {
-            let source_values = source_type(candles, source);
+            let source_values = match *source {
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            };
             if source_values.is_empty() {
                 return Err(SmoothTheilSenError::InvalidSource {
                     source_name: (*source).to_string(),
@@ -582,6 +593,35 @@ fn create_work_buffers(params: &ResolvedParams) -> WorkBuffers {
     }
 }
 
+struct DefaultWorkBuffers {
+    slopes: [f64; 300],
+    residuals: [f64; 25],
+    errors: [f64; 25],
+}
+
+impl Default for DefaultWorkBuffers {
+    #[inline(always)]
+    fn default() -> Self {
+        Self {
+            slopes: [0.0; 300],
+            residuals: [0.0; 25],
+            errors: [0.0; 25],
+        }
+    }
+}
+
+#[inline(always)]
+fn is_default_params(params: &ResolvedParams) -> bool {
+    params.length == DEFAULT_LENGTH
+        && params.offset == DEFAULT_OFFSET
+        && params.multiplier == DEFAULT_MULTIPLIER
+        && params.slope_style == SmoothTheilSenStatStyle::SmoothMedian
+        && params.residual_style == SmoothTheilSenStatStyle::SmoothMedian
+        && params.deviation_style == SmoothTheilSenDeviationType::Mad
+        && params.mad_style == SmoothTheilSenStatStyle::SmoothMedian
+        && !params.include_prediction_in_deviation
+}
+
 #[inline(always)]
 fn output_len_check(out: &[f64], len: usize) -> Result<(), SmoothTheilSenError> {
     if out.len() != len {
@@ -591,6 +631,25 @@ fn output_len_check(out: &[f64], len: usize) -> Result<(), SmoothTheilSenError> 
         });
     }
     Ok(())
+}
+
+#[inline(always)]
+fn fill_prefixes(
+    warmup: usize,
+    out_value: &mut [f64],
+    out_upper: &mut [f64],
+    out_lower: &mut [f64],
+    out_slope: &mut [f64],
+    out_intercept: &mut [f64],
+    out_deviation: &mut [f64],
+) {
+    let qnan = f64::NAN;
+    out_value[..warmup].fill(qnan);
+    out_upper[..warmup].fill(qnan);
+    out_lower[..warmup].fill(qnan);
+    out_slope[..warmup].fill(qnan);
+    out_intercept[..warmup].fill(qnan);
+    out_deviation[..warmup].fill(qnan);
 }
 
 #[inline(always)]
@@ -612,6 +671,74 @@ fn required_finite_segment(
 #[inline(always)]
 fn segment_all_finite(data: &[f64], start: usize, end: usize) -> bool {
     data[start..=end].iter().all(|value| value.is_finite())
+}
+
+#[inline(always)]
+fn smooth_weighted_sorted(values: &mut [f64], weights: &[f64]) -> f64 {
+    values.sort_unstable_by(f64::total_cmp);
+    values
+        .iter()
+        .zip(weights)
+        .map(|(value, weight)| value * weight)
+        .sum()
+}
+
+fn compute_default_point(
+    data: &[f64],
+    idx: usize,
+    cache: &KernelCache,
+    work: &mut DefaultWorkBuffers,
+) -> PointOutput {
+    let base = idx;
+    let mut n = 0usize;
+    for i in 0..24 {
+        let value_i = data[base - i];
+        for j in i + 1..25 {
+            let value_j = data[base - j];
+            work.slopes[n] = (value_j - value_i) / (j - i) as f64;
+            n += 1;
+        }
+    }
+    let beta_1 = smooth_weighted_sorted(
+        &mut work.slopes,
+        cache
+            .slope_weights
+            .as_deref()
+            .expect("default slope weights"),
+    );
+
+    for j in 0..25 {
+        work.residuals[j] = data[base - j] - beta_1 * j as f64;
+    }
+    let beta_0 = smooth_weighted_sorted(
+        &mut work.residuals,
+        cache
+            .residual_weights
+            .as_deref()
+            .expect("default residual weights"),
+    );
+
+    let predicted = beta_0;
+    for point in 0..25 {
+        let predicted_point = beta_0 + beta_1 * point as f64;
+        work.errors[point] = (data[idx - point] - predicted_point).abs();
+    }
+    let deviation = smooth_weighted_sorted(
+        &mut work.errors,
+        cache
+            .error_weights
+            .as_deref()
+            .expect("default error weights"),
+    ) * DEFAULT_MULTIPLIER;
+
+    PointOutput {
+        value: predicted,
+        upper: predicted + deviation,
+        lower: predicted - deviation,
+        slope: beta_1,
+        intercept: beta_0,
+        deviation,
+    }
 }
 
 fn compute_point(
@@ -703,6 +830,30 @@ fn compute_point(
     })
 }
 
+fn smooth_theil_sen_default_all_finite_into(
+    data: &[f64],
+    params: &ResolvedParams,
+    warmup: usize,
+    out_value: &mut [f64],
+    out_upper: &mut [f64],
+    out_lower: &mut [f64],
+    out_slope: &mut [f64],
+    out_intercept: &mut [f64],
+    out_deviation: &mut [f64],
+) {
+    let cache = build_kernel_cache(params);
+    let mut work = DefaultWorkBuffers::default();
+    for idx in warmup..data.len() {
+        let point = compute_default_point(data, idx, &cache, &mut work);
+        out_value[idx] = point.value;
+        out_upper[idx] = point.upper;
+        out_lower[idx] = point.lower;
+        out_slope[idx] = point.slope;
+        out_intercept[idx] = point.intercept;
+        out_deviation[idx] = point.deviation;
+    }
+}
+
 fn smooth_theil_sen_compute_into(
     data: &[f64],
     params: &ResolvedParams,
@@ -721,6 +872,21 @@ fn smooth_theil_sen_compute_into(
     output_len_check(out_slope, len)?;
     output_len_check(out_intercept, len)?;
     output_len_check(out_deviation, len)?;
+
+    if is_default_params(params) && data.iter().all(|value| value.is_finite()) {
+        smooth_theil_sen_default_all_finite_into(
+            data,
+            params,
+            warmup,
+            out_value,
+            out_upper,
+            out_lower,
+            out_slope,
+            out_intercept,
+            out_deviation,
+        );
+        return Ok(());
+    }
 
     let cache = build_kernel_cache(params);
     let mut work = create_work_buffers(params);
@@ -814,6 +980,38 @@ pub fn smooth_theil_sen_into_slice(
     kernel: Kernel,
 ) -> Result<(), SmoothTheilSenError> {
     let (data, params, _first, warmup, _kernel) = validate_input(input, kernel)?;
+    let len = data.len();
+    output_len_check(out_value, len)?;
+    output_len_check(out_upper, len)?;
+    output_len_check(out_lower, len)?;
+    output_len_check(out_slope, len)?;
+    output_len_check(out_intercept, len)?;
+    output_len_check(out_deviation, len)?;
+
+    if is_default_params(&params) && data.iter().all(|value| value.is_finite()) {
+        fill_prefixes(
+            warmup,
+            out_value,
+            out_upper,
+            out_lower,
+            out_slope,
+            out_intercept,
+            out_deviation,
+        );
+        smooth_theil_sen_default_all_finite_into(
+            data,
+            &params,
+            warmup,
+            out_value,
+            out_upper,
+            out_lower,
+            out_slope,
+            out_intercept,
+            out_deviation,
+        );
+        return Ok(());
+    }
+
     out_value.fill(f64::NAN);
     out_upper.fill(f64::NAN);
     out_lower.fill(f64::NAN);

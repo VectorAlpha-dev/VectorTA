@@ -17,21 +17,26 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use std::arch::is_x86_feature_detected;
 use std::convert::AsRef;
 use std::mem::{ManuallyDrop, MaybeUninit};
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use std::sync::OnceLock;
 use thiserror::Error;
 
 const DEFAULT_FAST_LENGTH: usize = 6;
 const DEFAULT_SLOW_LENGTH: usize = 12;
 const DEFAULT_SAMPLE_LENGTH: usize = 5;
 const MAX_LENGTH: usize = 4096;
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+static EUDMA_AUTO_KERNEL: OnceLock<Kernel> = OnceLock::new();
 
 impl<'a> AsRef<[f64]> for EhlersUndersampledDoubleMovingAverageInput<'a> {
     #[inline(always)]
@@ -324,12 +329,13 @@ impl HannFilterState {
     #[inline(always)]
     fn update(&mut self, sample: f64) -> f64 {
         let len = self.weights.len();
+        let full = self.count == len;
         self.ring[self.head] = sample;
         self.head += 1;
         if self.head == len {
             self.head = 0;
         }
-        if self.count < len {
+        if !full {
             self.count += 1;
         }
 
@@ -339,19 +345,28 @@ impl HannFilterState {
         } else {
             self.head - 1
         };
-        for offset in 0..len {
-            let value = if offset < self.count {
+        if full {
+            for offset in 0..len {
                 let current = self.ring[idx];
-                if current.is_finite() {
-                    current
+                let value = if current.is_finite() { current } else { 0.0 };
+                acc += self.weights[offset] * value;
+                idx = if idx == 0 { len - 1 } else { idx - 1 };
+            }
+        } else {
+            for offset in 0..len {
+                let value = if offset < self.count {
+                    let current = self.ring[idx];
+                    if current.is_finite() {
+                        current
+                    } else {
+                        0.0
+                    }
                 } else {
                     0.0
-                }
-            } else {
-                0.0
-            };
-            acc += self.weights[offset] * value;
-            idx = if idx == 0 { len - 1 } else { idx - 1 };
+                };
+                acc += self.weights[offset] * value;
+                idx = if idx == 0 { len - 1 } else { idx - 1 };
+            }
         }
 
         if self.norm == 0.0 {
@@ -367,7 +382,7 @@ struct EudmaCore {
     fast_filter: HannFilterState,
     slow_filter: HannFilterState,
     sample_length: usize,
-    bar_index: usize,
+    sample_countdown: usize,
     last_sample: f64,
 }
 
@@ -378,7 +393,7 @@ impl EudmaCore {
             fast_filter: HannFilterState::new(fast_length),
             slow_filter: HannFilterState::new(slow_length),
             sample_length,
-            bar_index: 0,
+            sample_countdown: 0,
             last_sample: f64::NAN,
         }
     }
@@ -387,21 +402,23 @@ impl EudmaCore {
     fn reset(&mut self) {
         self.fast_filter.reset();
         self.slow_filter.reset();
-        self.bar_index = 0;
+        self.sample_countdown = 0;
         self.last_sample = f64::NAN;
     }
 
     #[inline(always)]
     fn update(&mut self, value: f64) -> (f64, f64) {
-        let sampled = if self.bar_index % self.sample_length == 0 {
+        let sampled = if self.sample_countdown == 0 {
+            self.sample_countdown = self.sample_length - 1;
             value
         } else if self.last_sample.is_finite() {
+            self.sample_countdown -= 1;
             self.last_sample
         } else {
+            self.sample_countdown -= 1;
             0.0
         };
         self.last_sample = sampled;
-        self.bar_index += 1;
         (
             self.fast_filter.update(sampled),
             self.slow_filter.update(sampled),
@@ -412,11 +429,30 @@ impl EudmaCore {
 #[inline(always)]
 fn normalize_single_kernel(kernel: Kernel) -> Kernel {
     match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => detect_eudma_kernel(),
         Kernel::ScalarBatch => Kernel::Scalar,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::Avx512Batch => Kernel::Avx512,
         other => other,
+    }
+}
+
+#[inline(always)]
+fn detect_eudma_kernel() -> Kernel {
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    {
+        return *EUDMA_AUTO_KERNEL.get_or_init(|| {
+            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                Kernel::Avx2
+            } else {
+                Kernel::Scalar
+            }
+        });
+    }
+
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    {
+        Kernel::Scalar
     }
 }
 
@@ -478,13 +514,52 @@ fn compute_eudma_into(prepared: PreparedEudma<'_>, fast_out: &mut [f64], slow_ou
         prepared.slow_length,
         prepared.sample_length,
     );
-    for idx in 0..prepared.data.len() {
+    let first = prepared.first_valid.min(prepared.data.len());
+    for &value in &prepared.data[..first] {
+        let _ = core.update(value);
+    }
+    for idx in first..prepared.data.len() {
         let (fast, slow) = core.update(prepared.data[idx]);
-        if idx >= prepared.first_valid {
-            fast_out[idx] = fast;
-            slow_out[idx] = slow;
+        fast_out[idx] = fast;
+        slow_out[idx] = slow;
+    }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline(always)]
+fn compute_eudma_with_kernel(
+    prepared: PreparedEudma<'_>,
+    fast_out: &mut [f64],
+    slow_out: &mut [f64],
+    kernel: Kernel,
+) {
+    unsafe {
+        match kernel {
+            Kernel::Avx2 => compute_eudma_avx2(prepared, fast_out, slow_out),
+            Kernel::Avx512 => compute_eudma_avx512(prepared, fast_out, slow_out),
+            _ => compute_eudma_into(prepared, fast_out, slow_out),
         }
     }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn compute_eudma_avx2(
+    prepared: PreparedEudma<'_>,
+    fast_out: &mut [f64],
+    slow_out: &mut [f64],
+) {
+    compute_eudma_into(prepared, fast_out, slow_out)
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f,fma")]
+unsafe fn compute_eudma_avx512(
+    prepared: PreparedEudma<'_>,
+    fast_out: &mut [f64],
+    slow_out: &mut [f64],
+) {
+    compute_eudma_into(prepared, fast_out, slow_out)
 }
 
 #[inline]
@@ -500,10 +575,16 @@ pub fn ehlers_undersampled_double_moving_average_with_kernel(
     kernel: Kernel,
 ) -> Result<EhlersUndersampledDoubleMovingAverageOutput, EhlersUndersampledDoubleMovingAverageError>
 {
-    let (prepared, _) = eudma_prepare(input, kernel)?;
+    let (prepared, kernel) = eudma_prepare(input, kernel)?;
     let mut fast = alloc_with_nan_prefix(prepared.data.len(), prepared.first_valid);
     let mut slow = alloc_with_nan_prefix(prepared.data.len(), prepared.first_valid);
-    compute_eudma_into(prepared, &mut fast, &mut slow);
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    compute_eudma_with_kernel(prepared, &mut fast, &mut slow, kernel);
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    {
+        let _ = kernel;
+        compute_eudma_into(prepared, &mut fast, &mut slow);
+    }
     Ok(EhlersUndersampledDoubleMovingAverageOutput { fast, slow })
 }
 
@@ -514,7 +595,7 @@ pub fn ehlers_undersampled_double_moving_average_into_slices(
     input: &EhlersUndersampledDoubleMovingAverageInput,
     kernel: Kernel,
 ) -> Result<(), EhlersUndersampledDoubleMovingAverageError> {
-    let (prepared, _) = eudma_prepare(input, kernel)?;
+    let (prepared, kernel) = eudma_prepare(input, kernel)?;
     if fast_out.len() != prepared.data.len() {
         return Err(
             EhlersUndersampledDoubleMovingAverageError::OutputLengthMismatch {
@@ -540,7 +621,13 @@ pub fn ehlers_undersampled_double_moving_average_into_slices(
     for value in &mut slow_out[..warm] {
         *value = qnan;
     }
-    compute_eudma_into(prepared, fast_out, slow_out);
+    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+    compute_eudma_with_kernel(prepared, fast_out, slow_out, kernel);
+    #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+    {
+        let _ = kernel;
+        compute_eudma_into(prepared, fast_out, slow_out);
+    }
     Ok(())
 }
 

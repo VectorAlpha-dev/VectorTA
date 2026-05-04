@@ -529,8 +529,6 @@ pub fn ehlers_adaptive_cyber_cycle_into_slice(
     kernel: Kernel,
 ) -> Result<(), EhlersAdaptiveCyberCycleError> {
     let (data, params, _first, _kernel) = validate_input(input, kernel)?;
-    out_cycle.fill(f64::NAN);
-    out_trigger.fill(f64::NAN);
     compute_eacc_into(data, params, out_cycle, out_trigger)
 }
 

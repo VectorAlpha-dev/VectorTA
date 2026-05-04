@@ -68,7 +68,7 @@ fn ttm_prepare<'a>(
         });
     }
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((source, close, period, first, chosen))
@@ -174,7 +174,7 @@ impl<'a> TtmTrendInput<'a> {
         match &self.data {
             TtmTrendData::Slices { source, close } => (source, close),
             TtmTrendData::Candles { candles, source } => {
-                (source_type(candles, source), source_type(candles, "close"))
+                (ttm_trend_source(candles, source), &candles.close)
             }
         }
     }
@@ -183,9 +183,25 @@ impl<'a> TtmTrendInput<'a> {
         match &self.data {
             TtmTrendData::Slices { source, close } => (*source, *close),
             TtmTrendData::Candles { candles, source } => {
-                (source_type(candles, source), source_type(candles, "close"))
+                (ttm_trend_source(candles, source), &candles.close)
             }
         }
+    }
+}
+
+#[inline(always)]
+fn ttm_trend_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "close" => &candles.close,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" => &candles.hlcc4,
+        _ => source_type(candles, source),
     }
 }
 

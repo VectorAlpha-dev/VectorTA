@@ -21,7 +21,7 @@ use crate::indicators::moving_averages::wilders::{
 };
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::detect_best_batch_kernel;
+use crate::utilities::helpers::{alloc_uninit_f64, detect_best_batch_kernel};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
@@ -574,6 +574,60 @@ fn scaled_pmar_value(pmar: f64, pmar_high: f64, pmar_low: f64) -> f64 {
     }
 }
 
+#[inline(always)]
+fn insert_pmar_window(sorted: &mut Vec<f64>, invalid_count: &mut usize, value: f64) {
+    let value = value.abs();
+    if value.is_finite() {
+        let pos = sorted.partition_point(|probe| probe.total_cmp(&value).is_lt());
+        sorted.insert(pos, value);
+    } else {
+        *invalid_count += 1;
+    }
+}
+
+#[inline(always)]
+fn remove_pmar_window(sorted: &mut Vec<f64>, invalid_count: &mut usize, value: f64) {
+    let value = value.abs();
+    if value.is_finite() {
+        let pos = sorted
+            .binary_search_by(|probe| probe.total_cmp(&value))
+            .expect("pmar percentile window lost a finite value");
+        sorted.remove(pos);
+    } else {
+        *invalid_count -= 1;
+    }
+}
+
+fn compute_pmarp_percentile(
+    pmar_out: &[f64],
+    ma_length: usize,
+    lookback_limit: usize,
+    pmarp_out: &mut [f64],
+) {
+    let mut sorted = Vec::with_capacity(lookback_limit.min(pmar_out.len()));
+    let mut invalid_count = 0usize;
+
+    for i in 0..pmar_out.len() {
+        if i >= ma_length {
+            let current = pmar_out[i].abs();
+            let lookback = i.min(lookback_limit);
+            if current.is_finite() && lookback != 0 {
+                let le_count = sorted.partition_point(|value| *value <= current);
+                pmarp_out[i] = ((le_count + invalid_count) as f64 / lookback as f64) * 100.0;
+            }
+        }
+
+        if i >= lookback_limit {
+            remove_pmar_window(
+                &mut sorted,
+                &mut invalid_count,
+                pmar_out[i - lookback_limit],
+            );
+        }
+        insert_pmar_window(&mut sorted, &mut invalid_count, pmar_out[i]);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compute_core(
     price: &[f64],
@@ -627,39 +681,21 @@ fn compute_core(
         }
     }
 
-    if !pmar_out.iter().any(|value| value.is_finite()) {
+    if !seen_pmar {
         return Err(PriceMovingAverageRatioPercentileError::NotEnoughValidData {
             needed: params.ma_length,
             valid: count_valid_price_volume(price, volume),
         });
     }
 
-    for i in params.ma_length..price.len() {
-        let current = pmar_out[i].abs();
-        if !current.is_finite() {
-            continue;
-        }
-        let lookback = i.min(params.pmarp_lookback);
-        if lookback == 0 {
-            continue;
-        }
-        let mut count = 0usize;
-        for offset in 1..=lookback {
-            let prev = pmar_out[i - offset].abs();
-            if !(prev.is_finite() && prev > current) {
-                count += 1;
-            }
-        }
-        pmarp_out[i] = (count as f64 / lookback as f64) * 100.0;
-    }
+    compute_pmarp_percentile(pmar_out, params.ma_length, params.pmarp_lookback, pmarp_out);
 
-    match params.line_mode {
-        PriceMovingAverageRatioPercentileLineMode::Pmar => plotline_out.copy_from_slice(pmar_out),
-        PriceMovingAverageRatioPercentileLineMode::Pmarp => plotline_out.copy_from_slice(pmarp_out),
-    }
-
+    let signal_source = match params.line_mode {
+        PriceMovingAverageRatioPercentileLineMode::Pmar => &*pmar_out,
+        PriceMovingAverageRatioPercentileLineMode::Pmarp => &*pmarp_out,
+    };
     let signal = compute_ma_series(
-        plotline_out,
+        signal_source,
         volume,
         params.signal_ma_length,
         params.signal_ma_type,
@@ -667,6 +703,11 @@ fn compute_core(
         "signal ma",
     )?;
     signal_out.copy_from_slice(&signal);
+
+    match params.line_mode {
+        PriceMovingAverageRatioPercentileLineMode::Pmar => plotline_out.copy_from_slice(pmar_out),
+        PriceMovingAverageRatioPercentileLineMode::Pmarp => plotline_out.copy_from_slice(pmarp_out),
+    }
     Ok(())
 }
 
@@ -685,13 +726,13 @@ pub fn price_moving_average_ratio_percentile_with_kernel(
     let params = ValidatedParams::from_params(&input.params)?;
     let kernel = kernel.to_non_batch();
 
-    let mut pmar = vec![f64::NAN; price.len()];
-    let mut pmarp = vec![f64::NAN; price.len()];
-    let mut plotline = vec![f64::NAN; price.len()];
-    let mut signal = vec![f64::NAN; price.len()];
-    let mut pmar_high = vec![f64::NAN; price.len()];
-    let mut pmar_low = vec![f64::NAN; price.len()];
-    let mut scaled_pmar = vec![f64::NAN; price.len()];
+    let mut pmar = alloc_uninit_f64(price.len());
+    let mut pmarp = alloc_uninit_f64(price.len());
+    let mut plotline = alloc_uninit_f64(price.len());
+    let mut signal = alloc_uninit_f64(price.len());
+    let mut pmar_high = alloc_uninit_f64(price.len());
+    let mut pmar_low = alloc_uninit_f64(price.len());
+    let mut scaled_pmar = alloc_uninit_f64(price.len());
 
     compute_core(
         price,

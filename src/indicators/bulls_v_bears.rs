@@ -152,6 +152,20 @@ pub struct BullsVBearsOutput {
     pub zero_cross_down: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BullsVBearsOutputField {
+    Value,
+    Bull,
+    Bear,
+    Ma,
+    Upper,
+    Lower,
+    BullishSignal,
+    BearishSignal,
+    ZeroCrossUp,
+    ZeroCrossDown,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -962,6 +976,39 @@ pub fn bulls_v_bears_into_slice(
         out_zero_cross_up,
         out_zero_cross_down,
     )
+}
+
+pub fn bulls_v_bears_output_into_slice(
+    dst: &mut [f64],
+    input: &BullsVBearsInput,
+    kernel: Kernel,
+    field: BullsVBearsOutputField,
+) -> Result<(), BullsVBearsError> {
+    let (high, low, close, _params, _first, _kernel) = validate_input(input, kernel)?;
+    if dst.len() != close.len() {
+        return Err(BullsVBearsError::OutputLengthMismatch {
+            expected: close.len(),
+            got: dst.len(),
+        });
+    }
+    dst.fill(f64::NAN);
+    let mut stream = BullsVBearsStream::try_new(input.params.clone())?;
+    for i in 0..close.len() {
+        let point = stream.update(high[i], low[i], close[i]);
+        dst[i] = match field {
+            BullsVBearsOutputField::Value => point.0,
+            BullsVBearsOutputField::Bull => point.1,
+            BullsVBearsOutputField::Bear => point.2,
+            BullsVBearsOutputField::Ma => point.3,
+            BullsVBearsOutputField::Upper => point.4,
+            BullsVBearsOutputField::Lower => point.5,
+            BullsVBearsOutputField::BullishSignal => point.6,
+            BullsVBearsOutputField::BearishSignal => point.7,
+            BullsVBearsOutputField::ZeroCrossUp => point.8,
+            BullsVBearsOutputField::ZeroCrossDown => point.9,
+        };
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]

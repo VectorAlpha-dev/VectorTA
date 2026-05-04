@@ -33,16 +33,39 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+use smallvec::SmallVec;
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
+
+const DEFAULT_MIN_PERIOD: usize = 5;
+const DEFAULT_MAX_PERIOD: usize = 50;
+const DEFAULT_MATYPE: &str = "sma";
+const DEFAULT_DEVTYPE: usize = 0;
+const DEFAULT_SOURCE: &str = "close";
+
+#[inline(always)]
+fn source_slice<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        DEFAULT_SOURCE => &candles.close,
+        "open" => &candles.open,
+        "high" => &candles.high,
+        "low" => &candles.low,
+        "volume" => &candles.volume,
+        "hl2" => &candles.hl2,
+        "hlc3" => &candles.hlc3,
+        "ohlc4" => &candles.ohlc4,
+        "hlcc4" | "hlcc" => &candles.hlcc4,
+        _ => source_type(candles, source),
+    }
+}
 
 impl<'a> AsRef<[f64]> for VlmaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             VlmaData::Slice(sl) => sl,
-            VlmaData::Candles { candles, source } => source_type(candles, source),
+            VlmaData::Candles { candles, source } => source_slice(candles, source),
         }
     }
 }
@@ -103,10 +126,10 @@ pub struct VlmaParams {
 impl Default for VlmaParams {
     fn default() -> Self {
         Self {
-            min_period: Some(5),
-            max_period: Some(50),
-            matype: Some("sma".to_string()),
-            devtype: Some(0),
+            min_period: Some(DEFAULT_MIN_PERIOD),
+            max_period: Some(DEFAULT_MAX_PERIOD),
+            matype: Some(DEFAULT_MATYPE.to_string()),
+            devtype: Some(DEFAULT_DEVTYPE),
         }
     }
 }
@@ -137,26 +160,30 @@ impl<'a> VlmaInput<'a> {
     }
     #[inline]
     pub fn with_default_candles(c: &'a Candles) -> Self {
-        Self::from_candles(c, "close", VlmaParams::default())
+        Self::from_candles(c, DEFAULT_SOURCE, VlmaParams::default())
     }
     #[inline]
     pub fn get_min_period(&self) -> usize {
-        self.params.min_period.unwrap_or(5)
+        self.params.min_period.unwrap_or(DEFAULT_MIN_PERIOD)
     }
     #[inline]
     pub fn get_max_period(&self) -> usize {
-        self.params.max_period.unwrap_or(50)
+        self.params.max_period.unwrap_or(DEFAULT_MAX_PERIOD)
     }
     #[inline]
     pub fn get_matype(&self) -> String {
         self.params
             .matype
             .clone()
-            .unwrap_or_else(|| "sma".to_string())
+            .unwrap_or_else(|| DEFAULT_MATYPE.to_string())
+    }
+    #[inline]
+    fn get_matype_ref(&self) -> &str {
+        self.params.matype.as_deref().unwrap_or(DEFAULT_MATYPE)
     }
     #[inline]
     pub fn get_devtype(&self) -> usize {
-        self.params.devtype.unwrap_or(0)
+        self.params.devtype.unwrap_or(DEFAULT_DEVTYPE)
     }
 }
 
@@ -219,7 +246,7 @@ impl VlmaBuilder {
             matype: self.matype,
             devtype: self.devtype,
         };
-        let i = VlmaInput::from_candles(c, "close", p);
+        let i = VlmaInput::from_candles(c, DEFAULT_SOURCE, p);
         vlma_with_kernel(&i, self.kernel)
     }
     #[inline(always)]
@@ -284,9 +311,7 @@ pub fn vlma(input: &VlmaInput) -> Result<VlmaOutput, VlmaError> {
 pub fn vlma_with_kernel(input: &VlmaInput, kernel: Kernel) -> Result<VlmaOutput, VlmaError> {
     let (data, min_p, max_p, matype, devtype, first, chosen) = vlma_prepare(input, kernel)?;
     let mut out = alloc_with_nan_prefix(data.len(), first + max_p - 1);
-    vlma_compute_into(
-        data, min_p, max_p, &matype, devtype, first, chosen, &mut out,
-    )?;
+    vlma_compute_into(data, min_p, max_p, matype, devtype, first, chosen, &mut out)?;
     Ok(VlmaOutput { values: out })
 }
 
@@ -304,7 +329,7 @@ pub fn vlma_into_slice(dst: &mut [f64], input: &VlmaInput, kern: Kernel) -> Resu
             got: dst.len(),
         });
     }
-    vlma_compute_into(data, min_p, max_p, &matype, devtype, first, chosen, dst)?;
+    vlma_compute_into(data, min_p, max_p, matype, devtype, first, chosen, dst)?;
 
     let warm_end = first + max_p - 1;
     for i in 0..warm_end {
@@ -319,7 +344,7 @@ pub fn vlma_into_slice(dst: &mut [f64], input: &VlmaInput, kern: Kernel) -> Resu
 fn vlma_prepare<'a>(
     input: &'a VlmaInput,
     kernel: Kernel,
-) -> Result<(&'a [f64], usize, usize, String, usize, usize, Kernel), VlmaError> {
+) -> Result<(&'a [f64], usize, usize, &'a str, usize, usize, Kernel), VlmaError> {
     let data: &[f64] = input.as_ref();
 
     if data.is_empty() {
@@ -354,7 +379,7 @@ fn vlma_prepare<'a>(
         });
     }
 
-    let matype = input.get_matype();
+    let matype = input.get_matype_ref();
     let devtype = input.get_devtype();
 
     let chosen = match kernel {
@@ -443,7 +468,7 @@ pub unsafe fn vlma_scalar_sma_stddev_into(
     let min_pi = if min_period == 0 { 1 } else { min_period };
     let max_pi = core::cmp::max(max_period, min_pi);
     let mut last_p: usize = max_pi;
-    let mut sc_lut = Vec::with_capacity(max_pi + 1);
+    let mut sc_lut: SmallVec<[f64; 128]> = SmallVec::with_capacity(max_pi + 1);
     sc_lut.push(0.0);
     for p in 1..=max_pi {
         sc_lut.push(2.0 / (p as f64 + 1.0));
@@ -589,7 +614,7 @@ unsafe fn vlma_scalar_into(
     let max_pi = core::cmp::max(max_period, min_pi);
     let mut last_p: usize = max_pi;
 
-    let mut sc_lut = Vec::with_capacity(max_pi + 1);
+    let mut sc_lut: SmallVec<[f64; 128]> = SmallVec::with_capacity(max_pi + 1);
     sc_lut.push(0.0);
     for p in 1..=max_pi {
         sc_lut.push(2.0 / (p as f64 + 1.0));
@@ -742,7 +767,7 @@ unsafe fn vlma_row_fast_sma_std_prefix(
     let max_pi = core::cmp::max(max_period, min_pi);
     let mut last_p: usize = max_pi;
 
-    let mut sc_lut = Vec::with_capacity(max_pi + 1);
+    let mut sc_lut: SmallVec<[f64; 128]> = SmallVec::with_capacity(max_pi + 1);
     sc_lut.push(0.0);
     for p in 1..=max_pi {
         sc_lut.push(2.0 / (p as f64 + 1.0));
@@ -829,6 +854,9 @@ unsafe fn vlma_avx2_into(
     first_valid: usize,
     out: &mut [f64],
 ) -> Result<(), VlmaError> {
+    if matype == DEFAULT_MATYPE && devtype == DEFAULT_DEVTYPE {
+        return vlma_scalar_sma_stddev_into(data, min_period, max_period, first_valid, out);
+    }
     vlma_scalar_into(
         data,
         min_period,
@@ -873,6 +901,9 @@ unsafe fn vlma_avx512_into(
     first_valid: usize,
     out: &mut [f64],
 ) -> Result<(), VlmaError> {
+    if matype == DEFAULT_MATYPE && devtype == DEFAULT_DEVTYPE {
+        return vlma_scalar_sma_stddev_into(data, min_period, max_period, first_valid, out);
+    }
     if max_period <= 32 {
         vlma_avx512_short_into(
             data,
@@ -1238,13 +1269,13 @@ impl VlmaBatchBuilder {
         VlmaBatchBuilder::new().kernel(k).apply_slice(data)
     }
     pub fn apply_candles(self, c: &Candles, src: &str) -> Result<VlmaBatchOutput, VlmaError> {
-        let slice = source_type(c, src);
+        let slice = source_slice(c, src);
         self.apply_slice(slice)
     }
     pub fn with_default_candles(c: &Candles) -> Result<VlmaBatchOutput, VlmaError> {
         VlmaBatchBuilder::new()
             .kernel(Kernel::Auto)
-            .apply_candles(c, "close")
+            .apply_candles(c, DEFAULT_SOURCE)
     }
 }
 

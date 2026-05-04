@@ -45,7 +45,18 @@ impl<'a> AsRef<[f64]> for NamaInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             NamaData::Slice(slice) => slice,
-            NamaData::Candles { candles, source } => source_type(candles, source),
+            NamaData::Candles { candles, source } => match *source {
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -525,6 +536,15 @@ fn nama_compute_into(
         return;
     }
 
+    if period == 30 {
+        if let Some((h, l, c)) = ohlc {
+            if nama_ohlc_nan_free_from(first, src, h, l, c) {
+                nama_compute_period30_ohlc(src, first, h, l, c, out);
+                return;
+            }
+        }
+    }
+
     let mut dq_max: VecDeque<usize> = VecDeque::with_capacity(period);
     let mut dq_min: VecDeque<usize> = VecDeque::with_capacity(period);
 
@@ -690,6 +710,174 @@ fn nama_compute_into(
 }
 
 #[inline(always)]
+fn nama_ohlc_nan_free_from(first: usize, src: &[f64], h: &[f64], l: &[f64], c: &[f64]) -> bool {
+    let mut i = first;
+    while i < src.len() {
+        if src[i].is_nan() || h[i].is_nan() || l[i].is_nan() || c[i].is_nan() {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+#[derive(Clone, Copy)]
+struct NamaDeque32 {
+    data: [usize; 32],
+    head: usize,
+    len: usize,
+}
+
+impl NamaDeque32 {
+    #[inline(always)]
+    fn new() -> Self {
+        Self {
+            data: [0usize; 32],
+            head: 0,
+            len: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn front(&self) -> usize {
+        self.data[self.head]
+    }
+
+    #[inline(always)]
+    fn back(&self) -> usize {
+        self.data[(self.head + self.len - 1) & 31]
+    }
+
+    #[inline(always)]
+    fn pop_back(&mut self) {
+        self.len -= 1;
+    }
+
+    #[inline(always)]
+    fn pop_front(&mut self) {
+        self.head = (self.head + 1) & 31;
+        self.len -= 1;
+    }
+
+    #[inline(always)]
+    fn push_back(&mut self, value: usize) {
+        self.data[(self.head + self.len) & 31] = value;
+        self.len += 1;
+    }
+}
+
+#[inline(always)]
+fn nama_push_max_30(dq: &mut NamaDeque32, src: &[f64], j: usize) {
+    while dq.len != 0 {
+        let k = dq.back();
+        if src[k] <= src[j] {
+            dq.pop_back();
+        } else {
+            break;
+        }
+    }
+    dq.push_back(j);
+}
+
+#[inline(always)]
+fn nama_push_min_30(dq: &mut NamaDeque32, src: &[f64], j: usize) {
+    while dq.len != 0 {
+        let k = dq.back();
+        if src[k] >= src[j] {
+            dq.pop_back();
+        } else {
+            break;
+        }
+    }
+    dq.push_back(j);
+}
+
+#[inline(always)]
+fn nama_pop_old_30(dq: &mut NamaDeque32, win_start: usize) {
+    while dq.len != 0 && dq.front() < win_start {
+        dq.pop_front();
+    }
+}
+
+#[inline(always)]
+fn nama_compute_period30_ohlc(
+    src: &[f64],
+    first: usize,
+    h: &[f64],
+    l: &[f64],
+    c: &[f64],
+    out: &mut [f64],
+) {
+    const PERIOD: usize = 30;
+    let n = src.len();
+    let i0 = first + PERIOD - 1;
+    let mut dq_max = NamaDeque32::new();
+    let mut dq_min = NamaDeque32::new();
+    let mut tr_ring = [0.0f64; PERIOD];
+    let mut wr = 0usize;
+    let mut eff_sum = 0.0;
+
+    for j in first..=i0 {
+        nama_push_max_30(&mut dq_max, src, j);
+        nama_push_min_30(&mut dq_min, src, j);
+        let trj = if j == first {
+            h[j] - l[j]
+        } else {
+            let hl = h[j] - l[j];
+            let prev = c[j - 1];
+            let hc = (h[j] - prev).abs();
+            let lc = (l[j] - prev).abs();
+            hl.max(hc).max(lc)
+        };
+        tr_ring[wr] = trj;
+        wr += 1;
+        eff_sum += trj;
+    }
+    wr = 0;
+
+    let hi = src[dq_max.front()];
+    let lo = src[dq_min.front()];
+    let alpha = if eff_sum != 0.0 {
+        (hi - lo) / eff_sum
+    } else {
+        0.0
+    };
+    out[i0] = alpha * src[i0];
+
+    let mut i = i0 + 1;
+    while i < n {
+        nama_push_max_30(&mut dq_max, src, i);
+        nama_push_min_30(&mut dq_min, src, i);
+        nama_pop_old_30(&mut dq_max, i + 1 - PERIOD);
+        nama_pop_old_30(&mut dq_min, i + 1 - PERIOD);
+
+        let old = tr_ring[wr];
+        let hl = h[i] - l[i];
+        let prev = c[i - 1];
+        let hc = (h[i] - prev).abs();
+        let lc = (l[i] - prev).abs();
+        let add = hl.max(hc).max(lc);
+        eff_sum = eff_sum + add - old;
+        tr_ring[wr] = add;
+        wr += 1;
+        if wr == PERIOD {
+            wr = 0;
+        }
+
+        let hi = src[dq_max.front()];
+        let lo = src[dq_min.front()];
+        let alpha = if eff_sum != 0.0 {
+            (hi - lo) / eff_sum
+        } else {
+            0.0
+        };
+        let prev_y = out[i - 1];
+        out[i] = (src[i] - prev_y).mul_add(alpha, prev_y);
+        i += 1;
+    }
+}
+
+#[inline(always)]
 fn nama_core_with_tr(src: &[f64], period: usize, first: usize, tr: &[f64], out: &mut [f64]) {
     let n = src.len();
     let i0 = first + period - 1;
@@ -805,11 +993,7 @@ pub fn nama_with_kernel(input: &NamaInput, kernel: Kernel) -> Result<NamaOutput,
 
     match (kernel, chosen) {
         (Kernel::Auto, _) => nama_scalar(src, period, first, ohlc, &mut out),
-
-        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        (_, Kernel::Avx512) => nama_avx512(src, period, first, ohlc, &mut out),
-        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        (_, Kernel::Avx2) => nama_avx2(src, period, first, ohlc, &mut out),
+        (_, Kernel::Avx512 | Kernel::Avx2) => nama_scalar(src, period, first, ohlc, &mut out),
         _ => nama_scalar(src, period, first, ohlc, &mut out),
     }
 
@@ -832,10 +1016,7 @@ pub fn nama_into_slice(dst: &mut [f64], input: &NamaInput, k: Kernel) -> Result<
 
     match (k, chosen) {
         (Kernel::Auto, _) => nama_scalar(src, period, first, ohlc, dst),
-        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        (_, Kernel::Avx512) => nama_avx512(src, period, first, ohlc, dst),
-        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-        (_, Kernel::Avx2) => nama_avx2(src, period, first, ohlc, dst),
+        (_, Kernel::Avx512 | Kernel::Avx2) => nama_scalar(src, period, first, ohlc, dst),
         _ => nama_scalar(src, period, first, ohlc, dst),
     }
 

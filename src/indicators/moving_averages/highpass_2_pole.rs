@@ -1,8 +1,7 @@
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -364,11 +363,19 @@ pub fn highpass_2_pole_with_kernel(
     kernel: Kernel,
 ) -> Result<HighPass2Output, HighPass2Error> {
     let (data, period, k, first, chosen) = highpass2_prepare(input, kernel)?;
-    let warm = warmup_end(first, period);
     let mut out = alloc_with_nan_prefix(data.len(), first);
 
     unsafe {
         match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch if period == 48 && k == 0.707 => {
+                highpass_2_pole_scalar_default_48_0707(data, first, &mut out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch
+                if period == 48 && k == 0.707 =>
+            {
+                highpass_2_pole_scalar_default_48_0707(data, first, &mut out)
+            }
             Kernel::Scalar | Kernel::ScalarBatch => {
                 highpass_2_pole_scalar_(data, period, k, first, &mut out)
             }
@@ -399,8 +406,6 @@ fn highpass_2_pole_with_kernel_into(
             expected: data.len(),
         });
     }
-    let warm = warmup_end(first, period);
-
     if first > 0 {
         let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
         for v in &mut out[..first] {
@@ -410,6 +415,15 @@ fn highpass_2_pole_with_kernel_into(
 
     unsafe {
         match chosen {
+            Kernel::Scalar | Kernel::ScalarBatch if period == 48 && k == 0.707 => {
+                highpass_2_pole_scalar_default_48_0707(data, first, out)
+            }
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch
+                if period == 48 && k == 0.707 =>
+            {
+                highpass_2_pole_scalar_default_48_0707(data, first, out)
+            }
             Kernel::Scalar | Kernel::ScalarBatch => {
                 highpass_2_pole_scalar_(data, period, k, first, out)
             }
@@ -524,6 +538,68 @@ pub unsafe fn highpass_2_pole_scalar_(
         src = src.add(1);
         dst = dst.add(1);
         rem -= 1;
+    }
+}
+
+#[inline(always)]
+unsafe fn highpass_2_pole_scalar_default_48_0707(data: &[f64], first: usize, out: &mut [f64]) {
+    const PERIOD: f64 = 48.0;
+    const K: f64 = 0.707;
+
+    let n = data.len();
+    if n == 0 || first >= n {
+        return;
+    }
+
+    let theta = 2.0 * core::f64::consts::PI * K / PERIOD;
+    let (s, c0) = theta.sin_cos();
+    let alpha = 1.0 + ((s - 1.0) / c0);
+    let one_minus_alpha = 1.0 - alpha;
+    let c = (1.0 - 0.5 * alpha) * (1.0 - 0.5 * alpha);
+    let two_1m = 2.0 * one_minus_alpha;
+    let neg_oma_sq = -(one_minus_alpha * one_minus_alpha);
+
+    out[first] = data[first];
+    if first + 1 >= n {
+        return;
+    }
+    out[first + 1] = data[first + 1];
+    if first + 2 >= n {
+        return;
+    }
+
+    let mut y_im2 = out[first];
+    let mut y_im1 = out[first + 1];
+    let mut i = first + 2;
+    while i + 3 < n {
+        let dd0 = data[i] - 2.0 * data[i - 1] + data[i - 2];
+        let y0 = two_1m.mul_add(y_im1, neg_oma_sq.mul_add(y_im2, c * dd0));
+        out[i] = y0;
+
+        let dd1 = data[i + 1] - 2.0 * data[i] + data[i - 1];
+        let y1 = two_1m.mul_add(y0, neg_oma_sq.mul_add(y_im1, c * dd1));
+        out[i + 1] = y1;
+
+        let dd2 = data[i + 2] - 2.0 * data[i + 1] + data[i];
+        let y2 = two_1m.mul_add(y1, neg_oma_sq.mul_add(y0, c * dd2));
+        out[i + 2] = y2;
+
+        let dd3 = data[i + 3] - 2.0 * data[i + 2] + data[i + 1];
+        let y3 = two_1m.mul_add(y2, neg_oma_sq.mul_add(y1, c * dd3));
+        out[i + 3] = y3;
+
+        y_im2 = y2;
+        y_im1 = y3;
+        i += 4;
+    }
+
+    while i < n {
+        let dd = data[i] - 2.0 * data[i - 1] + data[i - 2];
+        let y = two_1m.mul_add(y_im1, neg_oma_sq.mul_add(y_im2, c * dd));
+        out[i] = y;
+        y_im2 = y_im1;
+        y_im1 = y;
+        i += 1;
     }
 }
 

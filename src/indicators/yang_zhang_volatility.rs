@@ -482,6 +482,15 @@ fn yang_zhang_prepare<'a>(
     }
 
     let chosen = match kernel {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        Kernel::Auto => {
+            if len >= 262_144 {
+                Kernel::Scalar
+            } else {
+                detect_best_kernel()
+            }
+        }
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
         Kernel::Auto => detect_best_kernel(),
         k => k.to_non_batch(),
     };
@@ -506,6 +515,44 @@ fn sample_var(sum: f64, sumsq: f64, n: usize) -> f64 {
         v = 0.0;
     }
     v
+}
+
+#[inline]
+fn yang_zhang_precompute_ln_diff_scalar(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    oret: &mut [f64],
+    cret: &mut [f64],
+    rs_val: &mut [f64],
+) {
+    let len = close.len();
+    if len == 0 {
+        return;
+    }
+
+    let mut prev_ln_close = close[0].ln();
+    oret[0] = 0.0;
+
+    for i in 0..len {
+        let ln_open = open[i].ln();
+        let ln_high = high[i].ln();
+        let ln_low = low[i].ln();
+        let ln_close = close[i].ln();
+
+        let h_c = ln_high - ln_close;
+        let h_o = ln_high - ln_open;
+        let l_c = ln_low - ln_close;
+        let l_o = ln_low - ln_open;
+        rs_val[i] = h_c * h_o + l_c * l_o;
+
+        cret[i] = ln_close - ln_open;
+        if i > 0 {
+            oret[i] = ln_open - prev_ln_close;
+        }
+        prev_ln_close = ln_close;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -767,7 +814,7 @@ unsafe fn yang_zhang_precompute_ln_diff_avx512_fast(
     rs_val[0] = rs_component(high[0], low[0], open[0], close[0]);
 
     let one = _mm512_set1_pd(1.0);
-    let threshold = _mm512_set1_pd(0.25);
+    let threshold = _mm512_set1_pd(0.1);
 
     let mut i = 1usize;
     while i + 8 <= len {
@@ -1070,64 +1117,11 @@ fn yang_zhang_compute_into(
         return;
     }
 
-    let lb_f = lookback as f64;
-
-    let start = warmup;
-    let win_start = start + 1 - lookback;
-
-    let mut sum_rs = 0.0;
-    for j in win_start..=start {
-        sum_rs += rs_component(high[j], low[j], open[j], close[j]);
-    }
-
-    let mut sum_o = 0.0;
-    let mut sumsq_o = 0.0;
-    let mut sum_c = 0.0;
-    let mut sumsq_c = 0.0;
-
-    for j in win_start..=start {
-        let oret = (open[j] / close[j - 1]).ln();
-        sum_o += oret;
-        sumsq_o += oret * oret;
-
-        let cret = (close[j] / open[j]).ln();
-        sum_c += cret;
-        sumsq_c += cret * cret;
-    }
-
-    for t in start..len {
-        let mut rs_var = sum_rs / lb_f;
-        if rs_var < 0.0 {
-            rs_var = 0.0;
-        }
-        out_rs[t] = rs_var.sqrt();
-
-        let o_var = sample_var(sum_o, sumsq_o, lookback);
-        let c_var = sample_var(sum_c, sumsq_c, lookback);
-
-        let mut yz_var = o_var + k * c_var + (1.0 - k) * rs_var;
-        if yz_var < 0.0 {
-            yz_var = 0.0;
-        }
-        out_yz[t] = yz_var.sqrt();
-
-        if t + 1 < len {
-            let add_rs = rs_component(high[t + 1], low[t + 1], open[t + 1], close[t + 1]);
-            let sub_idx = t + 1 - lookback;
-            let sub_rs = rs_component(high[sub_idx], low[sub_idx], open[sub_idx], close[sub_idx]);
-            sum_rs += add_rs - sub_rs;
-
-            let add_oret = (open[t + 1] / close[t]).ln();
-            let sub_oret = (open[sub_idx] / close[sub_idx - 1]).ln();
-            sum_o += add_oret - sub_oret;
-            sumsq_o += add_oret * add_oret - sub_oret * sub_oret;
-
-            let add_cret = (close[t + 1] / open[t + 1]).ln();
-            let sub_cret = (close[sub_idx] / open[sub_idx]).ln();
-            sum_c += add_cret - sub_cret;
-            sumsq_c += add_cret * add_cret - sub_cret * sub_cret;
-        }
-    }
+    let mut rs_val = alloc_uninit_f64(len);
+    let mut oret = alloc_uninit_f64(len);
+    let mut cret = alloc_uninit_f64(len);
+    yang_zhang_precompute_ln_diff_scalar(open, high, low, close, &mut oret, &mut cret, &mut rs_val);
+    yang_zhang_row_precomputed_into(&oret, &cret, &rs_val, lookback, first, k, out_yz, out_rs);
 }
 
 #[inline]
@@ -1792,17 +1786,15 @@ fn yang_zhang_volatility_batch_inner_into(
     let mut rs_val = alloc_uninit_f64(len);
     match chosen {
         Kernel::Scalar => {
-            if len != 0 {
-                oret[0] = 0.0;
-            }
-
-            for i in 0..len {
-                rs_val[i] = rs_component(high[i], low[i], open[i], close[i]);
-                cret[i] = (close[i] / open[i]).ln();
-                if i > 0 {
-                    oret[i] = (open[i] / close[i - 1]).ln();
-                }
-            }
+            yang_zhang_precompute_ln_diff_scalar(
+                open,
+                high,
+                low,
+                close,
+                &mut oret,
+                &mut cret,
+                &mut rs_val,
+            );
         }
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2 => unsafe {
@@ -1830,17 +1822,15 @@ fn yang_zhang_volatility_batch_inner_into(
         },
         #[allow(unreachable_patterns)]
         _ => {
-            if len != 0 {
-                oret[0] = 0.0;
-            }
-
-            for i in 0..len {
-                rs_val[i] = rs_component(high[i], low[i], open[i], close[i]);
-                cret[i] = (close[i] / open[i]).ln();
-                if i > 0 {
-                    oret[i] = (open[i] / close[i - 1]).ln();
-                }
-            }
+            yang_zhang_precompute_ln_diff_scalar(
+                open,
+                high,
+                low,
+                close,
+                &mut oret,
+                &mut cret,
+                &mut rs_val,
+            );
         }
     }
 

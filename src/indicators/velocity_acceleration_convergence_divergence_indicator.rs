@@ -15,8 +15,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -25,13 +24,30 @@ use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
 
+const DEFAULT_LENGTH: usize = 21;
+const DEFAULT_SMOOTH_LENGTH: usize = 5;
+const DEFAULT_SOURCE: &str = "hlcc4";
+const DEFAULT_WMA_DENOMINATOR: f64 =
+    (DEFAULT_SMOOTH_LENGTH * (DEFAULT_SMOOTH_LENGTH + 1) / 2) as f64;
+
 impl<'a> AsRef<[f64]> for VelocityAccelerationConvergenceDivergenceIndicatorInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             VelocityAccelerationConvergenceDivergenceIndicatorData::Slice(slice) => slice,
             VelocityAccelerationConvergenceDivergenceIndicatorData::Candles { candles, source } => {
-                source_type(candles, source)
+                match *source {
+                    DEFAULT_SOURCE | "hlcc" => &candles.hlcc4,
+                    "open" => &candles.open,
+                    "high" => &candles.high,
+                    "low" => &candles.low,
+                    "close" => &candles.close,
+                    "volume" => &candles.volume,
+                    "hl2" => &candles.hl2,
+                    "hlc3" => &candles.hlc3,
+                    "ohlc4" => &candles.ohlc4,
+                    _ => source_type(candles, source),
+                }
             }
         }
     }
@@ -65,8 +81,8 @@ pub struct VelocityAccelerationConvergenceDivergenceIndicatorParams {
 impl Default for VelocityAccelerationConvergenceDivergenceIndicatorParams {
     fn default() -> Self {
         Self {
-            length: Some(21),
-            smooth_length: Some(5),
+            length: Some(DEFAULT_LENGTH),
+            smooth_length: Some(DEFAULT_SMOOTH_LENGTH),
         }
     }
 }
@@ -108,19 +124,19 @@ impl<'a> VelocityAccelerationConvergenceDivergenceIndicatorInput<'a> {
     pub fn with_default_candles(candles: &'a Candles) -> Self {
         Self::from_candles(
             candles,
-            "hlcc4",
+            DEFAULT_SOURCE,
             VelocityAccelerationConvergenceDivergenceIndicatorParams::default(),
         )
     }
 
     #[inline]
     pub fn get_length(&self) -> usize {
-        self.params.length.unwrap_or(21)
+        self.params.length.unwrap_or(DEFAULT_LENGTH)
     }
 
     #[inline]
     pub fn get_smooth_length(&self) -> usize {
-        self.params.smooth_length.unwrap_or(5)
+        self.params.smooth_length.unwrap_or(DEFAULT_SMOOTH_LENGTH)
     }
 }
 
@@ -179,7 +195,9 @@ impl VelocityAccelerationConvergenceDivergenceIndicatorBuilder {
         };
         velocity_acceleration_convergence_divergence_indicator_with_kernel(
             &VelocityAccelerationConvergenceDivergenceIndicatorInput::from_candles(
-                candles, "hlcc4", params,
+                candles,
+                DEFAULT_SOURCE,
+                params,
             ),
             self.kernel,
         )
@@ -414,8 +432,8 @@ impl VelocityAccelerationConvergenceDivergenceIndicatorStream {
     pub fn try_new(
         params: VelocityAccelerationConvergenceDivergenceIndicatorParams,
     ) -> Result<Self, VelocityAccelerationConvergenceDivergenceIndicatorError> {
-        let length = params.length.unwrap_or(21);
-        let smooth_length = params.smooth_length.unwrap_or(5);
+        let length = params.length.unwrap_or(DEFAULT_LENGTH);
+        let smooth_length = params.smooth_length.unwrap_or(DEFAULT_SMOOTH_LENGTH);
         validate_length(length)?;
         validate_smooth_length(smooth_length)?;
         Ok(Self {
@@ -485,8 +503,11 @@ fn compute_row(
     vacd: &mut [f64],
     signal: &mut [f64],
 ) {
-    vacd.fill(f64::NAN);
-    signal.fill(f64::NAN);
+    if length == DEFAULT_LENGTH && smooth_length == DEFAULT_SMOOTH_LENGTH {
+        compute_row_default(data, vacd, signal);
+        return;
+    }
+
     let mut stream = VelocityAccelerationConvergenceDivergenceIndicatorStream::try_new(
         VelocityAccelerationConvergenceDivergenceIndicatorParams {
             length: Some(length),
@@ -498,7 +519,173 @@ fn compute_row(
         if let Some((out_vacd, out_signal)) = stream.update(value) {
             vacd[i] = out_vacd;
             signal[i] = out_signal;
+        } else {
+            vacd[i] = f64::NAN;
+            signal[i] = f64::NAN;
         }
+    }
+}
+
+#[inline(always)]
+fn fixed_history_at<const N: usize>(
+    values: &[f64; N],
+    next: usize,
+    count: usize,
+    lag: usize,
+) -> f64 {
+    if count < lag {
+        0.0
+    } else {
+        fixed_history_at_full(values, next, lag)
+    }
+}
+
+#[inline(always)]
+fn fixed_history_at_full<const N: usize>(values: &[f64; N], next: usize, lag: usize) -> f64 {
+    let idx = if next >= lag {
+        next - lag
+    } else {
+        N + next - lag
+    };
+    values[idx]
+}
+
+#[inline(always)]
+fn fixed_push<const N: usize>(
+    values: &mut [f64; N],
+    next: &mut usize,
+    count: &mut usize,
+    value: f64,
+) {
+    values[*next] = value;
+    *next += 1;
+    if *next == N {
+        *next = 0;
+    }
+    if *count < N {
+        *count += 1;
+    }
+}
+
+#[inline(always)]
+fn compute_velocity_default_current(
+    history: &[f64; DEFAULT_LENGTH],
+    next: usize,
+    count: usize,
+    current: f64,
+) -> f64 {
+    let mut sum = 0.0;
+    for i in 1..=DEFAULT_LENGTH {
+        let prev = fixed_history_at(history, next, count, i);
+        sum += (current - prev) / i as f64;
+    }
+    sum / DEFAULT_LENGTH as f64
+}
+
+#[inline(always)]
+fn compute_velocity_default_current_full(
+    history: &[f64; DEFAULT_LENGTH],
+    next: usize,
+    current: f64,
+) -> f64 {
+    let mut sum = 0.0;
+    for i in 1..=DEFAULT_LENGTH {
+        let prev = fixed_history_at_full(history, next, i);
+        sum += (current - prev) / i as f64;
+    }
+    sum / DEFAULT_LENGTH as f64
+}
+
+#[inline(always)]
+fn compute_wma_default_tail_full(history: &[f64; DEFAULT_SMOOTH_LENGTH], next: usize) -> f64 {
+    let mut numerator = 0.0;
+    for offset in 0..DEFAULT_SMOOTH_LENGTH {
+        let weight = (offset + 1) as f64;
+        let value = fixed_history_at_full(history, next, DEFAULT_SMOOTH_LENGTH - offset);
+        numerator += value * weight;
+    }
+    numerator / DEFAULT_WMA_DENOMINATOR
+}
+
+#[inline(always)]
+fn compute_row_default(data: &[f64], vacd: &mut [f64], signal: &mut [f64]) {
+    let mut source_history = [0.0; DEFAULT_LENGTH];
+    let mut source_next = 0usize;
+    let mut source_count = 0usize;
+    let mut raw_history = [0.0; DEFAULT_SMOOTH_LENGTH];
+    let mut raw_next = 0usize;
+    let mut raw_count = 0usize;
+    let mut velocity_avg_history = [0.0; DEFAULT_LENGTH];
+    let mut velocity_avg_next = 0usize;
+    let mut velocity_avg_count = 0usize;
+    let mut prev_vacd = 0.0;
+    let mut has_prev_vacd = false;
+
+    for (i, &value) in data.iter().enumerate() {
+        if !value.is_finite() {
+            source_next = 0;
+            source_count = 0;
+            raw_next = 0;
+            raw_count = 0;
+            velocity_avg_next = 0;
+            velocity_avg_count = 0;
+            prev_vacd = 0.0;
+            has_prev_vacd = false;
+            vacd[i] = f64::NAN;
+            signal[i] = f64::NAN;
+            continue;
+        }
+
+        let raw_velocity = if source_count == DEFAULT_LENGTH {
+            compute_velocity_default_current_full(&source_history, source_next, value)
+        } else {
+            compute_velocity_default_current(&source_history, source_next, source_count, value)
+        };
+        fixed_push(
+            &mut source_history,
+            &mut source_next,
+            &mut source_count,
+            value,
+        );
+        fixed_push(
+            &mut raw_history,
+            &mut raw_next,
+            &mut raw_count,
+            raw_velocity,
+        );
+
+        if raw_count < DEFAULT_SMOOTH_LENGTH {
+            vacd[i] = f64::NAN;
+            signal[i] = f64::NAN;
+            continue;
+        }
+
+        let velocity_avg = compute_wma_default_tail_full(&raw_history, raw_next);
+        let acceleration = if velocity_avg_count == DEFAULT_LENGTH {
+            compute_velocity_default_current_full(
+                &velocity_avg_history,
+                velocity_avg_next,
+                velocity_avg,
+            )
+        } else {
+            compute_velocity_default_current(
+                &velocity_avg_history,
+                velocity_avg_next,
+                velocity_avg_count,
+                velocity_avg,
+            )
+        };
+        let out_vacd = velocity_avg - acceleration;
+        vacd[i] = out_vacd;
+        signal[i] = classify_signal(out_vacd, if has_prev_vacd { prev_vacd } else { 0.0 });
+        fixed_push(
+            &mut velocity_avg_history,
+            &mut velocity_avg_next,
+            &mut velocity_avg_count,
+            velocity_avg,
+        );
+        prev_vacd = out_vacd;
+        has_prev_vacd = true;
     }
 }
 
@@ -524,13 +711,12 @@ pub fn velocity_acceleration_convergence_divergence_indicator_with_kernel(
     validate_common(data, length, smooth_length)?;
 
     let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
+        Kernel::Auto => Kernel::Scalar,
+        other => other.to_non_batch(),
     };
 
-    let prefix = warmup_prefix(smooth_length);
-    let mut vacd = alloc_with_nan_prefix(data.len(), prefix);
-    let mut signal = alloc_with_nan_prefix(data.len(), prefix);
+    let mut vacd = alloc_uninit_f64(data.len());
+    let mut signal = alloc_uninit_f64(data.len());
     compute_row(data, length, smooth_length, &mut vacd, &mut signal);
     Ok(VelocityAccelerationConvergenceDivergenceIndicatorOutput { vacd, signal })
 }
@@ -563,8 +749,8 @@ pub fn velocity_acceleration_convergence_divergence_indicator_into_slice(
     }
 
     let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
+        Kernel::Auto => Kernel::Scalar,
+        other => other.to_non_batch(),
     };
 
     compute_row(data, length, smooth_length, dst_vacd, dst_signal);

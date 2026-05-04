@@ -283,7 +283,7 @@ struct ResolvedInput<'a> {
 }
 
 #[inline(always)]
-fn longest_valid_run(data: &[f64]) -> usize {
+fn valid_run_until(data: &[f64], needed: usize) -> usize {
     let mut best = 0usize;
     let mut current = 0usize;
     for &value in data {
@@ -293,6 +293,9 @@ fn longest_valid_run(data: &[f64]) -> usize {
             current += 1;
             if current > best {
                 best = current;
+                if best >= needed {
+                    return best;
+                }
             }
         }
     }
@@ -323,8 +326,7 @@ fn resolve_input<'a>(
     if data.is_empty() {
         return Err(NonlinearRegressionZeroLagMovingAverageError::EmptyInputData);
     }
-    let valid = longest_valid_run(data);
-    if valid == 0 {
+    if !data.iter().any(|value| !value.is_nan()) {
         return Err(NonlinearRegressionZeroLagMovingAverageError::AllValuesNaN);
     }
 
@@ -345,6 +347,7 @@ fn resolve_input<'a>(
     }
 
     let needed = required_valid_count(zlma_period, regression_period)?;
+    let valid = valid_run_until(data, needed);
     if valid < needed {
         return Err(
             NonlinearRegressionZeroLagMovingAverageError::NotEnoughValidData { needed, valid },

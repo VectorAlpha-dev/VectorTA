@@ -17,7 +17,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes, make_uninit_matrix,
+    alloc_uninit_f64, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -699,7 +699,7 @@ impl FibonacciTrailingStopStream {
 fn fibonacci_trailing_stop_prepare<'a>(
     input: &'a FibonacciTrailingStopInput,
     kernel: Kernel,
-) -> Result<(&'a [f64], &'a [f64], &'a [f64], ResolvedParams, Kernel), FibonacciTrailingStopError> {
+) -> Result<(&'a [f64], &'a [f64], &'a [f64], ResolvedParams), FibonacciTrailingStopError> {
     let (high, low, close) = input.as_slices();
     if high.is_empty() || low.is_empty() || close.is_empty() {
         return Err(FibonacciTrailingStopError::EmptyInputData);
@@ -724,11 +724,11 @@ fn fibonacci_trailing_stop_prepare<'a>(
         return Err(FibonacciTrailingStopError::NotEnoughValidData { needed, valid });
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+    let _chosen = match kernel {
+        Kernel::Auto => Kernel::Scalar,
         other => other.to_non_batch(),
     };
-    Ok((high, low, close, params, chosen))
+    Ok((high, low, close, params))
 }
 
 fn fibonacci_trailing_stop_row_from_slices(
@@ -741,11 +741,6 @@ fn fibonacci_trailing_stop_row_from_slices(
     short_stop: &mut [f64],
     direction: &mut [f64],
 ) {
-    trailing_stop.fill(f64::NAN);
-    long_stop.fill(f64::NAN);
-    short_stop.fill(f64::NAN);
-    direction.fill(f64::NAN);
-
     let mut state: Option<CoreState> = None;
     for i in 0..close.len() {
         let h = high[i];
@@ -753,6 +748,10 @@ fn fibonacci_trailing_stop_row_from_slices(
         let c = close[i];
         if !(h.is_finite() && l.is_finite() && c.is_finite()) {
             state = None;
+            trailing_stop[i] = f64::NAN;
+            long_stop[i] = f64::NAN;
+            short_stop[i] = f64::NAN;
+            direction[i] = f64::NAN;
             continue;
         }
 
@@ -782,12 +781,12 @@ pub fn fibonacci_trailing_stop_with_kernel(
     input: &FibonacciTrailingStopInput,
     kernel: Kernel,
 ) -> Result<FibonacciTrailingStopOutput, FibonacciTrailingStopError> {
-    let (high, low, close, params, _chosen) = fibonacci_trailing_stop_prepare(input, kernel)?;
+    let (high, low, close, params) = fibonacci_trailing_stop_prepare(input, kernel)?;
     let len = close.len();
-    let mut trailing_stop = vec![f64::NAN; len];
-    let mut long_stop = vec![f64::NAN; len];
-    let mut short_stop = vec![f64::NAN; len];
-    let mut direction = vec![f64::NAN; len];
+    let mut trailing_stop = alloc_uninit_f64(len);
+    let mut long_stop = alloc_uninit_f64(len);
+    let mut short_stop = alloc_uninit_f64(len);
+    let mut direction = alloc_uninit_f64(len);
     fibonacci_trailing_stop_row_from_slices(
         high,
         low,
@@ -823,7 +822,7 @@ pub fn fibonacci_trailing_stop_into_slices(
     {
         return Err(FibonacciTrailingStopError::OutputLengthMismatch { expected });
     }
-    let (high, low, close, params, _chosen) = fibonacci_trailing_stop_prepare(input, kernel)?;
+    let (high, low, close, params) = fibonacci_trailing_stop_prepare(input, kernel)?;
     fibonacci_trailing_stop_row_from_slices(
         high,
         low,

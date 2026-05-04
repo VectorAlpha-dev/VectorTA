@@ -17,8 +17,7 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_uninit_f64, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -31,15 +30,26 @@ use thiserror::Error;
 const DEFAULT_LENGTH: usize = 21;
 const DEFAULT_SMOOTH_LENGTH: usize = 5;
 const DEFAULT_SOURCE: &str = "hlcc4";
+const DEFAULT_WMA_DENOMINATOR: f64 =
+    (DEFAULT_SMOOTH_LENGTH * (DEFAULT_SMOOTH_LENGTH + 1) / 2) as f64;
 
 impl<'a> AsRef<[f64]> for VelocityAccelerationIndicatorInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             VelocityAccelerationIndicatorData::Slice(slice) => slice,
-            VelocityAccelerationIndicatorData::Candles { candles, source } => {
-                source_type(candles, source)
-            }
+            VelocityAccelerationIndicatorData::Candles { candles, source } => match *source {
+                DEFAULT_SOURCE | "hlcc" => &candles.hlcc4,
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                _ => source_type(candles, source),
+            },
         }
     }
 }
@@ -452,6 +462,86 @@ fn velocity_value(current: f64, history: &LagHistory, harmonic_sum: f64, inv_len
 }
 
 #[inline(always)]
+fn fixed_lag_weighted_past_sum(values: &[f64; DEFAULT_LENGTH], next: usize, count: usize) -> f64 {
+    let upto = count.min(DEFAULT_LENGTH);
+    let mut sum = 0.0;
+    let direct = upto.min(next);
+    for lag in 1..=direct {
+        sum += values[next - lag] / lag as f64;
+    }
+    for lag in direct + 1..=upto {
+        sum += values[DEFAULT_LENGTH + next - lag] / lag as f64;
+    }
+    sum
+}
+
+#[inline(always)]
+fn fixed_lag_push(
+    values: &mut [f64; DEFAULT_LENGTH],
+    next: &mut usize,
+    count: &mut usize,
+    value: f64,
+) {
+    values[*next] = value;
+    *next += 1;
+    if *next == DEFAULT_LENGTH {
+        *next = 0;
+    }
+    if *count < DEFAULT_LENGTH {
+        *count += 1;
+    }
+}
+
+#[inline(always)]
+fn fixed_velocity_value(
+    current: f64,
+    values: &[f64; DEFAULT_LENGTH],
+    next: usize,
+    count: usize,
+    harmonic_sum: f64,
+    inv_length: f64,
+) -> f64 {
+    (current * harmonic_sum - fixed_lag_weighted_past_sum(values, next, count)) * inv_length
+}
+
+#[inline(always)]
+fn fixed_wma_update(
+    values: &mut [f64; DEFAULT_SMOOTH_LENGTH],
+    next: &mut usize,
+    count: &mut usize,
+    sum: &mut f64,
+    weighted_sum: &mut f64,
+    value: f64,
+) -> Option<f64> {
+    if *count < DEFAULT_SMOOTH_LENGTH {
+        values[*next] = value;
+        *count += 1;
+        *next += 1;
+        if *next == DEFAULT_SMOOTH_LENGTH {
+            *next = 0;
+        }
+        *sum += value;
+        *weighted_sum += *count as f64 * value;
+        if *count < DEFAULT_SMOOTH_LENGTH {
+            None
+        } else {
+            Some(*weighted_sum / DEFAULT_WMA_DENOMINATOR)
+        }
+    } else {
+        let old = values[*next];
+        let prev_sum = *sum;
+        values[*next] = value;
+        *next += 1;
+        if *next == DEFAULT_SMOOTH_LENGTH {
+            *next = 0;
+        }
+        *sum = prev_sum - old + value;
+        *weighted_sum = *weighted_sum - prev_sum + DEFAULT_SMOOTH_LENGTH as f64 * value;
+        Some(*weighted_sum / DEFAULT_WMA_DENOMINATOR)
+    }
+}
+
+#[inline(always)]
 fn first_valid_value(data: &[f64]) -> usize {
     let mut i = 0usize;
     while i < data.len() {
@@ -520,7 +610,7 @@ fn velocity_acceleration_indicator_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other.to_non_batch(),
     };
     Ok((data, length, smooth_length, first, chosen))
@@ -528,6 +618,11 @@ fn velocity_acceleration_indicator_prepare<'a>(
 
 #[inline(always)]
 fn compute_row(data: &[f64], length: usize, smooth_length: usize, out: &mut [f64]) {
+    if length == DEFAULT_LENGTH && smooth_length == DEFAULT_SMOOTH_LENGTH {
+        compute_row_default(data, out);
+        return;
+    }
+
     let mut stream =
         VelocityAccelerationIndicatorStream::try_new(VelocityAccelerationIndicatorParams {
             length: Some(length),
@@ -536,6 +631,84 @@ fn compute_row(data: &[f64], length: usize, smooth_length: usize, out: &mut [f64
         .unwrap();
     for (slot, &value) in out.iter_mut().zip(data.iter()) {
         *slot = stream.update(value).unwrap_or(f64::NAN);
+    }
+}
+
+#[inline(always)]
+fn compute_row_default(data: &[f64], out: &mut [f64]) {
+    let mut harmonic_sum = 0.0;
+    for i in 1..=DEFAULT_LENGTH {
+        harmonic_sum += 1.0 / i as f64;
+    }
+    let inv_length = 1.0 / DEFAULT_LENGTH as f64;
+
+    let mut source_history = [0.0; DEFAULT_LENGTH];
+    let mut source_next = 0usize;
+    let mut source_count = 0usize;
+    let mut wma_values = [0.0; DEFAULT_SMOOTH_LENGTH];
+    let mut wma_next = 0usize;
+    let mut wma_count = 0usize;
+    let mut wma_sum = 0.0;
+    let mut wma_weighted_sum = 0.0;
+    let mut acceleration_history = [0.0; DEFAULT_LENGTH];
+    let mut acceleration_next = 0usize;
+    let mut acceleration_count = 0usize;
+
+    for (slot, &value) in out.iter_mut().zip(data.iter()) {
+        if !value.is_finite() {
+            source_next = 0;
+            source_count = 0;
+            wma_next = 0;
+            wma_count = 0;
+            wma_sum = 0.0;
+            wma_weighted_sum = 0.0;
+            acceleration_next = 0;
+            acceleration_count = 0;
+            *slot = f64::NAN;
+            continue;
+        }
+
+        let velocity = fixed_velocity_value(
+            value,
+            &source_history,
+            source_next,
+            source_count,
+            harmonic_sum,
+            inv_length,
+        );
+        fixed_lag_push(
+            &mut source_history,
+            &mut source_next,
+            &mut source_count,
+            value,
+        );
+
+        if let Some(velocity_avg) = fixed_wma_update(
+            &mut wma_values,
+            &mut wma_next,
+            &mut wma_count,
+            &mut wma_sum,
+            &mut wma_weighted_sum,
+            velocity,
+        ) {
+            let acceleration = fixed_velocity_value(
+                velocity_avg,
+                &acceleration_history,
+                acceleration_next,
+                acceleration_count,
+                harmonic_sum,
+                inv_length,
+            );
+            fixed_lag_push(
+                &mut acceleration_history,
+                &mut acceleration_next,
+                &mut acceleration_count,
+                velocity_avg,
+            );
+            *slot = acceleration;
+        } else {
+            *slot = f64::NAN;
+        }
     }
 }
 
@@ -553,10 +726,8 @@ pub fn velocity_acceleration_indicator_with_kernel(
 ) -> Result<VelocityAccelerationIndicatorOutput, VelocityAccelerationIndicatorError> {
     let (data, length, smooth_length, first, _chosen) =
         velocity_acceleration_indicator_prepare(input, kernel)?;
-    let mut values = alloc_with_nan_prefix(
-        data.len(),
-        first.saturating_add(smooth_length.saturating_sub(1)),
-    );
+    let _ = first;
+    let mut values = alloc_uninit_f64(data.len());
     compute_row(data, length, smooth_length, &mut values);
     Ok(VelocityAccelerationIndicatorOutput { values })
 }

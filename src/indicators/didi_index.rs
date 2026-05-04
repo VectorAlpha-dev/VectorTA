@@ -58,6 +58,14 @@ pub struct DidiIndexOutput {
     pub crossunder: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DidiIndexOutputField {
+    Short,
+    Long,
+    Crossover,
+    Crossunder,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -469,6 +477,51 @@ fn didi_index_row_from_slice(
 }
 
 #[inline(always)]
+fn didi_index_selected_row_from_slice(
+    data: &[f64],
+    params: &DidiIndexParams,
+    field: DidiIndexOutputField,
+    out: &mut [f64],
+) -> Result<(), DidiIndexError> {
+    let mut stream = DidiIndexStream::try_new(params.clone())?;
+    match field {
+        DidiIndexOutputField::Short => {
+            for i in 0..data.len() {
+                out[i] = match stream.update(data[i]) {
+                    Some((short, _, _, _)) => short,
+                    None => f64::NAN,
+                };
+            }
+        }
+        DidiIndexOutputField::Long => {
+            for i in 0..data.len() {
+                out[i] = match stream.update(data[i]) {
+                    Some((_, long, _, _)) => long,
+                    None => f64::NAN,
+                };
+            }
+        }
+        DidiIndexOutputField::Crossover => {
+            for i in 0..data.len() {
+                out[i] = match stream.update(data[i]) {
+                    Some((_, _, crossover, _)) => crossover,
+                    None => f64::NAN,
+                };
+            }
+        }
+        DidiIndexOutputField::Crossunder => {
+            for i in 0..data.len() {
+                out[i] = match stream.update(data[i]) {
+                    Some((_, _, _, crossunder)) => crossunder,
+                    None => f64::NAN,
+                };
+            }
+        }
+    }
+    Ok(())
+}
+
+#[inline(always)]
 fn didi_index_prepare<'a>(
     input: &'a DidiIndexInput,
     kernel: Kernel,
@@ -577,6 +630,26 @@ pub fn didi_index_into_slices(
         crossover_out,
         crossunder_out,
     )
+}
+
+#[inline]
+pub fn didi_index_output_into_slice(
+    out: &mut [f64],
+    input: &DidiIndexInput,
+    kernel: Kernel,
+    field: DidiIndexOutputField,
+) -> Result<(), DidiIndexError> {
+    let (data, _first, params, _chosen) = didi_index_prepare(input, kernel)?;
+    if out.len() != data.len() {
+        return Err(DidiIndexError::OutputLengthMismatch {
+            expected: data.len(),
+            short_got: out.len(),
+            long_got: out.len(),
+            crossover_got: out.len(),
+            crossunder_got: out.len(),
+        });
+    }
+    didi_index_selected_row_from_slice(data, &params, field, out)
 }
 
 #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]

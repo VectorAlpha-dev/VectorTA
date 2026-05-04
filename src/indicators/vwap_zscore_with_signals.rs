@@ -40,6 +40,13 @@ pub struct VwapZscoreWithSignalsOutput {
     pub resistance_signal: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VwapZscoreWithSignalsOutputField {
+    Zvwap,
+    SupportSignal,
+    ResistanceSignal,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),
@@ -546,6 +553,118 @@ fn vwap_zscore_with_signals_row_from_slices(
 }
 
 #[inline(always)]
+fn vwap_zscore_with_signals_output_row_from_slices(
+    close: &[f64],
+    volume: &[f64],
+    length: usize,
+    upper_bottom: f64,
+    lower_bottom: f64,
+    out: &mut [f64],
+    field: VwapZscoreWithSignalsOutputField,
+) {
+    let mut pv_values = vec![0.0f64; length];
+    let mut vol_values = vec![0.0f64; length];
+    let mut pv_valid = vec![0u8; length];
+    let mut idx = 0usize;
+    let mut count = 0usize;
+    let mut valid_count = 0usize;
+    let mut pv_sum = 0.0f64;
+    let mut vol_sum = 0.0f64;
+
+    let mut dev_values = vec![0.0f64; length];
+    let mut dev_valid = vec![0u8; length];
+    let mut dev_idx = 0usize;
+    let mut dev_count = 0usize;
+    let mut dev_valid_count = 0usize;
+    let mut dev_sum = 0.0f64;
+
+    for i in 0..close.len() {
+        if count >= length {
+            let old_idx = idx;
+            if pv_valid[old_idx] != 0 {
+                valid_count = valid_count.saturating_sub(1);
+                pv_sum -= pv_values[old_idx];
+                vol_sum -= vol_values[old_idx];
+            }
+        } else {
+            count += 1;
+        }
+
+        if valid_close_volume_bar(close[i], volume[i]) {
+            let pv = close[i] * volume[i];
+            pv_values[idx] = pv;
+            vol_values[idx] = volume[i];
+            pv_valid[idx] = 1;
+            valid_count += 1;
+            pv_sum += pv;
+            vol_sum += volume[i];
+        } else {
+            pv_values[idx] = 0.0;
+            vol_values[idx] = 0.0;
+            pv_valid[idx] = 0;
+        }
+        idx += 1;
+        if idx == length {
+            idx = 0;
+        }
+
+        if dev_count >= length {
+            let old_idx = dev_idx;
+            if dev_valid[old_idx] != 0 {
+                dev_valid_count = dev_valid_count.saturating_sub(1);
+                dev_sum -= dev_values[old_idx];
+            }
+        } else {
+            dev_count += 1;
+        }
+
+        let mut mean = f64::NAN;
+        if count >= length && valid_count == length && vol_sum > 0.0 {
+            mean = pv_sum / vol_sum;
+            let dev = (close[i] - mean) * (close[i] - mean);
+            dev_values[dev_idx] = dev;
+            dev_valid[dev_idx] = 1;
+            dev_valid_count += 1;
+            dev_sum += dev;
+        } else {
+            dev_values[dev_idx] = 0.0;
+            dev_valid[dev_idx] = 0;
+        }
+        dev_idx += 1;
+        if dev_idx == length {
+            dev_idx = 0;
+        }
+
+        let mut value = f64::NAN;
+        if dev_count >= length && dev_valid_count == length && mean.is_finite() {
+            let variance = (dev_sum / length as f64).max(0.0);
+            let sd = variance.sqrt();
+            if sd.is_finite() && sd > 0.0 {
+                let zvwap = (close[i] - mean) / sd;
+                value = match field {
+                    VwapZscoreWithSignalsOutputField::Zvwap => zvwap,
+                    VwapZscoreWithSignalsOutputField::SupportSignal => {
+                        if zvwap < lower_bottom {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    VwapZscoreWithSignalsOutputField::ResistanceSignal => {
+                        if zvwap > upper_bottom {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                };
+            }
+        }
+        out[i] = value;
+    }
+}
+
+#[inline(always)]
 fn vwap_zscore_with_signals_prepare<'a>(
     input: &'a VwapZscoreWithSignalsInput,
     kernel: Kernel,
@@ -599,7 +718,7 @@ fn vwap_zscore_with_signals_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other.to_non_batch(),
     };
 
@@ -677,6 +796,34 @@ pub fn vwap_zscore_with_signals_into_slices(
         zvwap_out,
         support_out,
         resistance_out,
+    );
+    Ok(())
+}
+
+pub fn vwap_zscore_with_signals_output_into_slice(
+    out: &mut [f64],
+    input: &VwapZscoreWithSignalsInput,
+    kernel: Kernel,
+    field: VwapZscoreWithSignalsOutputField,
+) -> Result<(), VwapZscoreWithSignalsError> {
+    let (close, volume, length, upper_bottom, lower_bottom, _first, _chosen) =
+        vwap_zscore_with_signals_prepare(input, kernel)?;
+    if out.len() != close.len() {
+        return Err(VwapZscoreWithSignalsError::OutputLengthMismatch {
+            expected: close.len(),
+            zvwap_got: out.len(),
+            support_got: out.len(),
+            resistance_got: out.len(),
+        });
+    }
+    vwap_zscore_with_signals_output_row_from_slices(
+        close,
+        volume,
+        length,
+        upper_bottom,
+        lower_bottom,
+        out,
+        field,
     );
     Ok(())
 }

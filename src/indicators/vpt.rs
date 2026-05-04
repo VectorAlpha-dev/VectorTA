@@ -165,11 +165,11 @@ pub fn vpt(input: &VptInput) -> Result<VptOutput, VptError> {
 pub fn vpt_with_kernel(input: &VptInput, kernel: Kernel) -> Result<VptOutput, VptError> {
     let (price, volume) = match &input.data {
         VptData::Candles { candles, source } => {
-            let price = source_type(candles, source);
-            let vol = candles
-                .select_candle_field("volume")
-                .map_err(|_| VptError::EmptyInputData)?;
-            (price, vol)
+            let price = match *source {
+                "close" => candles.close.as_slice(),
+                _ => source_type(candles, source),
+            };
+            (price, candles.volume.as_slice())
         }
         VptData::Slices { price, volume } => (*price, *volume),
     };
@@ -194,21 +194,16 @@ pub fn vpt_with_kernel(input: &VptInput, kernel: Kernel) -> Result<VptOutput, Vp
         });
     }
 
-    let chosen = match kernel {
-        Kernel::Auto => Kernel::Scalar,
-        other => other,
-    };
-
+    let first = vpt_first_valid(price, volume).ok_or(VptError::NotEnoughValidData {
+        needed: 2,
+        valid: valid_count,
+    })?;
+    let mut values = alloc_with_nan_prefix(price.len(), first + 1);
+    let _ = kernel;
     unsafe {
-        match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => vpt_scalar(price, volume),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => vpt_avx2(price, volume),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => vpt_avx512(price, volume),
-            _ => unreachable!(),
-        }
+        vpt_row_scalar_from(price, volume, first + 1, &mut values);
     }
+    Ok(VptOutput { values })
 }
 
 #[inline]
@@ -726,11 +721,11 @@ pub fn vpt_expand_grid() -> Vec<VptParams> {
 pub fn vpt_into(input: &VptInput, out: &mut [f64]) -> Result<(), VptError> {
     let (price, volume) = match &input.data {
         VptData::Candles { candles, source } => {
-            let price = source_type(candles, source);
-            let vol = candles
-                .select_candle_field("volume")
-                .map_err(|_| VptError::EmptyInputData)?;
-            (price, vol)
+            let price = match *source {
+                "close" => candles.close.as_slice(),
+                _ => source_type(candles, source),
+            };
+            (price, candles.volume.as_slice())
         }
         VptData::Slices { price, volume } => (*price, *volume),
     };
@@ -965,11 +960,11 @@ impl VptBatchBuilder {
     }
 
     pub fn apply_candles(self, c: &Candles, src: &str) -> Result<VptBatchOutput, VptError> {
-        let price = source_type(c, src);
-        let volume = c
-            .select_candle_field("volume")
-            .map_err(|_| VptError::EmptyInputData)?;
-        self.apply_slices(price, volume)
+        let price = match src {
+            "close" => c.close.as_slice(),
+            _ => source_type(c, src),
+        };
+        self.apply_slices(price, c.volume.as_slice())
     }
 
     pub fn with_default_candles(c: &Candles) -> Result<VptBatchOutput, VptError> {

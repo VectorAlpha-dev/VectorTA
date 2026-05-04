@@ -62,6 +62,25 @@ pub struct HemaTrendLevelsOutput {
     pub bearish_test_level: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HemaTrendLevelsOutputField {
+    FastHema,
+    SlowHema,
+    TrendDirection,
+    BarState,
+    BullishCrossover,
+    BearishCrossunder,
+    BoxOffset,
+    BullBoxTop,
+    BullBoxBottom,
+    BearBoxTop,
+    BearBoxBottom,
+    BullishTest,
+    BearishTest,
+    BullishTestLevel,
+    BearishTestLevel,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct HemaTrendLevelsPoint {
     pub fast_hema: f64,
@@ -689,6 +708,47 @@ fn hema_trend_levels_row_from_slices(
     }
 }
 
+fn hema_trend_levels_selected_row_from_slices(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    params: ResolvedParams,
+    field: HemaTrendLevelsOutputField,
+    out: &mut [f64],
+) {
+    let mut state = HemaTrendLevelsCoreState::new(params);
+    for i in 0..close.len() {
+        let point = if open[i].is_finite()
+            && high[i].is_finite()
+            && low[i].is_finite()
+            && close[i].is_finite()
+        {
+            state.update(open[i], high[i], low[i], close[i])
+        } else {
+            state.reset();
+            HemaTrendLevelsPoint::nan()
+        };
+        out[i] = match field {
+            HemaTrendLevelsOutputField::FastHema => point.fast_hema,
+            HemaTrendLevelsOutputField::SlowHema => point.slow_hema,
+            HemaTrendLevelsOutputField::TrendDirection => point.trend_direction,
+            HemaTrendLevelsOutputField::BarState => point.bar_state,
+            HemaTrendLevelsOutputField::BullishCrossover => point.bullish_crossover,
+            HemaTrendLevelsOutputField::BearishCrossunder => point.bearish_crossunder,
+            HemaTrendLevelsOutputField::BoxOffset => point.box_offset,
+            HemaTrendLevelsOutputField::BullBoxTop => point.bull_box_top,
+            HemaTrendLevelsOutputField::BullBoxBottom => point.bull_box_bottom,
+            HemaTrendLevelsOutputField::BearBoxTop => point.bear_box_top,
+            HemaTrendLevelsOutputField::BearBoxBottom => point.bear_box_bottom,
+            HemaTrendLevelsOutputField::BullishTest => point.bullish_test,
+            HemaTrendLevelsOutputField::BearishTest => point.bearish_test,
+            HemaTrendLevelsOutputField::BullishTestLevel => point.bullish_test_level,
+            HemaTrendLevelsOutputField::BearishTestLevel => point.bearish_test_level,
+        };
+    }
+}
+
 pub fn hema_trend_levels(
     input: &HemaTrendLevelsInput,
 ) -> Result<HemaTrendLevelsOutput, HemaTrendLevelsError> {
@@ -849,6 +909,36 @@ pub fn hema_trend_levels_into_slices(
         bullish_test_level_out,
         bearish_test_level_out,
     );
+    Ok(())
+}
+
+pub fn hema_trend_levels_output_into_slice(
+    out: &mut [f64],
+    input: &HemaTrendLevelsInput,
+    _kernel: Kernel,
+    field: HemaTrendLevelsOutputField,
+) -> Result<(), HemaTrendLevelsError> {
+    let (open, high, low, close) = input.as_slices();
+    if open.is_empty() || high.is_empty() || low.is_empty() || close.is_empty() {
+        return Err(HemaTrendLevelsError::EmptyInputData);
+    }
+    if open.len() != high.len() || open.len() != low.len() || open.len() != close.len() {
+        return Err(HemaTrendLevelsError::InconsistentSliceLengths {
+            open_len: open.len(),
+            high_len: high.len(),
+            low_len: low.len(),
+            close_len: close.len(),
+        });
+    }
+    let expected = close.len();
+    if out.len() != expected {
+        return Err(HemaTrendLevelsError::OutputLengthMismatch { expected });
+    }
+    if first_valid_ohlc(open, high, low, close) >= close.len() {
+        return Err(HemaTrendLevelsError::AllValuesNaN);
+    }
+    let params = resolve_params(&input.params)?;
+    hema_trend_levels_selected_row_from_slices(open, high, low, close, params, field, out);
     Ok(())
 }
 

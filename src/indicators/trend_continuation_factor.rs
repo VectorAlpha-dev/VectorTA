@@ -30,9 +30,18 @@ impl<'a> AsRef<[f64]> for TrendContinuationFactorInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
         match &self.data {
-            TrendContinuationFactorData::Candles { candles, source } => {
-                source_type(candles, source)
-            }
+            TrendContinuationFactorData::Candles { candles, source } => match *source {
+                "open" => &candles.open,
+                "high" => &candles.high,
+                "low" => &candles.low,
+                "close" => &candles.close,
+                "volume" => &candles.volume,
+                "hl2" => &candles.hl2,
+                "hlc3" => &candles.hlc3,
+                "ohlc4" => &candles.ohlc4,
+                "hlcc4" | "hlcc" => &candles.hlcc4,
+                _ => source_type(candles, source),
+            },
             TrendContinuationFactorData::Slice(slice) => slice,
         }
     }
@@ -373,18 +382,128 @@ fn trend_continuation_factor_compute_into(
     out_plus: &mut [f64],
     out_minus: &mut [f64],
 ) {
-    let mut stream = TrendContinuationFactorStream::from_length(length);
+    if length == 35 {
+        let mut plus_buffer = [0.0f64; 35];
+        let mut minus_buffer = [0.0f64; 35];
+        trend_continuation_factor_compute_with_buffers(
+            data,
+            length,
+            out_plus,
+            out_minus,
+            &mut plus_buffer,
+            &mut minus_buffer,
+        );
+        return;
+    }
+
+    let mut plus_buffer = vec![0.0f64; length.max(1)];
+    let mut minus_buffer = vec![0.0f64; length.max(1)];
+    trend_continuation_factor_compute_with_buffers(
+        data,
+        length,
+        out_plus,
+        out_minus,
+        &mut plus_buffer,
+        &mut minus_buffer,
+    );
+}
+
+#[inline(always)]
+fn trend_continuation_factor_compute_with_buffers(
+    data: &[f64],
+    length: usize,
+    out_plus: &mut [f64],
+    out_minus: &mut [f64],
+    plus_buffer: &mut [f64],
+    minus_buffer: &mut [f64],
+) {
+    let mut prev = 0.0;
+    let mut has_prev = false;
+    let mut plus_cf = 0.0;
+    let mut minus_cf = 0.0;
+    let mut has_cf = false;
+    let mut comparisons_seen = 0usize;
+    let mut head = 0usize;
+    let mut sum_plus = 0.0;
+    let mut sum_minus = 0.0;
+
     for i in 0..data.len() {
-        match stream.update_reset_on_nan(data[i]) {
-            Some((plus, minus)) => {
-                out_plus[i] = plus;
-                out_minus[i] = minus;
-            }
-            None => {
+        let value = data[i];
+        if !value.is_finite() {
+            has_prev = false;
+            has_cf = false;
+            comparisons_seen = 0;
+            head = 0;
+            sum_plus = 0.0;
+            sum_minus = 0.0;
+            out_plus[i] = f64::NAN;
+            out_minus[i] = f64::NAN;
+            continue;
+        }
+
+        if !has_prev {
+            prev = value;
+            has_prev = true;
+            out_plus[i] = f64::NAN;
+            out_minus[i] = f64::NAN;
+            continue;
+        }
+
+        let change = value - prev;
+        prev = value;
+
+        let plus_change = if change > 0.0 { change } else { 0.0 };
+        let minus_change = if change < 0.0 { -change } else { 0.0 };
+        let cf_seed_plus = if has_cf { plus_cf } else { 1.0 };
+        let cf_seed_minus = if has_cf { minus_cf } else { 1.0 };
+
+        let next_plus_cf = if plus_change == 0.0 {
+            0.0
+        } else {
+            plus_change + cf_seed_plus
+        };
+        let next_minus_cf = if minus_change == 0.0 {
+            0.0
+        } else {
+            minus_change + cf_seed_minus
+        };
+
+        plus_cf = next_plus_cf;
+        minus_cf = next_minus_cf;
+        has_cf = true;
+
+        let plus = plus_change - next_minus_cf;
+        let minus = minus_change - next_plus_cf;
+
+        if comparisons_seen < length {
+            plus_buffer[comparisons_seen] = plus;
+            minus_buffer[comparisons_seen] = minus;
+            sum_plus += plus;
+            sum_minus += minus;
+            comparisons_seen += 1;
+            if comparisons_seen < length {
                 out_plus[i] = f64::NAN;
                 out_minus[i] = f64::NAN;
+            } else {
+                out_plus[i] = sum_plus;
+                out_minus[i] = sum_minus;
             }
+            continue;
         }
+
+        let old_plus = plus_buffer[head];
+        let old_minus = minus_buffer[head];
+        plus_buffer[head] = plus;
+        minus_buffer[head] = minus;
+        sum_plus += plus - old_plus;
+        sum_minus += minus - old_minus;
+        head += 1;
+        if head == length {
+            head = 0;
+        }
+
+        out_plus[i] = sum_plus;
+        out_minus[i] = sum_minus;
     }
 }
 

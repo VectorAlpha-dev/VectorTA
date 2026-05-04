@@ -36,8 +36,26 @@ impl<'a> AsRef<[f64]> for QqeWeightedOscillatorInput<'a> {
     fn as_ref(&self) -> &[f64] {
         match &self.data {
             QqeWeightedOscillatorData::Slice(slice) => slice,
-            QqeWeightedOscillatorData::Candles { candles, source } => source_type(candles, source),
+            QqeWeightedOscillatorData::Candles { candles, source } => {
+                qqe_weighted_source(candles, source)
+            }
         }
+    }
+}
+
+#[inline(always)]
+fn qqe_weighted_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => candles.open.as_slice(),
+        "high" => candles.high.as_slice(),
+        "low" => candles.low.as_slice(),
+        "close" => candles.close.as_slice(),
+        "volume" => candles.volume.as_slice(),
+        "hl2" => candles.hl2.as_slice(),
+        "hlc3" => candles.hlc3.as_slice(),
+        "ohlc4" => candles.ohlc4.as_slice(),
+        "hlcc4" | "hlcc" => candles.hlcc4.as_slice(),
+        _ => source_type(candles, source),
     }
 }
 
@@ -277,6 +295,7 @@ struct PreparedInput<'a> {
     weight: f64,
     first: usize,
     warmup: usize,
+    clean: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -364,7 +383,7 @@ pub fn qqe_weighted_oscillator_with_kernel(
     let prepared = prepare_input(input, kernel)?;
     let mut rsi = alloc_with_nan_prefix(prepared.len, prepared.warmup);
     let mut trailing_stop = alloc_with_nan_prefix(prepared.len, prepared.warmup);
-    compute_into_slices(&prepared, &mut rsi, &mut trailing_stop)?;
+    compute_into_slices(&prepared, &mut rsi, &mut trailing_stop, true)?;
     Ok(QqeWeightedOscillatorOutput { rsi, trailing_stop })
 }
 
@@ -391,7 +410,7 @@ pub fn qqe_weighted_oscillator_into_slices(
             got: core::cmp::min(rsi.len(), trailing_stop.len()),
         });
     }
-    compute_into_slices(&prepared, rsi, trailing_stop)
+    compute_into_slices(&prepared, rsi, trailing_stop, false)
 }
 
 #[inline(always)]
@@ -434,10 +453,15 @@ fn prepare_input<'a>(
         return Err(QqeWeightedOscillatorError::InvalidWeight { weight });
     }
 
-    let valid = data[first..]
-        .iter()
-        .filter(|value| value.is_finite())
-        .count();
+    let mut valid = 0usize;
+    let mut clean = true;
+    for value in &data[first..] {
+        if value.is_finite() {
+            valid += 1;
+        } else {
+            clean = false;
+        }
+    }
     let needed = length + 1;
     if valid < needed {
         return Err(QqeWeightedOscillatorError::NotEnoughValidData { needed, valid });
@@ -457,6 +481,7 @@ fn prepare_input<'a>(
         weight,
         first,
         warmup: first + length,
+        clean,
     })
 }
 
@@ -465,6 +490,7 @@ fn compute_into_slices(
     prepared: &PreparedInput<'_>,
     dst_rsi: &mut [f64],
     dst_trailing_stop: &mut [f64],
+    allow_prefix_init: bool,
 ) -> Result<(), QqeWeightedOscillatorError> {
     if dst_rsi.len() != prepared.len || dst_trailing_stop.len() != prepared.len {
         return Err(QqeWeightedOscillatorError::OutputLengthMismatch {
@@ -473,8 +499,15 @@ fn compute_into_slices(
         });
     }
 
-    dst_rsi.fill(f64::NAN);
-    dst_trailing_stop.fill(f64::NAN);
+    let prefix_init = allow_prefix_init && prepared.clean;
+    if prefix_init {
+        let prefix = prepared.warmup.min(prepared.len);
+        dst_rsi[..prefix].fill(f64::NAN);
+        dst_trailing_stop[..prefix].fill(f64::NAN);
+    } else {
+        dst_rsi.fill(f64::NAN);
+        dst_trailing_stop.fill(f64::NAN);
+    }
 
     let mut num_state = RmaState::new(prepared.length);
     let mut den_state = RmaState::new(prepared.length);
@@ -549,6 +582,9 @@ fn compute_into_slices(
                     prev_rsi = Some(rsi);
                     prev_ts = Some(trailing_stop);
                 }
+            } else if prefix_init {
+                dst_rsi[i] = f64::NAN;
+                dst_trailing_stop[i] = f64::NAN;
             }
         }
 

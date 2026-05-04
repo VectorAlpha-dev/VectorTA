@@ -236,17 +236,7 @@ fn adxr_prepare<'a>(
     kernel: Kernel,
 ) -> Result<(&'a [f64], &'a [f64], &'a [f64], usize, usize, Kernel), AdxrError> {
     let (high, low, close) = match &input.data {
-        AdxrData::Candles { candles } => (
-            candles
-                .select_candle_field("high")
-                .map_err(|e| AdxrError::CandleFieldError(e.to_string()))?,
-            candles
-                .select_candle_field("low")
-                .map_err(|e| AdxrError::CandleFieldError(e.to_string()))?,
-            candles
-                .select_candle_field("close")
-                .map_err(|e| AdxrError::CandleFieldError(e.to_string()))?,
-        ),
+        AdxrData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
         AdxrData::Slices { high, low, close } => (*high, *low, *close),
     };
 

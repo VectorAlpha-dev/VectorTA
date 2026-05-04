@@ -337,12 +337,31 @@ fn fdi_from_length(length_sum: f64, length: usize) -> f64 {
 }
 
 #[inline(always)]
+fn fdi_from_length_with_den(length_sum: f64, ln_2_len: f64) -> f64 {
+    1.0 + (length_sum.ln() + std::f64::consts::LN_2) / ln_2_len
+}
+
+#[inline(always)]
 fn path_length_from_window(data: &[f64], start: usize, end: usize, low: f64, high: f64) -> f64 {
     let length = end - start + 1;
     let inv_n_sq = 1.0 / ((length * length) as f64);
+    let flat_length = (length - 1) as f64 / length as f64;
+    path_length_from_window_precomputed(data, start, end, low, high, inv_n_sq, flat_length)
+}
+
+#[inline(always)]
+fn path_length_from_window_precomputed(
+    data: &[f64],
+    start: usize,
+    end: usize,
+    low: f64,
+    high: f64,
+    inv_n_sq: f64,
+    flat_length: f64,
+) -> f64 {
     let range = high - low;
     if !range.is_finite() || range <= 0.0 {
-        return (length - 1) as f64 / length as f64;
+        return flat_length;
     }
 
     let mut prev = (data[start] - low) / range;
@@ -390,6 +409,9 @@ fn compute_fdi_row(data: &[f64], length: usize, out: &mut [f64]) {
         return;
     }
 
+    let inv_n_sq = 1.0 / ((length * length) as f64);
+    let flat_length = (length - 1) as f64 / length as f64;
+    let ln_2_len = ((2 * length) as f64).ln();
     let invalid = build_invalid_prefix(data);
     let mut min_q: VecDeque<usize> = VecDeque::with_capacity(length);
     let mut max_q: VecDeque<usize> = VecDeque::with_capacity(length);
@@ -438,13 +460,71 @@ fn compute_fdi_row(data: &[f64], length: usize, out: &mut [f64]) {
 
         let low = data[*min_q.front().unwrap()];
         let high = data[*max_q.front().unwrap()];
-        let length_sum = path_length_from_window(data, start, i, low, high);
-        out[i] = fdi_from_length(length_sum, length);
+        let length_sum =
+            path_length_from_window_precomputed(data, start, i, low, high, inv_n_sq, flat_length);
+        out[i] = fdi_from_length_with_den(length_sum, ln_2_len);
     }
 }
 
 #[inline(always)]
-fn validate_common(data: &[f64], length: usize) -> Result<(), FractalDimensionIndexError> {
+fn compute_fdi_row_all_valid(data: &[f64], length: usize, out: &mut [f64]) {
+    let len = data.len();
+    if len < length {
+        return;
+    }
+
+    let inv_n_sq = 1.0 / ((length * length) as f64);
+    let flat_length = (length - 1) as f64 / length as f64;
+    let ln_2_len = ((2 * length) as f64).ln();
+    let mut min_q: VecDeque<usize> = VecDeque::with_capacity(length);
+    let mut max_q: VecDeque<usize> = VecDeque::with_capacity(length);
+
+    for i in 0..len {
+        let value = data[i];
+        while let Some(&idx) = min_q.back() {
+            if data[idx] <= value {
+                break;
+            }
+            min_q.pop_back();
+        }
+        min_q.push_back(i);
+
+        while let Some(&idx) = max_q.back() {
+            if data[idx] >= value {
+                break;
+            }
+            max_q.pop_back();
+        }
+        max_q.push_back(i);
+
+        if i + 1 < length {
+            continue;
+        }
+
+        let start = i + 1 - length;
+        while let Some(&idx) = min_q.front() {
+            if idx >= start {
+                break;
+            }
+            min_q.pop_front();
+        }
+        while let Some(&idx) = max_q.front() {
+            if idx >= start {
+                break;
+            }
+            max_q.pop_front();
+        }
+
+        let low = data[*min_q.front().unwrap()];
+        let high = data[*max_q.front().unwrap()];
+        let length_sum =
+            path_length_from_window_precomputed(data, start, i, low, high, inv_n_sq, flat_length);
+        out[i] = fdi_from_length_with_den(length_sum, ln_2_len);
+    }
+}
+
+#[inline(always)]
+fn validate_common(data: &[f64], length: usize) -> Result<bool, FractalDimensionIndexError> {
     let len = data.len();
     if len == 0 {
         return Err(FractalDimensionIndexError::EmptyInputData);
@@ -456,7 +536,20 @@ fn validate_common(data: &[f64], length: usize) -> Result<(), FractalDimensionIn
         });
     }
 
-    let max_run = longest_valid_run(data);
+    let mut max_run = 0usize;
+    let mut current_run = 0usize;
+    let mut all_valid = true;
+    for &value in data {
+        if is_valid_value(value) {
+            current_run += 1;
+            if current_run > max_run {
+                max_run = current_run;
+            }
+        } else {
+            all_valid = false;
+            current_run = 0;
+        }
+    }
     if max_run == 0 {
         return Err(FractalDimensionIndexError::AllValuesNaN);
     }
@@ -466,7 +559,7 @@ fn validate_common(data: &[f64], length: usize) -> Result<(), FractalDimensionIn
             valid: max_run,
         });
     }
-    Ok(())
+    Ok(all_valid)
 }
 
 #[inline]
@@ -482,10 +575,16 @@ pub fn fractal_dimension_index_with_kernel(
 ) -> Result<FractalDimensionIndexOutput, FractalDimensionIndexError> {
     let data: &[f64] = input.as_ref();
     let length = input.get_length();
-    validate_common(data, length)?;
+    let all_valid = validate_common(data, length)?;
 
     let mut values = alloc_with_nan_prefix(data.len(), length - 1);
-    fractal_dimension_index_into_slice(&mut values, input, kernel)?;
+    let _ = kernel;
+    if all_valid {
+        compute_fdi_row_all_valid(data, length, &mut values);
+    } else {
+        values.fill(f64::NAN);
+        compute_fdi_row(data, length, &mut values);
+    }
     Ok(FractalDimensionIndexOutput { values })
 }
 
@@ -503,15 +602,19 @@ pub fn fractal_dimension_index_into_slice(
     }
 
     let length = input.get_length();
-    validate_common(data, length)?;
+    let all_valid = validate_common(data, length)?;
 
-    let _chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        other => other,
-    };
+    let _ = kernel;
 
-    dst.fill(f64::NAN);
-    compute_fdi_row(data, length, dst);
+    if all_valid {
+        for value in &mut dst[..length - 1] {
+            *value = f64::NAN;
+        }
+        compute_fdi_row_all_valid(data, length, dst);
+    } else {
+        dst.fill(f64::NAN);
+        compute_fdi_row(data, length, dst);
+    }
     Ok(())
 }
 

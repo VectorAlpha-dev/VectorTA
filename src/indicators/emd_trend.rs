@@ -19,7 +19,8 @@ use crate::indicators::moving_averages::ma_stream::{ma_stream, MaStream};
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix,
+    alloc_uninit_f64, alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel,
+    make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -558,6 +559,66 @@ fn build_source_series(
 }
 
 #[inline(always)]
+fn borrowed_source_series<'a>(
+    input: &'a EmdTrendInput<'a>,
+    source_kind: SourceKind,
+) -> Option<&'a [f64]> {
+    match (&input.data, source_kind) {
+        (EmdTrendData::Candles { candles }, SourceKind::Open) => Some(&candles.open),
+        (EmdTrendData::Candles { candles }, SourceKind::High) => Some(&candles.high),
+        (EmdTrendData::Candles { candles }, SourceKind::Low) => Some(&candles.low),
+        (EmdTrendData::Candles { candles }, SourceKind::Close) => Some(&candles.close),
+        (EmdTrendData::Candles { candles }, SourceKind::Hl2) => Some(&candles.hl2),
+        (EmdTrendData::Candles { candles }, SourceKind::Hlc3) => Some(&candles.hlc3),
+        (EmdTrendData::Candles { candles }, SourceKind::Ohlc4) => Some(&candles.ohlc4),
+        (EmdTrendData::Candles { candles }, SourceKind::Hlcc4) => Some(&candles.hlcc4),
+        (EmdTrendData::Slices { open, .. }, SourceKind::Open) => Some(open),
+        (EmdTrendData::Slices { high, .. }, SourceKind::High) => Some(high),
+        (EmdTrendData::Slices { low, .. }, SourceKind::Low) => Some(low),
+        (EmdTrendData::Slices { close, .. }, SourceKind::Close) => Some(close),
+        _ => None,
+    }
+}
+
+#[inline(always)]
+fn source_series<'a>(
+    input: &'a EmdTrendInput<'a>,
+    open: &'a [f64],
+    high: &'a [f64],
+    low: &'a [f64],
+    close: &'a [f64],
+    source_kind: SourceKind,
+) -> Result<std::borrow::Cow<'a, [f64]>, EmdTrendError> {
+    if let Some(src) = borrowed_source_series(input, source_kind) {
+        if src.is_empty() {
+            return Err(EmdTrendError::EmptyInputData);
+        }
+        if open.len() != high.len() || open.len() != low.len() || open.len() != close.len() {
+            return Err(EmdTrendError::InputLengthMismatch {
+                open_len: open.len(),
+                high_len: high.len(),
+                low_len: low.len(),
+                close_len: close.len(),
+            });
+        }
+        if src.len() != close.len() {
+            return Err(EmdTrendError::InputLengthMismatch {
+                open_len: open.len(),
+                high_len: high.len(),
+                low_len: low.len(),
+                close_len: close.len(),
+            });
+        }
+        if longest_valid_run(src) == 0 {
+            return Err(EmdTrendError::AllValuesNaN);
+        }
+        Ok(std::borrow::Cow::Borrowed(src))
+    } else {
+        build_source_series(open, high, low, close, source_kind).map(std::borrow::Cow::Owned)
+    }
+}
+
+#[inline(always)]
 fn parse_number_after(segment: &str) -> Option<usize> {
     let eq = segment.find('=')?;
     let number: String = segment[eq + 1..]
@@ -592,6 +653,8 @@ fn map_ma_error(err: Box<dyn Error>) -> EmdTrendError {
 fn normalize_single_kernel(kernel: Kernel) -> Kernel {
     match kernel {
         Kernel::Auto => detect_best_kernel(),
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Scalar,
         Kernel::ScalarBatch => Kernel::Scalar,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -608,6 +671,8 @@ fn normalize_batch_kernel(kernel: Kernel) -> Result<Kernel, EmdTrendError> {
             Kernel::Avx512Batch => Kernel::Avx512,
             other => other,
         },
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Scalar,
         Kernel::Scalar | Kernel::ScalarBatch => Kernel::Scalar,
         Kernel::Avx2 | Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Avx512,
@@ -748,7 +813,7 @@ pub fn emd_trend_with_kernel(
         input.get_length(),
         input.get_mult(),
     )?;
-    let src = build_source_series(open, high, low, close, source_kind)?;
+    let src = source_series(input, open, high, low, close, source_kind)?;
     let longest = longest_valid_run(&src);
     let needed = if avg_kind == AvgKind::Frama && input.get_length() % 2 == 1 {
         input.get_length() + 1
@@ -763,14 +828,10 @@ pub fn emd_trend_with_kernel(
     }
 
     let chosen = normalize_single_kernel(kernel);
-    let mut direction = alloc_with_nan_prefix(src.len(), 0);
-    let mut average = alloc_with_nan_prefix(src.len(), 0);
-    let mut upper = alloc_with_nan_prefix(src.len(), 0);
-    let mut lower = alloc_with_nan_prefix(src.len(), 0);
-    direction.fill(0.0);
-    average.fill(f64::NAN);
-    upper.fill(f64::NAN);
-    lower.fill(f64::NAN);
+    let mut direction = alloc_uninit_f64(src.len());
+    let mut average = alloc_uninit_f64(src.len());
+    let mut upper = alloc_uninit_f64(src.len());
+    let mut lower = alloc_uninit_f64(src.len());
 
     compute_from_source_into(
         &src,
@@ -807,7 +868,7 @@ pub fn emd_trend_into_slice(
         input.get_length(),
         input.get_mult(),
     )?;
-    let src = build_source_series(open, high, low, close, source_kind)?;
+    let src = source_series(input, open, high, low, close, source_kind)?;
     let longest = longest_valid_run(&src);
     let needed = if avg_kind == AvgKind::Frama && input.get_length() % 2 == 1 {
         input.get_length() + 1
@@ -1014,6 +1075,26 @@ pub fn emd_trend_batch_with_kernel(
     }
     let rows = combos.len();
     let cols = close.len();
+    let (source_kind, avg_kind) =
+        validate_params_only(source, avg_type, DEFAULT_LENGTH, DEFAULT_MULT)?;
+    let src = build_source_series(open, high, low, close, source_kind)?;
+    let longest = longest_valid_run(&src);
+    for combo in &combos {
+        let length = combo.length.unwrap_or(DEFAULT_LENGTH);
+        let mult = combo.mult.unwrap_or(DEFAULT_MULT);
+        validate_params_only(source, avg_type, length, mult)?;
+        let needed = if avg_kind == AvgKind::Frama && length % 2 == 1 {
+            length + 1
+        } else {
+            length
+        };
+        if longest < needed {
+            return Err(EmdTrendError::NotEnoughValidData {
+                needed,
+                valid: longest,
+            });
+        }
+    }
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| EmdTrendError::InvalidInput {
@@ -1025,19 +1106,12 @@ pub fn emd_trend_batch_with_kernel(
     let mut upper_mu = make_uninit_matrix(rows, cols);
     let mut lower_mu = make_uninit_matrix(rows, cols);
 
-    let mut direction_guard = core::mem::ManuallyDrop::new(direction_mu);
-    let mut average_guard = core::mem::ManuallyDrop::new(average_mu);
-    let mut upper_guard = core::mem::ManuallyDrop::new(upper_mu);
-    let mut lower_guard = core::mem::ManuallyDrop::new(lower_mu);
-
     let direction =
-        unsafe { std::slice::from_raw_parts_mut(direction_guard.as_mut_ptr() as *mut f64, total) };
+        unsafe { std::slice::from_raw_parts_mut(direction_mu.as_mut_ptr() as *mut f64, total) };
     let average =
-        unsafe { std::slice::from_raw_parts_mut(average_guard.as_mut_ptr() as *mut f64, total) };
-    let upper =
-        unsafe { std::slice::from_raw_parts_mut(upper_guard.as_mut_ptr() as *mut f64, total) };
-    let lower =
-        unsafe { std::slice::from_raw_parts_mut(lower_guard.as_mut_ptr() as *mut f64, total) };
+        unsafe { std::slice::from_raw_parts_mut(average_mu.as_mut_ptr() as *mut f64, total) };
+    let upper = unsafe { std::slice::from_raw_parts_mut(upper_mu.as_mut_ptr() as *mut f64, total) };
+    let lower = unsafe { std::slice::from_raw_parts_mut(lower_mu.as_mut_ptr() as *mut f64, total) };
 
     emd_trend_batch_inner_into(
         open, high, low, close, sweep, source, avg_type, kernel, false, direction, average, upper,
@@ -1046,32 +1120,36 @@ pub fn emd_trend_batch_with_kernel(
 
     let direction = unsafe {
         Vec::from_raw_parts(
-            direction_guard.as_mut_ptr() as *mut f64,
-            direction_guard.len(),
-            direction_guard.capacity(),
+            direction_mu.as_mut_ptr() as *mut f64,
+            direction_mu.len(),
+            direction_mu.capacity(),
         )
     };
     let average = unsafe {
         Vec::from_raw_parts(
-            average_guard.as_mut_ptr() as *mut f64,
-            average_guard.len(),
-            average_guard.capacity(),
+            average_mu.as_mut_ptr() as *mut f64,
+            average_mu.len(),
+            average_mu.capacity(),
         )
     };
     let upper = unsafe {
         Vec::from_raw_parts(
-            upper_guard.as_mut_ptr() as *mut f64,
-            upper_guard.len(),
-            upper_guard.capacity(),
+            upper_mu.as_mut_ptr() as *mut f64,
+            upper_mu.len(),
+            upper_mu.capacity(),
         )
     };
     let lower = unsafe {
         Vec::from_raw_parts(
-            lower_guard.as_mut_ptr() as *mut f64,
-            lower_guard.len(),
-            lower_guard.capacity(),
+            lower_mu.as_mut_ptr() as *mut f64,
+            lower_mu.len(),
+            lower_mu.capacity(),
         )
     };
+    std::mem::forget(direction_mu);
+    std::mem::forget(average_mu);
+    std::mem::forget(upper_mu);
+    std::mem::forget(lower_mu);
 
     Ok(EmdTrendBatchOutput {
         direction,

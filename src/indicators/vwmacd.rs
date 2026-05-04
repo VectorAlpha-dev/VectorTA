@@ -51,6 +51,13 @@ pub struct VwmacdOutput {
     pub hist: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VwmacdOutputField {
+    Macd,
+    Signal,
+    Hist,
+}
+
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[derive(Serialize, Deserialize)]
@@ -423,6 +430,141 @@ pub fn vwmacd_into_slice(
     )
 }
 
+pub fn vwmacd_output_into_slice(
+    out: &mut [f64],
+    input: &VwmacdInput,
+    kern: Kernel,
+    field: VwmacdOutputField,
+) -> Result<(), VwmacdError> {
+    let (
+        close,
+        volume,
+        fast,
+        slow,
+        signal,
+        fast_ma_type,
+        slow_ma_type,
+        signal_ma_type,
+        _first,
+        macd_warmup_abs,
+        total_warmup_abs,
+        chosen,
+    ) = vwmacd_prepare(input, kern)?;
+    let len = close.len();
+    if out.len() != len {
+        return Err(VwmacdError::OutputLengthMismatch {
+            expected: len,
+            got: out.len(),
+        });
+    }
+
+    let classic = chosen == Kernel::Scalar
+        && fast_ma_type.eq_ignore_ascii_case("sma")
+        && slow_ma_type.eq_ignore_ascii_case("sma")
+        && signal_ma_type.eq_ignore_ascii_case("ema");
+
+    if classic {
+        match field {
+            VwmacdOutputField::Macd => unsafe {
+                return vwmacd_scalar_macd_into(
+                    close,
+                    volume,
+                    fast,
+                    slow,
+                    signal,
+                    fast_ma_type,
+                    slow_ma_type,
+                    signal_ma_type,
+                    out,
+                );
+            },
+            VwmacdOutputField::Signal => {
+                let mut macd = alloc_with_nan_prefix(len, macd_warmup_abs);
+                unsafe {
+                    vwmacd_scalar_macd_into(
+                        close,
+                        volume,
+                        fast,
+                        slow,
+                        signal,
+                        fast_ma_type,
+                        slow_ma_type,
+                        signal_ma_type,
+                        &mut macd,
+                    )?;
+                }
+                vwmacd_signal_from_macd_into(&macd, signal, macd_warmup_abs, total_warmup_abs, out);
+                return Ok(());
+            }
+            VwmacdOutputField::Hist => {
+                let mut macd = alloc_with_nan_prefix(len, macd_warmup_abs);
+                let mut signal_out = alloc_with_nan_prefix(len, total_warmup_abs);
+                unsafe {
+                    vwmacd_scalar_macd_into(
+                        close,
+                        volume,
+                        fast,
+                        slow,
+                        signal,
+                        fast_ma_type,
+                        slow_ma_type,
+                        signal_ma_type,
+                        &mut macd,
+                    )?;
+                }
+                vwmacd_signal_from_macd_into(
+                    &macd,
+                    signal,
+                    macd_warmup_abs,
+                    total_warmup_abs,
+                    &mut signal_out,
+                );
+                let warmup = total_warmup_abs.min(len);
+                for v in &mut out[..warmup] {
+                    *v = f64::NAN;
+                }
+                for i in warmup..len {
+                    let m = macd[i];
+                    let s = signal_out[i];
+                    out[i] = if !m.is_nan() && !s.is_nan() {
+                        m - s
+                    } else {
+                        f64::NAN
+                    };
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    let mut macd = vec![f64::NAN; len];
+    let mut signal_out = vec![f64::NAN; len];
+    let mut hist = vec![f64::NAN; len];
+    vwmacd_compute_into(
+        close,
+        volume,
+        fast,
+        slow,
+        signal,
+        fast_ma_type,
+        slow_ma_type,
+        signal_ma_type,
+        _first,
+        macd_warmup_abs,
+        total_warmup_abs,
+        chosen,
+        &mut macd,
+        &mut signal_out,
+        &mut hist,
+    )?;
+    match field {
+        VwmacdOutputField::Macd => out.copy_from_slice(&macd),
+        VwmacdOutputField::Signal => out.copy_from_slice(&signal_out),
+        VwmacdOutputField::Hist => out.copy_from_slice(&hist),
+    }
+    Ok(())
+}
+
 #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn vwmacd_into(
     input: &VwmacdInput,
@@ -675,6 +817,46 @@ pub unsafe fn vwmacd_scalar_classic(
     }
 
     Ok(())
+}
+
+#[inline(always)]
+fn vwmacd_signal_from_macd_into(
+    macd: &[f64],
+    signal: usize,
+    macd_warmup_abs: usize,
+    total_warmup_abs: usize,
+    out: &mut [f64],
+) {
+    let len = macd.len();
+    if macd_warmup_abs < len {
+        let alpha = 2.0 / (signal as f64 + 1.0);
+        let beta = 1.0 - alpha;
+
+        let start = macd_warmup_abs;
+        let warmup_end = (start + signal).min(len);
+        if start < len {
+            let mut mean = macd[start];
+            out[start] = mean;
+            let mut count = 1usize;
+            for i in (start + 1)..warmup_end {
+                let x = macd[i];
+                count += 1;
+                mean = ((count as f64 - 1.0) * mean + x) / (count as f64);
+                out[i] = mean;
+            }
+
+            let mut prev = mean;
+            for i in warmup_end..len {
+                let x = macd[i];
+                prev = beta.mul_add(prev, alpha * x);
+                out[i] = prev;
+            }
+        }
+    }
+
+    for i in 0..total_warmup_abs.min(len) {
+        out[i] = f64::NAN;
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1524,18 +1706,17 @@ fn vwmacd_prepare<'a>(
     let macd_warmup_abs = first + fast.max(slow) - 1;
     let total_warmup_abs = macd_warmup_abs + signal - 1;
 
-    let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
-        k => k,
-    };
-
-    let chosen = if input.get_fast_ma_type().eq_ignore_ascii_case("sma")
+    let is_classic = input.get_fast_ma_type().eq_ignore_ascii_case("sma")
         && input.get_slow_ma_type().eq_ignore_ascii_case("sma")
-        && input.get_signal_ma_type().eq_ignore_ascii_case("ema")
-    {
+        && input.get_signal_ma_type().eq_ignore_ascii_case("ema");
+
+    let chosen = if is_classic {
         Kernel::Scalar
     } else {
-        chosen
+        match kernel {
+            Kernel::Auto => detect_best_kernel(),
+            k => k,
+        }
     };
 
     Ok((

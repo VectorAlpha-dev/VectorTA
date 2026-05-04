@@ -448,9 +448,25 @@ fn input_slices<'a>(
         ProjectionOscillatorData::Candles { candles, source } => Ok((
             candles.high.as_slice(),
             candles.low.as_slice(),
-            source_type(candles, source),
+            candle_source(candles, source),
         )),
         ProjectionOscillatorData::Slices { high, low, source } => Ok((high, low, source)),
+    }
+}
+
+#[inline(always)]
+fn candle_source<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
+    match source {
+        "open" => candles.open.as_slice(),
+        "high" => candles.high.as_slice(),
+        "low" => candles.low.as_slice(),
+        "close" => candles.close.as_slice(),
+        "volume" => candles.volume.as_slice(),
+        "hl2" => candles.hl2.as_slice(),
+        "hlc3" => candles.hlc3.as_slice(),
+        "ohlc4" => candles.ohlc4.as_slice(),
+        "hlcc4" | "hlcc" => candles.hlcc4.as_slice(),
+        _ => source_type(candles, source),
     }
 }
 
@@ -552,6 +568,11 @@ fn compute_row(
     out_pbo: &mut [f64],
     out_signal: &mut [f64],
 ) {
+    if length == 14 && smooth_length == 4 {
+        compute_row_default_14_4(high, low, source, out_pbo, out_signal);
+        return;
+    }
+
     let mut stream = ProjectionOscillatorStream::try_new(ProjectionOscillatorParams {
         length: Some(length),
         smooth_length: Some(smooth_length),
@@ -562,6 +583,209 @@ fn compute_row(
         if let Some((pbo, signal)) = stream.update(high[i], low[i], source[i]) {
             out_pbo[i] = pbo;
             if signal.is_finite() {
+                out_signal[i] = signal;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Wma4State {
+    values: [f64; 4],
+    pos: usize,
+    len: usize,
+    sum: f64,
+    weighted_sum: f64,
+}
+
+impl Wma4State {
+    #[inline(always)]
+    fn new() -> Self {
+        Self {
+            values: [0.0; 4],
+            pos: 0,
+            len: 0,
+            sum: 0.0,
+            weighted_sum: 0.0,
+        }
+    }
+
+    #[inline(always)]
+    fn reset(&mut self) {
+        self.pos = 0;
+        self.len = 0;
+        self.sum = 0.0;
+        self.weighted_sum = 0.0;
+    }
+
+    #[inline(always)]
+    fn update(&mut self, value: f64) -> Option<f64> {
+        if !value.is_finite() {
+            self.reset();
+            return None;
+        }
+        if self.len < 4 {
+            let weight = self.len + 1;
+            self.values[self.len] = value;
+            self.len += 1;
+            self.sum += value;
+            self.weighted_sum += value * weight as f64;
+            if self.len == 4 {
+                Some(self.weighted_sum / 10.0)
+            } else {
+                None
+            }
+        } else {
+            let oldest = self.values[self.pos];
+            let old_sum = self.sum;
+            self.values[self.pos] = value;
+            self.pos = (self.pos + 1) & 3;
+            self.sum = old_sum - oldest + value;
+            self.weighted_sum = self.weighted_sum - old_sum + 4.0 * value;
+            Some(self.weighted_sum / 10.0)
+        }
+    }
+}
+
+#[inline(always)]
+fn push_fixed_14(values: &mut [f64; 14], len: &mut usize, value: f64) {
+    if *len < 14 {
+        values[*len] = value;
+        *len += 1;
+    } else {
+        values.copy_within(1.., 0);
+        values[13] = value;
+    }
+}
+
+#[inline(always)]
+fn push_slope_fixed_14(
+    values: &mut [f64; 14],
+    len: &mut usize,
+    finite_count: &mut usize,
+    value: f64,
+) {
+    if *len < 14 {
+        values[*len] = value;
+        *len += 1;
+    } else {
+        if values[0].is_finite() {
+            *finite_count -= 1;
+        }
+        values.copy_within(1.., 0);
+        values[13] = value;
+    }
+    if value.is_finite() {
+        *finite_count += 1;
+    }
+}
+
+#[inline(always)]
+fn linreg_slope_14(values: &[f64; 14]) -> f64 {
+    let mut sum_y = 0.0;
+    let mut sum_xy = 0.0;
+    for (idx, &value) in values.iter().enumerate() {
+        let x = idx as f64;
+        sum_y += value;
+        sum_xy += x * value;
+    }
+    (14.0 * sum_xy - 91.0 * sum_y) / 3185.0
+}
+
+fn compute_row_default_14_4(
+    high: &[f64],
+    low: &[f64],
+    source: &[f64],
+    out_pbo: &mut [f64],
+    out_signal: &mut [f64],
+) {
+    let mut high_window = [0.0; 14];
+    let mut low_window = [0.0; 14];
+    let mut high_slopes = [f64::NAN; 14];
+    let mut low_slopes = [f64::NAN; 14];
+    let mut high_len = 0usize;
+    let mut low_len = 0usize;
+    let mut high_slope_len = 0usize;
+    let mut low_slope_len = 0usize;
+    let mut high_slope_finite = 0usize;
+    let mut low_slope_finite = 0usize;
+    let mut pbo_wma = Wma4State::new();
+    let mut signal_wma = Wma4State::new();
+
+    for i in 0..high.len() {
+        let h = high[i];
+        let l = low[i];
+        let s = source[i];
+        if !is_valid_triple(h, l, s) {
+            high_len = 0;
+            low_len = 0;
+            high_slope_len = 0;
+            low_slope_len = 0;
+            high_slope_finite = 0;
+            low_slope_finite = 0;
+            pbo_wma.reset();
+            signal_wma.reset();
+            continue;
+        }
+
+        push_fixed_14(&mut high_window, &mut high_len, h);
+        push_fixed_14(&mut low_window, &mut low_len, l);
+
+        let high_slope = if high_len == 14 {
+            linreg_slope_14(&high_window)
+        } else {
+            f64::NAN
+        };
+        let low_slope = if low_len == 14 {
+            linreg_slope_14(&low_window)
+        } else {
+            f64::NAN
+        };
+        push_slope_fixed_14(
+            &mut high_slopes,
+            &mut high_slope_len,
+            &mut high_slope_finite,
+            high_slope,
+        );
+        push_slope_fixed_14(
+            &mut low_slopes,
+            &mut low_slope_len,
+            &mut low_slope_finite,
+            low_slope,
+        );
+
+        if high_len != 14 || low_len != 14 || high_slope_len != 14 || low_slope_len != 14 {
+            continue;
+        }
+        if high_slope_finite != 14 || low_slope_finite != 14 {
+            continue;
+        }
+
+        let mut upper = f64::NEG_INFINITY;
+        let mut lower = f64::INFINITY;
+        for age in 0..14 {
+            let idx = 13 - age;
+            let age_f = age as f64;
+            let projected_high = high_window[idx] + high_slopes[idx] * age_f;
+            let projected_low = low_window[idx] + low_slopes[idx] * age_f;
+            if projected_high > upper {
+                upper = projected_high;
+            }
+            if projected_low < lower {
+                lower = projected_low;
+            }
+        }
+
+        let range = upper - lower;
+        let raw = if range.abs() <= f64::EPSILON {
+            0.0
+        } else {
+            100.0 * (s - lower) / range
+        };
+
+        if let Some(pbo) = pbo_wma.update(raw) {
+            out_pbo[i] = pbo;
+            if let Some(signal) = signal_wma.update(pbo) {
                 out_signal[i] = signal;
             }
         }
