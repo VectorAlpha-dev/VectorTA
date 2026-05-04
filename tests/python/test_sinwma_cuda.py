@@ -78,7 +78,7 @@ class TestSinwmaCuda:
 
         cpu_tm = np.empty_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.sinwma(data_tm[:, j], period)
+            cpu_tm[:, j] = ti.sinwma(np.ascontiguousarray(data_tm[:, j]), period)
 
         handle = ti.sinwma_cuda_many_series_one_param_dev(
             data_tm.astype(np.float32),

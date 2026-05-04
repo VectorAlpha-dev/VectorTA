@@ -2876,11 +2876,7 @@ pub fn alma_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py {
-        inner,
-        _ctx: Some(ctx),
-        device_id: Some(dev_id),
-    })
+    Ok(DeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2920,11 +2916,7 @@ pub fn alma_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py {
-        inner,
-        _ctx: Some(ctx),
-        device_id: Some(dev_id),
-    })
+    Ok(DeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
 #[cfg(feature = "python")]
@@ -3016,7 +3008,7 @@ pub fn alma_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn alma_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 

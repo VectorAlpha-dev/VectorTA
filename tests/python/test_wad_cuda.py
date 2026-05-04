@@ -49,8 +49,11 @@ class TestWadCuda:
 
     def test_wad_cuda_batch_matches_cpu(self):
         high, low, close = self._make_series()
-        cpu = ti.wad(high, low, close)
+        high_f32 = high.astype(np.float32)
+        low_f32 = low.astype(np.float32)
+        close_f32 = close.astype(np.float32)
+        cpu = ti.wad(high_f32.astype(np.float64), low_f32.astype(np.float64), close_f32.astype(np.float64))
         cpu_vals = cpu.astype(np.float32)
-        handle = ti.wad_cuda_batch_dev(high.astype(np.float32), low.astype(np.float32), close.astype(np.float32))
+        handle = ti.wad_cuda_batch_dev(high_f32, low_f32, close_f32)
         gpu_vals = cp.asnumpy(cp.asarray(handle)).reshape(cpu_vals.shape)
         assert_close(gpu_vals, cpu_vals, rtol=3e-4, atol=3e-4, msg="CUDA WAD mismatch")

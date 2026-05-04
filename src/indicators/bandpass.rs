@@ -1130,11 +1130,7 @@ fn expand_grid(r: &BandPassBatchRange) -> Vec<BandPassParams> {
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(
-    module = "ta_indicators.cuda",
-    name = "BandPassDeviceArrayF32",
-    unsendable
-)]
+#[pyclass(module = "vector_ta", name = "BandPassDeviceArrayF32", unsendable)]
 pub struct BandPassDeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32,
     pub(crate) _ctx: Arc<Context>,
@@ -3525,7 +3521,7 @@ pub fn bandpass_alloc(len: usize) -> *mut f64 {
 pub fn bandpass_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

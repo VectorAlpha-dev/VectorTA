@@ -1600,7 +1600,7 @@ pub fn market_structure_trailing_stop_alloc(len: usize) -> *mut f64 {
 pub fn market_structure_trailing_stop_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, 3 * len, 3 * len);
+            let _ = Vec::from_raw_parts(ptr, 0, 3 * len);
         }
     }
 }

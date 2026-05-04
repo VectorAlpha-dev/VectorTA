@@ -3018,7 +3018,7 @@ pub fn bollinger_bands_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn bollinger_bands_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 
@@ -3182,7 +3182,7 @@ use numpy::PyReadonlyArray1;
 use pyo3::{pyfunction, PyResult, Python};
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct BollingerDeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32Bb,
 }

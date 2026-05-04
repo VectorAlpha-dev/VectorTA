@@ -67,7 +67,7 @@ class TestSqwmaCuda:
 
         cpu_tm = np.empty_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.sqwma(data_tm[:, j], period)
+            cpu_tm[:, j] = ti.sqwma(np.ascontiguousarray(data_tm[:, j]), period)
 
         handle = ti.sqwma_cuda_many_series_one_param_dev(
             data_tm.astype(np.float32), period

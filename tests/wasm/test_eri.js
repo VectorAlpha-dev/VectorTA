@@ -428,7 +428,7 @@ test('ERI batch edge cases', () => {
 
     assert.throws(
         () => wasm.eri_batch([], [], [], { period_range: [13, 13, 0], ma_type: "ema" }),
-        /All input values are NaN/,
+        /Empty input data|Empty data/i,
         'Should fail with empty data'
     );
 

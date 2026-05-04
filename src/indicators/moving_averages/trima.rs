@@ -10,7 +10,8 @@ use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -1448,11 +1449,7 @@ pub fn trima_cuda_many_series_one_param_dev_py(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(
-    module = "ta_indicators.cuda",
-    name = "DeviceArrayF32Trima",
-    unsendable
-)]
+#[pyclass(module = "vector_ta", name = "DeviceArrayF32Trima", unsendable)]
 pub struct DeviceArrayF32TrimaPy {
     pub(crate) inner: Option<DeviceArrayF32Trima>,
 }
@@ -1667,7 +1664,7 @@ pub fn trima_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn trima_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 

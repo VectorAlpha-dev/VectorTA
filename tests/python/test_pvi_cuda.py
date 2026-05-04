@@ -83,7 +83,7 @@ class TestPviCuda:
         initial_value = 1200.0
         cpu_tm = np.zeros_like(close_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.pvi(close_tm[:, j], volume_tm[:, j], initial_value)
+            cpu_tm[:, j] = ti.pvi(np.ascontiguousarray(close_tm[:, j]), np.ascontiguousarray(volume_tm[:, j]), initial_value)
 
         handle = ti.pvi_cuda_many_series_one_param_dev(
             close_tm.astype(np.float32).ravel(),

@@ -122,6 +122,45 @@ pub struct CudaVpwma {
     debug_many_logged: bool,
 }
 
+pub struct CudaVpwmaBatchPlan {
+    combos: Vec<VpwmaParams>,
+    d_periods: DeviceBuffer<i32>,
+    d_win_lengths: DeviceBuffer<i32>,
+    d_weights: DeviceBuffer<f32>,
+    d_inv_norms: DeviceBuffer<f32>,
+    d_out: DeviceBuffer<f32>,
+    rows: usize,
+    cols: usize,
+    stride: usize,
+    first_valid: usize,
+}
+impl CudaVpwmaBatchPlan {
+    #[inline]
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    #[inline]
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    #[inline]
+    pub fn stride(&self) -> usize {
+        self.stride
+    }
+
+    #[inline]
+    pub fn params(&self) -> &[VpwmaParams] {
+        &self.combos
+    }
+
+    #[inline]
+    pub fn output(&self) -> &DeviceBuffer<f32> {
+        &self.d_out
+    }
+}
+
 impl CudaVpwma {
     pub fn new(device_id: usize) -> Result<Self, CudaVpwmaError> {
         cust::init(CudaFlags::empty())?;
@@ -261,6 +300,25 @@ impl CudaVpwma {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaVpwmaError::InvalidInput("all values are NaN".into()))?;
 
+        let len = data_f32.len();
+        let combos = Self::prepare_batch_inputs_device(len, first_valid, sweep)?;
+        Ok((combos, first_valid, len))
+    }
+
+    fn prepare_batch_inputs_device(
+        len: usize,
+        first_valid: usize,
+        sweep: &VpwmaBatchRange,
+    ) -> Result<Vec<VpwmaParams>, CudaVpwmaError> {
+        if len == 0 {
+            return Err(CudaVpwmaError::InvalidInput("empty data".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaVpwmaError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
         let combos = expand_grid_vpwma(sweep);
         if combos.is_empty() {
             return Err(CudaVpwmaError::InvalidInput(
@@ -268,7 +326,6 @@ impl CudaVpwma {
             ));
         }
 
-        let len = data_f32.len();
         let mut max_period = 0usize;
         for combo in &combos {
             let period = combo.period.unwrap_or(0);
@@ -298,7 +355,7 @@ impl CudaVpwma {
             )));
         }
 
-        Ok((combos, first_valid, len))
+        Ok(combos)
     }
 
     fn compute_weights(period: usize, power: f64) -> Result<(Vec<f32>, f32), CudaVpwmaError> {
@@ -566,30 +623,7 @@ impl CudaVpwma {
         len: usize,
     ) -> Result<DeviceArrayF32, CudaVpwmaError> {
         let n_combos = combos.len();
-        let mut periods = Vec::with_capacity(n_combos);
-        let mut win_lengths = Vec::with_capacity(n_combos);
-        let mut inv_norms = Vec::with_capacity(n_combos);
-
-        let stride = combos
-            .iter()
-            .map(|c| c.period.unwrap() - 1)
-            .max()
-            .unwrap_or(1);
-
         let prices_bytes = len
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
-        let weights_bytes = n_combos
-            .checked_mul(stride)
-            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
-            .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
-        let periods_bytes = n_combos
-            .checked_mul(std::mem::size_of::<i32>())
-            .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
-        let winlens_bytes = n_combos
-            .checked_mul(std::mem::size_of::<i32>())
-            .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
-        let invnorm_bytes = n_combos
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
         let out_bytes = n_combos
@@ -597,17 +631,41 @@ impl CudaVpwma {
             .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
         let required = prices_bytes
-            .checked_add(weights_bytes)
-            .and_then(|v| v.checked_add(periods_bytes))
-            .and_then(|v| v.checked_add(winlens_bytes))
-            .and_then(|v| v.checked_add(invnorm_bytes))
-            .and_then(|v| v.checked_add(out_bytes))
+            .checked_add(out_bytes)
             .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         Self::ensure_fit(required, headroom)?;
 
         let d_prices = DeviceBuffer::from_slice(data_f32)?;
+        let mut plan = self.build_vpwma_batch_plan(len, first_valid, combos)?;
+        self.launch_vpwma_batch_plan(&d_prices, &mut plan)?;
+        self.stream.synchronize()?;
+        let CudaVpwmaBatchPlan { d_out, rows, .. } = plan;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols: len,
+            ctx: self.ctx.clone(),
+            device_id: self.device_id,
+        })
+    }
 
+    fn build_vpwma_batch_plan(
+        &self,
+        len: usize,
+        first_valid: usize,
+        combos: &[VpwmaParams],
+    ) -> Result<CudaVpwmaBatchPlan, CudaVpwmaError> {
+        let n_combos = combos.len();
+        let stride = combos
+            .iter()
+            .map(|c| c.period.unwrap() - 1)
+            .max()
+            .unwrap_or(1);
+
+        let mut periods = Vec::with_capacity(n_combos);
+        let mut win_lengths = Vec::with_capacity(n_combos);
+        let mut inv_norms = Vec::with_capacity(n_combos);
         let mut weights_flat = vec![0f32; n_combos * stride];
 
         for (idx, combo) in combos.iter().enumerate() {
@@ -635,35 +693,51 @@ impl CudaVpwma {
             inv_norms.push((1.0 / norm) as f32);
         }
 
+        let weights_bytes = n_combos
+            .checked_mul(stride)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
+        let periods_bytes = n_combos
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
+        let winlens_bytes = n_combos
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
+        let invnorm_bytes = n_combos
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
+        let out_bytes = n_combos
+            .checked_mul(len)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
+        let required = weights_bytes
+            .checked_add(periods_bytes)
+            .and_then(|v| v.checked_add(winlens_bytes))
+            .and_then(|v| v.checked_add(invnorm_bytes))
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
+        Self::ensure_fit(required, 64 * 1024 * 1024)?;
+
         let d_periods = DeviceBuffer::from_slice(&periods)?;
         let d_win_lengths = DeviceBuffer::from_slice(&win_lengths)?;
         let d_weights = DeviceBuffer::from_slice(&weights_flat)?;
         let d_inv_norms = DeviceBuffer::from_slice(&inv_norms)?;
-
         let elems = n_combos
             .checked_mul(len)
             .ok_or_else(|| CudaVpwmaError::InvalidInput("element count overflow".into()))?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
+        let d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
 
-        self.launch_batch_kernel(
-            &d_prices,
-            &d_periods,
-            &d_win_lengths,
-            &d_weights,
-            &d_inv_norms,
-            len,
-            stride,
-            first_valid,
-            n_combos,
-            &mut d_out,
-        )?;
-        self.stream.synchronize()?;
-        Ok(DeviceArrayF32 {
-            buf: d_out,
+        Ok(CudaVpwmaBatchPlan {
+            combos: combos.to_vec(),
+            d_periods,
+            d_win_lengths,
+            d_weights,
+            d_inv_norms,
+            d_out,
             rows: n_combos,
             cols: len,
-            ctx: self.ctx.clone(),
-            device_id: self.device_id,
+            stride,
+            first_valid,
         })
     }
 
@@ -715,6 +789,72 @@ impl CudaVpwma {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let dev = self.run_batch_kernel(data_f32, &combos, first_valid, len)?;
         Ok((dev, combos))
+    }
+
+    pub fn prepare_vpwma_batch_plan(
+        &self,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &VpwmaBatchRange,
+    ) -> Result<CudaVpwmaBatchPlan, CudaVpwmaError> {
+        let combos = Self::prepare_batch_inputs_device(series_len, first_valid, sweep)?;
+        self.build_vpwma_batch_plan(series_len, first_valid, &combos)
+    }
+
+    pub fn launch_vpwma_batch_plan(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        plan: &mut CudaVpwmaBatchPlan,
+    ) -> Result<(), CudaVpwmaError> {
+        if d_prices.len() != plan.cols {
+            return Err(CudaVpwmaError::InvalidInput(
+                "d_prices length mismatch".into(),
+            ));
+        }
+        self.launch_batch_kernel(
+            d_prices,
+            &plan.d_periods,
+            &plan.d_win_lengths,
+            &plan.d_weights,
+            &plan.d_inv_norms,
+            plan.cols,
+            plan.stride,
+            plan.first_valid,
+            plan.rows,
+            &mut plan.d_out,
+        )
+    }
+
+    pub fn vpwma_batch_dev_from_device_prices(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &VpwmaBatchRange,
+    ) -> Result<(DeviceArrayF32, Vec<VpwmaParams>), CudaVpwmaError> {
+        if d_prices.len() != series_len {
+            return Err(CudaVpwmaError::InvalidInput(
+                "d_prices length mismatch".into(),
+            ));
+        }
+        let mut plan = self.prepare_vpwma_batch_plan(series_len, first_valid, sweep)?;
+        self.launch_vpwma_batch_plan(d_prices, &mut plan)?;
+        let CudaVpwmaBatchPlan {
+            combos,
+            d_out,
+            rows,
+            ..
+        } = plan;
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols: series_len,
+                ctx: self.ctx.clone(),
+                device_id: self.device_id,
+            },
+            combos,
+        ))
     }
 
     pub fn vpwma_batch_into_host_f32(

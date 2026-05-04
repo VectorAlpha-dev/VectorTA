@@ -87,7 +87,7 @@ class TestEhlersPmaCuda:
         cpu_predict = np.full_like(data_tm, np.nan)
         cpu_trigger = np.full_like(data_tm, np.nan)
         for j in range(cols):
-            predict, trigger = ti.ehlers_pma(data_tm[:, j])
+            predict, trigger = ti.ehlers_pma(np.ascontiguousarray(data_tm[:, j]))
             cpu_predict[:, j] = predict
             cpu_trigger[:, j] = trigger
 

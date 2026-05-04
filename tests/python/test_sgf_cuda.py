@@ -45,7 +45,7 @@ class TestSgfCuda:
             x = np.arange(rows, dtype=np.float64) + j * 0.25
             data_tm[:, j] = (1.0 + 0.4 * x - 0.01 * x * x).astype(np.float32)
 
-        cpu = np.column_stack([ti.sgf(data_tm[:, j].astype(np.float64), 9, 2) for j in range(cols)])
+        cpu = np.column_stack([ti.sgf(np.ascontiguousarray(data_tm[:, j]).astype(np.float64), 9, 2) for j in range(cols)])
         handle = ti.sgf_cuda_many_series_one_param_dev(data_tm, 9, 2)
         gpu = cp.asnumpy(cp.asarray(handle))
         np.testing.assert_allclose(gpu, cpu, rtol=1e-5, atol=1e-5, equal_nan=True)

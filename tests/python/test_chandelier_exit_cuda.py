@@ -82,7 +82,7 @@ class TestChandelierExitCuda:
         cpu_long = np.full_like(close_tm, np.nan)
         cpu_short = np.full_like(close_tm, np.nan)
         for j in range(N):
-            l, s = ti.chandelier_exit(high_tm[:, j], low_tm[:, j], close_tm[:, j], period, mult, use_close)
+            l, s = ti.chandelier_exit(np.ascontiguousarray(high_tm[:, j]), np.ascontiguousarray(low_tm[:, j]), np.ascontiguousarray(close_tm[:, j]), period, mult, use_close)
             cpu_long[:, j] = l
             cpu_short[:, j] = s
 

@@ -102,7 +102,7 @@ class TestWtoCuda:
         cpu_wt2 = np.zeros_like(series)
         cpu_hist = np.zeros_like(series)
         for j in range(cols):
-            wt1_j, wt2_j, hist_j = ti.wto(series[:, j], channel, average)
+            wt1_j, wt2_j, hist_j = ti.wto(np.ascontiguousarray(series[:, j]), channel, average)
             cpu_wt1[:, j] = wt1_j
             cpu_wt2[:, j] = wt2_j
             cpu_hist[:, j] = hist_j

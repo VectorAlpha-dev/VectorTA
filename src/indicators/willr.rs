@@ -2577,11 +2577,7 @@ impl WillrStreamPy {
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(
-    module = "ta_indicators.cuda",
-    name = "WillrDeviceArrayF32",
-    unsendable
-)]
+#[pyclass(module = "vector_ta", name = "WillrDeviceArrayF32", unsendable)]
 pub struct WillrDeviceArrayF32Py {
     pub(crate) inner: Option<DeviceArrayF32>,
     pub(crate) _ctx: Arc<Context>,
@@ -2932,7 +2928,7 @@ pub fn willr_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn willr_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 

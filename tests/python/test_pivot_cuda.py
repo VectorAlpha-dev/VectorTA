@@ -94,7 +94,11 @@ class TestPivotCuda:
         cpu_pp = np.zeros_like(c_tm)
         for s in range(cols):
             r4, r3, r2, r1, pp, s1, s2, s3, s4 = ti.pivot(
-                h_tm[:, s], l_tm[:, s], c_tm[:, s], o_tm[:, s], mode=3
+                np.ascontiguousarray(h_tm[:, s]),
+                np.ascontiguousarray(l_tm[:, s]),
+                np.ascontiguousarray(c_tm[:, s]),
+                np.ascontiguousarray(o_tm[:, s]),
+                mode=3,
             )
             cpu_pp[:, s] = pp
 

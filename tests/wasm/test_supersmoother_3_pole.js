@@ -202,7 +202,7 @@ test('SuperSmoother3Pole with leading NaNs', (t) => {
 
     for (let i = 0; i < 5; i++) {
 
-        assert.strictEqual(result[i], 0, `WASM converts NaN to 0 at index ${i}`);
+        assert.ok(isNaN(result[i]), `Expected leading NaN at index ${i}`);
     }
 
 

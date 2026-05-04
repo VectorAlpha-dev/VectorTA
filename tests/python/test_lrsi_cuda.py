@@ -68,7 +68,7 @@ class TestLrsiCuda:
 
         cpu_tm = np.zeros_like(high_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.lrsi(high_tm[:, j], low_tm[:, j], alpha)
+            cpu_tm[:, j] = ti.lrsi(np.ascontiguousarray(high_tm[:, j]), np.ascontiguousarray(low_tm[:, j]), alpha)
 
         handle = ti.lrsi_cuda_many_series_one_param_dev(
             high_tm.astype(np.float32), low_tm.astype(np.float32), alpha

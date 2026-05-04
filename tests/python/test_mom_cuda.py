@@ -67,7 +67,7 @@ class TestMomCuda:
         period = 10
         cpu_tm = np.zeros_like(tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.mom(tm[:, j], period)
+            cpu_tm[:, j] = ti.mom(np.ascontiguousarray(tm[:, j]), period)
 
         handle = ti.mom_cuda_many_series_one_param_dev(
             tm.astype(np.float32).ravel(), N, T, period

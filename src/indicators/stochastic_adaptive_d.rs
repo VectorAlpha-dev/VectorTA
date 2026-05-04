@@ -1610,7 +1610,7 @@ pub fn stochastic_adaptive_d_free(ptr: *mut f64, len: usize) {
         return;
     }
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len * 3, len * 3);
+        let _ = Vec::from_raw_parts(ptr, 0, len * 3);
     }
 }
 

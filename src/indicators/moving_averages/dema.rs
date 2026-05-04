@@ -1034,7 +1034,7 @@ unsafe fn dema_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Dema", unsendable)]
+#[pyclass(module = "vector_ta", name = "DeviceArrayF32Dema", unsendable)]
 pub struct DeviceArrayF32DemaPy {
     pub(crate) inner: DeviceArrayF32,
     _ctx_guard: std::sync::Arc<cust::context::Context>,
@@ -2196,7 +2196,7 @@ pub fn dema_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn dema_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 

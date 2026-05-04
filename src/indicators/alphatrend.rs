@@ -1584,7 +1584,10 @@ pub fn alphatrend_js(
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn alphatrend_alloc_flat(n: usize) -> *mut f64 {
-    let mut v = Vec::<f64>::with_capacity(2 * n);
+    let Some(total) = n.checked_mul(2) else {
+        return core::ptr::null_mut();
+    };
+    let mut v = Vec::<f64>::with_capacity(total);
     let p = v.as_mut_ptr();
     core::mem::forget(v);
     p
@@ -1593,8 +1596,14 @@ pub fn alphatrend_alloc_flat(n: usize) -> *mut f64 {
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn alphatrend_free_flat(ptr: *mut f64, n: usize) {
+    if ptr.is_null() {
+        return;
+    }
+    let Some(total) = n.checked_mul(2) else {
+        return;
+    };
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, 2 * n, 2 * n);
+        let _ = Vec::from_raw_parts(ptr, 0, total);
     }
 }
 
@@ -1645,14 +1654,24 @@ pub fn alphatrend_into_flat(
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[deprecated(note = "Use alphatrend_alloc_flat/alphatrend_into_flat")]
-pub fn alphatrend_alloc(_len: usize) -> *mut f64 {
-    core::ptr::null_mut()
+pub fn alphatrend_alloc(len: usize) -> *mut f64 {
+    let mut v = Vec::<f64>::with_capacity(len);
+    let ptr = v.as_mut_ptr();
+    core::mem::forget(v);
+    ptr
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[deprecated(note = "Use alphatrend_free_flat")]
-pub fn alphatrend_free(_ptr: *mut f64, _len: usize) {}
+pub fn alphatrend_free(ptr: *mut f64, len: usize) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let _ = Vec::from_raw_parts(ptr, 0, len);
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct AlphaTrendBatchRange {
@@ -2592,7 +2611,7 @@ pub fn alphatrend_cuda_many_series_one_param_dev_py<'py>(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct AtDeviceArrayF32Py {
     pub(crate) buf: Option<DeviceBuffer<f32>>,
     pub(crate) rows: usize,

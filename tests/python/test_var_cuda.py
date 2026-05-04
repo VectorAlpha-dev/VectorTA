@@ -43,14 +43,15 @@ class TestVarCuda:
 
     def test_var_cuda_batch_matches_cpu(self, test_data):
         close = test_data['close']
+        close_f32 = close.astype(np.float32)
         period, nbdev = 14, 1.5
 
 
-        cpu = ti.var(close, period, nbdev)
+        cpu = ti.var(close_f32.astype(np.float64), period, nbdev)
 
 
         handle = ti.var_cuda_batch_dev(
-            close.astype(np.float32),
+            close_f32,
             period_range=(period, period, 0),
             nbdev_range=(nbdev, nbdev, 0.0),
         )
@@ -66,17 +67,20 @@ class TestVarCuda:
         data_tm = np.zeros((T, N), dtype=np.float64)
         for j in range(N):
             data_tm[:, j] = series * (1.0 + 0.01 * j)
+        data_f32 = data_tm.astype(np.float32)
 
         period, nbdev = 14, 1.0
 
 
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.var(data_tm[:, j], period, nbdev)
+            cpu_tm[:, j] = ti.var(
+                np.ascontiguousarray(data_f32[:, j]).astype(np.float64), period, nbdev
+            )
 
 
         handle = ti.var_cuda_many_series_one_param_dev(
-            data_tm.astype(np.float32).ravel(), cols=N, rows=T, period=period, nbdev=nbdev
+            data_f32.ravel(), cols=N, rows=T, period=period, nbdev=nbdev
         )
         gpu_tm = cp.asnumpy(cp.asarray(handle))
         assert gpu_tm.shape == (T, N)

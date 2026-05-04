@@ -625,7 +625,7 @@ pub fn advance_decline_line_alloc(len: usize) -> *mut f64 {
 pub fn advance_decline_line_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

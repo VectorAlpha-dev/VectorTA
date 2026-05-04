@@ -89,7 +89,7 @@ class TestSupersmoother3PoleCuda:
 
         cpu_tm = np.zeros_like(tm_quant)
         for j in range(N):
-            cpu_tm[:, j] = ti.supersmoother_3_pole(tm_quant[:, j], period)
+            cpu_tm[:, j] = ti.supersmoother_3_pole(np.ascontiguousarray(tm_quant[:, j]), period)
 
         handle = ti.supersmoother_3_pole_cuda_many_series_one_param_dev(
             tm32,

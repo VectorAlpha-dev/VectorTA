@@ -78,7 +78,7 @@ class TestDtiCuda:
 
             base = (1.0 + 0.02 * j)
             high_tm[:, j] = high * base
-            low_tm[:, j] = (low * base).clip(max=high_tm[:, j] - 1e-6)
+            low_tm[:, j] = (low * base).clip(max=np.ascontiguousarray(high_tm[:, j]) - 1e-6)
 
         r, s, u = 14, 10, 5
 
@@ -86,8 +86,8 @@ class TestDtiCuda:
         cpu_tm = np.zeros_like(high_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.dti(
-                high_tm[:, j].astype(np.float32).astype(np.float64),
-                low_tm[:, j].astype(np.float32).astype(np.float64),
+                np.ascontiguousarray(high_tm[:, j]).astype(np.float32).astype(np.float64),
+                np.ascontiguousarray(low_tm[:, j]).astype(np.float32).astype(np.float64),
                 r, s, u,
             )
 

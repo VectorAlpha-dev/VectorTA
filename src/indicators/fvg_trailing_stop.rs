@@ -2707,7 +2707,7 @@ pub fn fvg_ts_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn fvg_ts_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 
@@ -2968,7 +2968,7 @@ pub fn fvg_trailing_stop_alloc_js(size: usize) -> *mut f64 {
 #[wasm_bindgen(js_name = "fvgTrailingStopFree")]
 pub fn fvg_trailing_stop_free_js(ptr: *mut f64, size: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, size * 4, size * 4);
+        let _ = Vec::from_raw_parts(ptr, 0, size * 4);
     }
 }
 

@@ -1348,7 +1348,7 @@ pub fn percentile_nearest_rank_alloc(n: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn percentile_nearest_rank_free(ptr: *mut f64, n: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, n, n);
+        let _ = Vec::from_raw_parts(ptr, 0, n);
     }
 }
 

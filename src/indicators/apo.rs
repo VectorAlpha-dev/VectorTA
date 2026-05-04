@@ -2323,7 +2323,7 @@ use cust::context::Context as CudaContext;
 use std::sync::Arc;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Apo", unsendable)]
+#[pyclass(module = "vector_ta", name = "DeviceArrayF32Apo", unsendable)]
 pub struct DeviceArrayF32ApoPy {
     pub(crate) inner: Option<crate::cuda::moving_averages::apo_wrapper::DeviceArrayF32>,
     stream_handle: usize,
@@ -2516,7 +2516,7 @@ pub fn apo_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn apo_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 

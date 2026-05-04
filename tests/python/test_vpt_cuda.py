@@ -75,7 +75,7 @@ class TestVptCuda:
 
         cpu_tm = np.zeros_like(price_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.vpt(price_tm[:, j], volume_tm[:, j])
+            cpu_tm[:, j] = ti.vpt(np.ascontiguousarray(price_tm[:, j]), np.ascontiguousarray(volume_tm[:, j]))
 
         handle = ti.vpt_cuda_many_series_one_param_dev(
             price_tm.astype(np.float32).ravel(),

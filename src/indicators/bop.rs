@@ -1534,7 +1534,7 @@ impl BopStreamPy {
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct BopDeviceArrayF32Py {
     pub(crate) buf: Option<DeviceBuffer<f32>>,
     pub(crate) rows: usize,
@@ -1828,7 +1828,7 @@ pub fn bop_alloc(len: usize) -> *mut f64 {
 pub fn bop_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

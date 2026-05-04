@@ -2630,7 +2630,7 @@ pub fn donchian_alloc(len: usize) -> *mut f64 {
 pub fn donchian_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }
@@ -2759,7 +2759,7 @@ use crate::cuda::donchian_wrapper::DeviceArrayF32 as DeviceArrayF32Donch;
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct DeviceArrayF32DonchPy {
     pub(crate) inner: Option<DeviceArrayF32Donch>,
 }

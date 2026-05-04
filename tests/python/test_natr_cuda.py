@@ -97,12 +97,12 @@ class TestNatrCuda:
 
 
         for s in range(cols):
-            cpu = ti.natr(high_tm[:, s].astype(np.float64),
-                          low_tm[:, s].astype(np.float64),
-                          close_tm[:, s].astype(np.float64),
+            cpu = ti.natr(np.ascontiguousarray(high_tm[:, s]).astype(np.float64),
+                          np.ascontiguousarray(low_tm[:, s]).astype(np.float64),
+                          np.ascontiguousarray(close_tm[:, s]).astype(np.float64),
                           period)
             assert_close(
-                gpu_tm[:, s],
+                np.ascontiguousarray(gpu_tm[:, s]),
                 cpu,
                 rtol=1e-5,
                 atol=2e-5,

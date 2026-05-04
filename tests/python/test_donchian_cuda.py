@@ -51,10 +51,7 @@ class TestDonchianCuda:
         low  = test_data["low"].astype(np.float64)
         period = 20
 
-        cpu = ti.donchian(high, low, period)
-        cpu_upper = cpu["upperband"]
-        cpu_middle = cpu["middleband"]
-        cpu_lower = cpu["lowerband"]
+        cpu_upper, cpu_middle, cpu_lower = ti.donchian(high, low, period)
 
         out = ti.donchian_cuda_batch_dev(
             high.astype(np.float32),
@@ -87,10 +84,14 @@ class TestDonchianCuda:
         cpu_m = np.zeros_like(high_tm)
         cpu_l = np.zeros_like(high_tm)
         for j in range(cols):
-            out = ti.donchian(high_tm[:, j], low_tm[:, j], period)
-            cpu_u[:, j] = out["upperband"]
-            cpu_m[:, j] = out["middleband"]
-            cpu_l[:, j] = out["lowerband"]
+            upper, middle, lower = ti.donchian(
+                np.ascontiguousarray(high_tm[:, j]),
+                np.ascontiguousarray(low_tm[:, j]),
+                period,
+            )
+            cpu_u[:, j] = upper
+            cpu_m[:, j] = middle
+            cpu_l[:, j] = lower
 
         out = ti.donchian_cuda_many_series_one_param_dev(
             high_tm.astype(np.float32),

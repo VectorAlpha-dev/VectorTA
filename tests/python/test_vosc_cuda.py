@@ -64,7 +64,7 @@ class TestVoscCuda:
 
         cpu_tm = np.zeros_like(v_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.vosc(v_tm[:, j].astype(np.float32).astype(np.float64), s, l)
+            cpu_tm[:, j] = ti.vosc(np.ascontiguousarray(v_tm[:, j]).astype(np.float32).astype(np.float64), s, l)
 
         handle = ti.vosc_cuda_many_series_one_param_dev(v_tm.astype(np.float32), s, l)
         gpu_tm = cp.asnumpy(cp.asarray(handle))

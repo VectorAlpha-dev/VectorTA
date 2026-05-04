@@ -1694,11 +1694,7 @@ pub fn aroon_cuda_many_series_one_param_dev_py<'py>(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(
-    module = "ta_indicators.cuda",
-    name = "AroonDeviceArrayF32",
-    unsendable
-)]
+#[pyclass(module = "vector_ta", name = "AroonDeviceArrayF32", unsendable)]
 pub struct AroonDeviceArrayF32Py {
     pub(crate) inner: crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32,
     pub(crate) _ctx: std::sync::Arc<cust::context::Context>,
@@ -3397,7 +3393,7 @@ pub fn aroon_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn aroon_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, 2 * len, 2 * len);
+        let _ = Vec::from_raw_parts(ptr, 0, 2 * len);
     }
 }
 

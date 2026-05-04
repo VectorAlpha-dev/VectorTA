@@ -2863,7 +2863,7 @@ pub fn vwmacd_alloc(len: usize) -> *mut f64 {
 pub fn vwmacd_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }
@@ -3172,9 +3172,190 @@ pub fn vwmacd_batch_py<'py>(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::vwmacd_wrapper::CudaVwmacdBatchPlan;
+#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaVwmacd};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::make_device_array_py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::{CopyDestination, DeviceBuffer};
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "vector_ta", name = "VwmacdCudaBatchPlan", unsendable)]
+pub struct VwmacdCudaBatchPlanPy {
+    cuda: CudaVwmacd,
+    plan: CudaVwmacdBatchPlan,
+    device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl VwmacdCudaBatchPlanPy {
+    #[getter]
+    fn rows(&self) -> usize {
+        self.plan.rows()
+    }
+
+    #[getter]
+    fn cols(&self) -> usize {
+        self.plan.cols()
+    }
+
+    #[getter]
+    fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        let params = pyo3::types::PyList::empty(py);
+        for combo in self.plan.params() {
+            let item = PyDict::new(py);
+            item.set_item("fast_period", combo.fast_period.unwrap_or(12))?;
+            item.set_item("slow_period", combo.slow_period.unwrap_or(26))?;
+            item.set_item("signal_period", combo.signal_period.unwrap_or(9))?;
+            item.set_item(
+                "fast_ma_type",
+                combo.fast_ma_type.as_deref().unwrap_or("sma"),
+            )?;
+            item.set_item(
+                "slow_ma_type",
+                combo.slow_ma_type.as_deref().unwrap_or("sma"),
+            )?;
+            item.set_item(
+                "signal_ma_type",
+                combo.signal_ma_type.as_deref().unwrap_or("ema"),
+            )?;
+            params.append(item)?;
+        }
+        dict.set_item("params", params)?;
+        dict.set_item(
+            "fasts",
+            self.plan
+                .params()
+                .iter()
+                .map(|c| c.fast_period.unwrap_or(12) as u64)
+                .collect::<Vec<_>>()
+                .into_pyarray(py),
+        )?;
+        dict.set_item(
+            "slows",
+            self.plan
+                .params()
+                .iter()
+                .map(|c| c.slow_period.unwrap_or(26) as u64)
+                .collect::<Vec<_>>()
+                .into_pyarray(py),
+        )?;
+        dict.set_item(
+            "signals",
+            self.plan
+                .params()
+                .iter()
+                .map(|c| c.signal_period.unwrap_or(9) as u64)
+                .collect::<Vec<_>>()
+                .into_pyarray(py),
+        )?;
+        dict.set_item("rows", self.plan.rows())?;
+        dict.set_item("cols", self.plan.cols())?;
+        Ok(dict)
+    }
+
+    fn execute<'py>(
+        &mut self,
+        py: Python<'py>,
+        close_f32: numpy::PyReadonlyArray1<'py, f32>,
+        volume_f32: numpy::PyReadonlyArray1<'py, f32>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let close = close_f32.as_slice()?;
+        let volume = volume_f32.as_slice()?;
+        let rows = self.plan.rows();
+        let cols = self.plan.cols();
+        if close.len() != cols || volume.len() != cols {
+            return Err(PyValueError::new_err(
+                "VWMACD CUDA plan input length mismatch",
+            ));
+        }
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| PyValueError::new_err("VWMACD CUDA plan rows*cols overflow"))?;
+        let (macd, signal, hist) =
+            py.allow_threads(|| -> PyResult<(Vec<f32>, Vec<f32>, Vec<f32>)> {
+                let d_close = DeviceBuffer::from_slice(close)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                let d_volume = DeviceBuffer::from_slice(volume)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                self.cuda
+                    .launch_vwmacd_batch_plan(&d_close, &d_volume, &mut self.plan)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                self.cuda
+                    .synchronize()
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+                let mut macd = vec![0f32; total];
+                let mut signal = vec![0f32; total];
+                let mut hist = vec![0f32; total];
+                let (macd_buf, signal_buf, hist_buf) = self.plan.outputs();
+                macd_buf
+                    .copy_to(&mut macd)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                signal_buf
+                    .copy_to(&mut signal)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                hist_buf
+                    .copy_to(&mut hist)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                Ok((macd, signal, hist))
+            })?;
+
+        let dict = self.metadata(py)?;
+        let macd_arr = macd.into_pyarray(py);
+        let signal_arr = signal.into_pyarray(py);
+        let hist_arr = hist.into_pyarray(py);
+        dict.set_item("macd", macd_arr.reshape((rows, cols))?)?;
+        dict.set_item("signal", signal_arr.reshape((rows, cols))?)?;
+        dict.set_item("hist", hist_arr.reshape((rows, cols))?)?;
+        Ok(dict)
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vwmacd_cuda_batch_plan_create")]
+#[pyo3(signature = (series_len, first_valid, fast_range, slow_range, signal_range, device_id=0))]
+pub fn vwmacd_cuda_batch_plan_create_py(
+    py: Python<'_>,
+    series_len: usize,
+    first_valid: usize,
+    fast_range: (usize, usize, usize),
+    slow_range: (usize, usize, usize),
+    signal_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<VwmacdCudaBatchPlanPy> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let sweep = VwmacdBatchRange {
+        fast: fast_range,
+        slow: slow_range,
+        signal: signal_range,
+        fast_ma_type: "sma".to_string(),
+        slow_ma_type: "sma".to_string(),
+        signal_ma_type: "ema".to_string(),
+    };
+    let (cuda, plan, dev_id) = py.allow_threads(|| {
+        let cuda = CudaVwmacd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let plan = cuda
+            .prepare_vwmacd_batch_plan(series_len, first_valid, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dev_id = plan.device_id();
+        Ok::<_, PyErr>((cuda, plan, dev_id))
+    })?;
+    Ok(VwmacdCudaBatchPlanPy {
+        cuda,
+        plan,
+        device_id: dev_id,
+    })
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "vwmacd_cuda_batch_dev")]

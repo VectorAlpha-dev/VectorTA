@@ -1139,11 +1139,7 @@ impl MarketefiStreamPy {
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(
-    module = "ta_indicators.cuda",
-    name = "MarketefiDeviceArrayF32",
-    unsendable
-)]
+#[pyclass(module = "vector_ta", name = "MarketefiDeviceArrayF32", unsendable)]
 pub struct MarketefiDeviceArrayF32Py {
     pub(crate) inner: SharedDeviceArrayF32Py,
 }
@@ -1930,7 +1926,7 @@ pub fn marketefi_alloc(len: usize) -> *mut f64 {
 pub fn marketefi_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

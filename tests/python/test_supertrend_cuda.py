@@ -59,9 +59,9 @@ class TestSupertrendCuda:
         trend_cpu, changed_cpu = ti.supertrend(high, low, close, period, factor)
 
         gpu = ti.supertrend_cuda_batch_dev(
-            high.astype(np.float32),
-            low.astype(np.float32),
-            close.astype(np.float32),
+            high,
+            low,
+            close,
             (period, period, 0),
             (factor, factor, 0.0),
         )
@@ -88,14 +88,14 @@ class TestSupertrendCuda:
         trend_cpu = np.zeros_like(series)
         changed_cpu = np.zeros_like(series)
         for j in range(cols):
-            t, ch = ti.supertrend(high[:, j], low[:, j], series[:, j], period, factor)
+            t, ch = ti.supertrend(np.ascontiguousarray(high[:, j]), np.ascontiguousarray(low[:, j]), np.ascontiguousarray(series[:, j]), period, factor)
             trend_cpu[:, j] = t
             changed_cpu[:, j] = ch
 
         out = ti.supertrend_cuda_many_series_one_param_dev(
-            high.astype(np.float32),
-            low.astype(np.float32),
-            series.astype(np.float32),
+            high.ravel(),
+            low.ravel(),
+            series.ravel(),
             cols,
             rows,
             period,

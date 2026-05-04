@@ -53,17 +53,26 @@ class TestEriCuda:
         high = test_data['high']
         low = test_data['low']
         close = test_data['close']
+        high_f32 = high.astype(np.float32)
+        low_f32 = low.astype(np.float32)
+        close_f32 = close.astype(np.float32)
         period = 13
         ma_type = "ema"
 
 
-        bull_cpu, bear_cpu = ti.eri(high, low, close, period=period, ma_type=ma_type)
+        bull_cpu, bear_cpu = ti.eri(
+            high_f32.astype(np.float64),
+            low_f32.astype(np.float64),
+            close_f32.astype(np.float64),
+            period=period,
+            ma_type=ma_type,
+        )
 
 
         bull_dev, bear_dev = ti.eri_cuda_batch_dev(
-            high.astype(np.float32),
-            low.astype(np.float32),
-            close.astype(np.float32),
+            high_f32,
+            low_f32,
+            close_f32,
             period_range=(period, period, 0),
             ma_type=ma_type,
         )
@@ -95,18 +104,27 @@ class TestEriCuda:
         ma_type = "ema"
 
 
+        high_f32 = high_tm.astype(np.float32)
+        low_f32 = low_tm.astype(np.float32)
+        close_f32 = close_tm.astype(np.float32)
         bull_cpu = np.zeros_like(close_tm)
         bear_cpu = np.zeros_like(close_tm)
         for j in range(N):
-            bull, bear = ti.eri(high_tm[:, j], low_tm[:, j], close_tm[:, j], period=period, ma_type=ma_type)
+            bull, bear = ti.eri(
+                np.ascontiguousarray(high_f32[:, j]).astype(np.float64),
+                np.ascontiguousarray(low_f32[:, j]).astype(np.float64),
+                np.ascontiguousarray(close_f32[:, j]).astype(np.float64),
+                period=period,
+                ma_type=ma_type,
+            )
             bull_cpu[:, j] = bull
             bear_cpu[:, j] = bear
 
 
         bull_dev, bear_dev = ti.eri_cuda_many_series_one_param_dev(
-            high_tm.astype(np.float32).ravel(),
-            low_tm.astype(np.float32).ravel(),
-            close_tm.astype(np.float32).ravel(),
+            high_f32.ravel(),
+            low_f32.ravel(),
+            close_f32.ravel(),
             close_tm.shape[1],
             close_tm.shape[0],
             period,

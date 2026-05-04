@@ -2579,7 +2579,7 @@ pub fn tilson_cuda_many_series_one_param_dev_py(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct DeviceArrayF32TilsonPy {
     pub(crate) inner: DeviceArrayF32Tilson,
 }
@@ -2817,7 +2817,7 @@ pub fn tilson_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn tilson_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 

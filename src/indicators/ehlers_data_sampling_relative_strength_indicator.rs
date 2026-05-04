@@ -1305,7 +1305,7 @@ pub fn ehlers_data_sampling_relative_strength_indicator_alloc(len: usize) -> *mu
 pub fn ehlers_data_sampling_relative_strength_indicator_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, 3 * len, 3 * len);
+            let _ = Vec::from_raw_parts(ptr, 0, 3 * len);
         }
     }
 }

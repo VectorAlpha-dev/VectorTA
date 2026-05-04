@@ -92,10 +92,10 @@ class TestCgCuda:
         period = 12
         cpu = np.full_like(tm, np.nan)
         for j in range(N):
-            cpu[:, j] = ti.cg(tm[:, j], period=period)
+            cpu[:, j] = ti.cg(np.ascontiguousarray(tm[:, j]), period=period)
 
         handle = ti.cg_cuda_many_series_one_param_dev(
-            tm.astype(np.float32),
+            tm.astype(np.float32).ravel(),
             cols=N,
             rows=T,
             period=period,

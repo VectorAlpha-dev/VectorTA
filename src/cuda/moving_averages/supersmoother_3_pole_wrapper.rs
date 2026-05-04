@@ -860,7 +860,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32")]
+#[pyclass(module = "vector_ta", name = "DeviceArrayF32")]
 pub struct DeviceArrayF32Py {
     pub inner: DeviceArrayF32,
     stream_handle: usize,
@@ -886,9 +886,6 @@ impl DeviceArrayF32Py {
         };
         d.set_item("data", (ptr_val, false))?;
         d.set_item("version", 3)?;
-        if self.stream_handle != 0 {
-            d.set_item("stream", self.stream_handle)?;
-        }
         Ok(d.into())
     }
     fn __dlpack_device__(&self) -> (i32, i32) {
@@ -927,9 +924,6 @@ impl DeviceArrayF32Py {
             }
         }
 
-        unsafe {
-            let _ = cust::sys::cuStreamSynchronize(self.stream_handle as *mut _);
-        }
         let _ = stream;
 
         let dummy = DeviceBuffer::from_slice(&[])

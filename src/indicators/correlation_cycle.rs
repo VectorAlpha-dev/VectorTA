@@ -2844,7 +2844,7 @@ mod tests {
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(
-    module = "ta_indicators.cuda",
+    module = "vector_ta",
     name = "DeviceArrayF32CorrelationCycle",
     unsendable
 )]
@@ -3296,7 +3296,7 @@ pub fn correlation_cycle_alloc(len: usize) -> *mut f64 {
 pub fn correlation_cycle_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

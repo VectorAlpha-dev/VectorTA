@@ -69,10 +69,10 @@ class TestTsiCuda:
 
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.tsi(data_tm[:, j], long_p, short_p)
+            cpu_tm[:, j] = ti.tsi(np.ascontiguousarray(data_tm[:, j]), long_p, short_p)
 
         handle = ti.tsi_cuda_many_series_one_param_dev(
-            data_tm.astype(np.float32), data_tm.shape[1], data_tm.shape[0], long_p, short_p
+            data_tm.astype(np.float32).ravel(), data_tm.shape[1], data_tm.shape[0], long_p, short_p
         )
         gpu_tm = cp.asnumpy(cp.asarray(handle))
         assert gpu_tm.shape == data_tm.shape

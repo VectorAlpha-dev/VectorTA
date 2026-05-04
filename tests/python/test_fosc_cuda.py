@@ -70,7 +70,7 @@ class TestFoscCuda:
 
         cpu_tm = np.full_like(data_tm, np.nan)
         for s in range(N):
-            cpu_tm[:, s] = ti.fosc(data_tm[:, s], period)
+            cpu_tm[:, s] = ti.fosc(np.ascontiguousarray(data_tm[:, s]), period)
 
         handle = ti.fosc_cuda_many_series_one_param_dev(
             data_tm.astype(np.float32), period

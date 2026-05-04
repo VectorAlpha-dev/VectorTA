@@ -91,15 +91,15 @@ class TestAsoCuda:
         cpu_b = np.zeros_like(c_tm)
         cpu_e = np.zeros_like(c_tm)
         for s in range(cols):
-            b, e = ti.aso(o_tm[:, s], h_tm[:, s], l_tm[:, s], c_tm[:, s], period, mode)
+            b, e = ti.aso(np.ascontiguousarray(o_tm[:, s]), np.ascontiguousarray(h_tm[:, s]), np.ascontiguousarray(l_tm[:, s]), np.ascontiguousarray(c_tm[:, s]), period, mode)
             cpu_b[:, s] = b
             cpu_e[:, s] = e
 
         hb, he = ti.aso_cuda_many_series_one_param_dev(
-            o_tm.astype(np.float32),
-            h_tm.astype(np.float32),
-            l_tm.astype(np.float32),
-            c_tm.astype(np.float32),
+            o_tm.astype(np.float32).ravel(),
+            h_tm.astype(np.float32).ravel(),
+            l_tm.astype(np.float32).ravel(),
+            c_tm.astype(np.float32).ravel(),
             cols,
             rows,
             period,

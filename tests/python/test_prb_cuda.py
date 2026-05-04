@@ -50,13 +50,14 @@ class TestPrbCuda:
 
     def test_prb_cuda_batch_matches_cpu(self, test_data):
         close = test_data['close']
+        close_f32 = close.astype(np.float32)
         n, k, ro = 50, 2, 0
 
-        cpu_main, cpu_up, cpu_lo = ti.prb(close, False, 10, n, k, ro, 2.0)
+        cpu_main, cpu_up, cpu_lo = ti.prb(close_f32.astype(np.float64), False, 10, n, k, ro, 2.0)
 
 
         main, up, lo = ti.prb_cuda_batch_dev(
-            close.astype(np.float32),
+            close_f32,
             smooth_data=False,
             smooth_period_range=(10, 10, 0),
             regression_period_range=(n, n, 0),
@@ -78,13 +79,24 @@ class TestPrbCuda:
         tm = np.zeros((T, N), dtype=np.float64)
         for j in range(N):
             tm[:, j] = series * (1.0 + 0.01 * j)
+        tm_f32 = tm.astype(np.float32)
         cpu_m = np.zeros_like(tm); cpu_u=np.zeros_like(tm); cpu_l=np.zeros_like(tm)
         for j in range(N):
-            m, u, l = ti.prb(tm[:, j], False, 10, n, k, ro, 2.0)
-            cpu_m[:, j] = m; cpu_u[:, j] = u; cpu_l[:, j] = l
+            m, u, l = ti.prb(
+                np.ascontiguousarray(tm_f32[:, j]).astype(np.float64),
+                False,
+                10,
+                n,
+                k,
+                ro,
+                2.0,
+            )
+            cpu_m[:, j] = m
+            cpu_u[:, j] = u
+            cpu_l[:, j] = l
 
         m_h, u_h, l_h = ti.prb_cuda_many_series_one_param_dev(
-            tm.astype(np.float32), cols=N, rows=T,
+            tm_f32.ravel(), cols=N, rows=T,
             smooth_data=False, smooth_period=10, regression_period=n, polynomial_order=k, regression_offset=ro, ndev=2.0,
         )
         g_m = cp.asnumpy(cp.asarray(m_h))

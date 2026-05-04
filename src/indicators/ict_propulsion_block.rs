@@ -2338,7 +2338,7 @@ pub fn ict_propulsion_block_free(ptr: *mut f64, len: usize) {
         return;
     }
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len * 12, len * 12);
+        let _ = Vec::from_raw_parts(ptr, 0, len * 12);
     }
 }
 

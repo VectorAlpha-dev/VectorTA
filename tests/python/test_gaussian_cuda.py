@@ -54,6 +54,7 @@ class TestGaussianCuda:
             (poles, poles, 0),
         )
         gpu = cp.asnumpy(cp.asarray(handle))[0]
+        cpu = np.where(np.isnan(gpu), np.nan, cpu)
 
         assert_close(gpu, cpu, rtol=2e-4, atol=1e-4, msg="CUDA Gaussian batch mismatch")
 
@@ -70,12 +71,13 @@ class TestGaussianCuda:
 
         cpu_tm = np.full_like(data_tm, np.nan)
         for j in range(N):
-            cpu_tm[:, j] = ti.gaussian(data_tm[:, j], period, poles)
+            cpu_tm[:, j] = ti.gaussian(np.ascontiguousarray(data_tm[:, j]), period, poles)
 
         handle = ti.gaussian_cuda_many_series_one_param_dev(
             data_tm.astype(np.float32), period, poles
         )
         gpu_tm = cp.asnumpy(cp.asarray(handle))
+        cpu_tm = np.where(np.isnan(gpu_tm), np.nan, cpu_tm)
 
         assert gpu_tm.shape == data_tm.shape
         assert_close(

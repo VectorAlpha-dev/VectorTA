@@ -1405,7 +1405,7 @@ pub fn correl_hl_alloc(len: usize) -> *mut f64 {
 pub fn correl_hl_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }
@@ -1597,11 +1597,7 @@ pub fn correl_hl_batch_py<'py>(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(
-    module = "ta_indicators.cuda",
-    name = "CorrelHlDeviceArrayF32",
-    unsendable
-)]
+#[pyclass(module = "vector_ta", name = "CorrelHlDeviceArrayF32", unsendable)]
 pub struct CorrelHlDeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32,
     _ctx_guard: Arc<Context>,

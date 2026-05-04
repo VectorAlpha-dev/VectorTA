@@ -48,10 +48,13 @@ class TestMarketefiCuda:
         h = test_data["high"].astype(np.float64)
         l = test_data["low"].astype(np.float64)
         v = test_data["volume"].astype(np.float64)
+        h_f32 = h.astype(np.float32)
+        l_f32 = l.astype(np.float32)
+        v_f32 = v.astype(np.float32)
 
-        cpu = ti.marketefi(h, l, v)
-        handle = ti.marketefi_cuda_batch_dev(h.astype(np.float32), l.astype(np.float32), v.astype(np.float32))
-        gpu = cp.asnumpy(cp.asarray(handle))
+        cpu = ti.marketefi(h_f32.astype(np.float64), l_f32.astype(np.float64), v_f32.astype(np.float64))
+        handle = ti.marketefi_cuda_batch_dev(h_f32, l_f32, v_f32)
+        gpu = cp.asnumpy(cp.asarray(handle))[0]
         assert gpu.shape == cpu.shape
         assert_close(gpu, cpu, rtol=1e-5, atol=1e-6, msg="CUDA marketefi batch mismatch")
 
@@ -68,12 +71,19 @@ class TestMarketefiCuda:
             high_tm[:, j] = base_h * (1.0 + 0.02 * j)
             low_tm[:, j] = base_l * (1.0 + 0.02 * j)
             vol_tm[:, j] = base_v * (1.0 + 0.05 * j)
+        high_f32 = high_tm.astype(np.float32)
+        low_f32 = low_tm.astype(np.float32)
+        vol_f32 = vol_tm.astype(np.float32)
         cpu_tm = np.zeros_like(high_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.marketefi(high_tm[:, j], low_tm[:, j], vol_tm[:, j])
+            cpu_tm[:, j] = ti.marketefi(
+                np.ascontiguousarray(high_f32[:, j]).astype(np.float64),
+                np.ascontiguousarray(low_f32[:, j]).astype(np.float64),
+                np.ascontiguousarray(vol_f32[:, j]).astype(np.float64),
+            )
 
         handle = ti.marketefi_cuda_many_series_one_param_dev(
-            high_tm.astype(np.float32), low_tm.astype(np.float32), vol_tm.astype(np.float32)
+            high_f32, low_f32, vol_f32
         )
         gpu_tm = cp.asnumpy(cp.asarray(handle))
         assert gpu_tm.shape == cpu_tm.shape

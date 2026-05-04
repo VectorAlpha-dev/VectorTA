@@ -61,7 +61,7 @@ class TestFvgTrailingStopCuda:
         high, low, close = test_ohlc
         params = dict(unmitigated_fvg_lookback=5, smoothing_length=9, reset_on_cross=False)
 
-        cpu_u, cpu_l, cpu_ut, cpu_lt = ti.fvg_trailing_stop(close, **params, kernel=None)
+        cpu_u, cpu_l, cpu_ut, cpu_lt = ti.fvg_trailing_stop(high, low, close, **params, kernel=None)
 
         u, l, ut, lt = ti.fvg_trailing_stop_cuda_batch_dev(
             high.astype(np.float32), low.astype(np.float32), close.astype(np.float32),
@@ -99,11 +99,20 @@ class TestFvgTrailingStopCuda:
         cpu_ut= np.zeros_like(c_tm)
         cpu_lt= np.zeros_like(c_tm)
         for j in range(N):
-            u, l, ut, lt = ti.fvg_trailing_stop(c_tm[:, j], **params, kernel=None)
-            cpu_u[:, j] = u; cpu_l[:, j] = l; cpu_ut[:, j] = ut; cpu_lt[:, j] = lt
+            u, l, ut, lt = ti.fvg_trailing_stop(
+                np.ascontiguousarray(h_tm[:, j]),
+                np.ascontiguousarray(l_tm[:, j]),
+                np.ascontiguousarray(c_tm[:, j]),
+                **params,
+                kernel=None,
+            )
+            cpu_u[:, j] = u
+            cpu_l[:, j] = l
+            cpu_ut[:, j] = ut
+            cpu_lt[:, j] = lt
 
         u, l, ut, lt = ti.fvg_trailing_stop_cuda_many_series_one_param_dev(
-            h_tm.astype(np.float32), l_tm.astype(np.float32), c_tm.astype(np.float32),
+            h_tm.astype(np.float32).ravel(), l_tm.astype(np.float32).ravel(), c_tm.astype(np.float32).ravel(),
             cols=N, rows=T,
             unmitigated_fvg_lookback=params['unmitigated_fvg_lookback'],
             smoothing_length=params['smoothing_length'],

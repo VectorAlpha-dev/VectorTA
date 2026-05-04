@@ -129,12 +129,12 @@ class TestUmaCuda:
         cpu_tm = np.full_like(prices_tm, np.nan)
         for j in range(N):
             cpu_tm[:, j] = ti.uma(
-                prices_tm[:, j],
+                np.ascontiguousarray(prices_tm[:, j]),
                 accelerator,
                 min_length,
                 max_length,
                 smooth_length,
-                volume=volumes_tm[:, j],
+                volume=np.ascontiguousarray(volumes_tm[:, j]),
             )
 
         handle = ti.uma_cuda_many_series_one_param_dev(
@@ -168,7 +168,7 @@ class TestUmaCuda:
         cpu_tm = np.full_like(prices_tm, np.nan)
         for j in range(N):
             cpu_tm[:, j] = ti.uma(
-                prices_tm[:, j],
+                np.ascontiguousarray(prices_tm[:, j]),
                 accelerator,
                 min_length,
                 max_length,

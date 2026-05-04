@@ -101,7 +101,7 @@ class TestNweCuda:
         upper_cpu = np.full_like(data_tm, np.nan)
         lower_cpu = np.full_like(data_tm, np.nan)
         for j in range(N):
-            up_j, lo_j = ti.nadaraya_watson_envelope(data_tm[:, j], bandwidth=bw, multiplier=mult, lookback=lb)
+            up_j, lo_j = ti.nadaraya_watson_envelope(np.ascontiguousarray(data_tm[:, j]), bandwidth=bw, multiplier=mult, lookback=lb)
             upper_cpu[:, j] = up_j
             lower_cpu[:, j] = lo_j
 

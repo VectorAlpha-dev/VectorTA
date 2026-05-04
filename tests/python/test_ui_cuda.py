@@ -81,7 +81,7 @@ class TestUiCuda:
 
         cpu_tm = np.zeros_like(tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.ui(tm[:, j], period, scalar)
+            cpu_tm[:, j] = ti.ui(np.ascontiguousarray(tm[:, j]), period, scalar)
 
         handle = ti.ui_cuda_many_series_one_param_dev(
             tm.astype(np.float32), period, scalar

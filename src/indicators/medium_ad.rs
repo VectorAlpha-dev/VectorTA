@@ -2232,7 +2232,7 @@ pub fn medium_ad_batch_py<'py>(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::medium_ad_wrapper::CudaMediumAd;
+use crate::cuda::medium_ad_wrapper::{CudaMediumAd, CudaMediumAdBatchPlan};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2240,12 +2240,12 @@ use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use cust::memory::DeviceBuffer;
+use cust::memory::{CopyDestination, DeviceBuffer};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct MediumAdDeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32,
     ctx: Arc<Context>,
@@ -2369,6 +2369,159 @@ impl MediumAdDeviceArrayF32Py {
         let max_version_bound = max_version.map(|obj| obj.into_bound(py));
         export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)
     }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "vector_ta", name = "MediumAdCudaBatchPlan", unsendable)]
+pub struct MediumAdCudaBatchPlanPy {
+    cuda: CudaMediumAd,
+    plan: CudaMediumAdBatchPlan,
+    device_id: u32,
+    periods: Vec<usize>,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+fn medium_ad_periods_from_range(period_range: (usize, usize, usize)) -> Vec<usize> {
+    let (start, end, step) = period_range;
+    if step == 0 || start == end {
+        return vec![start];
+    }
+    let mut out = Vec::new();
+    if start < end {
+        let mut v = start;
+        loop {
+            out.push(v);
+            match v.checked_add(step.max(1)) {
+                Some(next) if next <= end => v = next,
+                _ => break,
+            }
+        }
+    } else {
+        let mut v = start;
+        loop {
+            out.push(v);
+            if v == end {
+                break;
+            }
+            match v.checked_sub(step.max(1)) {
+                Some(next) if next >= end => v = next,
+                _ => break,
+            }
+        }
+    }
+    out
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl MediumAdCudaBatchPlanPy {
+    #[getter]
+    fn rows(&self) -> usize {
+        self.plan.rows()
+    }
+
+    #[getter]
+    fn cols(&self) -> usize {
+        self.plan.cols()
+    }
+
+    #[getter]
+    fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        dict.set_item(
+            "periods",
+            self.periods
+                .iter()
+                .map(|&p| p as u64)
+                .collect::<Vec<_>>()
+                .into_pyarray(py),
+        )?;
+        dict.set_item("rows", self.plan.rows())?;
+        dict.set_item("cols", self.plan.cols())?;
+        Ok(dict)
+    }
+
+    fn execute<'py>(
+        &mut self,
+        py: Python<'py>,
+        data_f32: numpy::PyReadonlyArray1<'py, f32>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let slice = data_f32.as_slice()?;
+        let rows = self.plan.rows();
+        let cols = self.plan.cols();
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| PyValueError::new_err("medium_ad CUDA plan rows*cols overflow"))?;
+        let values = py.allow_threads(|| -> PyResult<Vec<f32>> {
+            let d_prices = DeviceBuffer::from_slice(slice)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            self.cuda
+                .launch_medium_ad_batch_plan(&d_prices, &mut self.plan)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            self.cuda
+                .synchronize()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let mut values = vec![0f32; total];
+            self.plan
+                .output()
+                .copy_to(&mut values)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok(values)
+        })?;
+        let dict = PyDict::new(py);
+        let arr = values.into_pyarray(py);
+        dict.set_item("values", arr.reshape((rows, cols))?)?;
+        dict.set_item(
+            "periods",
+            self.periods
+                .iter()
+                .map(|&p| p as u64)
+                .collect::<Vec<_>>()
+                .into_pyarray(py),
+        )?;
+        dict.set_item("rows", rows)?;
+        dict.set_item("cols", cols)?;
+        Ok(dict)
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "medium_ad_cuda_batch_plan_create")]
+#[pyo3(signature = (series_len, first_valid, period_range, device_id=0))]
+pub fn medium_ad_cuda_batch_plan_create_py(
+    py: Python<'_>,
+    series_len: usize,
+    first_valid: usize,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<MediumAdCudaBatchPlanPy> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let sweep = MediumAdBatchRange {
+        period: period_range,
+    };
+    let periods = medium_ad_periods_from_range(period_range);
+    let (cuda, plan, dev_id) = py.allow_threads(|| {
+        let cuda =
+            CudaMediumAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dev_id = cuda.device_id();
+        let plan = cuda
+            .prepare_medium_ad_batch_plan(series_len, first_valid, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((cuda, plan, dev_id))
+    })?;
+    Ok(MediumAdCudaBatchPlanPy {
+        cuda,
+        plan,
+        device_id: dev_id,
+        periods,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2525,7 +2678,7 @@ pub fn medium_ad_alloc(len: usize) -> *mut f64 {
 pub fn medium_ad_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

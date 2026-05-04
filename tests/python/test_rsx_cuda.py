@@ -60,7 +60,7 @@ class TestRsxCuda:
         period = 14
         cpu_tm = np.zeros_like(tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.rsx(tm[:, j], period=period)
+            cpu_tm[:, j] = ti.rsx(np.ascontiguousarray(tm[:, j]), period=period)
 
         handle = ti.rsx_cuda_many_series_one_param_dev(tm.astype(np.float32).ravel(), N, T, period)
         gpu_tm = cp.asnumpy(cp.asarray(handle)).reshape(T, N)

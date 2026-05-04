@@ -2047,7 +2047,7 @@ use crate::cuda::cuda_available;
 use crate::cuda::oscillators::tsi_wrapper::CudaTsi;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "TsiDeviceArrayF32", unsendable)]
+#[pyclass(module = "vector_ta", name = "TsiDeviceArrayF32", unsendable)]
 pub struct TsiDeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32,
     ctx_guard: Arc<Context>,
@@ -2312,7 +2312,7 @@ pub fn tsi_alloc(len: usize) -> *mut f64 {
 pub fn tsi_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

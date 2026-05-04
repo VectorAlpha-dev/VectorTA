@@ -1358,7 +1358,7 @@ impl PfeStream {
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "PfeDeviceArrayF32", unsendable)]
+#[pyclass(module = "vector_ta", name = "PfeDeviceArrayF32", unsendable)]
 pub struct PfeDeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32,
     _ctx_guard: Arc<Context>,
@@ -1655,7 +1655,7 @@ pub fn pfe_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn pfe_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 

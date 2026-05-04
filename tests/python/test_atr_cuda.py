@@ -71,7 +71,7 @@ class TestAtrCuda:
         length = 14
         cpu_tm = np.zeros_like(high_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.atr(high_tm[:, j], low_tm[:, j], close_tm[:, j], length)
+            cpu_tm[:, j] = ti.atr(np.ascontiguousarray(high_tm[:, j]), np.ascontiguousarray(low_tm[:, j]), np.ascontiguousarray(close_tm[:, j]), length)
 
         handle = ti.atr_cuda_many_series_one_param_dev(
             high_tm.astype(np.float32).ravel(),

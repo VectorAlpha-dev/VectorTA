@@ -73,7 +73,7 @@ class TestMaaqCuda:
 
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.maaq(data_tm[:, j], period, fast_period, slow_period)
+            cpu_tm[:, j] = ti.maaq(np.ascontiguousarray(data_tm[:, j]), period, fast_period, slow_period)
 
         handle = ti.maaq_cuda_many_series_one_param_dev(
             data_tm.astype(np.float32), period, fast_period, slow_period

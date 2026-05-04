@@ -3343,7 +3343,7 @@ pub fn rvi_alloc(len: usize) -> *mut f64 {
 pub fn rvi_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }
@@ -3359,6 +3359,9 @@ pub fn rvi_into(
     matype: usize,
     devtype: usize,
 ) -> Result<(), JsValue> {
+    if in_ptr.is_null() || out_ptr.is_null() {
+        return Err(JsValue::from_str("rvi_into: null pointer provided"));
+    }
     if len == 0 {
         return Err(JsValue::from_str("rvi_into: len cannot be 0"));
     }

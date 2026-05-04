@@ -1107,7 +1107,7 @@ use pyo3::types::PyDict;
 use pyo3::types::PyDictMethods;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32", unsendable)]
+#[pyclass(module = "vector_ta", name = "DeviceArrayF32", unsendable)]
 pub struct DeviceArrayF32Py {
     pub inner: Option<DeviceArrayF32>,
     stream_handle: usize,
@@ -1163,9 +1163,6 @@ impl Drop for PrimaryCtxGuard {
 impl DeviceArrayF32Py {
     #[getter]
     fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
-        unsafe {
-            let _ = cu::cuStreamSynchronize(self.stream_handle as cu::CUstream);
-        }
         let itemsize = std::mem::size_of::<f32>();
         let inner = self.inner.as_ref().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err("buffer already exported via __dlpack__")
@@ -1182,9 +1179,6 @@ impl DeviceArrayF32Py {
         };
         d.set_item("data", (ptr_val, false))?;
         d.set_item("version", 3)?;
-        if self.stream_handle != 0 {
-            d.set_item("stream", self.stream_handle)?;
-        }
         Ok(d.into())
     }
 

@@ -1928,7 +1928,7 @@ use cust::memory::DeviceBuffer;
 use std::sync::Arc;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct AsoDeviceArrayF32Py {
     pub(crate) buf: Option<DeviceBuffer<f32>>,
     pub(crate) rows: usize,
@@ -2412,7 +2412,7 @@ pub fn aso_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn aso_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 

@@ -47,10 +47,12 @@ class TestFisherCuda:
         low = high - 0.3 - 0.05 * np.cos(i * 0.1)
         high[:10] = np.nan
         low[:10] = np.nan
+        high_f32 = high.astype(np.float32)
+        low_f32 = low.astype(np.float32)
 
         sweep = (9, 45, 6)
-        cpu = ti.fisher_batch(high, low, sweep)
-        out = ti.fisher_cuda_batch_dev(high.astype(np.float32), low.astype(np.float32), sweep)
+        cpu = ti.fisher_batch(high_f32.astype(np.float64), low_f32.astype(np.float64), sweep)
+        out = ti.fisher_cuda_batch_dev(high_f32, low_f32, sweep)
         g_fish = cp.asnumpy(cp.asarray(out["fisher"]))
         g_sig = cp.asnumpy(cp.asarray(out["signal"]))
         g_fish = g_fish.reshape(cpu["fisher"].shape)
@@ -67,21 +69,27 @@ class TestFisherCuda:
         low_tm = np.zeros((rows, cols), dtype=np.float64)
         for s in range(cols):
             high_tm[:, s] = base * (1.0 + 0.02 * s)
-            low_tm[:, s] = high_tm[:, s] - 0.25 - 0.07 * np.cos(i * (0.11 + 0.01 * s))
+            low_tm[:, s] = np.ascontiguousarray(high_tm[:, s]) - 0.25 - 0.07 * np.cos(i * (0.11 + 0.01 * s))
         high_tm[:3, :] = np.nan
         low_tm[:3, :] = np.nan
+        high_f32 = high_tm.astype(np.float32)
+        low_f32 = low_tm.astype(np.float32)
         period = 13
 
         cpu_fish = np.zeros_like(high_tm)
         cpu_sig = np.zeros_like(low_tm)
         for s in range(cols):
-            fish, sig = ti.fisher(high_tm[:, s], low_tm[:, s], period)
+            fish, sig = ti.fisher(
+                np.ascontiguousarray(high_f32[:, s]).astype(np.float64),
+                np.ascontiguousarray(low_f32[:, s]).astype(np.float64),
+                period,
+            )
             cpu_fish[:, s] = fish
             cpu_sig[:, s] = sig
 
         out = ti.fisher_cuda_many_series_one_param_dev(
-            high_tm.astype(np.float32).ravel(),
-            low_tm.astype(np.float32).ravel(),
+            high_f32.ravel(),
+            low_f32.ravel(),
             cols,
             rows,
             period,

@@ -1320,7 +1320,7 @@ pub fn ehlers_kama_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn ehlers_kama_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 
@@ -1412,7 +1412,7 @@ pub fn register_ehlers_kama_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyRe
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Kama", unsendable)]
+#[pyclass(module = "vector_ta", name = "DeviceArrayF32Kama", unsendable)]
 pub struct DeviceArrayF32KamaPy {
     pub(crate) inner: DeviceArrayF32,
     _ctx_guard: Arc<Context>,

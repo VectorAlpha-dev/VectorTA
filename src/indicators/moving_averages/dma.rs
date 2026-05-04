@@ -2586,7 +2586,7 @@ pub fn dma_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn dma_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 
@@ -3310,7 +3310,7 @@ mod tests {
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "DmaDeviceArrayF32", unsendable)]
+#[pyclass(module = "vector_ta", name = "DmaDeviceArrayF32", unsendable)]
 pub struct DmaDeviceArrayF32Py {
     pub(crate) inner: Option<DeviceArrayF32>,
     pub(crate) _ctx: Arc<Context>,

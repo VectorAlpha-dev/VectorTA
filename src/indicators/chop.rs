@@ -2598,7 +2598,7 @@ pub fn chop_cuda_many_series_one_param_dev_py(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct ChopDeviceArrayF32Py {
     pub(crate) inner: Option<DeviceArrayF32Chop>,
 }
@@ -2730,7 +2730,7 @@ pub fn chop_free(ptr: *mut f64, len: usize) {
         return;
     }
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 

@@ -1592,7 +1592,7 @@ pub fn expand_grid_srsi(r: &SrsiBatchRange) -> Result<Vec<SrsiParams>, SrsiError
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "SrsiDeviceArrayF32", unsendable)]
+#[pyclass(module = "vector_ta", name = "SrsiDeviceArrayF32", unsendable)]
 pub struct SrsiDeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32,
     pub(crate) _ctx: Arc<Context>,
@@ -2090,7 +2090,7 @@ pub fn srsi_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn srsi_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 

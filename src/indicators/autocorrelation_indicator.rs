@@ -1408,7 +1408,7 @@ pub fn autocorrelation_indicator_free(ptr: *mut f64, len: usize, max_lag: usize)
         .checked_mul(max_lag.saturating_add(1))
         .expect("autocorrelation_indicator_free overflow");
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, total, total);
+        let _ = Vec::from_raw_parts(ptr, 0, total);
     }
 }
 

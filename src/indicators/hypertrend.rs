@@ -1677,7 +1677,7 @@ pub fn hypertrend_free(ptr: *mut f64, len: usize) {
         return;
     }
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len * 5, len * 5);
+        let _ = Vec::from_raw_parts(ptr, 0, len * 5);
     }
 }
 

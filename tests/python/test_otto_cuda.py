@@ -76,11 +76,11 @@ class TestOttoCuda:
         assert_close(gpu_lott, cpu_lott, rtol=3e-3, atol=3e-4, msg="OTTO LOTT mismatch")
 
     def test_otto_cuda_many_series_one_param_matches_cpu_var(self):
-        cols = 300
-        rows = 64
-        base = np.linspace(0, 1, cols, dtype=np.float64)
-        tm = np.zeros((cols, rows), dtype=np.float64)
-        for s in range(rows):
+        rows = 300
+        cols = 64
+        base = np.linspace(0, 1, rows, dtype=np.float64)
+        tm = np.zeros((rows, cols), dtype=np.float64)
+        for s in range(cols):
             tm[:, s] = np.sin(base * (1.0 + 0.05 * s)) * 0.01 + base * 0.1
 
         params = dict(
@@ -93,13 +93,13 @@ class TestOttoCuda:
         )
         cpu_hott = np.zeros_like(tm)
         cpu_lott = np.zeros_like(tm)
-        for s in range(rows):
-            h, l = ti.otto(tm[:, s], **params)
+        for s in range(cols):
+            h, l = ti.otto(np.ascontiguousarray(tm[:, s]), **params)
             cpu_hott[:, s] = h
             cpu_lott[:, s] = l
 
         hott_h, lott_h = ti.otto_cuda_many_series_one_param_dev(
-            tm.astype(np.float32),
+            tm.astype(np.float32).ravel(),
             cols,
             rows,
             params["ott_period"],

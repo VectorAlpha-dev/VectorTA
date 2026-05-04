@@ -2553,7 +2553,7 @@ use std::os::raw::c_void;
 use std::sync::Arc;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct DeviceArrayF32DiPy {
     pub(crate) inner: DeviceArrayF32,
     pub(crate) ctx: Arc<Context>,
@@ -2803,7 +2803,7 @@ pub fn di_alloc(len: usize) -> *mut f64 {
 pub fn di_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

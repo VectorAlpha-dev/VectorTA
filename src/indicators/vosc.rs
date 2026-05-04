@@ -22,7 +22,7 @@ mod vosc_python_cuda_handle {
     use std::ffi::c_void;
     use std::sync::Arc;
 
-    #[pyclass(module = "ta_indicators.cuda", unsendable, name = "DeviceArrayF32Py")]
+    #[pyclass(module = "vector_ta", unsendable, name = "DeviceArrayF32Py")]
     pub struct DeviceArrayF32Py {
         pub(crate) buf: Option<DeviceBuffer<f32>>,
         pub(crate) rows: usize,
@@ -2356,7 +2356,7 @@ pub fn vosc_alloc(len: usize) -> *mut f64 {
 pub fn vosc_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

@@ -82,7 +82,7 @@ class TestRviCuda:
 
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.rvi(data_tm[:, j], period, ma_len, matype, devtype)
+            cpu_tm[:, j] = ti.rvi(np.ascontiguousarray(data_tm[:, j]), period, ma_len, matype, devtype)
 
 
         handle = ti.rvi_cuda_many_series_one_param_dev(

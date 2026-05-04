@@ -77,7 +77,7 @@ class TestWmaCuda:
 
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.wma(data_tm[:, j], period)
+            cpu_tm[:, j] = ti.wma(np.ascontiguousarray(data_tm[:, j]), period)
 
         handle = ti.wma_cuda_many_series_one_param_dev(
             data_tm.astype(np.float32), period

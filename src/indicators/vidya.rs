@@ -2346,11 +2346,7 @@ pub fn vidya_batch_py<'py>(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(
-    module = "ta_indicators.cuda",
-    name = "VidyaDeviceArrayF32",
-    unsendable
-)]
+#[pyclass(module = "vector_ta", name = "VidyaDeviceArrayF32", unsendable)]
 pub struct VidyaDeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32,
     pub(crate) _ctx: std::sync::Arc<Context>,
@@ -2584,7 +2580,7 @@ pub fn vidya_alloc(len: usize) -> *mut f64 {
 pub fn vidya_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

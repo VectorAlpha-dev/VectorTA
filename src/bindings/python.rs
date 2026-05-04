@@ -510,8 +510,8 @@ use crate::indicators::mean_ad::{
 use crate::indicators::medium_ad::{medium_ad_batch_py, medium_ad_py, MediumAdStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::medium_ad::{
-    medium_ad_cuda_batch_dev_py, medium_ad_cuda_many_series_one_param_dev_py,
-    MediumAdDeviceArrayF32Py,
+    medium_ad_cuda_batch_dev_py, medium_ad_cuda_batch_plan_create_py,
+    medium_ad_cuda_many_series_one_param_dev_py, MediumAdCudaBatchPlanPy, MediumAdDeviceArrayF32Py,
 };
 #[cfg(feature = "python")]
 use crate::indicators::medprice::{medprice_batch_py, medprice_py, MedpriceStreamPy};
@@ -652,7 +652,8 @@ use crate::indicators::moving_averages::epma::{
 use crate::indicators::moving_averages::frama::{frama_batch_py, frama_py, FramaStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::frama::{
-    frama_cuda_batch_dev_py, frama_cuda_many_series_one_param_dev_py,
+    frama_cuda_batch_dev_py, frama_cuda_batch_plan_create_py,
+    frama_cuda_many_series_one_param_dev_py, FramaCudaBatchPlanPy,
 };
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::fwma::{fwma_batch_py, fwma_py, FwmaStreamPy};
@@ -1331,7 +1332,8 @@ use crate::indicators::moving_averages::volume_adjusted_ma::{
 use crate::indicators::moving_averages::vpwma::{vpwma_batch_py, vpwma_py, VpwmaStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::vpwma::{
-    vpwma_cuda_batch_dev_py, vpwma_cuda_many_series_one_param_dev_py,
+    vpwma_cuda_batch_dev_py, vpwma_cuda_batch_plan_create_py,
+    vpwma_cuda_many_series_one_param_dev_py, VpwmaCudaBatchPlanPy,
 };
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::vwap::{vwap_batch_py, vwap_py, VwapStreamPy};
@@ -1627,7 +1629,10 @@ use crate::indicators::voss::{voss_batch_py, voss_py, VossStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::vpci::{vpci_batch_py, vpci_py};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::vpci::{vpci_cuda_batch_dev_py, vpci_cuda_many_series_one_param_dev_py};
+use crate::indicators::vpci::{
+    vpci_cuda_batch_dev_py, vpci_cuda_batch_plan_create_py, vpci_cuda_many_series_one_param_dev_py,
+    VpciCudaBatchPlanPy,
+};
 #[cfg(feature = "python")]
 use crate::indicators::vpt::{vpt_batch_py, vpt_py, VptStreamPy};
 #[cfg(feature = "python")]
@@ -1881,6 +1886,8 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(nma_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(nma_cuda_many_series_one_param_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(frama_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(frama_cuda_batch_plan_create_py, m)?)?;
+        m.add_class::<FramaCudaBatchPlanPy>()?;
         m.add_function(wrap_pyfunction!(
             frama_cuda_many_series_one_param_dev_py,
             m
@@ -1902,11 +1909,13 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
 
         m.add_function(wrap_pyfunction!(medium_ad_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(medium_ad_cuda_batch_plan_create_py, m)?)?;
         m.add_function(wrap_pyfunction!(
             medium_ad_cuda_many_series_one_param_dev_py,
             m
         )?)?;
         m.add_class::<MediumAdDeviceArrayF32Py>()?;
+        m.add_class::<MediumAdCudaBatchPlanPy>()?;
 
         use crate::indicators::adosc::{
             adosc_cuda_batch_dev_py, adosc_cuda_many_series_one_param_dev_py, DeviceArrayF32AdoscPy,
@@ -1924,10 +1933,12 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
             m
         )?)?;
         m.add_function(wrap_pyfunction!(vpwma_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(vpwma_cuda_batch_plan_create_py, m)?)?;
         m.add_function(wrap_pyfunction!(
             vpwma_cuda_many_series_one_param_dev_py,
             m
         )?)?;
+        m.add_class::<VpwmaCudaBatchPlanPy>()?;
         m.add_function(wrap_pyfunction!(supersmoother_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(
             supersmoother_cuda_many_series_one_param_dev_py,
@@ -2230,7 +2241,12 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "cuda")]
     {
         m.add_function(wrap_pyfunction!(rsmk_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            crate::indicators::rsmk::rsmk_cuda_batch_plan_create_py,
+            m
+        )?)?;
         m.add_function(wrap_pyfunction!(rsmk_cuda_many_series_one_param_dev_py, m)?)?;
+        m.add_class::<crate::indicators::rsmk::RsmkCudaBatchPlanPy>()?;
     }
     m.add_class::<RsmkStreamPy>()?;
 
@@ -2553,7 +2569,12 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "cuda")]
     {
         m.add_function(wrap_pyfunction!(vwma_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            crate::indicators::moving_averages::vwma::vwma_cuda_batch_plan_create_py,
+            m
+        )?)?;
         m.add_function(wrap_pyfunction!(vwma_cuda_many_series_one_param_dev_py, m)?)?;
+        m.add_class::<crate::indicators::moving_averages::vwma::VwmaCudaBatchPlanPy>()?;
     }
 
     m.add_function(wrap_pyfunction!(vwmacd_py, m)?)?;
@@ -2562,13 +2583,16 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(all(feature = "python", feature = "cuda"))]
     {
         use crate::indicators::vwmacd::{
-            vwmacd_cuda_batch_dev_py, vwmacd_cuda_many_series_one_param_dev_py,
+            vwmacd_cuda_batch_dev_py, vwmacd_cuda_batch_plan_create_py,
+            vwmacd_cuda_many_series_one_param_dev_py, VwmacdCudaBatchPlanPy,
         };
         m.add_function(wrap_pyfunction!(vwmacd_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(vwmacd_cuda_batch_plan_create_py, m)?)?;
         m.add_function(wrap_pyfunction!(
             vwmacd_cuda_many_series_one_param_dev_py,
             m
         )?)?;
+        m.add_class::<VwmacdCudaBatchPlanPy>()?;
     }
 
     m.add_function(wrap_pyfunction!(vwap_py, m)?)?;
@@ -3178,7 +3202,9 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "cuda")]
     {
         m.add_function(wrap_pyfunction!(vpci_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(vpci_cuda_batch_plan_create_py, m)?)?;
         m.add_function(wrap_pyfunction!(vpci_cuda_many_series_one_param_dev_py, m)?)?;
+        m.add_class::<VpciCudaBatchPlanPy>()?;
     }
 
     m.add_function(wrap_pyfunction!(wclprice_py, m)?)?;
@@ -3956,7 +3982,12 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "cuda")]
     {
         m.add_function(wrap_pyfunction!(mab_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(
+            crate::indicators::mab::mab_cuda_batch_plan_create_py,
+            m
+        )?)?;
         m.add_function(wrap_pyfunction!(mab_cuda_many_series_one_param_dev_py, m)?)?;
+        m.add_class::<crate::indicators::mab::MabCudaBatchPlanPy>()?;
     }
 
     m.add_function(wrap_pyfunction!(medprice_py, m)?)?;

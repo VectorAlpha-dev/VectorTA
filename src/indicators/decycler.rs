@@ -48,11 +48,7 @@ use std::sync::Arc;
 use crate::cuda::moving_averages::decycler_wrapper::DeviceArrayF32Decycler as DeviceArrayF32Inner;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(
-    module = "ta_indicators.cuda",
-    name = "DecyclerDeviceArrayF32",
-    unsendable
-)]
+#[pyclass(module = "vector_ta", name = "DecyclerDeviceArrayF32", unsendable)]
 pub struct DeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32Inner,
 }
@@ -2154,7 +2150,7 @@ pub fn decycler_alloc(len: usize) -> *mut f64 {
 pub fn decycler_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

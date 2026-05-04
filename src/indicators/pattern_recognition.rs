@@ -9,7 +9,7 @@ use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use cust::memory::DeviceBuffer;
+use cust::memory::{CopyDestination, DeviceBuffer};
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArrayMethods};
 #[cfg(feature = "python")]
@@ -6966,7 +6966,7 @@ pub fn pattern_recognition_cuda_host_f32_py<'py>(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct PatternRecognitionDeviceBitmaskU64Py {
     pub(crate) buf: Option<DeviceBuffer<u64>>,
     pub(crate) rows: usize,
@@ -7178,7 +7178,7 @@ pub fn pattern_recognition_free(ptr: *mut u8, len: usize) {
         return;
     }
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 

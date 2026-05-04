@@ -2071,7 +2071,7 @@ pub fn logarithmic_moving_average_free(ptr: *mut f64, len: usize) {
         return;
     }
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len * 4, len * 4);
+        let _ = Vec::from_raw_parts(ptr, 0, len * 4);
     }
 }
 

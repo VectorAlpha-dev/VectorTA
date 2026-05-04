@@ -1189,7 +1189,7 @@ pub fn var_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn var_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 
@@ -2217,7 +2217,7 @@ use cust::memory::DeviceBuffer;
 use std::sync::Arc;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "VarDeviceArrayF32", unsendable)]
+#[pyclass(module = "vector_ta", name = "VarDeviceArrayF32", unsendable)]
 pub struct VarDeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32,
     pub(crate) _ctx: Arc<Context>,

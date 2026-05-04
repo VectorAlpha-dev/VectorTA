@@ -514,7 +514,7 @@ pub fn export_u64_cuda_dlpack_2d<'py>(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct DeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32,
 
@@ -612,6 +612,21 @@ impl DeviceArrayF32Py {
         let max_version_bound = max_version.map(|obj| obj.into_bound(py));
 
         export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+impl DeviceArrayF32Py {
+    pub fn new_from_rust(
+        inner: DeviceArrayF32,
+        ctx_guard: std::sync::Arc<cust::context::Context>,
+        device_id: u32,
+    ) -> Self {
+        Self {
+            inner,
+            _ctx: Some(ctx_guard),
+            device_id: Some(device_id),
+        }
     }
 }
 

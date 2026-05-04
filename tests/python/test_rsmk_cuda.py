@@ -1,8 +1,10 @@
 import numpy as np
 import pytest
 
+cp = pytest.importorskip("cupy")
+
 try:
-    import ta_indicators as ti
+    import vector_ta as ti
 except Exception:
     ti = None
 
@@ -18,8 +20,8 @@ def test_rsmk_cuda_batch_shapes_and_basic():
         y[i] = np.abs(np.cos(0.0009 * t)) + 0.5
 
     ind, sig = ti.rsmk_cuda_batch_dev(x, y, (30, 30, 0), (3, 3, 0), (20, 20, 0))
-    assert ind.inner.rows == 1 and ind.inner.cols == n
-    assert sig.inner.rows == 1 and sig.inner.cols == n
+    assert cp.asarray(ind).shape == (1, n)
+    assert cp.asarray(sig).shape == (1, n)
 
 
 @pytest.mark.skipif(ti is None or not hasattr(ti, "rsmk_cuda_many_series_one_param_dev"), reason="CUDA or RSMK CUDA binding unavailable")
@@ -36,5 +38,5 @@ def test_rsmk_cuda_many_series_shape():
     ind, sig = ti.rsmk_cuda_many_series_one_param_dev(
         tm_main, tm_comp, cols, rows, 30, 3, 10
     )
-    assert ind.inner.rows == rows and ind.inner.cols == cols
-    assert sig.inner.rows == rows and sig.inner.cols == cols
+    assert cp.asarray(ind).shape == (rows, cols)
+    assert cp.asarray(sig).shape == (rows, cols)

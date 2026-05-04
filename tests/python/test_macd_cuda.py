@@ -46,9 +46,10 @@ class TestMacdCuda:
 
     def test_macd_cuda_batch_matches_cpu(self, close):
         f, s, g = 12, 26, 9
-        macd_cpu, sig_cpu, hist_cpu = ti.macd(close, f, s, g, "ema")
+        close_f32 = close.astype(np.float32)
+        macd_cpu, sig_cpu, hist_cpu = ti.macd(close_f32.astype(np.float64), f, s, g, "ema")
         d = ti.macd_cuda_batch_dev(
-            close.astype(np.float32),
+            close_f32,
             (f, f, 0),
             (s, s, 0),
             (g, g, 0),
@@ -66,9 +67,10 @@ class TestMacdCuda:
         fast_range = (10, 14, 2)
         slow_range = (24, 28, 2)
         sig_range = (8, 10, 1)
-        cpu = ti.macd_batch(close, fast_range, slow_range, sig_range, "ema")
+        close_f32 = close.astype(np.float32)
+        cpu = ti.macd_batch(close_f32.astype(np.float64), fast_range, slow_range, sig_range, "ema")
         d = ti.macd_cuda_batch_dev(
-            close.astype(np.float32), fast_range, slow_range, sig_range, "ema"
+            close_f32, fast_range, slow_range, sig_range, "ema"
         )
         macd_gpu = cp.asnumpy(cp.asarray(d["macd"]))
         sig_gpu = cp.asnumpy(cp.asarray(d["signal"]))
@@ -84,17 +86,24 @@ class TestMacdCuda:
         T = 2048
         N = 4
         series = np.vstack([close[:T] * (1.0 + 0.01 * j) for j in range(N)]).T
+        series_f32 = series.astype(np.float32)
         f, s, g = 12, 26, 9
         macd_cpu = np.zeros_like(series)
         sig_cpu = np.zeros_like(series)
         hist_cpu = np.zeros_like(series)
         for j in range(N):
-            m, si, h = ti.macd(series[:, j], f, s, g, "ema")
+            m, si, h = ti.macd(
+                np.ascontiguousarray(series_f32[:, j]).astype(np.float64),
+                f,
+                s,
+                g,
+                "ema",
+            )
             macd_cpu[:, j] = m
             sig_cpu[:, j] = si
             hist_cpu[:, j] = h
         d = ti.macd_cuda_many_series_one_param_dev(
-            series.astype(np.float32), f, s, g, "ema"
+            np.ascontiguousarray(series_f32), f, s, g, "ema"
         )
         macd_gpu = cp.asnumpy(cp.asarray(d["macd"]))
         sig_gpu = cp.asnumpy(cp.asarray(d["signal"]))

@@ -1525,7 +1525,7 @@ pub fn projection_oscillator_alloc(len: usize) -> *mut f64 {
 pub fn projection_oscillator_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, 2 * len, 2 * len);
+            let _ = Vec::from_raw_parts(ptr, 0, 2 * len);
         }
     }
 }

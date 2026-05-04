@@ -1086,7 +1086,7 @@ pub fn efi_alloc(len: usize) -> *mut f64 {
 pub fn efi_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }
@@ -1167,7 +1167,7 @@ pub fn efi_batch_js(price: &[f64], volume: &[f64], config: JsValue) -> Result<Js
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct EfiDeviceArrayF32Py {
     pub(crate) inner: Option<DeviceArrayF32>,
     pub(crate) ctx: Arc<Context>,

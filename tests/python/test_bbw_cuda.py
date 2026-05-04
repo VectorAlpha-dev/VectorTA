@@ -79,11 +79,11 @@ class TestBbwCuda:
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.bollinger_bands_width(
-                data_tm[:, j], period, devup, devdn, matype='sma', devtype=0
+                np.ascontiguousarray(data_tm[:, j]), period, devup, devdn, matype='sma', devtype=0
             )
 
         handle = ti.bollinger_bands_width_cuda_many_series_one_param_dev(
-            data_tm.astype(np.float32), N, T, period, devup, devdn
+            data_tm.astype(np.float32).ravel(), N, T, period, devup, devdn
         )
         gpu_tm = cp.asnumpy(cp.asarray(handle))
 

@@ -1455,7 +1455,7 @@ pub fn velocity_acceleration_convergence_divergence_indicator_alloc(len: usize) 
 pub fn velocity_acceleration_convergence_divergence_indicator_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, 2 * len, 2 * len);
+            let _ = Vec::from_raw_parts(ptr, 0, 2 * len);
         }
     }
 }

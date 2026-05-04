@@ -82,10 +82,10 @@ class TestStochfCuda:
         k_cpu_tm = np.zeros_like(close_tm)
         d_cpu_tm = np.zeros_like(close_tm)
         for j in range(N):
-            k_cpu_tm[:, j], d_cpu_tm[:, j] = ti.stochf(high_tm[:, j], low_tm[:, j], close_tm[:, j], fk, fd, 0)
+            k_cpu_tm[:, j], d_cpu_tm[:, j] = ti.stochf(np.ascontiguousarray(high_tm[:, j]), np.ascontiguousarray(low_tm[:, j]), np.ascontiguousarray(close_tm[:, j]), fk, fd, 0)
 
         k_h, d_h = ti.stochf_cuda_many_series_one_param_dev(
-            high_tm.astype(np.float32), low_tm.astype(np.float32), close_tm.astype(np.float32),
+            high_tm.astype(np.float32).ravel(), low_tm.astype(np.float32).ravel(), close_tm.astype(np.float32).ravel(),
             cols=N, rows=T, fastk=fk, fastd=fd, fastd_matype=0
         )
         k_gpu_tm = cp.asnumpy(cp.asarray(k_h))

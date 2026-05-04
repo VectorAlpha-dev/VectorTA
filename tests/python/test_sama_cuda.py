@@ -122,7 +122,7 @@ class TestSamaCuda:
         cpu_tm = np.full_like(data_tm, np.nan)
         for j in range(N):
             cpu_tm[:, j] = ti.sama(
-                data_tm[:, j],
+                np.ascontiguousarray(data_tm[:, j]),
                 length=params["length"],
                 maj_length=params["maj_length"],
                 min_length=params["min_length"],

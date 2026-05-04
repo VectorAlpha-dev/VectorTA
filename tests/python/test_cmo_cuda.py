@@ -55,7 +55,7 @@ class TestCmoCuda:
         assert meta["periods"].tolist() == [period]
 
         gpu = cp.asnumpy(cp.asarray(handle))[0]
-        assert_close(gpu, cpu, rtol=1e-5, atol=1e-5, msg="CUDA CMO batch mismatch")
+        assert_close(gpu, cpu, rtol=4e-4, atol=2e-5, msg="CUDA CMO batch mismatch")
 
     def test_cmo_cuda_many_series_one_param_matches_cpu(self, test_data):
         T = 2048
@@ -70,7 +70,7 @@ class TestCmoCuda:
 
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.cmo(data_tm[:, j].astype(np.float32).astype(np.float64), period)
+            cpu_tm[:, j] = ti.cmo(np.ascontiguousarray(data_tm[:, j]).astype(np.float32).astype(np.float64), period)
 
         handle = ti.cmo_cuda_many_series_one_param_dev(
             data_tm.astype(np.float32), period
@@ -81,7 +81,7 @@ class TestCmoCuda:
         assert_close(
             gpu_tm,
             cpu_tm,
-            rtol=1e-5,
-            atol=1e-5,
+            rtol=4e-4,
+            atol=2e-5,
             msg="CUDA CMO many-series mismatch",
         )

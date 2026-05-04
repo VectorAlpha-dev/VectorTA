@@ -84,7 +84,7 @@ class TestVwapCuda:
 
         cpu_tm = np.full((rows, cols), np.nan, dtype=np.float64)
         for s in range(cols):
-            vals = ti.vwap(ts, volumes_tm[:, s], prices_tm[:, s], anchor)
+            vals = ti.vwap(ts, np.ascontiguousarray(volumes_tm[:, s]), np.ascontiguousarray(prices_tm[:, s]), anchor)
             cpu_tm[:, s] = np.asarray(vals, dtype=np.float64)
 
 

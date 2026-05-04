@@ -3635,7 +3635,7 @@ pub fn mod_god_mode_alloc(size: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn mod_god_mode_free(ptr: *mut f64, size: usize) {
     unsafe {
-        Vec::from_raw_parts(ptr, size, size);
+        Vec::from_raw_parts(ptr, 0, size);
     }
 }
 

@@ -52,7 +52,7 @@ class TestEhlersKamaCuda:
         cpu_values = np.asarray(cpu["values"], dtype=np.float64)
 
         handle = ti.ehlers_kama_cuda_batch_dev(price_series, sweep)
-        gpu = cp.asnumpy(cp.asarray(handle)).astype(np.float64)
+        gpu = cp.asnumpy(cp.asarray(handle))
 
         assert gpu.shape == cpu_values.shape
         assert_close(gpu, cpu_values, rtol=2e-4, atol=3e-4, msg="CUDA batch vs CPU mismatch")
@@ -67,14 +67,17 @@ class TestEhlersKamaCuda:
 
         period = 30
 
+        data_f32 = data_tm.astype(np.float32)
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.ehlers_kama(data_tm[:, j], period)
+            cpu_tm[:, j] = ti.ehlers_kama(
+                np.ascontiguousarray(data_f32[:, j]).astype(np.float64), period
+            )
 
         handle = ti.ehlers_kama_cuda_many_series_one_param_dev(
-            data_tm.astype(np.float32), period
+            data_f32, period
         )
-        gpu_tm = cp.asnumpy(cp.asarray(handle)).astype(np.float64)
+        gpu_tm = cp.asnumpy(cp.asarray(handle))
 
         assert gpu_tm.shape == data_tm.shape
         assert_close(

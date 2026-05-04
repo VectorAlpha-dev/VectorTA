@@ -2260,11 +2260,7 @@ pub fn fisher_batch_py<'py>(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(
-    module = "ta_indicators.cuda",
-    name = "FisherDeviceArrayF32",
-    unsendable
-)]
+#[pyclass(module = "vector_ta", name = "FisherDeviceArrayF32", unsendable)]
 pub struct FisherDeviceArrayF32Py {
     pub(crate) inner: Option<DeviceArrayF32Py>,
 }
@@ -2531,7 +2527,7 @@ pub fn fisher_alloc(len: usize) -> *mut f64 {
 pub fn fisher_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

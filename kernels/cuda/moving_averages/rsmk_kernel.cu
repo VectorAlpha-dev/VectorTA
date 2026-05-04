@@ -115,6 +115,121 @@ extern "C" __global__ void rsmk_apply_mom_single_row_ema_ema_f32(
     }
 }
 
+
+extern "C" __global__ void rsmk_indicator_from_mom_ema_f32(
+    const float* __restrict__ mom,
+    int len,
+    int first_valid_mom,
+    int period,
+    float* __restrict__ out_indicator
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    const float nanf = qnan32();
+    if (len <= 0 || period <= 0) return;
+
+    int first = first_valid_mom;
+    if (first < 0) first = 0;
+    if (first >= len) return;
+    while (first < len && isnan(mom[first])) { first += 1; }
+    if (first >= len) return;
+
+    const double alpha_ind = 2.0 / (double(period) + 1.0);
+    const double beta_ind = 1.0 - alpha_ind;
+
+    for (int i = 0; i < first; ++i) {
+        out_indicator[i] = nanf;
+    }
+
+    double ind_mean = (double)mom[first] * 100.0;
+    int ind_count = 1;
+    out_indicator[first] = (float)ind_mean;
+
+    const int ind_warm_end = min(len, first + period);
+    for (int i = first + 1; i < ind_warm_end; ++i) {
+        const float mv = mom[i];
+        if (!isnan(mv)) {
+            const double src100 = (double)mv * 100.0;
+            ind_count += 1;
+            ind_mean = (((double)(ind_count - 1) * ind_mean) + src100) / (double)ind_count;
+        }
+        out_indicator[i] = (float)ind_mean;
+    }
+
+    double ind_val = ind_mean;
+    for (int i = ind_warm_end; i < len; ++i) {
+        const float mv = mom[i];
+        if (!isnan(mv)) {
+            const double src100 = (double)mv * 100.0;
+            ind_val = beta_ind * ind_val + alpha_ind * src100;
+        }
+        out_indicator[i] = (float)ind_val;
+    }
+}
+
+
+extern "C" __global__ void rsmk_signal_from_indicator_ema_f32(
+    const float* __restrict__ indicator,
+    int len,
+    int first_valid_mom,
+    int signal_period,
+    float* __restrict__ out_signal
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    const float nanf = qnan32();
+    if (len <= 0 || signal_period <= 0) return;
+
+    int first = first_valid_mom;
+    if (first < 0) first = 0;
+    if (first >= len) return;
+    while (first < len && isnan(indicator[first])) { first += 1; }
+    if (first >= len) return;
+
+    for (int i = 0; i < first; ++i) {
+        out_signal[i] = nanf;
+    }
+
+    const double alpha_sig = 2.0 / (double(signal_period) + 1.0);
+    const double beta_sig = 1.0 - alpha_sig;
+    double sig_mean = (double)indicator[first];
+    int sig_count = 1;
+    out_signal[first] = (float)sig_mean;
+
+    const int sig_warm_end = min(len, first + signal_period);
+    for (int i = first + 1; i < sig_warm_end; ++i) {
+        const float iv = indicator[i];
+        if (!isnan(iv)) {
+            sig_count += 1;
+            sig_mean = (((double)(sig_count - 1) * sig_mean) + (double)iv) / (double)sig_count;
+        }
+        out_signal[i] = (float)sig_mean;
+    }
+
+    double sig_val = sig_mean;
+    for (int i = sig_warm_end; i < len; ++i) {
+        const float iv = indicator[i];
+        if (!isnan(iv)) {
+            sig_val = beta_sig * sig_val + alpha_sig * (double)iv;
+        }
+        out_signal[i] = (float)sig_val;
+    }
+}
+
+
+extern "C" __global__ void rsmk_copy_group_indicator_tiled_f32(
+    const float* __restrict__ group_indicator,
+    const int* __restrict__ row_group_idx,
+    int len,
+    int n_rows,
+    float* __restrict__ out_indicator
+) {
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int row = blockIdx.y;
+    if (row >= n_rows || t >= len) return;
+    const int group = row_group_idx[row];
+    out_indicator[row * len + t] = group_indicator[group * len + t];
+}
+
+
 extern "C" __global__ void rsmk_apply_mom_single_row_ema_ema_classic_f32(
     const float* __restrict__ mom,
     int len,

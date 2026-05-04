@@ -112,7 +112,7 @@ class TestTilsonCuda:
         cpu_tm = np.full_like(data_tm, np.nan)
         for j in range(N):
             cpu_tm[:, j] = ti.tilson(
-                data_tm[:, j],
+                np.ascontiguousarray(data_tm[:, j]),
                 period=period,
                 volume_factor=volume_factor,
             )

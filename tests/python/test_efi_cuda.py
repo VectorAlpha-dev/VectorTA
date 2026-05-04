@@ -46,10 +46,12 @@ class TestEfiCuda:
     def test_efi_cuda_batch_matches_cpu(self, test_data):
         price = test_data["close"].astype(np.float64)
         volume = test_data["volume"].astype(np.float64)
+        price_f32 = price.astype(np.float32)
+        volume_f32 = volume.astype(np.float32)
         sweep = (8, 20, 3)
 
-        cpu = ti.efi_batch(price, volume, sweep)["values"]
-        handle = ti.efi_cuda_batch_dev(price.astype(np.float32), volume.astype(np.float32), sweep)
+        cpu = ti.efi_batch(price_f32.astype(np.float64), volume_f32.astype(np.float64), sweep)["values"]
+        handle = ti.efi_cuda_batch_dev(price_f32, volume_f32, sweep)
         gpu = cp.asnumpy(cp.asarray(handle))
         assert gpu.shape == cpu.shape
         assert_close(gpu, cpu, rtol=1e-4, atol=1e-5, msg="CUDA EFI batch mismatch")
@@ -66,10 +68,16 @@ class TestEfiCuda:
             volumes_tm[:, j] = base_v * (1.0 + 0.05 * j)
         period = 13
         cpu_tm = np.zeros_like(prices_tm)
+        prices_f32 = prices_tm.astype(np.float32)
+        volumes_f32 = volumes_tm.astype(np.float32)
         for j in range(N):
-            cpu_tm[:, j] = ti.efi(prices_tm[:, j], volumes_tm[:, j], period)
+            cpu_tm[:, j] = ti.efi(
+                np.ascontiguousarray(prices_f32[:, j]).astype(np.float64),
+                np.ascontiguousarray(volumes_f32[:, j]).astype(np.float64),
+                period,
+            )
         handle = ti.efi_cuda_many_series_one_param_dev(
-            prices_tm.astype(np.float32), volumes_tm.astype(np.float32), period
+            prices_f32, volumes_f32, period
         )
         gpu_tm = cp.asnumpy(cp.asarray(handle))
         assert gpu_tm.shape == prices_tm.shape

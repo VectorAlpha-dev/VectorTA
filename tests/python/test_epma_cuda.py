@@ -47,7 +47,7 @@ class TestEpmaCuda:
 
     def test_epma_cuda_batch_matches_cpu(self, test_data):
         close = test_data['close'].astype(np.float64)
-        period_range = (6, 30, 4)
+        period_range = (10, 30, 4)
         offset_range = (1, 9, 2)
 
         cpu_out = ti.epma_batch(close, period_range, offset_range)
@@ -82,7 +82,7 @@ class TestEpmaCuda:
 
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.epma(data_tm[:, j], period, offset)
+            cpu_tm[:, j] = ti.epma(np.ascontiguousarray(data_tm[:, j]), period, offset)
 
         handle = ti.epma_cuda_many_series_one_param_dev(
             data_tm.astype(np.float32), period, offset

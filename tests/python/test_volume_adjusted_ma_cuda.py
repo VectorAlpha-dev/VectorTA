@@ -143,8 +143,8 @@ class TestVolumeAdjustedMaCuda:
         cpu_tm = np.zeros_like(price_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.VolumeAdjustedMa(
-                price_tm[:, j],
-                volume_tm[:, j],
+                np.ascontiguousarray(price_tm[:, j]),
+                np.ascontiguousarray(volume_tm[:, j]),
                 length=length,
                 vi_factor=vi_factor,
                 strict=strict,

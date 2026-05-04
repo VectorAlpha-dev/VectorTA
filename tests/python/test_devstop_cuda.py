@@ -97,8 +97,8 @@ class TestDevStopCuda:
         cpu_tm = np.zeros_like(high_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.devstop(
-                high_tm[:, j].astype(np.float32).astype(np.float64),
-                low_tm[:, j].astype(np.float32).astype(np.float64),
+                np.ascontiguousarray(high_tm[:, j]).astype(np.float32).astype(np.float64),
+                np.ascontiguousarray(low_tm[:, j]).astype(np.float32).astype(np.float64),
                 period, mult, 0, "long", "sma",
             )
 

@@ -1242,7 +1242,7 @@ use pyo3::types::PyDict;
 use pyo3::Bound;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32")]
+#[pyclass(module = "vector_ta", name = "DeviceArrayF32")]
 pub struct DeviceArrayF32Py {
     pub inner: Option<DeviceArrayF32>,
     _ctx_guard: Arc<Context>,

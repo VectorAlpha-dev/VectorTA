@@ -2219,7 +2219,7 @@ impl PpoStreamPy {
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct PpoDeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32Ppo,
 }
@@ -2550,7 +2550,7 @@ pub fn ppo_alloc(len: usize) -> *mut f64 {
 pub fn ppo_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

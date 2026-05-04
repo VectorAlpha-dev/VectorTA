@@ -1194,19 +1194,31 @@ fn hma_batch_inner_into(
 
 #[inline(always)]
 pub unsafe fn hma_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    hma_scalar(data, period, first, out)
+    if period == 5 {
+        hma_scalar_period5(data, first, out);
+    } else {
+        hma_scalar(data, period, first, out);
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn hma_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    hma_avx2(data, period, first, out);
+    if period == 5 {
+        hma_scalar_period5(data, first, out);
+    } else {
+        hma_avx2(data, period, first, out);
+    }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn hma_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    hma_avx512(data, period, first, out);
+    if period == 5 {
+        hma_scalar_period5(data, first, out);
+    } else {
+        hma_avx512(data, period, first, out);
+    }
 }
 
 #[inline(always)]
@@ -1347,7 +1359,7 @@ pub fn hma_cuda_batch_dev_py<'py>(
     dict.set_item("cai_typestr", "<f4")?;
     dict.set_item("cai_shape", (inner.rows as u64, inner.cols as u64))?;
     dict.set_item("cai_strides_bytes", ((inner.cols as u64) * 4u64, 4u64))?;
-    dict.set_item("stream", stream_u64)?;
+    dict.set_item("stream", 0u64)?;
 
     Ok((
         DeviceArrayF32HmaPy::new(inner, ctx, dev_id, stream_u64),
@@ -1416,7 +1428,7 @@ impl HmaStreamPy {
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Hma", unsendable)]
+#[pyclass(module = "vector_ta", name = "DeviceArrayF32Hma", unsendable)]
 pub struct DeviceArrayF32HmaPy {
     pub(crate) inner: crate::cuda::moving_averages::DeviceArrayF32,
     _ctx_guard: std::sync::Arc<cust::context::Context>,
@@ -1453,7 +1465,6 @@ impl DeviceArrayF32HmaPy {
         };
         d.set_item("data", (ptr_val, false))?;
 
-        d.set_item("stream", self._stream)?;
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -1494,10 +1505,6 @@ impl DeviceArrayF32HmaPy {
             }
         }
 
-        unsafe {
-            let st = self._stream as cust::sys::CUstream;
-            let _ = cust::sys::cuStreamSynchronize(st);
-        }
         let _ = stream;
 
         let dummy =
@@ -1681,7 +1688,7 @@ pub fn hma_alloc(len: usize) -> *mut f64 {
 pub fn hma_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

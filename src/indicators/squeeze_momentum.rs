@@ -2438,7 +2438,7 @@ pub fn squeeze_momentum_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn squeeze_momentum_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 

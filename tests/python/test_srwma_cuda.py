@@ -98,7 +98,7 @@ class TestSrwmaCuda:
         period = 21
         cpu_tm = np.full_like(data_tm, np.nan)
         for j in range(N):
-            cpu_tm[:, j] = ti.srwma(data_tm[:, j], period=period)
+            cpu_tm[:, j] = ti.srwma(np.ascontiguousarray(data_tm[:, j]), period=period)
 
         handle = ti.srwma_cuda_many_series_one_param_dev(
             data_tm.astype(np.float32),

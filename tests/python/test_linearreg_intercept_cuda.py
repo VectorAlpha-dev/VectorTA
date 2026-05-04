@@ -69,18 +69,24 @@ class TestLinregInterceptCuda:
         period = 18
         cols = 4
         rows = close.shape[0]
-        matrix = np.tile(close[:, None], (1, cols))
+        matrix = np.tile(np.ascontiguousarray(close[:, None]), (1, cols))
         for idx in range(cols):
             matrix[: idx + 10, idx] = np.nan
             matrix[:, idx] += idx * 0.19
 
+        matrix_f32 = matrix.astype(np.float32)
         cpu_cols = []
         for idx in range(cols):
-            cpu_cols.append(ti.linearreg_intercept(matrix[:, idx], period=period))
+            cpu_cols.append(
+                ti.linearreg_intercept(
+                    np.ascontiguousarray(matrix_f32[:, idx]).astype(np.float64),
+                    period=period,
+                )
+            )
         cpu_values = np.column_stack(cpu_cols)
 
         handle = ti.linearreg_intercept_cuda_many_series_one_param_dev(
-            matrix.astype(np.float32),
+            matrix_f32.ravel(),
             cols,
             rows,
             period,

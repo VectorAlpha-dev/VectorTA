@@ -2077,7 +2077,7 @@ pub fn register_macd_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct DeviceArrayF32MacdPy {
     pub(crate) inner: crate::cuda::oscillators::macd_wrapper::DeviceArrayF32Macd,
 }
@@ -2422,7 +2422,7 @@ pub fn macd_alloc(len: usize) -> *mut f64 {
 pub fn macd_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

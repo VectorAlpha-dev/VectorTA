@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 try:
-    import ta_indicators as ti
+    import vector_ta as ti
 except Exception:
     ti = None
 
@@ -59,7 +59,7 @@ def test_kst_cuda_many_series_one_param_matches_cpu():
     sig_cpu  = np.empty_like(data_tm)
     for s in range(cols):
         line, sig = ti.kst(
-            data_tm[:, s],
+            np.ascontiguousarray(data_tm[:, s]),
             10, 10, 10, 15,
             10, 15, 20, 30,
             9,

@@ -87,7 +87,7 @@ class TestAdCuda:
         )
 
         gpu_cai = cp.asarray(handle)
-        gpu_dlpack = cp.fromDlpack(handle)
+        gpu_dlpack = cp.from_dlpack(handle)
 
         assert gpu_cai.shape == gpu_dlpack.shape
         assert_close(

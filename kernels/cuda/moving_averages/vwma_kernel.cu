@@ -54,6 +54,42 @@ void vwma_prefix_pv_vol_f64_f32(const float* __restrict__ prices,
 }
 
 extern "C" __global__
+void vwma_prefix_pv_vol_time_major_f64_f32(const float* __restrict__ prices_tm,
+                                           const float* __restrict__ volumes_tm,
+                                           const int* __restrict__ first_valids,
+                                           int num_series,
+                                           int series_len,
+                                           double* __restrict__ pv_prefix_tm,
+                                           double* __restrict__ vol_prefix_tm) {
+    const int series_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (series_idx >= num_series || series_len <= 0) return;
+
+    int first_valid = first_valids[series_idx];
+    if (first_valid < 0) first_valid = 0;
+    if (first_valid > series_len) first_valid = series_len;
+
+    double acc_pv = 0.0;
+    double acc_vol = 0.0;
+
+    for (int row = 0; row < series_len; ++row) {
+        const int idx = row * num_series + series_idx;
+        if (row >= first_valid) {
+            const float p = prices_tm[idx];
+            const float v = volumes_tm[idx];
+            if (isnan(p) || isnan(v) || isnan(acc_pv) || isnan(acc_vol)) {
+                acc_pv = NAN;
+                acc_vol = NAN;
+            } else {
+                acc_pv += (double)p * (double)v;
+                acc_vol += (double)v;
+            }
+        }
+        pv_prefix_tm[idx] = acc_pv;
+        vol_prefix_tm[idx] = acc_vol;
+    }
+}
+
+extern "C" __global__
 void vwma_batch_f32(const double* __restrict__ pv_prefix,
                     const double* __restrict__ vol_prefix,
                     const int*    __restrict__ periods,

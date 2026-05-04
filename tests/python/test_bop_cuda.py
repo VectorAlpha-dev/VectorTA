@@ -83,10 +83,10 @@ class TestBopCuda:
         cpu_tm = np.zeros_like(open_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.bop(
-                open_tm[:, j].astype(np.float64),
-                high_tm[:, j].astype(np.float64),
-                low_tm[:, j].astype(np.float64),
-                close_tm[:, j].astype(np.float64),
+                np.ascontiguousarray(open_tm[:, j]).astype(np.float64),
+                np.ascontiguousarray(high_tm[:, j]).astype(np.float64),
+                np.ascontiguousarray(low_tm[:, j]).astype(np.float64),
+                np.ascontiguousarray(close_tm[:, j]).astype(np.float64),
             )
 
         handle = ti.bop_cuda_many_series_one_param_dev(

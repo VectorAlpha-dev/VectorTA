@@ -3115,7 +3115,7 @@ use cust::context::Context;
 use std::sync::Arc;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "CudaContextGuard", unsendable)]
+#[pyclass(module = "vector_ta", name = "CudaContextGuard", unsendable)]
 struct CudaContextGuardPy {
     #[pyo3(get)]
     device_id: u32,
@@ -3461,7 +3461,7 @@ pub fn alligator_alloc(len: usize) -> *mut f64 {
 pub fn alligator_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

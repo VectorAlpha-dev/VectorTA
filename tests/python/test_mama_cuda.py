@@ -87,7 +87,7 @@ class TestMamaCuda:
         cpu_m_tm = np.zeros_like(data_tm)
         cpu_f_tm = np.zeros_like(data_tm)
         for j in range(N):
-            m, f = ti.mama(data_tm[:, j], fast, slow)
+            m, f = ti.mama(np.ascontiguousarray(data_tm[:, j]), fast, slow)
             cpu_m_tm[:, j] = m
             cpu_f_tm[:, j] = f
 

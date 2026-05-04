@@ -421,11 +421,7 @@ pub fn minmax_with_kernel(
 use crate::cuda::minmax_wrapper::CudaMinmax;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(
-    module = "ta_indicators.cuda",
-    name = "MinmaxDeviceArrayF32",
-    unsendable
-)]
+#[pyclass(module = "vector_ta", name = "MinmaxDeviceArrayF32", unsendable)]
 pub struct MinmaxDeviceArrayF32Py {
     pub(crate) buf: Option<DeviceBuffer<f32>>,
     pub(crate) rows: usize,
@@ -2192,7 +2188,7 @@ pub fn minmax_alloc(len: usize) -> *mut f64 {
 pub fn minmax_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

@@ -1471,7 +1471,7 @@ pub fn impulse_macd_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn impulse_macd_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len * 3, len * 3);
+        let _ = Vec::from_raw_parts(ptr, 0, len * 3);
     }
 }
 

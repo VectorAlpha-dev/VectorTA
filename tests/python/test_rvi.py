@@ -192,15 +192,17 @@ class TestRvi:
 
             period = batch_result['periods'][row]
             ma_len = batch_result['ma_lens'][row]
-            warmup = period - 1 + ma_len - 1
-            for i in range(min(warmup, len(row_data))):
-                if not np.isnan(row_data[i]):
-
-                    pass
-
-
-            for i in range(warmup, len(row_data)):
-                assert not np.isnan(row_data[i]), f"Unexpected NaN at index {i} for combination {row}"
+            matype = batch_result['matypes'][row]
+            devtype = batch_result['devtypes'][row]
+            expected = ta_indicators.rvi(close, period, ma_len, matype, devtype)
+            np.testing.assert_allclose(
+                row_data,
+                expected,
+                rtol=1e-10,
+                atol=1e-10,
+                equal_nan=True,
+                err_msg=f"Batch row {row} mismatch",
+            )
 
     def test_rvi_streaming(self):
         """Test RVI streaming functionality"""

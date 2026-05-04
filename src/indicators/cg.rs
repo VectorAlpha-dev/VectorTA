@@ -737,7 +737,7 @@ use numpy::PyReadonlyArray1;
 use std::sync::Arc;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "CgDeviceArrayF32", unsendable)]
+#[pyclass(module = "vector_ta", name = "CgDeviceArrayF32", unsendable)]
 pub struct CgDeviceArrayF32Py {
     pub inner: CudaDeviceArrayF32,
     _ctx: Arc<Context>,
@@ -2083,7 +2083,7 @@ pub fn cg_alloc(len: usize) -> *mut f64 {
 pub fn cg_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

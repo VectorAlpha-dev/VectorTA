@@ -1895,7 +1895,7 @@ pub unsafe fn kaufmanstop_free(ptr: *mut f64, len: usize) {
     if ptr.is_null() {
         return;
     }
-    Vec::from_raw_parts(ptr, len, len);
+    Vec::from_raw_parts(ptr, 0, len);
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]

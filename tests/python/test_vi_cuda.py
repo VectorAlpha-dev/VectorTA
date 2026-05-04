@@ -83,7 +83,7 @@ class TestViCuda:
         plus_cpu = np.zeros_like(h_tm)
         minus_cpu = np.zeros_like(h_tm)
         for j in range(N):
-            out = ti.vi(h_tm[:, j], l_tm[:, j], c_tm[:, j], period)
+            out = ti.vi(np.ascontiguousarray(h_tm[:, j]), np.ascontiguousarray(l_tm[:, j]), np.ascontiguousarray(c_tm[:, j]), period)
             plus_cpu[:, j] = out["plus"]
             minus_cpu[:, j] = out["minus"]
 

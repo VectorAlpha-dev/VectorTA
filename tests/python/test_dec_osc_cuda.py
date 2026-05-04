@@ -45,7 +45,7 @@ class TestDecOscCuda:
         close = test_data['close'].astype(np.float64)
         p, k = 64, 1.0
         cpu = ti.dec_osc(close, p, k)
-        handle = ti.dec_osc_cuda_batch_dev(close.astype(np.float32), (p, p, 0), (k, k, 0.0))
+        handle = ti.dec_osc_cuda_batch_dev(close, (p, p, 0), (k, k, 0.0))
         gpu = cp.asnumpy(cp.asarray(handle))[0]
         assert_close(gpu, cpu, rtol=3e-3, atol=1e-4, msg="CUDA batch vs CPU mismatch")
 
@@ -58,7 +58,7 @@ class TestDecOscCuda:
         p, k = 32, 1.0
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.dec_osc(data_tm[:, j], p, k)
-        handle = ti.dec_osc_cuda_many_series_one_param_dev(data_tm.astype(np.float32).ravel(), N, T, p, k)
+            cpu_tm[:, j] = ti.dec_osc(np.ascontiguousarray(data_tm[:, j]), p, k)
+        handle = ti.dec_osc_cuda_many_series_one_param_dev(data_tm.ravel(), N, T, p, k)
         gpu_tm = cp.asnumpy(cp.asarray(handle)).reshape(T, N)
         assert_close(gpu_tm, cpu_tm, rtol=3e-3, atol=1e-4, msg="CUDA many-series vs CPU mismatch")

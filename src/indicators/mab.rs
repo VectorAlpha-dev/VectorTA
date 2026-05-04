@@ -2041,7 +2041,7 @@ pub fn mab_alloc(len: usize) -> *mut f64 {
 pub fn mab_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }
@@ -2323,14 +2323,179 @@ pub unsafe fn mab_scalar_classic_sma(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::{cuda_available, moving_averages::CudaMab};
+use crate::cuda::{
+    cuda_available,
+    moving_averages::{mab_wrapper::CudaMabBatchPlan, CudaMab},
+};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::{CopyDestination, DeviceBuffer};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
+use numpy::{PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::{pyfunction, PyResult, Python};
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "vector_ta", name = "MabCudaBatchPlan", unsendable)]
+pub struct MabCudaBatchPlanPy {
+    cuda: CudaMab,
+    plan: CudaMabBatchPlan,
+    device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl MabCudaBatchPlanPy {
+    #[getter]
+    fn rows(&self) -> usize {
+        self.plan.rows()
+    }
+
+    #[getter]
+    fn cols(&self) -> usize {
+        self.plan.cols()
+    }
+
+    #[getter]
+    fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        let params = pyo3::types::PyList::empty(py);
+        for p in self.plan.params() {
+            let item = PyDict::new(py);
+            item.set_item("fast_period", p.fast_period.unwrap_or(0))?;
+            item.set_item("slow_period", p.slow_period.unwrap_or(0))?;
+            item.set_item("devup", p.devup.unwrap_or(1.0))?;
+            item.set_item("devdn", p.devdn.unwrap_or(1.0))?;
+            item.set_item("fast_ma_type", p.fast_ma_type.as_deref().unwrap_or("sma"))?;
+            item.set_item("slow_ma_type", p.slow_ma_type.as_deref().unwrap_or("sma"))?;
+            params.append(item)?;
+        }
+        dict.set_item("params", params)?;
+        dict.set_item("rows", self.plan.rows())?;
+        dict.set_item("cols", self.plan.cols())?;
+        dict.set_item("first_valid", self.plan.first_valid())?;
+        dict.set_item("device_id", self.device_id)?;
+        Ok(dict)
+    }
+
+    fn execute<'py>(
+        &mut self,
+        py: Python<'py>,
+        data_f32: PyReadonlyArray1<'py, f32>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let slice = data_f32.as_slice()?;
+        let rows = self.plan.rows();
+        let cols = self.plan.cols();
+        if slice.len() != cols {
+            return Err(PyValueError::new_err(format!(
+                "mab CUDA plan input length mismatch: expected {}, got {}",
+                cols,
+                slice.len()
+            )));
+        }
+        let first_valid = slice
+            .iter()
+            .position(|v| !v.is_nan())
+            .ok_or_else(|| PyValueError::new_err("mab CUDA plan input is all NaN"))?;
+        if first_valid != self.plan.first_valid() {
+            return Err(PyValueError::new_err(format!(
+                "mab CUDA plan first_valid mismatch: expected {}, got {}",
+                self.plan.first_valid(),
+                first_valid
+            )));
+        }
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| PyValueError::new_err("mab CUDA plan rows*cols overflow"))?;
+        let (upper, middle, lower) =
+            py.allow_threads(|| -> PyResult<(Vec<f32>, Vec<f32>, Vec<f32>)> {
+                let d_prices = DeviceBuffer::from_slice(slice)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                self.cuda
+                    .launch_mab_batch_plan(&d_prices, &mut self.plan)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                self.cuda
+                    .synchronize()
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                let mut upper = vec![0f32; total];
+                let mut middle = vec![0f32; total];
+                let mut lower = vec![0f32; total];
+                let (upper_buf, middle_buf, lower_buf) = self.plan.outputs();
+                upper_buf
+                    .copy_to(&mut upper)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                middle_buf
+                    .copy_to(&mut middle)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                lower_buf
+                    .copy_to(&mut lower)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                Ok((upper, middle, lower))
+            })?;
+        let dict = self.metadata(py)?;
+        let upper_arr = upper.into_pyarray(py);
+        let middle_arr = middle.into_pyarray(py);
+        let lower_arr = lower.into_pyarray(py);
+        dict.set_item("upper", upper_arr.reshape((rows, cols))?)?;
+        dict.set_item("middle", middle_arr.reshape((rows, cols))?)?;
+        dict.set_item("lower", lower_arr.reshape((rows, cols))?)?;
+        Ok(dict)
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "mab_cuda_batch_plan_create")]
+#[pyo3(signature = (series_len, first_valid, fast_period_range, slow_period_range, devup_range=(1.0,1.0,0.0), devdn_range=(1.0,1.0,0.0), fast_ma_type="sma", slow_ma_type="sma", device_id=0))]
+pub fn mab_cuda_batch_plan_create_py(
+    py: Python<'_>,
+    series_len: usize,
+    first_valid: usize,
+    fast_period_range: (usize, usize, usize),
+    slow_period_range: (usize, usize, usize),
+    devup_range: (f64, f64, f64),
+    devdn_range: (f64, f64, f64),
+    fast_ma_type: &str,
+    slow_ma_type: &str,
+    device_id: usize,
+) -> PyResult<MabCudaBatchPlanPy> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let sweep = MabBatchRange {
+        fast_period: fast_period_range,
+        slow_period: slow_period_range,
+        devup: devup_range,
+        devdn: devdn_range,
+        fast_ma_type: (
+            fast_ma_type.to_string(),
+            fast_ma_type.to_string(),
+            String::new(),
+        ),
+        slow_ma_type: (
+            slow_ma_type.to_string(),
+            slow_ma_type.to_string(),
+            String::new(),
+        ),
+    };
+    let (cuda, plan, dev_id) = py.allow_threads(|| {
+        let cuda = CudaMab::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dev_id = cuda.device_id();
+        let plan = cuda
+            .prepare_mab_batch_plan(series_len, first_valid, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((cuda, plan, dev_id))
+    })?;
+    Ok(MabCudaBatchPlanPy {
+        cuda,
+        plan,
+        device_id: dev_id,
+    })
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "mab_cuda_batch_dev")]

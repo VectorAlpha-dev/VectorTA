@@ -64,7 +64,7 @@ class TestPpoCuda:
 
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.ppo(data_tm[:, j], fast, slow, "ema")
+            cpu_tm[:, j] = ti.ppo(np.ascontiguousarray(data_tm[:, j]), fast, slow, "ema")
         handle = ti.ppo_cuda_many_series_one_param_dev(
             data_tm.astype(np.float32), fast, slow, "ema"
         )

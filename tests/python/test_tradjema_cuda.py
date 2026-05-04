@@ -105,9 +105,9 @@ class TestTradjemaCuda:
         cpu_tm = np.empty_like(close_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.tradjema(
-                high_tm32[:, j].astype(np.float64),
-                low_tm32[:, j].astype(np.float64),
-                close_tm32[:, j].astype(np.float64),
+                np.ascontiguousarray(high_tm32[:, j]).astype(np.float64),
+                np.ascontiguousarray(low_tm32[:, j]).astype(np.float64),
+                np.ascontiguousarray(close_tm32[:, j]).astype(np.float64),
                 length,
                 mult,
             )

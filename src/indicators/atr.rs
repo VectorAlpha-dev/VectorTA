@@ -2070,7 +2070,7 @@ use crate::cuda::atr_wrapper::DeviceArrayF32Atr;
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct DeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32Atr,
 }
@@ -2546,7 +2546,7 @@ pub fn atr_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn atr_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 

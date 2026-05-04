@@ -895,7 +895,7 @@ pub fn acosc_cuda_many_series_one_param_dev_py(
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::DeviceArrayF32Acosc;
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct AcoscDeviceArrayF32Py {
     pub(crate) inner: Option<DeviceArrayF32Acosc>,
     pub(crate) device_id: u32,
@@ -1307,7 +1307,7 @@ pub fn acosc_alloc(len: usize) -> *mut f64 {
 pub fn acosc_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

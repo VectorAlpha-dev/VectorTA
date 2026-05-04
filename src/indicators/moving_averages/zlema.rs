@@ -35,11 +35,7 @@ use cust::context::Context;
 use std::sync::Arc;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(
-    module = "ta_indicators.cuda",
-    name = "ZlemaDeviceArrayF32",
-    unsendable
-)]
+#[pyclass(module = "vector_ta", name = "ZlemaDeviceArrayF32", unsendable)]
 pub struct DeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32,
     pub(crate) _ctx: Arc<Context>,
@@ -67,9 +63,6 @@ impl DeviceArrayF32Py {
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
 
-        if self.stream != 0 {
-            d.set_item("stream", self.stream)?;
-        }
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -108,23 +101,7 @@ impl DeviceArrayF32Py {
             }
         }
 
-        #[cfg(feature = "cuda")]
-        if let Some(stream_obj) = stream.as_ref() {
-            if let Ok(s) = stream_obj.extract::<usize>(py) {
-                if s > 2 {
-                    unsafe {
-                        use cust::sys as cu;
-                        let mut ev: cu::CUevent = std::ptr::null_mut();
-                        let _ = cu::cuEventCreate(&mut ev as *mut _, 0);
-                        let prod: cu::CUstream = self.stream as *mut _;
-                        let _ = cu::cuEventRecord(ev, prod);
-                        let cons: cu::CUstream = s as *mut _;
-                        let _ = cu::cuStreamWaitEvent(cons, ev, 0);
-                        let _ = cu::cuEventDestroy_v2(ev);
-                    }
-                }
-            }
-        }
+        let _ = stream;
 
         let dummy =
             DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2031,7 +2008,7 @@ pub fn zlema_alloc(len: usize) -> *mut f64 {
 pub fn zlema_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

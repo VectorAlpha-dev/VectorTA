@@ -1432,7 +1432,7 @@ pub fn volatility_ratio_adaptive_rsx_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn volatility_ratio_adaptive_rsx_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, 2 * len, 2 * len);
+        let _ = Vec::from_raw_parts(ptr, 0, 2 * len);
     }
 }
 

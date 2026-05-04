@@ -57,17 +57,27 @@ class TestFramaCuda:
         high = test_data["high"].astype(np.float64)
         low = test_data["low"].astype(np.float64)
         close = test_data["close"].astype(np.float64)
+        high_f32 = high.astype(np.float32)
+        low_f32 = low.astype(np.float32)
+        close_f32 = close.astype(np.float32)
 
         window = 12
         sc = 260
         fc = 2
 
-        cpu = ti.frama(high, low, close, window, sc, fc)
+        cpu = ti.frama(
+            high_f32.astype(np.float64),
+            low_f32.astype(np.float64),
+            close_f32.astype(np.float64),
+            window,
+            sc,
+            fc,
+        )
 
         handle, meta = ti.frama_cuda_batch_dev(
-            high.astype(np.float32),
-            low.astype(np.float32),
-            close.astype(np.float32),
+            high_f32,
+            low_f32,
+            close_f32,
             window_range=(window, window, 0),
             sc_range=(sc, sc, 0),
             fc_range=(fc, fc, 0),
@@ -100,21 +110,24 @@ class TestFramaCuda:
         sc = 220
         fc = 2
 
+        high_f32 = high_tm.astype(np.float32)
+        low_f32 = low_tm.astype(np.float32)
+        close_f32 = close_tm.astype(np.float32)
         cpu_tm = np.zeros_like(close_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.frama(
-                high_tm[:, j],
-                low_tm[:, j],
-                close_tm[:, j],
+                np.ascontiguousarray(high_f32[:, j]).astype(np.float64),
+                np.ascontiguousarray(low_f32[:, j]).astype(np.float64),
+                np.ascontiguousarray(close_f32[:, j]).astype(np.float64),
                 window,
                 sc,
                 fc,
             )
 
         handle = ti.frama_cuda_many_series_one_param_dev(
-            high_tm.astype(np.float32),
-            low_tm.astype(np.float32),
-            close_tm.astype(np.float32),
+            high_f32,
+            low_f32,
+            close_f32,
             window,
             sc,
             fc,

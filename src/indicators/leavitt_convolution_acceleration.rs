@@ -14,7 +14,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::make_uninit_matrix;
+use crate::utilities::helpers::{detect_best_batch_kernel, make_uninit_matrix};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 
@@ -1525,7 +1525,7 @@ pub fn leavitt_convolution_acceleration_free(ptr: *mut f64, len: usize) {
         return;
     }
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len * 2, len * 2);
+        let _ = Vec::from_raw_parts(ptr, 0, len * 2);
     }
 }
 

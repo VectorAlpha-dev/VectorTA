@@ -9,11 +9,7 @@ mod nwe_python_cuda_handle {
     use std::ffi::c_void;
     use std::sync::Arc;
 
-    #[pyclass(
-        module = "ta_indicators.cuda",
-        unsendable,
-        name = "NweDeviceArrayF32Py"
-    )]
+    #[pyclass(module = "vector_ta", unsendable, name = "NweDeviceArrayF32Py")]
     pub struct NweDeviceArrayF32Py {
         pub(crate) buf: Option<DeviceBuffer<f32>>,
         pub(crate) rows: usize,
@@ -2109,7 +2105,7 @@ pub fn nadaraya_watson_envelope_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn nadaraya_watson_envelope_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, 2 * len, 2 * len);
+        let _ = Vec::from_raw_parts(ptr, 0, 2 * len);
     }
 }
 

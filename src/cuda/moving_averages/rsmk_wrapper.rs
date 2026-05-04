@@ -63,6 +63,79 @@ impl DeviceArrayF32Pair {
     }
 }
 
+pub struct CudaRsmkBatchPlan {
+    combos: Vec<RsmkParams>,
+    lookbacks: Vec<usize>,
+    d_moms: Vec<DeviceBuffer<f32>>,
+    group_mom_idx: Vec<usize>,
+    group_periods: Vec<usize>,
+    group_first_moms: Vec<usize>,
+    row_group_idx: Vec<usize>,
+    d_row_group_idx: DeviceBuffer<i32>,
+    signal_periods: Vec<usize>,
+    first_moms: Vec<usize>,
+    d_group_indicator: DeviceBuffer<f32>,
+    d_indicator: DeviceBuffer<f32>,
+    d_signal: DeviceBuffer<f32>,
+    rows: usize,
+    cols: usize,
+    first_valid: usize,
+    device_id: u32,
+}
+
+impl CudaRsmkBatchPlan {
+    #[inline]
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    #[inline]
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    #[inline]
+    pub fn params(&self) -> &[RsmkParams] {
+        &self.combos
+    }
+
+    #[inline]
+    pub fn outputs(&self) -> (&DeviceBuffer<f32>, &DeviceBuffer<f32>) {
+        (&self.d_indicator, &self.d_signal)
+    }
+
+    pub fn into_device_pair_and_params(self) -> (DeviceArrayF32Pair, Vec<RsmkParams>) {
+        let CudaRsmkBatchPlan {
+            combos,
+            d_indicator,
+            d_signal,
+            rows,
+            cols,
+            ..
+        } = self;
+        (
+            DeviceArrayF32Pair {
+                a: DeviceArrayF32 {
+                    buf: d_indicator,
+                    rows,
+                    cols,
+                },
+                b: DeviceArrayF32 {
+                    buf: d_signal,
+                    rows,
+                    cols,
+                },
+            },
+            combos,
+        )
+    }
+}
+
 pub struct CudaRsmk {
     module: Module,
     pub(crate) stream: Stream,
@@ -187,6 +260,11 @@ impl CudaRsmk {
         vals
     }
 
+    fn usize_to_i32(name: &'static str, value: usize) -> Result<i32, CudaRsmkError> {
+        i32::try_from(value)
+            .map_err(|_| CudaRsmkError::InvalidInput(format!("{} exceeds i32 range", name)))
+    }
+
     fn expand_batch_combos(sweep: &RsmkBatchRange) -> Result<Vec<RsmkParams>, CudaRsmkError> {
         let looks = Self::axis(sweep.lookback);
         let periods = Self::axis(sweep.period);
@@ -211,6 +289,327 @@ impl CudaRsmk {
             ));
         }
         Ok(combos)
+    }
+
+    pub fn prepare_rsmk_batch_plan(
+        &self,
+        len: usize,
+        first_valid: usize,
+        sweep: &RsmkBatchRange,
+    ) -> Result<CudaRsmkBatchPlan, CudaRsmkError> {
+        if len == 0 {
+            return Err(CudaRsmkError::InvalidInput("empty input".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaRsmkError::InvalidInput(format!(
+                "invalid first_valid {} for length {}",
+                first_valid, len
+            )));
+        }
+        Self::usize_to_i32("len", len)?;
+        Self::usize_to_i32("first_valid", first_valid)?;
+
+        let combos = Self::expand_batch_combos(sweep)?;
+        let rows = combos.len();
+        Self::usize_to_i32("rows", rows)?;
+        for prm in &combos {
+            Self::usize_to_i32("lookback", prm.lookback.unwrap())?;
+            Self::usize_to_i32("period", prm.period.unwrap())?;
+            Self::usize_to_i32("signal_period", prm.signal_period.unwrap())?;
+        }
+
+        let lookbacks: Vec<usize> = combos
+            .iter()
+            .map(|p| p.lookback.unwrap())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let lookback_index: HashMap<usize, usize> = lookbacks
+            .iter()
+            .enumerate()
+            .map(|(idx, &lb)| (lb, idx))
+            .collect();
+        let group_keys: Vec<(usize, usize)> = combos
+            .iter()
+            .map(|p| (p.lookback.unwrap(), p.period.unwrap()))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Self::usize_to_i32("groups", group_keys.len())?;
+        let group_index: HashMap<(usize, usize), usize> = group_keys
+            .iter()
+            .enumerate()
+            .map(|(idx, &key)| (key, idx))
+            .collect();
+        let row_group_idx: Vec<usize> = combos
+            .iter()
+            .map(|p| {
+                let key = (p.lookback.unwrap(), p.period.unwrap());
+                *group_index.get(&key).expect("rsmk group index")
+            })
+            .collect();
+        let row_group_idx_i32: Vec<i32> = row_group_idx
+            .iter()
+            .map(|&idx| Self::usize_to_i32("row group index", idx))
+            .collect::<Result<Vec<_>, _>>()?;
+        let group_mom_idx: Vec<usize> = group_keys
+            .iter()
+            .map(|&(lb, _)| *lookback_index.get(&lb).expect("rsmk lookback index"))
+            .collect();
+        let group_periods: Vec<usize> = group_keys.iter().map(|&(_, period)| period).collect();
+        let group_first_moms: Vec<usize> = group_keys
+            .iter()
+            .map(|&(lb, _)| {
+                first_valid
+                    .checked_add(lb)
+                    .ok_or_else(|| CudaRsmkError::InvalidInput("first_valid overflow".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for &first_mom in &group_first_moms {
+            Self::usize_to_i32("first_mom", first_mom)?;
+        }
+        let signal_periods: Vec<usize> = combos.iter().map(|p| p.signal_period.unwrap()).collect();
+        let first_moms: Vec<usize> = combos
+            .iter()
+            .map(|p| {
+                first_valid
+                    .checked_add(p.lookback.unwrap())
+                    .ok_or_else(|| CudaRsmkError::InvalidInput("first_valid overflow".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for &first_mom in &first_moms {
+            Self::usize_to_i32("first_mom", first_mom)?;
+        }
+
+        let el = std::mem::size_of::<f32>();
+        let i32_el = std::mem::size_of::<i32>();
+        let rows_len = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = rows_len
+            .checked_mul(2 * el)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("output size overflow".into()))?;
+        let mom_bytes = lookbacks
+            .len()
+            .checked_mul(len)
+            .and_then(|x| x.checked_mul(el))
+            .ok_or_else(|| CudaRsmkError::InvalidInput("momentum size overflow".into()))?;
+        let group_len = group_keys
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("group indicator size overflow".into()))?;
+        let group_bytes = group_len
+            .checked_mul(el)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("group indicator size overflow".into()))?;
+        let row_idx_bytes = rows
+            .checked_mul(i32_el)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("row group index size overflow".into()))?;
+        let in_bytes = len
+            .checked_mul(2 * el)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("input size overflow".into()))?;
+        let required = out_bytes
+            .checked_add(mom_bytes)
+            .and_then(|x| x.checked_add(group_bytes))
+            .and_then(|x| x.checked_add(row_idx_bytes))
+            .and_then(|x| x.checked_add(in_bytes))
+            .ok_or_else(|| CudaRsmkError::InvalidInput("VRAM size overflow".into()))?;
+        Self::will_fit(required, 64 * 1024 * 1024)?;
+
+        let mut d_moms = Vec::with_capacity(lookbacks.len());
+        for _ in 0..lookbacks.len() {
+            d_moms.push(unsafe { DeviceBuffer::<f32>::uninitialized(len) }?);
+        }
+        let d_row_group_idx = DeviceBuffer::from_slice(&row_group_idx_i32)?;
+        let d_group_indicator: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(group_len) }?;
+        let d_indicator: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows_len) }?;
+        let d_signal: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows_len) }?;
+
+        Ok(CudaRsmkBatchPlan {
+            combos,
+            lookbacks,
+            d_moms,
+            group_mom_idx,
+            group_periods,
+            group_first_moms,
+            row_group_idx,
+            d_row_group_idx,
+            signal_periods,
+            first_moms,
+            d_group_indicator,
+            d_indicator,
+            d_signal,
+            rows,
+            cols: len,
+            first_valid,
+            device_id: self.device_id,
+        })
+    }
+
+    pub fn launch_rsmk_batch_plan(
+        &self,
+        d_main: &DeviceBuffer<f32>,
+        d_compare: &DeviceBuffer<f32>,
+        plan: &mut CudaRsmkBatchPlan,
+    ) -> Result<(), CudaRsmkError> {
+        if d_main.len() != plan.cols || d_compare.len() != plan.cols {
+            return Err(CudaRsmkError::InvalidInput(
+                "device input length mismatch".into(),
+            ));
+        }
+
+        let rows_len = plan
+            .rows
+            .checked_mul(plan.cols)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("rows*cols overflow".into()))?;
+        let group_len = plan
+            .group_periods
+            .len()
+            .checked_mul(plan.cols)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("group indicator size overflow".into()))?;
+        self.memset_nan32_async(plan.d_signal.as_device_ptr().as_raw() as u64, rows_len)?;
+        self.memset_nan32_async(
+            plan.d_group_indicator.as_device_ptr().as_raw() as u64,
+            group_len,
+        )?;
+
+        let mut k_mom: Function = self.module.get_function("rsmk_momentum_f32").map_err(|_| {
+            CudaRsmkError::MissingKernelSymbol {
+                name: "rsmk_momentum_f32",
+            }
+        })?;
+        let mut k_indicator: Function = self
+            .module
+            .get_function("rsmk_indicator_from_mom_ema_f32")
+            .map_err(|_| CudaRsmkError::MissingKernelSymbol {
+                name: "rsmk_indicator_from_mom_ema_f32",
+            })?;
+        let mut k_signal: Function = self
+            .module
+            .get_function("rsmk_signal_from_indicator_ema_f32")
+            .map_err(|_| CudaRsmkError::MissingKernelSymbol {
+                name: "rsmk_signal_from_indicator_ema_f32",
+            })?;
+        let mut k_copy: Function = self
+            .module
+            .get_function("rsmk_copy_group_indicator_tiled_f32")
+            .map_err(|_| CudaRsmkError::MissingKernelSymbol {
+                name: "rsmk_copy_group_indicator_tiled_f32",
+            })?;
+
+        for (idx, &lb) in plan.lookbacks.iter().enumerate() {
+            unsafe {
+                let mut main_ptr = d_main.as_device_ptr().as_raw();
+                let mut comp_ptr = d_compare.as_device_ptr().as_raw();
+                let mut lb_i = Self::usize_to_i32("lookback", lb)?;
+                let mut fv_i = Self::usize_to_i32("first_valid", plan.first_valid)?;
+                let mut len_i = Self::usize_to_i32("len", plan.cols)?;
+                let mut mom_ptr = plan.d_moms[idx].as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut main_ptr as *mut _ as *mut c_void,
+                    &mut comp_ptr as *mut _ as *mut c_void,
+                    &mut lb_i as *mut _ as *mut c_void,
+                    &mut fv_i as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut mom_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(
+                    &mut k_mom,
+                    GridSize::xyz(1, 1, 1),
+                    BlockSize::xyz(1, 1, 1),
+                    0,
+                    args,
+                )?;
+            }
+        }
+
+        for group in 0..plan.group_periods.len() {
+            let mom_idx = plan.group_mom_idx[group];
+            unsafe {
+                let mut mom_ptr = plan.d_moms[mom_idx].as_device_ptr().as_raw();
+                let mut len_i = Self::usize_to_i32("len", plan.cols)?;
+                let mut fv_m_i = Self::usize_to_i32("first_mom", plan.group_first_moms[group])?;
+                let mut p_i = Self::usize_to_i32("period", plan.group_periods[group])?;
+                let mut ind_ptr = plan
+                    .d_group_indicator
+                    .as_device_ptr()
+                    .offset((group * plan.cols) as isize)
+                    .as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut mom_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut fv_m_i as *mut _ as *mut c_void,
+                    &mut p_i as *mut _ as *mut c_void,
+                    &mut ind_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(
+                    &mut k_indicator,
+                    GridSize::xyz(1, 1, 1),
+                    BlockSize::xyz(1, 1, 1),
+                    0,
+                    args,
+                )?;
+            }
+        }
+
+        unsafe {
+            let mut group_ptr = plan.d_group_indicator.as_device_ptr().as_raw();
+            let mut row_group_ptr = plan.d_row_group_idx.as_device_ptr().as_raw();
+            let mut len_i = Self::usize_to_i32("len", plan.cols)?;
+            let mut rows_i = Self::usize_to_i32("rows", plan.rows)?;
+            let mut ind_ptr = plan.d_indicator.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut group_ptr as *mut _ as *mut c_void,
+                &mut row_group_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut rows_i as *mut _ as *mut c_void,
+                &mut ind_ptr as *mut _ as *mut c_void,
+            ];
+            let block_x = 256u32;
+            let grid_x = ((plan.cols as u32) + block_x - 1) / block_x;
+            self.stream.launch(
+                &mut k_copy,
+                GridSize::xyz(grid_x, plan.rows as u32, 1),
+                BlockSize::xyz(block_x, 1, 1),
+                0,
+                args,
+            )?;
+        }
+
+        for row in 0..plan.rows {
+            let group = plan.row_group_idx[row];
+            unsafe {
+                let mut ind_group_ptr = plan
+                    .d_group_indicator
+                    .as_device_ptr()
+                    .offset((group * plan.cols) as isize)
+                    .as_raw();
+                let mut len_i = Self::usize_to_i32("len", plan.cols)?;
+                let mut fv_m_i = Self::usize_to_i32("first_mom", plan.first_moms[row])?;
+                let mut s_i = Self::usize_to_i32("signal_period", plan.signal_periods[row])?;
+                let mut sig_ptr = plan
+                    .d_signal
+                    .as_device_ptr()
+                    .offset((row * plan.cols) as isize)
+                    .as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut ind_group_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut fv_m_i as *mut _ as *mut c_void,
+                    &mut s_i as *mut _ as *mut c_void,
+                    &mut sig_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(
+                    &mut k_signal,
+                    GridSize::xyz(1, 1, 1),
+                    BlockSize::xyz(1, 1, 1),
+                    0,
+                    args,
+                )?;
+            }
+        }
+
+        Ok(())
     }
 
     pub fn rsmk_batch_dev(
@@ -256,6 +655,24 @@ impl CudaRsmk {
         let combos = Self::expand_batch_combos(sweep)?;
         let rows = combos.len();
         let uniq_looks: BTreeSet<usize> = combos.iter().map(|p| p.lookback.unwrap()).collect();
+        let group_keys: Vec<(usize, usize)> = combos
+            .iter()
+            .map(|p| (p.lookback.unwrap(), p.period.unwrap()))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let group_index: HashMap<(usize, usize), usize> = group_keys
+            .iter()
+            .enumerate()
+            .map(|(idx, &key)| (key, idx))
+            .collect();
+        let row_group_idx: Vec<i32> = combos
+            .iter()
+            .map(|p| {
+                let key = (p.lookback.unwrap(), p.period.unwrap());
+                *group_index.get(&key).expect("rsmk group index") as i32
+            })
+            .collect();
         let el = std::mem::size_of::<f32>();
         let rows_len = rows
             .checked_mul(len)
@@ -268,30 +685,53 @@ impl CudaRsmk {
             .checked_mul(len)
             .and_then(|x| x.checked_mul(el))
             .ok_or_else(|| CudaRsmkError::InvalidInput("momentum size overflow".into()))?;
+        let group_len = group_keys
+            .len()
+            .checked_mul(len)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("group indicator size overflow".into()))?;
+        let group_bytes = group_len
+            .checked_mul(el)
+            .ok_or_else(|| CudaRsmkError::InvalidInput("group indicator size overflow".into()))?;
         let in_bytes = len
             .checked_mul(2 * el)
             .ok_or_else(|| CudaRsmkError::InvalidInput("input size overflow".into()))?;
         let required = out_bytes
             .checked_add(mom_bytes)
+            .and_then(|x| x.checked_add(group_bytes))
             .and_then(|x| x.checked_add(in_bytes))
             .ok_or_else(|| CudaRsmkError::InvalidInput("VRAM size overflow".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
         let mut d_indicator: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows_len) }?;
         let mut d_signal: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows_len) }?;
-        self.memset_nan32_async(d_indicator.as_device_ptr().as_raw() as u64, rows_len)?;
         self.memset_nan32_async(d_signal.as_device_ptr().as_raw() as u64, rows_len)?;
+        let mut d_group_indicator: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(group_len) }?;
+        self.memset_nan32_async(d_group_indicator.as_device_ptr().as_raw() as u64, group_len)?;
+        let d_row_group_idx = DeviceBuffer::from_slice(&row_group_idx)?;
 
         let mut k_mom: Function = self.module.get_function("rsmk_momentum_f32").map_err(|_| {
             CudaRsmkError::MissingKernelSymbol {
                 name: "rsmk_momentum_f32",
             }
         })?;
-        let mut k_apply_row: Function = self
+        let mut k_indicator: Function = self
             .module
-            .get_function("rsmk_apply_mom_single_row_ema_ema_f32")
+            .get_function("rsmk_indicator_from_mom_ema_f32")
             .map_err(|_| CudaRsmkError::MissingKernelSymbol {
-                name: "rsmk_apply_mom_single_row_ema_ema_f32",
+                name: "rsmk_indicator_from_mom_ema_f32",
+            })?;
+        let mut k_signal: Function = self
+            .module
+            .get_function("rsmk_signal_from_indicator_ema_f32")
+            .map_err(|_| CudaRsmkError::MissingKernelSymbol {
+                name: "rsmk_signal_from_indicator_ema_f32",
+            })?;
+        let mut k_copy: Function = self
+            .module
+            .get_function("rsmk_copy_group_indicator_tiled_f32")
+            .map_err(|_| CudaRsmkError::MissingKernelSymbol {
+                name: "rsmk_copy_group_indicator_tiled_f32",
             })?;
 
         let mut mom_dev: HashMap<usize, DeviceBuffer<f32>> = HashMap::new();
@@ -323,10 +763,7 @@ impl CudaRsmk {
             mom_dev.insert(lb, d_m);
         }
 
-        for (row, prm) in combos.iter().enumerate() {
-            let lb = prm.lookback.unwrap();
-            let period = prm.period.unwrap();
-            let sig = prm.signal_period.unwrap();
+        for (group, &(lb, period)) in group_keys.iter().enumerate() {
             let first_mom = first_valid + lb;
             let d_m = mom_dev.get(&lb).expect("mom dev by lookback");
             unsafe {
@@ -334,31 +771,77 @@ impl CudaRsmk {
                 let mut len_i = len as i32;
                 let mut fv_m_i = first_mom as i32;
                 let mut p_i = period as i32;
-                let mut s_i = sig as i32;
-
-                let mut ind_ptr = unsafe {
-                    d_indicator
-                        .as_device_ptr()
-                        .offset((row * len) as isize)
-                        .as_raw()
-                };
-                let mut sig_ptr = unsafe {
-                    d_signal
-                        .as_device_ptr()
-                        .offset((row * len) as isize)
-                        .as_raw()
-                };
+                let mut ind_ptr = d_group_indicator
+                    .as_device_ptr()
+                    .offset((group * len) as isize)
+                    .as_raw();
                 let args: &mut [*mut c_void] = &mut [
                     &mut mom_ptr as *mut _ as *mut c_void,
                     &mut len_i as *mut _ as *mut c_void,
                     &mut fv_m_i as *mut _ as *mut c_void,
                     &mut p_i as *mut _ as *mut c_void,
-                    &mut s_i as *mut _ as *mut c_void,
                     &mut ind_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(
+                    &mut k_indicator,
+                    GridSize::xyz(1, 1, 1),
+                    BlockSize::xyz(1, 1, 1),
+                    0,
+                    args,
+                )?;
+            }
+        }
+
+        unsafe {
+            let mut group_ptr = d_group_indicator.as_device_ptr().as_raw();
+            let mut row_group_ptr = d_row_group_idx.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut rows_i = rows as i32;
+            let mut ind_ptr = d_indicator.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut group_ptr as *mut _ as *mut c_void,
+                &mut row_group_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut rows_i as *mut _ as *mut c_void,
+                &mut ind_ptr as *mut _ as *mut c_void,
+            ];
+            let block_x = 256u32;
+            let grid_x = ((len as u32) + block_x - 1) / block_x;
+            self.stream.launch(
+                &mut k_copy,
+                GridSize::xyz(grid_x, rows as u32, 1),
+                BlockSize::xyz(block_x, 1, 1),
+                0,
+                args,
+            )?;
+        }
+
+        for (row, prm) in combos.iter().enumerate() {
+            let lb = prm.lookback.unwrap();
+            let sig = prm.signal_period.unwrap();
+            let first_mom = first_valid + lb;
+            let group = row_group_idx[row] as usize;
+            unsafe {
+                let mut ind_group_ptr = d_group_indicator
+                    .as_device_ptr()
+                    .offset((group * len) as isize)
+                    .as_raw();
+                let mut len_i = len as i32;
+                let mut fv_m_i = first_mom as i32;
+                let mut s_i = sig as i32;
+                let mut sig_ptr = d_signal
+                    .as_device_ptr()
+                    .offset((row * len) as isize)
+                    .as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut ind_group_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut fv_m_i as *mut _ as *mut c_void,
+                    &mut s_i as *mut _ as *mut c_void,
                     &mut sig_ptr as *mut _ as *mut c_void,
                 ];
                 self.stream.launch(
-                    &mut k_apply_row,
+                    &mut k_signal,
                     GridSize::xyz(1, 1, 1),
                     BlockSize::xyz(1, 1, 1),
                     0,
@@ -663,7 +1146,8 @@ pub mod benches {
         let in_bytes = 2 * BATCH_LEN * std::mem::size_of::<f32>();
         let out_bytes = 2 * rows * BATCH_LEN * std::mem::size_of::<f32>();
         let mom_bytes = 50 * BATCH_LEN * std::mem::size_of::<f32>();
-        in_bytes + out_bytes + mom_bytes + 32 * 1024 * 1024
+        let group_bytes = 50 * BATCH_LEN * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + mom_bytes + group_bytes + 32 * 1024 * 1024
     }
     fn bytes_many() -> usize {
         let elems = MANY_COLS * MANY_ROWS;
@@ -705,10 +1189,14 @@ pub mod benches {
         first_valid: usize,
         lookbacks: Vec<usize>,
         d_moms: Vec<DeviceBuffer<f32>>,
-        row_mom_idx: Vec<usize>,
-        periods: Vec<usize>,
+        group_mom_idx: Vec<usize>,
+        group_periods: Vec<usize>,
+        group_first_moms: Vec<usize>,
+        row_group_idx: Vec<usize>,
+        d_row_group_idx: DeviceBuffer<i32>,
         signals: Vec<usize>,
         first_moms: Vec<usize>,
+        d_group_indicator: DeviceBuffer<f32>,
         d_indicator: DeviceBuffer<f32>,
         d_signal: DeviceBuffer<f32>,
     }
@@ -723,8 +1211,18 @@ pub mod benches {
             let mut k_apply = self
                 .cuda
                 .module
-                .get_function("rsmk_apply_mom_single_row_ema_ema_f32")
-                .expect("rsmk_apply_mom_single_row_ema_ema_f32");
+                .get_function("rsmk_indicator_from_mom_ema_f32")
+                .expect("rsmk_indicator_from_mom_ema_f32");
+            let mut k_signal = self
+                .cuda
+                .module
+                .get_function("rsmk_signal_from_indicator_ema_f32")
+                .expect("rsmk_signal_from_indicator_ema_f32");
+            let mut k_copy = self
+                .cuda
+                .module
+                .get_function("rsmk_copy_group_indicator_tiled_f32")
+                .expect("rsmk_copy_group_indicator_tiled_f32");
 
             for (idx, &lb) in self.lookbacks.iter().enumerate() {
                 unsafe {
@@ -737,8 +1235,8 @@ pub mod benches {
                     let args: &mut [*mut c_void] = &mut [
                         &mut main_ptr as *mut _ as *mut c_void,
                         &mut comp_ptr as *mut _ as *mut c_void,
-                        &mut fv_i as *mut _ as *mut c_void,
                         &mut lb_i as *mut _ as *mut c_void,
+                        &mut fv_i as *mut _ as *mut c_void,
                         &mut len_i as *mut _ as *mut c_void,
                         &mut mom_ptr as *mut _ as *mut c_void,
                     ];
@@ -755,38 +1253,93 @@ pub mod benches {
                 }
             }
 
-            for row in 0..self.periods.len() {
-                let mom_idx = self.row_mom_idx[row];
+            for group in 0..self.group_periods.len() {
+                let mom_idx = self.group_mom_idx[group];
                 let d_m = &self.d_moms[mom_idx];
                 unsafe {
                     let mut mom_ptr = d_m.as_device_ptr().as_raw();
                     let mut len_i = self.len as i32;
-                    let mut fv_m_i = self.first_moms[row] as i32;
-                    let mut p_i = self.periods[row] as i32;
-                    let mut s_i = self.signals[row] as i32;
+                    let mut fv_m_i = self.group_first_moms[group] as i32;
+                    let mut p_i = self.group_periods[group] as i32;
                     let mut ind_ptr = self
-                        .d_indicator
+                        .d_group_indicator
                         .as_device_ptr()
-                        .offset((row * self.len) as isize)
-                        .as_raw();
-                    let mut sig_ptr = self
-                        .d_signal
-                        .as_device_ptr()
-                        .offset((row * self.len) as isize)
+                        .offset((group * self.len) as isize)
                         .as_raw();
                     let args: &mut [*mut c_void] = &mut [
                         &mut mom_ptr as *mut _ as *mut c_void,
                         &mut len_i as *mut _ as *mut c_void,
                         &mut fv_m_i as *mut _ as *mut c_void,
                         &mut p_i as *mut _ as *mut c_void,
-                        &mut s_i as *mut _ as *mut c_void,
                         &mut ind_ptr as *mut _ as *mut c_void,
-                        &mut sig_ptr as *mut _ as *mut c_void,
                     ];
                     self.cuda
                         .stream
                         .launch(
                             &mut k_apply,
+                            GridSize::xyz(1, 1, 1),
+                            BlockSize::xyz(1, 1, 1),
+                            0,
+                            args,
+                        )
+                        .expect("rsmk indicator launch");
+                }
+            }
+
+            unsafe {
+                let mut group_ptr = self.d_group_indicator.as_device_ptr().as_raw();
+                let mut row_group_ptr = self.d_row_group_idx.as_device_ptr().as_raw();
+                let mut len_i = self.len as i32;
+                let mut rows_i = self.row_group_idx.len() as i32;
+                let mut ind_ptr = self.d_indicator.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut group_ptr as *mut _ as *mut c_void,
+                    &mut row_group_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut ind_ptr as *mut _ as *mut c_void,
+                ];
+                let block_x = 256u32;
+                let grid_x = ((self.len as u32) + block_x - 1) / block_x;
+                self.cuda
+                    .stream
+                    .launch(
+                        &mut k_copy,
+                        GridSize::xyz(grid_x, self.row_group_idx.len() as u32, 1),
+                        BlockSize::xyz(block_x, 1, 1),
+                        0,
+                        args,
+                    )
+                    .expect("rsmk indicator copy launch");
+            }
+
+            for row in 0..self.row_group_idx.len() {
+                let group = self.row_group_idx[row];
+                unsafe {
+                    let mut ind_group_ptr = self
+                        .d_group_indicator
+                        .as_device_ptr()
+                        .offset((group * self.len) as isize)
+                        .as_raw();
+                    let mut len_i = self.len as i32;
+                    let mut fv_m_i = self.first_moms[row] as i32;
+                    let mut s_i = self.signals[row] as i32;
+                    let mut sig_ptr = self
+                        .d_signal
+                        .as_device_ptr()
+                        .offset((row * self.len) as isize)
+                        .as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut ind_group_ptr as *mut _ as *mut c_void,
+                        &mut len_i as *mut _ as *mut c_void,
+                        &mut fv_m_i as *mut _ as *mut c_void,
+                        &mut s_i as *mut _ as *mut c_void,
+                        &mut sig_ptr as *mut _ as *mut c_void,
+                    ];
+                    self.cuda
+                        .stream
+                        .launch(
+                            &mut k_signal,
                             GridSize::xyz(1, 1, 1),
                             BlockSize::xyz(1, 1, 1),
                             0,
@@ -870,11 +1423,33 @@ pub mod benches {
         for (i, &lb) in lookbacks.iter().enumerate() {
             map.insert(lb, i);
         }
-        let row_mom_idx: Vec<usize> = row_lookbacks
-            .iter()
-            .map(|lb| *map.get(lb).expect("lb idx"))
-            .collect();
         let first_moms: Vec<usize> = row_lookbacks.iter().map(|&lb| first_valid + lb).collect();
+        let group_keys: Vec<(usize, usize)> = row_lookbacks
+            .iter()
+            .copied()
+            .zip(row_periods.iter().copied())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let group_map: HashMap<(usize, usize), usize> = group_keys
+            .iter()
+            .enumerate()
+            .map(|(idx, &key)| (key, idx))
+            .collect();
+        let row_group_idx: Vec<usize> = row_lookbacks
+            .iter()
+            .copied()
+            .zip(row_periods.iter().copied())
+            .map(|key| *group_map.get(&key).expect("group idx"))
+            .collect();
+        let row_group_idx_i32: Vec<i32> = row_group_idx.iter().map(|&idx| idx as i32).collect();
+        let group_mom_idx: Vec<usize> = group_keys
+            .iter()
+            .map(|&(lb, _)| *map.get(&lb).expect("group mom idx"))
+            .collect();
+        let group_periods: Vec<usize> = group_keys.iter().map(|&(_, p)| p).collect();
+        let group_first_moms: Vec<usize> =
+            group_keys.iter().map(|&(lb, _)| first_valid + lb).collect();
 
         let d_main = DeviceBuffer::from_slice(&main).expect("d_main");
         let d_comp = DeviceBuffer::from_slice(&comp).expect("d_comp");
@@ -882,6 +1457,11 @@ pub mod benches {
         for _ in 0..lookbacks.len() {
             d_moms.push(unsafe { DeviceBuffer::uninitialized(len) }.expect("d_mom"));
         }
+        let d_row_group_idx =
+            DeviceBuffer::from_slice(&row_group_idx_i32).expect("d_row_group_idx");
+        let d_group_indicator: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(group_keys.len() * len) }
+                .expect("d_group_indicator");
         let n_rows = row_lookbacks.len();
         let rows_len = n_rows.checked_mul(len).expect("rows*len");
         let d_indicator: DeviceBuffer<f32> =
@@ -898,10 +1478,14 @@ pub mod benches {
             first_valid,
             lookbacks,
             d_moms,
-            row_mom_idx,
-            periods: row_periods,
+            group_mom_idx,
+            group_periods,
+            group_first_moms,
+            row_group_idx,
+            d_row_group_idx,
             signals: row_sigs,
             first_moms,
+            d_group_indicator,
             d_indicator,
             d_signal,
         })

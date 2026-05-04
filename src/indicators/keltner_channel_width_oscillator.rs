@@ -2030,7 +2030,7 @@ pub fn keltner_channel_width_oscillator_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn keltner_channel_width_oscillator_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len * 2, len * 2);
+        let _ = Vec::from_raw_parts(ptr, 0, len * 2);
     }
 }
 

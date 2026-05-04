@@ -119,7 +119,7 @@ class TestDmaCuda:
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.dma(
-                data_tm[:, j],
+                np.ascontiguousarray(data_tm[:, j]),
                 hull_length,
                 ema_length,
                 ema_gain_limit,

@@ -106,7 +106,7 @@ class TestMwdxCuda:
 
         cpu_tm = np.full_like(data_tm, np.nan)
         for j in range(N):
-            cpu_tm[:, j] = ti.mwdx(data_tm[:, j], factor)
+            cpu_tm[:, j] = ti.mwdx(np.ascontiguousarray(data_tm[:, j]), factor)
 
         handle = ti.mwdx_cuda_many_series_one_param_dev(
             data_tm.astype(np.float32),

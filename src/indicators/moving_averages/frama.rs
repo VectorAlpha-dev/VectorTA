@@ -2511,20 +2511,18 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::frama_wrapper::CudaFramaBatchPlan;
+#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use cust::memory::DeviceBuffer;
+use cust::memory::{CopyDestination, DeviceBuffer};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(
-    module = "ta_indicators.cuda",
-    name = "DeviceArrayF32Frama",
-    unsendable
-)]
+#[pyclass(module = "vector_ta", name = "DeviceArrayF32Frama", unsendable)]
 pub struct DeviceArrayF32FramaPy {
     pub(crate) inner: DeviceArrayF32,
     _ctx_guard: Arc<Context>,
@@ -2625,6 +2623,141 @@ impl DeviceArrayF32FramaPy {
             _device_id: device_id,
         }
     }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "vector_ta", name = "FramaCudaBatchPlan", unsendable)]
+pub struct FramaCudaBatchPlanPy {
+    cuda: CudaFrama,
+    plan: CudaFramaBatchPlan,
+    _ctx_guard: Arc<Context>,
+    device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl FramaCudaBatchPlanPy {
+    #[getter]
+    fn rows(&self) -> usize {
+        self.plan.rows()
+    }
+
+    #[getter]
+    fn cols(&self) -> usize {
+        self.plan.cols()
+    }
+
+    #[getter]
+    fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        let windows: Vec<u64> = self
+            .plan
+            .params()
+            .iter()
+            .map(|c| c.window.unwrap() as u64)
+            .collect();
+        let scs: Vec<u64> = self
+            .plan
+            .params()
+            .iter()
+            .map(|c| c.sc.unwrap() as u64)
+            .collect();
+        let fcs: Vec<u64> = self
+            .plan
+            .params()
+            .iter()
+            .map(|c| c.fc.unwrap() as u64)
+            .collect();
+        dict.set_item("windows", windows.into_pyarray(py))?;
+        dict.set_item("scs", scs.into_pyarray(py))?;
+        dict.set_item("fcs", fcs.into_pyarray(py))?;
+        dict.set_item("rows", self.plan.rows())?;
+        dict.set_item("cols", self.plan.cols())?;
+        Ok(dict)
+    }
+
+    fn execute<'py>(
+        &mut self,
+        py: Python<'py>,
+        high_f32: numpy::PyReadonlyArray1<'py, f32>,
+        low_f32: numpy::PyReadonlyArray1<'py, f32>,
+        close_f32: numpy::PyReadonlyArray1<'py, f32>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let high = high_f32.as_slice()?;
+        let low = low_f32.as_slice()?;
+        let close = close_f32.as_slice()?;
+        let rows = self.plan.rows();
+        let cols = self.plan.cols();
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| PyValueError::new_err("frama CUDA plan rows*cols overflow"))?;
+        let values = py.allow_threads(|| -> PyResult<Vec<f32>> {
+            let d_high =
+                DeviceBuffer::from_slice(high).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let d_low =
+                DeviceBuffer::from_slice(low).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let d_close = DeviceBuffer::from_slice(close)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            self.cuda
+                .launch_frama_batch_plan(&d_high, &d_low, &d_close, &mut self.plan)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            self.cuda
+                .synchronize()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let mut values = vec![0f32; total];
+            self.plan
+                .output()
+                .copy_to(&mut values)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok(values)
+        })?;
+        let dict = self.metadata(py)?;
+        let arr = values.into_pyarray(py);
+        dict.set_item("values", arr.reshape((rows, cols))?)?;
+        Ok(dict)
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "frama_cuda_batch_plan_create")]
+#[pyo3(signature = (series_len, first_valid, window_range, sc_range, fc_range, device_id=0))]
+pub fn frama_cuda_batch_plan_create_py(
+    py: Python<'_>,
+    series_len: usize,
+    first_valid: usize,
+    window_range: (usize, usize, usize),
+    sc_range: (usize, usize, usize),
+    fc_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<FramaCudaBatchPlanPy> {
+    use crate::cuda::cuda_available;
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let sweep = FramaBatchRange {
+        window: window_range,
+        sc: sc_range,
+        fc: fc_range,
+    };
+    let (cuda, plan, ctx, dev_id) = py.allow_threads(|| {
+        let cuda = CudaFrama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.ctx();
+        let dev_id = cuda.device_id();
+        let plan = cuda
+            .prepare_frama_batch_plan(series_len, first_valid, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((cuda, plan, ctx, dev_id))
+    })?;
+    Ok(FramaCudaBatchPlanPy {
+        cuda,
+        plan,
+        _ctx_guard: ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(feature = "python")]
@@ -3118,7 +3251,7 @@ pub fn frama_alloc(len: usize) -> *mut f64 {
 pub fn frama_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

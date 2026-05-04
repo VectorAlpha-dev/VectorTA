@@ -49,12 +49,13 @@ class TestHighpass2Cuda:
 
     def test_highpass2_cuda_batch_matches_cpu(self, test_data):
         close = test_data["close"][:1024]
+        close_f32 = close.astype(np.float32)
         params = dict(period=48, k=0.707)
 
-        cpu = ti.highpass_2_pole(close, **params)
+        cpu = ti.highpass_2_pole(close_f32.astype(np.float64), **params)
 
         handle = ti.highpass_2_pole_cuda_batch_dev(
-            close.astype(np.float32),
+            close_f32,
             period_range=(params["period"], params["period"], 0),
             k_range=(params["k"], params["k"], 0.0),
         )
@@ -70,6 +71,7 @@ class TestHighpass2Cuda:
 
     def test_highpass2_cuda_batch_sweep_matches_cpu(self, test_data):
         close = test_data["close"][:1536]
+        close_f32 = close.astype(np.float32)
         sweep = dict(period_range=(6, 64, 7), k_range=(0.2, 0.9, 0.15))
 
         def _axis_usize(rng):
@@ -95,11 +97,11 @@ class TestHighpass2Cuda:
         cpu_rows = []
         for period in periods:
             for kval in ks:
-                cpu_rows.append(ti.highpass_2_pole(close, period=period, k=kval))
+                cpu_rows.append(ti.highpass_2_pole(close_f32.astype(np.float64), period=period, k=kval))
         cpu = np.vstack(cpu_rows)
 
         handle = ti.highpass_2_pole_cuda_batch_dev(
-            close.astype(np.float32),
+            close_f32,
             period_range=sweep["period_range"],
             k_range=sweep["k_range"],
         )
@@ -125,16 +127,17 @@ class TestHighpass2Cuda:
                 x = base_series[t] if np.isfinite(base_series[t]) else float(t)
                 data_tm[t, j] = np.cos(0.0023 * x + 0.01 * j) + 0.00041 * t
 
+        data_f32 = data_tm.astype(np.float32)
         cpu_tm = np.full_like(data_tm, np.nan)
         for j in range(N):
             cpu_tm[:, j] = ti.highpass_2_pole(
-                data_tm[:, j],
+                np.ascontiguousarray(data_f32[:, j]).astype(np.float64),
                 period=params["period"],
                 k=params["k"],
             )
 
         handle = ti.highpass_2_pole_cuda_many_series_one_param_dev(
-            data_tm.astype(np.float32),
+            data_f32,
             period=params["period"],
             k=params["k"],
         )

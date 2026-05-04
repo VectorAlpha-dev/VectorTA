@@ -13,6 +13,7 @@ use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use cust::sys as cu;
+use std::collections::HashMap;
 use std::env;
 use std::ffi::c_void;
 use thiserror::Error;
@@ -62,6 +63,87 @@ impl DeviceArrayF32Triplet {
     #[inline]
     pub fn cols(&self) -> usize {
         self.upper.cols
+    }
+}
+
+pub struct CudaMabBatchPlan {
+    combos: Vec<MabParams>,
+    d_fast_periods: DeviceBuffer<i32>,
+    d_slow_periods: DeviceBuffer<i32>,
+    d_devups: DeviceBuffer<f32>,
+    d_devdns: DeviceBuffer<f32>,
+    d_upper: DeviceBuffer<f32>,
+    d_middle: DeviceBuffer<f32>,
+    d_lower: DeviceBuffer<f32>,
+    rows: usize,
+    cols: usize,
+    first_valid: usize,
+    device_id: u32,
+    all_sma: bool,
+    all_same_ma: bool,
+}
+
+impl CudaMabBatchPlan {
+    #[inline]
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    #[inline]
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    #[inline]
+    pub fn first_valid(&self) -> usize {
+        self.first_valid
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    #[inline]
+    pub fn params(&self) -> &[MabParams] {
+        &self.combos
+    }
+
+    #[inline]
+    pub fn outputs(&self) -> (&DeviceBuffer<f32>, &DeviceBuffer<f32>, &DeviceBuffer<f32>) {
+        (&self.d_upper, &self.d_middle, &self.d_lower)
+    }
+
+    pub fn into_device_triplet_and_params(self) -> (DeviceArrayF32Triplet, Vec<MabParams>) {
+        let Self {
+            combos,
+            d_upper,
+            d_middle,
+            d_lower,
+            rows,
+            cols,
+            ..
+        } = self;
+        (
+            DeviceArrayF32Triplet {
+                upper: DeviceArrayF32 {
+                    buf: d_upper,
+                    rows,
+                    cols,
+                },
+                middle: DeviceArrayF32 {
+                    buf: d_middle,
+                    rows,
+                    cols,
+                },
+                lower: DeviceArrayF32 {
+                    buf: d_lower,
+                    rows,
+                    cols,
+                },
+            },
+            combos,
+        )
     }
 }
 
@@ -115,6 +197,21 @@ impl CudaMab {
             self.stream.clone(),
             self.device_id,
         ))
+    }
+
+    #[inline]
+    pub fn context_arc(&self) -> std::sync::Arc<Context> {
+        self.context.clone()
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaMabError> {
+        self.stream.synchronize().map_err(Into::into)
     }
 
     fn compute_ma_host(
@@ -366,6 +463,436 @@ impl CudaMab {
         Ok(())
     }
 
+    fn prepare_mab_batch_inputs_device(
+        len: usize,
+        first_valid: usize,
+        sweep: &MabBatchRange,
+    ) -> Result<Vec<MabParams>, CudaMabError> {
+        if len == 0 {
+            return Err(CudaMabError::InvalidInput("empty input".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaMabError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+        if len > i32::MAX as usize || first_valid > i32::MAX as usize {
+            return Err(CudaMabError::InvalidInput(
+                "arguments exceed kernel limits".into(),
+            ));
+        }
+
+        let combos = crate::indicators::mab::expand_grid(sweep)
+            .map_err(|e| CudaMabError::InvalidInput(e.to_string()))?;
+        if combos.is_empty() {
+            return Err(CudaMabError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        if combos.len() > i32::MAX as usize {
+            return Err(CudaMabError::InvalidInput(
+                "too many parameter combinations".into(),
+            ));
+        }
+
+        for p in &combos {
+            let fast = p.fast_period.unwrap_or(0);
+            let slow = p.slow_period.unwrap_or(0);
+            if fast == 0 || slow == 0 {
+                return Err(CudaMabError::InvalidInput("periods must be >=1".into()));
+            }
+            if fast > i32::MAX as usize || slow > i32::MAX as usize {
+                return Err(CudaMabError::InvalidInput(
+                    "periods exceed kernel limits".into(),
+                ));
+            }
+            if fast > len || slow > len {
+                return Err(CudaMabError::InvalidInput(format!(
+                    "period exceeds input length: fast={} slow={} len={}",
+                    fast, slow, len
+                )));
+            }
+            let need_total = fast
+                .max(slow)
+                .checked_add(fast)
+                .and_then(|v| v.checked_sub(1))
+                .ok_or_else(|| CudaMabError::InvalidInput("warmup length overflow".into()))?;
+            if len - first_valid < need_total {
+                return Err(CudaMabError::InvalidInput(format!(
+                    "insufficient valid tail for fast={} slow={}",
+                    fast, slow
+                )));
+            }
+            let devup = p.devup.unwrap_or(1.0);
+            let devdn = p.devdn.unwrap_or(1.0);
+            if !devup.is_finite() || !devdn.is_finite() {
+                return Err(CudaMabError::InvalidInput(
+                    "deviation multipliers must be finite".into(),
+                ));
+            }
+        }
+
+        Ok(combos)
+    }
+
+    fn build_mab_batch_plan(
+        &self,
+        len: usize,
+        first_valid: usize,
+        combos: &[MabParams],
+    ) -> Result<CudaMabBatchPlan, CudaMabError> {
+        let rows = combos.len();
+        let elem_count = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaMabError::InvalidInput("rows*cols overflow".into()))?;
+        let output_bytes = elem_count
+            .checked_mul(3)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaMabError::InvalidInput("output byte size overflow".into()))?;
+        let period_bytes = rows
+            .checked_mul(2)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<i32>()))
+            .ok_or_else(|| CudaMabError::InvalidInput("parameter byte size overflow".into()))?;
+        let dev_bytes = rows
+            .checked_mul(2)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaMabError::InvalidInput("parameter byte size overflow".into()))?;
+        let required = output_bytes
+            .checked_add(period_bytes)
+            .and_then(|v| v.checked_add(dev_bytes))
+            .ok_or_else(|| CudaMabError::InvalidInput("total byte size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            if let Ok((free, _total)) = mem_get_info() {
+                return Err(CudaMabError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
+            }
+            return Err(CudaMabError::InvalidInput(
+                "insufficient device memory".into(),
+            ));
+        }
+
+        let fast_periods: Vec<i32> = combos
+            .iter()
+            .map(|p| p.fast_period.unwrap_or(0) as i32)
+            .collect();
+        let slow_periods: Vec<i32> = combos
+            .iter()
+            .map(|p| p.slow_period.unwrap_or(0) as i32)
+            .collect();
+        let devups: Vec<f32> = combos
+            .iter()
+            .map(|p| p.devup.unwrap_or(1.0) as f32)
+            .collect();
+        let devdns: Vec<f32> = combos
+            .iter()
+            .map(|p| p.devdn.unwrap_or(1.0) as f32)
+            .collect();
+
+        let d_fast_periods = DeviceBuffer::from_slice(&fast_periods)?;
+        let d_slow_periods = DeviceBuffer::from_slice(&slow_periods)?;
+        let d_devups = DeviceBuffer::from_slice(&devups)?;
+        let d_devdns = DeviceBuffer::from_slice(&devdns)?;
+        let d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elem_count) }?;
+        let d_middle: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elem_count) }?;
+        let d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elem_count) }?;
+
+        let all_sma = combos.iter().all(|p| {
+            p.fast_ma_type
+                .as_deref()
+                .unwrap_or("sma")
+                .eq_ignore_ascii_case("sma")
+                && p.slow_ma_type
+                    .as_deref()
+                    .unwrap_or("sma")
+                    .eq_ignore_ascii_case("sma")
+        });
+        let p0 = &combos[0];
+        let all_same_ma = combos.iter().all(|p| {
+            p.fast_period == p0.fast_period
+                && p.slow_period == p0.slow_period
+                && p.fast_ma_type == p0.fast_ma_type
+                && p.slow_ma_type == p0.slow_ma_type
+        });
+
+        Ok(CudaMabBatchPlan {
+            combos: combos.to_vec(),
+            d_fast_periods,
+            d_slow_periods,
+            d_devups,
+            d_devdns,
+            d_upper,
+            d_middle,
+            d_lower,
+            rows,
+            cols: len,
+            first_valid,
+            device_id: self.device_id,
+            all_sma,
+            all_same_ma,
+        })
+    }
+
+    pub fn prepare_mab_batch_plan(
+        &self,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &MabBatchRange,
+    ) -> Result<CudaMabBatchPlan, CudaMabError> {
+        let combos = Self::prepare_mab_batch_inputs_device(series_len, first_valid, sweep)?;
+        self.build_mab_batch_plan(series_len, first_valid, &combos)
+    }
+
+    pub fn launch_mab_batch_plan(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        plan: &mut CudaMabBatchPlan,
+    ) -> Result<(), CudaMabError> {
+        if d_prices.len() != plan.cols {
+            return Err(CudaMabError::InvalidInput(
+                "device price length mismatch".into(),
+            ));
+        }
+        if plan.device_id != self.device_id {
+            return Err(CudaMabError::InvalidInput("plan device mismatch".into()));
+        }
+        let len = plan.cols;
+        let rows = plan.rows;
+        let elem_count = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaMabError::InvalidInput("rows*cols overflow".into()))?;
+        if plan.d_upper.len() < elem_count
+            || plan.d_middle.len() < elem_count
+            || plan.d_lower.len() < elem_count
+        {
+            return Err(CudaMabError::InvalidInput(
+                "device output buffer too small".into(),
+            ));
+        }
+
+        let prices_view = unsafe {
+            CudaDeviceSliceF32Ref::from_raw_parts(
+                d_prices.as_device_ptr().as_raw(),
+                len,
+                self.device_id,
+            )
+        }
+        .map_err(|e| CudaMabError::InvalidInput(e.to_string()))?;
+        let price_data = CudaMaDeviceDataRef::Slice(prices_view);
+        let selector = CudaMaSelector::from_session(self.shared_session());
+        let device_selector = selector.device_native();
+
+        if plan.all_sma && !plan.all_same_ma {
+            let (d_pcs, d_pcn) = self.build_prefixes_device(d_prices, len)?;
+            self.mab_batch_device_sma(
+                &d_pcs,
+                &d_pcn,
+                &plan.d_fast_periods,
+                &plan.d_slow_periods,
+                &plan.d_devups,
+                &plan.d_devdns,
+                len,
+                plan.first_valid,
+                rows,
+                &mut plan.d_upper,
+                &mut plan.d_middle,
+                &mut plan.d_lower,
+            )?;
+            return Ok(());
+        }
+
+        if plan.all_same_ma && rows > 1 {
+            let p0 = &plan.combos[0];
+            let fast_period = p0.fast_period.unwrap();
+            let slow_period = p0.slow_period.unwrap();
+            let fast_type = p0.fast_ma_type.as_deref().unwrap_or("sma");
+            let slow_type = p0.slow_ma_type.as_deref().unwrap_or("sma");
+            let d_fast = device_selector
+                .ma_to_device_ref(fast_type, price_data, plan.first_valid, fast_period)
+                .map_err(|e| CudaMabError::InvalidInput(format!("fast ma_to_device_ref: {}", e)))?;
+            let d_slow = device_selector
+                .ma_to_device_ref(slow_type, price_data, plan.first_valid, slow_period)
+                .map_err(|e| CudaMabError::InvalidInput(format!("slow ma_to_device_ref: {}", e)))?;
+
+            let mut d_dev: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
+            let mut f_dev: Function =
+                self.module
+                    .get_function("mab_dev_from_ma_f32")
+                    .map_err(|_e| CudaMabError::MissingKernelSymbol {
+                        name: "mab_dev_from_ma_f32",
+                    })?;
+            unsafe {
+                let mut fast_ptr = d_fast.buf.as_device_ptr().as_raw();
+                let mut slow_ptr = d_slow.buf.as_device_ptr().as_raw();
+                let mut fp_i = fast_period as i32;
+                let mut fv_i = plan.first_valid as i32;
+                let mut len_i = len as i32;
+                let mut dev_ptr = d_dev.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut fast_ptr as *mut _ as *mut c_void,
+                    &mut slow_ptr as *mut _ as *mut c_void,
+                    &mut fp_i as *mut _ as *mut c_void,
+                    &mut fv_i as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut dev_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(
+                    &mut f_dev,
+                    GridSize::xyz(1, 1, 1),
+                    BlockSize::xyz(1, 1, 1),
+                    0,
+                    args,
+                )?;
+            }
+
+            let mut f_apply: Function = self
+                .module
+                .get_function("mab_apply_dev_shared_ma_batch_f32")
+                .map_err(|_e| CudaMabError::MissingKernelSymbol {
+                    name: "mab_apply_dev_shared_ma_batch_f32",
+                })?;
+            let block_x: u32 = 256;
+            let grid_x = ((len as u32) + block_x - 1) / block_x;
+            let grid = GridSize::xyz(grid_x.max(1), rows as u32, 1);
+            let block = BlockSize::xyz(block_x, 1, 1);
+            unsafe {
+                let mut fast_ptr = d_fast.buf.as_device_ptr().as_raw();
+                let mut slow_ptr = d_slow.buf.as_device_ptr().as_raw();
+                let mut dev_ptr = d_dev.as_device_ptr().as_raw();
+                let mut fp_i = fast_period as i32;
+                let mut sp_i = slow_period as i32;
+                let mut fv_i = plan.first_valid as i32;
+                let mut len_i = len as i32;
+                let mut ups_ptr = plan.d_devups.as_device_ptr().as_raw();
+                let mut dns_ptr = plan.d_devdns.as_device_ptr().as_raw();
+                let mut rows_i = rows as i32;
+                let mut up_ptr = plan.d_upper.as_device_ptr().as_raw();
+                let mut mid_ptr = plan.d_middle.as_device_ptr().as_raw();
+                let mut lo_ptr = plan.d_lower.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut fast_ptr as *mut _ as *mut c_void,
+                    &mut slow_ptr as *mut _ as *mut c_void,
+                    &mut dev_ptr as *mut _ as *mut c_void,
+                    &mut fp_i as *mut _ as *mut c_void,
+                    &mut sp_i as *mut _ as *mut c_void,
+                    &mut fv_i as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut ups_ptr as *mut _ as *mut c_void,
+                    &mut dns_ptr as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut up_ptr as *mut _ as *mut c_void,
+                    &mut mid_ptr as *mut _ as *mut c_void,
+                    &mut lo_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(&mut f_apply, grid, block, 0, args)?;
+            }
+            return Ok(());
+        }
+
+        let mut f_row: Function = self
+            .module
+            .get_function("mab_single_row_from_ma_f32")
+            .map_err(|_e| CudaMabError::MissingKernelSymbol {
+                name: "mab_single_row_from_ma_f32",
+            })?;
+        let mut ma_cache: HashMap<(String, usize), usize> = HashMap::new();
+        let mut ma_buffers: Vec<DeviceArrayF32> = Vec::new();
+        for (row, p) in plan.combos.iter().enumerate() {
+            let fast_type = p.fast_ma_type.as_deref().unwrap_or("sma");
+            let slow_type = p.slow_ma_type.as_deref().unwrap_or("sma");
+            let fast_period = p.fast_period.unwrap();
+            let slow_period = p.slow_period.unwrap();
+
+            let fast_key = (fast_type.to_ascii_lowercase(), fast_period);
+            let fast_idx = if let Some(&idx) = ma_cache.get(&fast_key) {
+                idx
+            } else {
+                let d_ma = device_selector
+                    .ma_to_device_ref(fast_type, price_data, plan.first_valid, fast_period)
+                    .map_err(|e| {
+                        CudaMabError::InvalidInput(format!("fast ma_to_device_ref: {}", e))
+                    })?;
+                let idx = ma_buffers.len();
+                ma_buffers.push(d_ma);
+                ma_cache.insert(fast_key, idx);
+                idx
+            };
+
+            let slow_key = (slow_type.to_ascii_lowercase(), slow_period);
+            let slow_idx = if let Some(&idx) = ma_cache.get(&slow_key) {
+                idx
+            } else {
+                let d_ma = device_selector
+                    .ma_to_device_ref(slow_type, price_data, plan.first_valid, slow_period)
+                    .map_err(|e| {
+                        CudaMabError::InvalidInput(format!("slow ma_to_device_ref: {}", e))
+                    })?;
+                let idx = ma_buffers.len();
+                ma_buffers.push(d_ma);
+                ma_cache.insert(slow_key, idx);
+                idx
+            };
+
+            let row_off = row
+                .checked_mul(len)
+                .ok_or_else(|| CudaMabError::InvalidInput("row offset overflow".into()))?;
+            let mut up_row = unsafe {
+                plan.d_upper
+                    .as_device_ptr()
+                    .offset(row_off as isize)
+                    .as_raw()
+            };
+            let mut mid_row = unsafe {
+                plan.d_middle
+                    .as_device_ptr()
+                    .offset(row_off as isize)
+                    .as_raw()
+            };
+            let mut lo_row = unsafe {
+                plan.d_lower
+                    .as_device_ptr()
+                    .offset(row_off as isize)
+                    .as_raw()
+            };
+
+            unsafe {
+                let mut fast_ptr = ma_buffers[fast_idx].buf.as_device_ptr().as_raw();
+                let mut slow_ptr = ma_buffers[slow_idx].buf.as_device_ptr().as_raw();
+                let mut fp_i = fast_period as i32;
+                let mut sp_i = slow_period as i32;
+                let mut fv_i = plan.first_valid as i32;
+                let mut len_i = len as i32;
+                let mut upf = p.devup.unwrap() as f32;
+                let mut dnf = p.devdn.unwrap() as f32;
+                let args: &mut [*mut c_void] = &mut [
+                    &mut fast_ptr as *mut _ as *mut c_void,
+                    &mut slow_ptr as *mut _ as *mut c_void,
+                    &mut fp_i as *mut _ as *mut c_void,
+                    &mut sp_i as *mut _ as *mut c_void,
+                    &mut fv_i as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut upf as *mut _ as *mut c_void,
+                    &mut dnf as *mut _ as *mut c_void,
+                    &mut up_row as *mut _ as *mut c_void,
+                    &mut mid_row as *mut _ as *mut c_void,
+                    &mut lo_row as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(
+                    &mut f_row,
+                    GridSize::xyz(1, 1, 1),
+                    BlockSize::xyz(1, 1, 1),
+                    0,
+                    args,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn mab_batch_dev(
         &self,
         prices_f32: &[f32],
@@ -606,19 +1133,35 @@ impl CudaMab {
                 .map_err(|_e| CudaMabError::MissingKernelSymbol {
                     name: "mab_single_row_from_ma_f32",
                 })?;
+            let mut ma_cache: HashMap<(String, usize), usize> = HashMap::new();
+            let mut ma_buffers: Vec<DeviceBuffer<f32>> = Vec::new();
             for (row, p) in combos.iter().enumerate() {
-                let fast_ma_host = Self::compute_ma_host(
-                    p.fast_ma_type.as_deref().unwrap_or("sma"),
-                    prices_f32,
-                    p.fast_period.unwrap(),
-                )?;
-                let slow_ma_host = Self::compute_ma_host(
-                    p.slow_ma_type.as_deref().unwrap_or("sma"),
-                    prices_f32,
-                    p.slow_period.unwrap(),
-                )?;
-                let d_fast = DeviceBuffer::from_slice(&fast_ma_host)?;
-                let d_slow = DeviceBuffer::from_slice(&slow_ma_host)?;
+                let fast_type = p.fast_ma_type.as_deref().unwrap_or("sma");
+                let slow_type = p.slow_ma_type.as_deref().unwrap_or("sma");
+                let fast_period = p.fast_period.unwrap();
+                let slow_period = p.slow_period.unwrap();
+
+                let fast_key = (fast_type.to_ascii_lowercase(), fast_period);
+                let fast_idx = if let Some(&idx) = ma_cache.get(&fast_key) {
+                    idx
+                } else {
+                    let ma_host = Self::compute_ma_host(fast_type, prices_f32, fast_period)?;
+                    let idx = ma_buffers.len();
+                    ma_buffers.push(DeviceBuffer::from_slice(&ma_host)?);
+                    ma_cache.insert(fast_key, idx);
+                    idx
+                };
+
+                let slow_key = (slow_type.to_ascii_lowercase(), slow_period);
+                let slow_idx = if let Some(&idx) = ma_cache.get(&slow_key) {
+                    idx
+                } else {
+                    let ma_host = Self::compute_ma_host(slow_type, prices_f32, slow_period)?;
+                    let idx = ma_buffers.len();
+                    ma_buffers.push(DeviceBuffer::from_slice(&ma_host)?);
+                    ma_cache.insert(slow_key, idx);
+                    idx
+                };
 
                 let row_off = row * len;
                 let mut up_row =
@@ -629,10 +1172,10 @@ impl CudaMab {
                     unsafe { d_lower.as_device_ptr().offset(row_off as isize).as_raw() };
 
                 unsafe {
-                    let mut fast_ptr = d_fast.as_device_ptr().as_raw();
-                    let mut slow_ptr = d_slow.as_device_ptr().as_raw();
-                    let mut fp_i = p.fast_period.unwrap() as i32;
-                    let mut sp_i = p.slow_period.unwrap() as i32;
+                    let mut fast_ptr = ma_buffers[fast_idx].as_device_ptr().as_raw();
+                    let mut slow_ptr = ma_buffers[slow_idx].as_device_ptr().as_raw();
+                    let mut fp_i = fast_period as i32;
+                    let mut sp_i = slow_period as i32;
                     let mut fv_i = first_valid as i32;
                     let mut len_i = len as i32;
                     let mut upf = p.devup.unwrap() as f32;
@@ -934,33 +1477,54 @@ impl CudaMab {
             .map_err(|_e| CudaMabError::MissingKernelSymbol {
                 name: "mab_single_row_from_ma_f32",
             })?;
+        let mut ma_cache: HashMap<(String, usize), usize> = HashMap::new();
+        let mut ma_buffers: Vec<DeviceArrayF32> = Vec::new();
         for (row, p) in combos.iter().enumerate() {
-            let d_fast = device_selector
-                .ma_to_device_ref(
-                    p.fast_ma_type.as_deref().unwrap_or("sma"),
-                    price_data,
-                    first_valid,
-                    p.fast_period.unwrap(),
-                )
-                .map_err(|e| CudaMabError::InvalidInput(format!("fast ma_to_device_ref: {}", e)))?;
-            let d_slow = device_selector
-                .ma_to_device_ref(
-                    p.slow_ma_type.as_deref().unwrap_or("sma"),
-                    price_data,
-                    first_valid,
-                    p.slow_period.unwrap(),
-                )
-                .map_err(|e| CudaMabError::InvalidInput(format!("slow ma_to_device_ref: {}", e)))?;
+            let fast_type = p.fast_ma_type.as_deref().unwrap_or("sma");
+            let slow_type = p.slow_ma_type.as_deref().unwrap_or("sma");
+            let fast_period = p.fast_period.unwrap();
+            let slow_period = p.slow_period.unwrap();
+
+            let fast_key = (fast_type.to_ascii_lowercase(), fast_period);
+            let fast_idx = if let Some(&idx) = ma_cache.get(&fast_key) {
+                idx
+            } else {
+                let d_ma = device_selector
+                    .ma_to_device_ref(fast_type, price_data, first_valid, fast_period)
+                    .map_err(|e| {
+                        CudaMabError::InvalidInput(format!("fast ma_to_device_ref: {}", e))
+                    })?;
+                let idx = ma_buffers.len();
+                ma_buffers.push(d_ma);
+                ma_cache.insert(fast_key, idx);
+                idx
+            };
+
+            let slow_key = (slow_type.to_ascii_lowercase(), slow_period);
+            let slow_idx = if let Some(&idx) = ma_cache.get(&slow_key) {
+                idx
+            } else {
+                let d_ma = device_selector
+                    .ma_to_device_ref(slow_type, price_data, first_valid, slow_period)
+                    .map_err(|e| {
+                        CudaMabError::InvalidInput(format!("slow ma_to_device_ref: {}", e))
+                    })?;
+                let idx = ma_buffers.len();
+                ma_buffers.push(d_ma);
+                ma_cache.insert(slow_key, idx);
+                idx
+            };
+
             let row_off = row * len;
             let mut up_row = unsafe { d_upper.as_device_ptr().offset(row_off as isize).as_raw() };
             let mut mid_row = unsafe { d_middle.as_device_ptr().offset(row_off as isize).as_raw() };
             let mut lo_row = unsafe { d_lower.as_device_ptr().offset(row_off as isize).as_raw() };
 
             unsafe {
-                let mut fast_ptr = d_fast.buf.as_device_ptr().as_raw();
-                let mut slow_ptr = d_slow.buf.as_device_ptr().as_raw();
-                let mut fp_i = p.fast_period.unwrap() as i32;
-                let mut sp_i = p.slow_period.unwrap() as i32;
+                let mut fast_ptr = ma_buffers[fast_idx].buf.as_device_ptr().as_raw();
+                let mut slow_ptr = ma_buffers[slow_idx].buf.as_device_ptr().as_raw();
+                let mut fp_i = fast_period as i32;
+                let mut sp_i = slow_period as i32;
                 let mut fv_i = first_valid as i32;
                 let mut len_i = len as i32;
                 let mut upf = p.devup.unwrap() as f32;

@@ -20,7 +20,7 @@ use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 use cust::context::Context as CudaContext;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct DeviceDvdiqqePlanePy {
     pub(crate) inner: crate::cuda::moving_averages::DeviceArrayF32,
     pub(crate) _ctx: std::sync::Arc<CudaContext>,
@@ -3040,7 +3040,7 @@ pub fn dvdiqqe_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn dvdiqqe_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 

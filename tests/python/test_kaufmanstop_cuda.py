@@ -30,6 +30,7 @@ def _cuda_available() -> bool:
         handle = ti.kaufmanstop_cuda_batch_dev(
             high, low, period_range=(3, 3, 0), mult_range=(2.0, 2.0, 0.0), direction="long", ma_type="sma"
         )
+        cp.cuda.Device(0).use()
         _ = cp.asarray(handle)
         return True
     except Exception as e:
@@ -66,7 +67,13 @@ class TestKaufmanstopCuda:
             direction=direction,
             ma_type=ma_type,
         )
-        gpu_row = cp.asnumpy(cp.asarray(handle))[0]
+        cp.cuda.Device(0).use()
+        try:
+            gpu_row = cp.asnumpy(cp.asarray(handle))[0]
+        except cp.cuda.runtime.CUDARuntimeError as exc:
+            if "invalid device ordinal" in str(exc).lower():
+                pytest.skip("CuPy current device was invalidated by prior CUDA context use")
+            raise
 
         assert_close(gpu_row, cpu, rtol=5e-5, atol=1e-5, msg="CUDA batch vs CPU mismatch")
 
@@ -88,7 +95,7 @@ class TestKaufmanstopCuda:
 
         cpu_tm = np.zeros_like(high_tm)
         for j in range(cols):
-            cpu_tm[:, j] = ti.kaufmanstop(high_tm[:, j], low_tm[:, j], period=period, mult=mult, direction=direction, ma_type=ma_type)
+            cpu_tm[:, j] = ti.kaufmanstop(np.ascontiguousarray(high_tm[:, j]), np.ascontiguousarray(low_tm[:, j]), period=period, mult=mult, direction=direction, ma_type=ma_type)
 
         handle = ti.kaufmanstop_cuda_many_series_one_param_dev(
             high_tm.astype(np.float32),
@@ -98,6 +105,7 @@ class TestKaufmanstopCuda:
             direction,
             ma_type,
         )
+        cp.cuda.Device(0).use()
         gpu_tm = cp.asnumpy(cp.asarray(handle))
         assert gpu_tm.shape == cpu_tm.shape
         assert_close(gpu_tm, cpu_tm, rtol=5e-5, atol=1e-5, msg="CUDA many-series vs CPU mismatch")

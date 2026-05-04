@@ -2115,7 +2115,7 @@ pub fn linearreg_angle_batch_py<'py>(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct LinearregAngleDeviceArrayF32Py {
     pub(crate) buf: Option<DeviceBuffer<f32>>,
     pub(crate) rows: usize,
@@ -2431,7 +2431,7 @@ pub fn linearreg_angle_alloc(len: usize) -> *mut f64 {
 pub fn linearreg_angle_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

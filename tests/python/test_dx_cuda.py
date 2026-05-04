@@ -99,10 +99,10 @@ class TestDxCuda:
 
         cpu_tm = np.zeros_like(C)
         for j in range(N):
-            cpu_tm[:, j] = ti.dx(H[:, j], L[:, j], C[:, j], period)
+            cpu_tm[:, j] = ti.dx(np.ascontiguousarray(H[:, j]), np.ascontiguousarray(L[:, j]), np.ascontiguousarray(C[:, j]), period)
 
         handle = ti.dx_cuda_many_series_one_param_dev(
-            H.astype(np.float32), L.astype(np.float32), C.astype(np.float32),
+            H.astype(np.float32).ravel(), L.astype(np.float32).ravel(), C.astype(np.float32).ravel(),
             cols=N, rows=T, period=period
         )
         gpu_tm = cp.asnumpy(cp.asarray(handle))

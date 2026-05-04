@@ -1727,7 +1727,7 @@ pub fn cwma_batch_py<'py>(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct DeviceArrayF32CwmaPy {
     pub(crate) inner: DeviceArrayF32,
     pub(crate) guard: Arc<CudaCwma>,
@@ -1901,7 +1901,7 @@ pub fn cwma_alloc(len: usize) -> *mut f64 {
 pub fn cwma_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() && len > 0 {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

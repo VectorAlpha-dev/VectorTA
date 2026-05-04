@@ -61,8 +61,8 @@ class TestLinearregAngleCuda:
         tm = np.stack([np.sin(0.003 * x) + 0.0004 * x * (1.0 + 0.05 * j) for j in range(cols)], axis=1)
         period = 21
 
-        cpu_tm = np.stack([ti.linearreg_angle(tm[:, j], period) for j in range(cols)], axis=1)
-        handle = ti.linearreg_angle_cuda_many_series_one_param_dev(tm.astype(np.float32), cols, rows, period)
+        cpu_tm = np.stack([ti.linearreg_angle(np.ascontiguousarray(tm[:, j]), period) for j in range(cols)], axis=1)
+        handle = ti.linearreg_angle_cuda_many_series_one_param_dev(tm.astype(np.float32).ravel(), cols, rows, period)
         gpu_tm = cp.asnumpy(cp.asarray(handle)).astype(np.float64)
 
 

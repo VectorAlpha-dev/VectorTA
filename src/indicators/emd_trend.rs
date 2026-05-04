@@ -1685,7 +1685,7 @@ pub fn emd_trend_alloc(len: usize) -> *mut f64 {
 pub fn emd_trend_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, 4 * len, 4 * len);
+            let _ = Vec::from_raw_parts(ptr, 0, 4 * len);
         }
     }
 }

@@ -60,7 +60,7 @@ class TestAlphaTrendCuda:
         no_volume = True
 
 
-        k1_cpu, k2_cpu = ti.alphatrend(h, l, l, c, v, coeff, period, no_volume)
+        k1_cpu, k2_cpu = ti.alphatrend(h, h, l, c, v, coeff, period, no_volume)
 
 
         out = ti.alphatrend_cuda_batch_dev(
@@ -104,7 +104,7 @@ class TestAlphaTrendCuda:
         k1_cpu = np.zeros_like(c)
         k2_cpu = np.zeros_like(c)
         for j in range(N):
-            k1_j, k2_j = ti.alphatrend(h[:, j], h[:, j], l[:, j], c[:, j], v[:, j], coeff, period, no_volume)
+            k1_j, k2_j = ti.alphatrend(np.ascontiguousarray(h[:, j]), np.ascontiguousarray(h[:, j]), np.ascontiguousarray(l[:, j]), np.ascontiguousarray(c[:, j]), np.ascontiguousarray(v[:, j]), coeff, period, no_volume)
             k1_cpu[:, j] = k1_j
             k2_cpu[:, j] = k2_j
 

@@ -1614,7 +1614,7 @@ pub fn mwdx_batch_py<'py>(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct DeviceArrayF32MwdxPy {
     pub(crate) inner: DeviceArrayF32Mwdx,
 }
@@ -1880,7 +1880,7 @@ pub fn mwdx_alloc(len: usize) -> *mut f64 {
 pub fn mwdx_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

@@ -123,7 +123,7 @@ class TestVamaCuda:
         cpu_tm = np.full_like(data_tm, np.nan)
         for j in range(N):
             cpu_tm[:, j] = ti.vama(
-                data_tm[:, j],
+                np.ascontiguousarray(data_tm[:, j]),
                 base_period=base_period,
                 vol_period=vol_period,
                 smoothing=False,

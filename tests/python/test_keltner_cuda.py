@@ -90,16 +90,16 @@ class TestKeltnerCuda:
         mid_cpu = np.zeros_like(series)
         low_cpu = np.zeros_like(series)
         for j in range(cols):
-            u, m, l = ti.keltner(high[:, j], low[:, j], series[:, j], series[:, j], period, mult, "ema")
+            u, m, l = ti.keltner(np.ascontiguousarray(high[:, j]), np.ascontiguousarray(low[:, j]), np.ascontiguousarray(series[:, j]), np.ascontiguousarray(series[:, j]), period, mult, "ema")
             up_cpu[:, j] = u
             mid_cpu[:, j] = m
             low_cpu[:, j] = l
 
         up_dev, mid_dev, low_dev = ti.keltner_cuda_many_series_one_param_dev(
-            high.astype(np.float32),
-            low.astype(np.float32),
-            series.astype(np.float32),
-            series.astype(np.float32),
+            high.astype(np.float32).ravel(),
+            low.astype(np.float32).ravel(),
+            series.astype(np.float32).ravel(),
+            series.astype(np.float32).ravel(),
             cols,
             rows,
             period,

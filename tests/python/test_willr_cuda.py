@@ -91,7 +91,7 @@ class TestWillrCuda:
 
         cpu_tm = np.full_like(close_tm, np.nan)
         for j in range(N):
-            cpu_tm[:, j] = ti.willr(high_tm[:, j], low_tm[:, j], close_tm[:, j], period)
+            cpu_tm[:, j] = ti.willr(np.ascontiguousarray(high_tm[:, j]), np.ascontiguousarray(low_tm[:, j]), np.ascontiguousarray(close_tm[:, j]), period)
 
         handle = ti.willr_cuda_many_series_one_param_dev(
             high_tm.astype(np.float32).ravel(),

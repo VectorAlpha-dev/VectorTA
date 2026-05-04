@@ -1274,7 +1274,7 @@ pub fn adaptive_momentum_oscillator_free(ptr: *mut f64, len: usize) {
         return;
     }
     unsafe {
-        drop(Vec::from_raw_parts(ptr, len, len));
+        drop(Vec::from_raw_parts(ptr, 0, len));
     }
 }
 

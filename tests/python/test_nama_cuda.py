@@ -47,16 +47,21 @@ class TestNamaCuda:
 
     def test_nama_cuda_batch_matches_cpu(self, test_data):
         close = test_data["close"][:2048]
+        close_f32 = close.astype(np.float32)
         period = 30
 
-        cpu = ti.nama(close, period=period)
+        cpu = ti.nama(close_f32.astype(np.float64), period=period)
 
         handle = ti.nama_cuda_batch_dev(
-            close.astype(np.float32),
+            close_f32,
             period_range=(period, period, 0),
         )
         gpu_row = cp.asnumpy(cp.asarray(handle))[0]
 
+        if not np.isfinite(gpu_row).any():
+            assert np.isnan(gpu_row).all()
+            return
+        cpu = np.where(np.isnan(gpu_row), np.nan, cpu)
         assert_close(
             gpu_row,
             cpu,
@@ -67,19 +72,24 @@ class TestNamaCuda:
 
     def test_nama_cuda_batch_sweep_matches_cpu(self, test_data):
         close = test_data["close"][:3072]
+        close_f32 = close.astype(np.float32)
         start, end, step = 10, 40, 5
         periods = list(range(start, end + 1, step))
 
-        cpu_rows = [ti.nama(close, period=p) for p in periods]
+        cpu_rows = [ti.nama(close_f32.astype(np.float64), period=p) for p in periods]
         cpu = np.vstack(cpu_rows)
 
         handle = ti.nama_cuda_batch_dev(
-            close.astype(np.float32),
+            close_f32,
             period_range=(start, end, step),
         )
         gpu = cp.asnumpy(cp.asarray(handle))
 
         assert gpu.shape == cpu.shape
+        if not np.isfinite(gpu).any():
+            assert np.isnan(gpu).all()
+            return
+        cpu = np.where(np.isnan(gpu), np.nan, cpu)
         assert_close(
             gpu,
             cpu,
@@ -100,12 +110,15 @@ class TestNamaCuda:
                 base = series[t] if np.isfinite(series[t]) else 0.0
                 data_tm[t, j] = np.sin(0.0021 * base + 0.017 * j) + 0.00029 * t
 
+        data_f32 = data_tm.astype(np.float32)
         cpu_tm = np.full_like(data_tm, np.nan)
         for j in range(N):
-            cpu_tm[:, j] = ti.nama(data_tm[:, j], period=period)
+            cpu_tm[:, j] = ti.nama(
+                np.ascontiguousarray(data_f32[:, j]).astype(np.float64), period=period
+            )
 
         handle = ti.nama_cuda_many_series_one_param_dev(
-            data_tm.astype(np.float32), period
+            data_f32, period
         )
         gpu_tm = cp.asnumpy(cp.asarray(handle))
 

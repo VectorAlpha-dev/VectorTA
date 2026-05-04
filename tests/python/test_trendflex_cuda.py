@@ -71,14 +71,14 @@ class TestTrendFlexCuda:
         period = 18
         cols = 4
         rows = close.shape[0]
-        matrix = np.tile(close[:, None], (1, cols))
+        matrix = np.tile(np.ascontiguousarray(close[:, None]), (1, cols))
         for idx in range(cols):
             matrix[: idx + 5, idx] = np.nan
             matrix[:, idx] += idx * 0.12
 
         cpu_cols = []
         for idx in range(cols):
-            cpu_cols.append(ti.trendflex(matrix[:, idx], period=period))
+            cpu_cols.append(ti.trendflex(np.ascontiguousarray(matrix[:, idx]), period=period))
         cpu_values = np.column_stack(cpu_cols)
 
         handle = ti.trendflex_cuda_many_series_one_param_dev(

@@ -82,7 +82,7 @@ class TestQqeCuda:
         cpu_fast = np.full_like(tm, np.nan)
         cpu_slow = np.full_like(tm, np.nan)
         for j in range(N):
-            f, s = ti.qqe(tm[:, j], rsi_p, ema_p, fast_k)
+            f, s = ti.qqe(np.ascontiguousarray(tm[:, j]), rsi_p, ema_p, fast_k)
             cpu_fast[:, j] = f
             cpu_slow[:, j] = s
 

@@ -63,7 +63,7 @@ class TestPmaCuda:
         cpu_pred_tm = np.zeros_like(data_tm)
         cpu_trig_tm = np.zeros_like(data_tm)
         for j in range(N):
-            cpu_pred_tm[:, j], cpu_trig_tm[:, j] = ti.pma(data_tm[:, j])
+            cpu_pred_tm[:, j], cpu_trig_tm[:, j] = ti.pma(np.ascontiguousarray(data_tm[:, j]))
 
         pred_h, trig_h = ti.pma_cuda_many_series_one_param_dev(data_tm.astype(np.float32))
         gpu_pred_tm = cp.asnumpy(cp.asarray(pred_h))

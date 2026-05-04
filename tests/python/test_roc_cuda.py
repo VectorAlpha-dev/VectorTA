@@ -61,7 +61,7 @@ class TestRocCuda:
         period = 10
         cpu_tm = np.zeros_like(tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.roc(tm[:, j], period=period)
+            cpu_tm[:, j] = ti.roc(np.ascontiguousarray(tm[:, j]), period=period)
 
         handle = ti.roc_cuda_many_series_one_param_dev(tm.astype(np.float32).ravel(), N, T, period)
         gpu_tm = cp.asnumpy(cp.asarray(handle)).reshape(T, N)

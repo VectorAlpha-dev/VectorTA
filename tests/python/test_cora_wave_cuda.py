@@ -84,10 +84,10 @@ class TestCoraWaveCuda:
 
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.cora_wave(data_tm[:, j], period=period, r_multi=r_multi, smooth=smooth)
+            cpu_tm[:, j] = ti.cora_wave(np.ascontiguousarray(data_tm[:, j]), period=period, r_multi=r_multi, smooth=smooth)
 
         handle = ti.cora_wave_cuda_many_series_one_param_dev(
-            data_tm.astype(np.float32), cols=N, rows=T, period=period, r_multi=r_multi, smooth=smooth
+            data_tm.astype(np.float32).ravel(), cols=N, rows=T, period=period, r_multi=r_multi, smooth=smooth
         )
         gpu_tm = cp.asnumpy(cp.asarray(handle))
 

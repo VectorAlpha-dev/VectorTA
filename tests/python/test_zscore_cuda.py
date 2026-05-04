@@ -94,7 +94,7 @@ class TestZscoreCuda:
 
         cpu_tm = np.full((rows, cols), np.nan, dtype=np.float64)
         for s in range(cols):
-            col = price[:, s].copy()
+            col = np.ascontiguousarray(price[:, s]).copy()
             out = ti.zscore_batch(
                 col,
                 period_range=(period, period, 0),

@@ -86,10 +86,10 @@ class TestEmvCuda:
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.emv(
-                high_tm[:, j].astype(np.float32).astype(np.float64),
-                low_tm[:, j].astype(np.float32).astype(np.float64),
-                data_tm[:, j].astype(np.float32).astype(np.float64),
-                vol_tm[:, j].astype(np.float32).astype(np.float64),
+                np.ascontiguousarray(high_tm[:, j]).astype(np.float32).astype(np.float64),
+                np.ascontiguousarray(low_tm[:, j]).astype(np.float32).astype(np.float64),
+                np.ascontiguousarray(data_tm[:, j]).astype(np.float32).astype(np.float64),
+                np.ascontiguousarray(vol_tm[:, j]).astype(np.float32).astype(np.float64),
             )
 
         handle = ti.emv_cuda_many_series_one_param_dev(

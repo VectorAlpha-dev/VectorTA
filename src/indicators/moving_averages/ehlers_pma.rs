@@ -117,11 +117,7 @@ impl<'a> EhlersPmaInput<'a> {
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyo3::pyclass(
-    module = "ta_indicators.cuda",
-    name = "EhlersPmaDeviceArrayF32",
-    unsendable
-)]
+#[pyo3::pyclass(module = "vector_ta", name = "EhlersPmaDeviceArrayF32", unsendable)]
 pub struct EhlersPmaDeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32,
     pub(crate) _ctx: Arc<Context>,
@@ -146,9 +142,6 @@ impl EhlersPmaDeviceArrayF32Py {
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
 
-        if self.stream != 0 {
-            d.set_item("stream", self.stream)?;
-        }
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -1262,7 +1255,7 @@ pub fn ehlers_pma_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn ehlers_pma_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, 2 * len, 2 * len);
+        let _ = Vec::from_raw_parts(ptr, 0, 2 * len);
     }
 }
 

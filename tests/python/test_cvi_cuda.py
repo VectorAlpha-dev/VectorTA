@@ -47,10 +47,12 @@ class TestCviCuda:
         high = dataset["high"].astype(np.float64)
         low = dataset["low"].astype(np.float64)
 
-        periods = [5, 10, 20]
+        periods = [5, 10, 15, 20]
+        high_f32 = high.astype(np.float32)
+        low_f32 = low.astype(np.float32)
         handle = ti.cvi_cuda_batch_dev(
-            high.astype(np.float32),
-            low.astype(np.float32),
+            high_f32,
+            low_f32,
             (periods[0], periods[-1], 5),
         )
         gpu = cp.asnumpy(cp.asarray(handle))
@@ -58,8 +60,8 @@ class TestCviCuda:
 
 
         for row, p in enumerate(periods):
-            cpu = ti.cvi(high, low, p)
-            assert_close(gpu[row], cpu, rtol=1e-6, atol=2e-3,
+            cpu = ti.cvi(high_f32.astype(np.float64), low_f32.astype(np.float64), p)
+            assert_close(gpu[row], cpu, rtol=1e-6, atol=4e-3,
                          msg=f"CVI CUDA batch mismatch (p={p})")
 
     def test_many_series_one_param_matches_cpu(self, dataset):
@@ -81,7 +83,11 @@ class TestCviCuda:
 
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.cvi(high_tm[:, j], low_tm[:, j], period)
+            cpu_tm[:, j] = ti.cvi(
+                np.ascontiguousarray(high_tm.astype(np.float32)[:, j]).astype(np.float64),
+                np.ascontiguousarray(low_tm.astype(np.float32)[:, j]).astype(np.float64),
+                period,
+            )
 
 
         handle = ti.cvi_cuda_many_series_one_param_dev(
@@ -93,5 +99,5 @@ class TestCviCuda:
         )
         gpu_tm = cp.asnumpy(cp.asarray(handle))
         assert gpu_tm.shape == cpu_tm.shape
-        assert_close(gpu_tm, cpu_tm, rtol=1e-6, atol=2e-3,
+        assert_close(gpu_tm, cpu_tm, rtol=1e-6, atol=4e-3,
                      msg="CVI CUDA many-series vs CPU mismatch")

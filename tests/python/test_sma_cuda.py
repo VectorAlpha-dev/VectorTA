@@ -68,7 +68,7 @@ class TestSmaCuda:
 
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.sma(data_tm[:, j], period)
+            cpu_tm[:, j] = ti.sma(np.ascontiguousarray(data_tm[:, j]), period)
 
         handle = ti.sma_cuda_many_series_one_param_dev(
             data_tm.astype(np.float32), period

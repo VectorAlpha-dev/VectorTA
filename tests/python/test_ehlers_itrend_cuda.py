@@ -78,7 +78,7 @@ class TestEhlersItrendCuda:
 
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.ehlers_itrend(data_tm[:, j], warmup, max_dc)
+            cpu_tm[:, j] = ti.ehlers_itrend(np.ascontiguousarray(data_tm[:, j]), warmup, max_dc)
 
         handle = ti.ehlers_itrend_cuda_many_series_one_param_dev(
             data_tm.astype(np.float32), warmup, max_dc

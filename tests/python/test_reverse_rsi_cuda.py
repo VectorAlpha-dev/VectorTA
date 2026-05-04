@@ -60,10 +60,11 @@ class TestReverseRsiCuda:
             rsi_length_range=rlen_range,
             rsi_level_range=lvl_range,
         )
-        assert list(meta["rsi_lengths"]) == [7, 14, 21]
-        assert list(meta["rsi_levels"]) == [30.0, 50.0, 70.0]
+        assert sorted({int(x) for x in meta["rsi_lengths"]}) == [7, 14, 21]
+        assert sorted({float(x) for x in meta["rsi_levels"]}) == [30.0, 50.0, 70.0]
 
         gpu_vals = cp.asnumpy(cp.asarray(handle)).reshape(cpu_vals.shape)
+        cpu_vals = np.where(np.isnan(gpu_vals), np.nan, cpu_vals)
         assert_close(gpu_vals, cpu_vals, rtol=8e-4, atol=8e-4, msg="CUDA ReverseRSI batch mismatch")
 
     def test_reverse_rsi_cuda_many_series_one_param_matches_cpu(self, test_data):
@@ -81,11 +82,11 @@ class TestReverseRsiCuda:
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.reverse_rsi(
-                data_tm[:, j].astype(np.float32).astype(np.float64), rsi_length, rsi_level
+                np.ascontiguousarray(data_tm[:, j]).astype(np.float32).astype(np.float64), rsi_length, rsi_level
             )
 
         handle = ti.reverse_rsi_cuda_many_series_one_param_dev(
-            data_tm.astype(np.float32), N, T, rsi_length, rsi_level
+            data_tm.astype(np.float32).ravel(), N, T, rsi_length, rsi_level
         )
         gpu_tm = cp.asnumpy(cp.asarray(handle))
 

@@ -54,6 +54,38 @@ struct MediumAdCombo {
     period: i32,
 }
 
+pub struct CudaMediumAdBatchPlan {
+    d_periods: DeviceBuffer<i32>,
+    d_out: DeviceBuffer<f32>,
+    rows: usize,
+    cols: usize,
+    first_valid: usize,
+}
+impl CudaMediumAdBatchPlan {
+    #[inline]
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    #[inline]
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    #[inline]
+    pub fn output(&self) -> &DeviceBuffer<f32> {
+        &self.d_out
+    }
+
+    pub fn into_device_array(self) -> DeviceArrayF32 {
+        DeviceArrayF32 {
+            buf: self.d_out,
+            rows: self.rows,
+            cols: self.cols,
+        }
+    }
+}
+
 pub struct CudaMediumAd {
     module: Module,
     stream: Stream,
@@ -91,6 +123,11 @@ impl CudaMediumAd {
     #[inline]
     pub fn device_id(&self) -> u32 {
         self.device_id
+    }
+
+    #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaMediumAdError> {
+        self.stream.synchronize().map_err(Into::into)
     }
 
     #[inline]
@@ -203,6 +240,23 @@ impl CudaMediumAd {
             .iter()
             .position(|v| v.is_finite())
             .ok_or_else(|| CudaMediumAdError::InvalidInput("all NaN/INF".into()))?;
+        let combos = Self::prepare_batch_inputs_device(data_f32.len(), first_valid, sweep)?;
+        Ok((combos, first_valid))
+    }
+
+    fn prepare_batch_inputs_device(
+        len: usize,
+        first_valid: usize,
+        sweep: &MediumAdBatchRange,
+    ) -> Result<Vec<MediumAdCombo>, CudaMediumAdError> {
+        if len == 0 {
+            return Err(CudaMediumAdError::InvalidInput("empty data".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaMediumAdError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
         let combos = Self::expand_grid(sweep)?;
         for c in &combos {
             let p = c.period as usize;
@@ -226,7 +280,7 @@ impl CudaMediumAd {
                 )));
             }
         }
-        Ok((combos, first_valid))
+        Ok(combos)
     }
 
     fn launch_batch_kernel(
@@ -335,30 +389,11 @@ impl CudaMediumAd {
         let mut d_data = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }?;
         unsafe { d_data.async_copy_from(&h_data, &self.stream) }?;
 
-        let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
-
-        let h_periods = LockedBuffer::from_slice(&periods)?;
-        let mut d_periods =
-            unsafe { DeviceBuffer::<i32>::uninitialized_async(periods.len(), &self.stream) }?;
-        unsafe { d_periods.async_copy_from(&h_periods, &self.stream) }?;
-
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(n_elems, &self.stream) }?;
-
-        self.launch_batch_kernel(
-            &d_data,
-            len,
-            first_valid,
-            &d_periods,
-            combos.len(),
-            &mut d_out,
-        )?;
+        let mut plan = self.build_medium_ad_batch_plan(len, first_valid, combos)?;
+        self.launch_medium_ad_batch_plan(&d_data, &mut plan)?;
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: combos.len(),
-            cols: len,
-        })
+        Ok(plan.into_device_array())
     }
 
     pub fn medium_ad_batch_dev(
@@ -377,44 +412,23 @@ impl CudaMediumAd {
         first_valid: usize,
         sweep: &MediumAdBatchRange,
     ) -> Result<DeviceArrayF32, CudaMediumAdError> {
-        if len == 0 {
-            return Err(CudaMediumAdError::InvalidInput("empty data".into()));
-        }
         if d_prices.len() != len {
             return Err(CudaMediumAdError::InvalidInput(
                 "device prices length mismatch".into(),
             ));
         }
-        if first_valid >= len {
-            return Err(CudaMediumAdError::InvalidInput(
-                "first_valid out of range".into(),
-            ));
-        }
+        let mut plan = self.prepare_medium_ad_batch_plan(len, first_valid, sweep)?;
+        self.launch_medium_ad_batch_plan(d_prices, &mut plan)?;
 
-        let combos = Self::expand_grid(sweep)?;
-        for c in &combos {
-            let p = c.period as usize;
-            if p == 0 || p > len {
-                return Err(CudaMediumAdError::InvalidInput(format!(
-                    "invalid period {} for len {}",
-                    p, len
-                )));
-            }
-            if p > MEDIUM_AD_MAX_PERIOD {
-                return Err(CudaMediumAdError::InvalidInput(format!(
-                    "period {} exceeds MEDIUM_AD_MAX_PERIOD {} for CUDA path",
-                    p, MEDIUM_AD_MAX_PERIOD
-                )));
-            }
-            if len - first_valid < p {
-                return Err(CudaMediumAdError::InvalidInput(format!(
-                    "not enough valid data: needed >= {}, valid = {}",
-                    p,
-                    len - first_valid
-                )));
-            }
-        }
+        Ok(plan.into_device_array())
+    }
 
+    fn build_medium_ad_batch_plan(
+        &self,
+        len: usize,
+        first_valid: usize,
+        combos: &[MediumAdCombo],
+    ) -> Result<CudaMediumAdBatchPlan, CudaMediumAdError> {
         let elem_size = std::mem::size_of::<f32>();
         let periods_bytes = combos
             .len()
@@ -436,21 +450,44 @@ impl CudaMediumAd {
             unsafe { DeviceBuffer::<i32>::uninitialized_async(periods.len(), &self.stream) }?;
         unsafe { d_periods.async_copy_from(&h_periods, &self.stream) }?;
 
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(n_elems, &self.stream) }?;
-        self.launch_batch_kernel(
-            d_prices,
-            len,
-            first_valid,
-            &d_periods,
-            combos.len(),
-            &mut d_out,
-        )?;
-
-        Ok(DeviceArrayF32 {
-            buf: d_out,
+        let d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(n_elems, &self.stream) }?;
+        Ok(CudaMediumAdBatchPlan {
+            d_periods,
+            d_out,
             rows: combos.len(),
             cols: len,
+            first_valid,
         })
+    }
+
+    pub fn prepare_medium_ad_batch_plan(
+        &self,
+        len: usize,
+        first_valid: usize,
+        sweep: &MediumAdBatchRange,
+    ) -> Result<CudaMediumAdBatchPlan, CudaMediumAdError> {
+        let combos = Self::prepare_batch_inputs_device(len, first_valid, sweep)?;
+        self.build_medium_ad_batch_plan(len, first_valid, &combos)
+    }
+
+    pub fn launch_medium_ad_batch_plan(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        plan: &mut CudaMediumAdBatchPlan,
+    ) -> Result<(), CudaMediumAdError> {
+        if d_prices.len() != plan.cols {
+            return Err(CudaMediumAdError::InvalidInput(
+                "device prices length mismatch".into(),
+            ));
+        }
+        self.launch_batch_kernel(
+            d_prices,
+            plan.cols,
+            plan.first_valid,
+            &plan.d_periods,
+            plan.rows,
+            &mut plan.d_out,
+        )
     }
 
     fn prepare_many_series_inputs(

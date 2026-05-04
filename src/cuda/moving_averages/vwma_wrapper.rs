@@ -5,7 +5,7 @@ use crate::indicators::moving_averages::vwma::{VwmaBatchRange, VwmaParams};
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{AsyncCopyDestination, DeviceBuffer, LockedBuffer};
+use cust::memory::{AsyncCopyDestination, CopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -95,6 +95,50 @@ pub struct CudaVwma {
     stream: Stream,
     _context: std::sync::Arc<Context>,
     device_id: u32,
+}
+
+pub struct CudaVwmaBatchPlan {
+    combos: Vec<VwmaParams>,
+    d_pv_prefix: DeviceBuffer<f64>,
+    d_vol_prefix: DeviceBuffer<f64>,
+    d_periods: DeviceBuffer<i32>,
+    d_out: DeviceBuffer<f32>,
+    rows: usize,
+    cols: usize,
+    first_valid: usize,
+    device_id: u32,
+}
+
+impl CudaVwmaBatchPlan {
+    #[inline]
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    #[inline]
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    #[inline]
+    pub fn first_valid(&self) -> usize {
+        self.first_valid
+    }
+
+    #[inline]
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    #[inline]
+    pub fn params(&self) -> &[VwmaParams] {
+        &self.combos
+    }
+
+    #[inline]
+    pub fn output(&self) -> &DeviceBuffer<f32> {
+        &self.d_out
+    }
 }
 
 impl CudaVwma {
@@ -193,6 +237,75 @@ impl CudaVwma {
         Ok(())
     }
 
+    fn vwma_prefix_pv_vol_time_major_f64_device_into(
+        &self,
+        d_prices_tm: &DeviceBuffer<f32>,
+        d_volumes_tm: &DeviceBuffer<f32>,
+        d_first_valids: &DeviceBuffer<i32>,
+        num_series: usize,
+        series_len: usize,
+        d_pv_prefix_tm: &mut DeviceBuffer<f64>,
+        d_vol_prefix_tm: &mut DeviceBuffer<f64>,
+    ) -> Result<(), CudaVwmaError> {
+        if num_series == 0 || series_len == 0 {
+            return Err(CudaVwmaError::InvalidInput(
+                "num_series and series_len must be positive".into(),
+            ));
+        }
+        let elems = num_series
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaVwmaError::InvalidInput("size overflow".into()))?;
+        if d_prices_tm.len() != elems || d_volumes_tm.len() != elems {
+            return Err(CudaVwmaError::InvalidInput(
+                "time-major input length mismatch".into(),
+            ));
+        }
+        if d_first_valids.len() < num_series
+            || d_pv_prefix_tm.len() < elems
+            || d_vol_prefix_tm.len() < elems
+        {
+            return Err(CudaVwmaError::InvalidInput(
+                "time-major prefix buffers too small".into(),
+            ));
+        }
+
+        let func = self
+            .module
+            .get_function("vwma_prefix_pv_vol_time_major_f64_f32")
+            .map_err(|_| CudaVwmaError::MissingKernelSymbol {
+                name: "vwma_prefix_pv_vol_time_major_f64_f32",
+            })?;
+        let block_x = 256u32;
+        let num_series_u32 = u32::try_from(num_series).map_err(|_| {
+            CudaVwmaError::InvalidInput("num_series exceeds CUDA grid limit".into())
+        })?;
+        let grid_x = (num_series_u32 + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        unsafe {
+            let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
+            let mut volumes_ptr = d_volumes_tm.as_device_ptr().as_raw();
+            let mut firsts_ptr = d_first_valids.as_device_ptr().as_raw();
+            let mut num_series_i = num_series as i32;
+            let mut series_len_i = series_len as i32;
+            let mut pv_ptr = d_pv_prefix_tm.as_device_ptr().as_raw();
+            let mut vol_ptr = d_vol_prefix_tm.as_device_ptr().as_raw();
+
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut volumes_ptr as *mut _ as *mut c_void,
+                &mut firsts_ptr as *mut _ as *mut c_void,
+                &mut num_series_i as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut pv_ptr as *mut _ as *mut c_void,
+                &mut vol_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
     pub fn vwma_batch_dev(
         &self,
         prices: &[f32],
@@ -229,6 +342,115 @@ impl CudaVwma {
         self.stream.synchronize()?;
         out.copy_from_slice(h_out.as_slice());
         Ok((arr.rows, arr.cols, inputs.combos))
+    }
+
+    fn build_vwma_batch_plan(
+        &self,
+        series_len: usize,
+        first_valid: usize,
+        combos: &[VwmaParams],
+        periods: &[i32],
+    ) -> Result<CudaVwmaBatchPlan, CudaVwmaError> {
+        let n_combos = combos.len();
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or(CudaVwmaError::InvalidInput(
+                "size overflow: output elements".into(),
+            ))?;
+        let prefix_bytes = series_len
+            .checked_mul(2)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f64>()))
+            .ok_or(CudaVwmaError::InvalidInput(
+                "size overflow: prefix bytes".into(),
+            ))?;
+        let period_bytes =
+            n_combos
+                .checked_mul(std::mem::size_of::<i32>())
+                .ok_or(CudaVwmaError::InvalidInput(
+                    "size overflow: period bytes".into(),
+                ))?;
+        let out_bytes = out_elems.checked_mul(std::mem::size_of::<f32>()).ok_or(
+            CudaVwmaError::InvalidInput("size overflow: output bytes".into()),
+        )?;
+        let required = prefix_bytes
+            .checked_add(period_bytes)
+            .and_then(|t| t.checked_add(out_bytes))
+            .ok_or(CudaVwmaError::InvalidInput(
+                "size overflow: total bytes".into(),
+            ))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            let (free, _total) = Self::device_mem_info().unwrap_or((0, 0));
+            return Err(CudaVwmaError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            });
+        }
+
+        let d_pv_prefix = unsafe { DeviceBuffer::<f64>::uninitialized(series_len) }?;
+        let d_vol_prefix = unsafe { DeviceBuffer::<f64>::uninitialized(series_len) }?;
+        let d_periods = DeviceBuffer::from_slice(periods)?;
+        let d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
+
+        Ok(CudaVwmaBatchPlan {
+            combos: combos.to_vec(),
+            d_pv_prefix,
+            d_vol_prefix,
+            d_periods,
+            d_out,
+            rows: n_combos,
+            cols: series_len,
+            first_valid,
+            device_id: self.device_id,
+        })
+    }
+
+    pub fn prepare_vwma_batch_plan(
+        &self,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &VwmaBatchRange,
+    ) -> Result<CudaVwmaBatchPlan, CudaVwmaError> {
+        let (combos, periods) = Self::prepare_batch_inputs_device(series_len, first_valid, sweep)?;
+        self.build_vwma_batch_plan(series_len, first_valid, &combos, &periods)
+    }
+
+    pub fn launch_vwma_batch_plan(
+        &self,
+        prices: &[f32],
+        volumes: &[f32],
+        plan: &mut CudaVwmaBatchPlan,
+    ) -> Result<(), CudaVwmaError> {
+        if prices.len() != plan.cols || volumes.len() != plan.cols {
+            return Err(CudaVwmaError::InvalidInput(
+                "price/volume length mismatch for VWMA CUDA plan".into(),
+            ));
+        }
+        if plan.rows == 0 || plan.cols == 0 {
+            return Err(CudaVwmaError::InvalidInput(
+                "VWMA CUDA plan has empty shape".into(),
+            ));
+        }
+
+        let (pv_prefix, vol_prefix) =
+            compute_prefix_sums(prices, volumes, plan.first_valid, plan.cols);
+        plan.d_pv_prefix
+            .copy_from(&pv_prefix)
+            .map_err(CudaVwmaError::Cuda)?;
+        plan.d_vol_prefix
+            .copy_from(&vol_prefix)
+            .map_err(CudaVwmaError::Cuda)?;
+
+        self.launch_batch_kernel(
+            &plan.d_pv_prefix,
+            &plan.d_vol_prefix,
+            &plan.d_periods,
+            plan.cols,
+            plan.rows,
+            plan.first_valid,
+            &mut plan.d_out,
+        )
     }
 
     pub fn vwma_batch_device(
@@ -607,19 +829,18 @@ impl CudaVwma {
         let series_len = rows;
         let num_series = cols;
 
-        let pv_bytes = inputs
-            .pv_prefix_tm
-            .len()
-            .checked_mul(std::mem::size_of::<f64>())
+        let elems = prices_tm_f32.len();
+        let input_bytes = elems
+            .checked_mul(2)
+            .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
             .ok_or(CudaVwmaError::InvalidInput(
-                "size overflow: pv bytes".into(),
+                "size overflow: input bytes".into(),
             ))?;
-        let vol_bytes = inputs
-            .vol_prefix_tm
-            .len()
-            .checked_mul(std::mem::size_of::<f64>())
+        let prefix_bytes = elems
+            .checked_mul(2)
+            .and_then(|n| n.checked_mul(std::mem::size_of::<f64>()))
             .ok_or(CudaVwmaError::InvalidInput(
-                "size overflow: vol bytes".into(),
+                "size overflow: prefix bytes".into(),
             ))?;
         let first_valid_bytes = inputs
             .first_valids
@@ -628,19 +849,25 @@ impl CudaVwma {
             .ok_or(CudaVwmaError::InvalidInput(
                 "size overflow: first_valid bytes".into(),
             ))?;
-        let out_bytes = prices_tm_f32
-            .len()
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or(CudaVwmaError::InvalidInput(
-                "size overflow: output bytes".into(),
-            ))?;
-        let required = pv_bytes
-            .checked_add(vol_bytes)
+        let out_bytes =
+            elems
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or(CudaVwmaError::InvalidInput(
+                    "size overflow: output bytes".into(),
+                ))?;
+        let prefix_stage_required = input_bytes
+            .checked_add(prefix_bytes)
             .and_then(|t| t.checked_add(first_valid_bytes))
+            .ok_or(CudaVwmaError::InvalidInput(
+                "size overflow: total bytes".into(),
+            ))?;
+        let output_stage_required = prefix_bytes
+            .checked_add(first_valid_bytes)
             .and_then(|t| t.checked_add(out_bytes))
             .ok_or(CudaVwmaError::InvalidInput(
                 "size overflow: total bytes".into(),
             ))?;
+        let required = prefix_stage_required.max(output_stage_required);
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             return Err(CudaVwmaError::InvalidInput(
@@ -648,18 +875,31 @@ impl CudaVwma {
             ));
         }
 
-        let h_pv = LockedBuffer::from_slice(&inputs.pv_prefix_tm)?;
-        let h_vol = LockedBuffer::from_slice(&inputs.vol_prefix_tm)?;
         let h_fv = LockedBuffer::from_slice(&inputs.first_valids)?;
-
-        let d_pv: DeviceBuffer<f64> =
-            unsafe { DeviceBuffer::from_slice_async(&*h_pv, &self.stream) }?;
-        let d_vol: DeviceBuffer<f64> =
-            unsafe { DeviceBuffer::from_slice_async(&*h_vol, &self.stream) }?;
+        let d_prices = DeviceBuffer::from_slice(prices_tm_f32)?;
+        let d_volumes = DeviceBuffer::from_slice(volumes_tm_f32)?;
         let d_first_valids: DeviceBuffer<i32> =
             unsafe { DeviceBuffer::from_slice_async(&*h_fv, &self.stream) }?;
+        let mut d_pv: DeviceBuffer<f64> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
+        let mut d_vol: DeviceBuffer<f64> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
+
+        self.vwma_prefix_pv_vol_time_major_f64_device_into(
+            &d_prices,
+            &d_volumes,
+            &d_first_valids,
+            num_series,
+            series_len,
+            &mut d_pv,
+            &mut d_vol,
+        )?;
+        self.stream.synchronize()?;
+        drop(d_prices);
+        drop(d_volumes);
+
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(prices_tm_f32.len(), &self.stream) }?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
 
         self.launch_many_series_kernel(
             &d_pv,
@@ -741,19 +981,7 @@ impl CudaVwma {
             first_valids[series_idx] = val as i32;
         }
 
-        let (pv_prefix_tm, vol_prefix_tm) = compute_prefix_sums_time_major(
-            prices_tm_f32,
-            volumes_tm_f32,
-            cols,
-            rows,
-            &first_valids,
-        );
-
-        Ok(ManySeriesPrepared {
-            first_valids,
-            pv_prefix_tm,
-            vol_prefix_tm,
-        })
+        Ok(ManySeriesPrepared { first_valids })
     }
 
     fn prepare_batch_inputs(
@@ -826,6 +1054,81 @@ impl CudaVwma {
             first_valid,
             series_len,
         })
+    }
+
+    fn prepare_batch_inputs_device(
+        series_len: usize,
+        first_valid: usize,
+        sweep: &VwmaBatchRange,
+    ) -> Result<(Vec<VwmaParams>, Vec<i32>), CudaVwmaError> {
+        if series_len == 0 {
+            return Err(CudaVwmaError::InvalidInput("series_len must be > 0".into()));
+        }
+        if first_valid >= series_len {
+            return Err(CudaVwmaError::InvalidInput(
+                "first_valid must be within series_len".into(),
+            ));
+        }
+        if series_len > i32::MAX as usize {
+            return Err(CudaVwmaError::InvalidInput(
+                "series too long for kernel argument width".into(),
+            ));
+        }
+
+        let combos = expand_grid(sweep);
+        if combos.is_empty() {
+            return Err(CudaVwmaError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        if combos.len() > i32::MAX as usize {
+            return Err(CudaVwmaError::InvalidInput(
+                "too many parameter combinations".into(),
+            ));
+        }
+
+        let max_period = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        if max_period == 0 {
+            return Err(CudaVwmaError::InvalidInput(
+                "invalid period (zero) in sweep".into(),
+            ));
+        }
+        if series_len - first_valid < max_period {
+            return Err(CudaVwmaError::InvalidInput(format!(
+                "not enough valid data (needed >= {}, valid = {})",
+                max_period,
+                series_len - first_valid
+            )));
+        }
+
+        let mut periods = Vec::with_capacity(combos.len());
+        for prm in &combos {
+            let period = prm.period.unwrap_or(0);
+            if period == 0 {
+                return Err(CudaVwmaError::InvalidInput(
+                    "period must be positive".into(),
+                ));
+            }
+            if period > i32::MAX as usize {
+                return Err(CudaVwmaError::InvalidInput(
+                    "period too large for kernel argument".into(),
+                ));
+            }
+            periods.push(period as i32);
+        }
+
+        let _ = combos
+            .len()
+            .checked_mul(series_len)
+            .ok_or(CudaVwmaError::InvalidInput(
+                "size overflow computing output elements".into(),
+            ))?;
+
+        Ok((combos, periods))
     }
 
     #[inline]
@@ -995,11 +1298,11 @@ pub mod benches {
         let period = 64usize;
         let prepared = CudaVwma::prepare_many_series_inputs(&price_tm, &vol_tm, cols, rows, period)
             .expect("vwma prepare many-series");
+        let (pv_prefix_tm, vol_prefix_tm) =
+            compute_prefix_sums_time_major(&price_tm, &vol_tm, cols, rows, &prepared.first_valids);
 
-        let d_pv_prefix_tm =
-            DeviceBuffer::from_slice(&prepared.pv_prefix_tm).expect("d_pv_prefix_tm");
-        let d_vol_prefix_tm =
-            DeviceBuffer::from_slice(&prepared.vol_prefix_tm).expect("d_vol_prefix_tm");
+        let d_pv_prefix_tm = DeviceBuffer::from_slice(&pv_prefix_tm).expect("d_pv_prefix_tm");
+        let d_vol_prefix_tm = DeviceBuffer::from_slice(&vol_prefix_tm).expect("d_vol_prefix_tm");
         let d_first_valids =
             DeviceBuffer::from_slice(&prepared.first_valids).expect("d_first_valids");
         let d_out_tm: DeviceBuffer<f32> =
@@ -1052,8 +1355,6 @@ struct BatchInputs {
 
 struct ManySeriesPrepared {
     first_valids: Vec<i32>,
-    pv_prefix_tm: Vec<f64>,
-    vol_prefix_tm: Vec<f64>,
 }
 
 fn compute_prefix_sums(

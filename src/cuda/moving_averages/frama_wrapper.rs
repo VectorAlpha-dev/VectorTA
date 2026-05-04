@@ -165,6 +165,49 @@ pub struct CudaFrama {
     debug_many_logged: bool,
 }
 
+pub struct CudaFramaBatchPlan {
+    combos: Vec<FramaParams>,
+    d_windows: DeviceBuffer<i32>,
+    d_scs: DeviceBuffer<i32>,
+    d_fcs: DeviceBuffer<i32>,
+    d_out: DeviceBuffer<f32>,
+    rows: usize,
+    cols: usize,
+    first_valid: usize,
+}
+impl CudaFramaBatchPlan {
+    #[inline]
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    #[inline]
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
+    #[inline]
+    pub fn params(&self) -> &[FramaParams] {
+        &self.combos
+    }
+
+    #[inline]
+    pub fn output(&self) -> &DeviceBuffer<f32> {
+        &self.d_out
+    }
+
+    pub fn into_device_array_and_params(self) -> (DeviceArrayF32, Vec<FramaParams>) {
+        (
+            DeviceArrayF32 {
+                buf: self.d_out,
+                rows: self.rows,
+                cols: self.cols,
+            },
+            self.combos,
+        )
+    }
+}
+
 impl CudaFrama {
     pub fn new(device_id: usize) -> Result<Self, CudaFramaError> {
         cust::init(CudaFlags::empty())?;
@@ -218,6 +261,11 @@ impl CudaFrama {
     #[inline]
     pub fn device_id(&self) -> u32 {
         self.device_id
+    }
+
+    pub fn synchronize(&self) -> Result<(), CudaFramaError> {
+        self.stream.synchronize()?;
+        Ok(())
     }
 
     #[inline]
@@ -312,16 +360,34 @@ impl CudaFrama {
             )));
         }
 
+        let len = high.len();
+        let first_valid = first_valid_index(high, low, close)
+            .ok_or_else(|| CudaFramaError::InvalidInput("all values are NaN".into()))?;
+
+        let combos = Self::prepare_batch_inputs_device(len, first_valid, sweep)?;
+        Ok((combos, first_valid, len))
+    }
+
+    fn prepare_batch_inputs_device(
+        len: usize,
+        first_valid: usize,
+        sweep: &FramaBatchRange,
+    ) -> Result<Vec<FramaParams>, CudaFramaError> {
+        if len == 0 {
+            return Err(CudaFramaError::InvalidInput("empty input".into()));
+        }
+        if first_valid >= len {
+            return Err(CudaFramaError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+
         let combos = expand_grid(sweep);
         if combos.is_empty() {
             return Err(CudaFramaError::InvalidInput(
                 "no parameter combinations".into(),
             ));
         }
-
-        let len = high.len();
-        let first_valid = first_valid_index(high, low, close)
-            .ok_or_else(|| CudaFramaError::InvalidInput("all values are NaN".into()))?;
 
         let mut max_even = 0usize;
         for combo in &combos {
@@ -372,7 +438,7 @@ impl CudaFrama {
             ));
         }
 
-        Ok((combos, first_valid, len))
+        Ok(combos)
     }
 
     fn launch_batch_kernel(
@@ -528,34 +594,10 @@ impl CudaFrama {
         let d_low = DeviceBuffer::from_slice(low)?;
         let d_close = DeviceBuffer::from_slice(close)?;
 
-        let windows: Vec<i32> = combos.iter().map(|c| c.window.unwrap() as i32).collect();
-        let scs: Vec<i32> = combos.iter().map(|c| c.sc.unwrap() as i32).collect();
-        let fcs: Vec<i32> = combos.iter().map(|c| c.fc.unwrap() as i32).collect();
-
-        let d_windows = DeviceBuffer::from_slice(&windows)?;
-        let d_scs = DeviceBuffer::from_slice(&scs)?;
-        let d_fcs = DeviceBuffer::from_slice(&fcs)?;
-
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(combos.len() * len) }?;
-
-        self.launch_batch_kernel(
-            &d_high,
-            &d_low,
-            &d_close,
-            &d_windows,
-            &d_scs,
-            &d_fcs,
-            len,
-            combos.len(),
-            first_valid,
-            &mut d_out,
-        )?;
-
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: combos.len(),
-            cols: len,
-        })
+        let mut plan = self.build_frama_batch_plan(len, first_valid, combos)?;
+        self.launch_frama_batch_plan(&d_high, &d_low, &d_close, &mut plan)?;
+        let (dev, _) = plan.into_device_array_and_params();
+        Ok(dev)
     }
 
     pub fn frama_batch_dev(
@@ -579,43 +621,71 @@ impl CudaFrama {
         series_len: usize,
         first_valid: usize,
     ) -> Result<(DeviceArrayF32, Vec<FramaParams>), CudaFramaError> {
-        let combos = expand_grid(sweep);
-        if combos.is_empty() {
-            return Err(CudaFramaError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
+        let mut plan = self.prepare_frama_batch_plan(series_len, first_valid, sweep)?;
+        self.launch_frama_batch_plan(d_high, d_low, d_close, &mut plan)?;
+        Ok(plan.into_device_array_and_params())
+    }
 
+    fn build_frama_batch_plan(
+        &self,
+        series_len: usize,
+        first_valid: usize,
+        combos: &[FramaParams],
+    ) -> Result<CudaFramaBatchPlan, CudaFramaError> {
         let windows: Vec<i32> = combos.iter().map(|c| c.window.unwrap() as i32).collect();
         let scs: Vec<i32> = combos.iter().map(|c| c.sc.unwrap() as i32).collect();
         let fcs: Vec<i32> = combos.iter().map(|c| c.fc.unwrap() as i32).collect();
         let d_windows = DeviceBuffer::from_slice(&windows)?;
         let d_scs = DeviceBuffer::from_slice(&scs)?;
         let d_fcs = DeviceBuffer::from_slice(&fcs)?;
+        let d_out = unsafe { DeviceBuffer::<f32>::uninitialized(combos.len() * series_len) }?;
 
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(combos.len() * series_len) }?;
+        Ok(CudaFramaBatchPlan {
+            combos: combos.to_vec(),
+            d_windows,
+            d_scs,
+            d_fcs,
+            d_out,
+            rows: combos.len(),
+            cols: series_len,
+            first_valid,
+        })
+    }
 
+    pub fn prepare_frama_batch_plan(
+        &self,
+        series_len: usize,
+        first_valid: usize,
+        sweep: &FramaBatchRange,
+    ) -> Result<CudaFramaBatchPlan, CudaFramaError> {
+        let combos = Self::prepare_batch_inputs_device(series_len, first_valid, sweep)?;
+        self.build_frama_batch_plan(series_len, first_valid, &combos)
+    }
+
+    pub fn launch_frama_batch_plan(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        plan: &mut CudaFramaBatchPlan,
+    ) -> Result<(), CudaFramaError> {
+        if d_high.len() != plan.cols || d_low.len() != plan.cols || d_close.len() != plan.cols {
+            return Err(CudaFramaError::InvalidInput(
+                "device input length mismatch".into(),
+            ));
+        }
         self.launch_batch_kernel(
             d_high,
             d_low,
             d_close,
-            &d_windows,
-            &d_scs,
-            &d_fcs,
-            series_len,
-            combos.len(),
-            first_valid,
-            &mut d_out,
-        )?;
-
-        Ok((
-            DeviceArrayF32 {
-                buf: d_out,
-                rows: combos.len(),
-                cols: series_len,
-            },
-            combos,
-        ))
+            &plan.d_windows,
+            &plan.d_scs,
+            &plan.d_fcs,
+            plan.cols,
+            plan.rows,
+            plan.first_valid,
+            &mut plan.d_out,
+        )
     }
 
     pub fn frama_batch_device(

@@ -2588,7 +2588,7 @@ pub fn possible_rsi_alloc(len: usize) -> *mut f64 {
 pub fn possible_rsi_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, 7 * len, 7 * len);
+            let _ = Vec::from_raw_parts(ptr, 0, 7 * len);
         }
     }
 }

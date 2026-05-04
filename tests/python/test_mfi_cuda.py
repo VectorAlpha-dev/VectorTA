@@ -83,11 +83,11 @@ class TestMfiCuda:
         period = 14
         cpu_tm = np.zeros_like(tp_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.mfi(tp_tm[:, j].astype(np.float32).astype(np.float64),
-                                   vol_tm[:, j].astype(np.float32).astype(np.float64), period)
+            cpu_tm[:, j] = ti.mfi(np.ascontiguousarray(tp_tm[:, j]).astype(np.float32).astype(np.float64),
+                                   np.ascontiguousarray(vol_tm[:, j]).astype(np.float32).astype(np.float64), period)
 
         handle = ti.mfi_cuda_many_series_one_param_dev(
-            tp_tm.astype(np.float32), vol_tm.astype(np.float32), N, T, period
+            tp_tm.astype(np.float32).ravel(), vol_tm.astype(np.float32).ravel(), N, T, period
         )
         gpu_tm = cp.asnumpy(cp.asarray(handle))
         assert gpu_tm.shape == tp_tm.shape

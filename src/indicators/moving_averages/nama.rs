@@ -62,7 +62,7 @@ impl<'a> AsRef<[f64]> for NamaInput<'a> {
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct DeviceArrayF32PyNama {
     pub(crate) inner: DeviceArrayF32,
     _ctx: Arc<CudaContext>,
@@ -1723,7 +1723,7 @@ pub fn nama_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn nama_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 

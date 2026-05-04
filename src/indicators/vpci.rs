@@ -2764,7 +2764,7 @@ pub fn vpci_alloc(len: usize) -> *mut f64 {
 pub fn vpci_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }
@@ -2815,9 +2815,141 @@ pub fn vpci_batch_unified_js(
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::vpci_wrapper::CudaVpci;
+use crate::cuda::vpci_wrapper::{CudaVpci, CudaVpciBatchPlan};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::{CopyDestination, DeviceBuffer};
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "vector_ta", name = "VpciCudaBatchPlan", unsendable)]
+pub struct VpciCudaBatchPlanPy {
+    cuda: CudaVpci,
+    plan: CudaVpciBatchPlan,
+    device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl VpciCudaBatchPlanPy {
+    #[getter]
+    fn rows(&self) -> usize {
+        self.plan.rows()
+    }
+
+    #[getter]
+    fn cols(&self) -> usize {
+        self.plan.cols()
+    }
+
+    #[getter]
+    fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        dict.set_item(
+            "short_ranges",
+            self.plan
+                .params()
+                .iter()
+                .map(|p| p.short_range.unwrap_or(5) as u64)
+                .collect::<Vec<_>>()
+                .into_pyarray(py),
+        )?;
+        dict.set_item(
+            "long_ranges",
+            self.plan
+                .params()
+                .iter()
+                .map(|p| p.long_range.unwrap_or(25) as u64)
+                .collect::<Vec<_>>()
+                .into_pyarray(py),
+        )?;
+        dict.set_item("rows", self.plan.rows())?;
+        dict.set_item("cols", self.plan.cols())?;
+        Ok(dict)
+    }
+
+    fn execute<'py>(
+        &mut self,
+        py: Python<'py>,
+        close_f32: numpy::PyReadonlyArray1<'py, f32>,
+        volume_f32: numpy::PyReadonlyArray1<'py, f32>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        use numpy::PyArrayMethods;
+
+        let close = close_f32.as_slice()?;
+        let volume = volume_f32.as_slice()?;
+        let rows = self.plan.rows();
+        let cols = self.plan.cols();
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| PyValueError::new_err("vpci CUDA plan rows*cols overflow"))?;
+        let (vpci, vpcis) = py.allow_threads(|| -> PyResult<(Vec<f32>, Vec<f32>)> {
+            let d_close = DeviceBuffer::from_slice(close)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let d_volume = DeviceBuffer::from_slice(volume)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            self.cuda
+                .launch_vpci_batch_plan(&d_close, &d_volume, &mut self.plan)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            self.cuda
+                .synchronize()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let mut vpci = vec![0f32; total];
+            let mut vpcis = vec![0f32; total];
+            let (vpci_buf, vpcis_buf) = self.plan.outputs();
+            vpci_buf
+                .copy_to(&mut vpci)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            vpcis_buf
+                .copy_to(&mut vpcis)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok((vpci, vpcis))
+        })?;
+        let dict = self.metadata(py)?;
+        let vpci_arr = vpci.into_pyarray(py);
+        let vpcis_arr = vpcis.into_pyarray(py);
+        dict.set_item("vpci", vpci_arr.reshape((rows, cols))?)?;
+        dict.set_item("vpcis", vpcis_arr.reshape((rows, cols))?)?;
+        Ok(dict)
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vpci_cuda_batch_plan_create")]
+#[pyo3(signature = (series_len, first_valid, short_range_tuple, long_range_tuple, device_id=0))]
+pub fn vpci_cuda_batch_plan_create_py(
+    py: Python<'_>,
+    series_len: usize,
+    first_valid: usize,
+    short_range_tuple: (usize, usize, usize),
+    long_range_tuple: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<VpciCudaBatchPlanPy> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let sweep = VpciBatchRange {
+        short_range: short_range_tuple,
+        long_range: long_range_tuple,
+    };
+    let (cuda, plan, dev_id) = py.allow_threads(|| {
+        let cuda = CudaVpci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dev_id = cuda.device_id();
+        let plan = cuda
+            .prepare_vpci_batch_plan(series_len, first_valid, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((cuda, plan, dev_id))
+    })?;
+    Ok(VpciCudaBatchPlanPy {
+        cuda,
+        plan,
+        device_id: dev_id,
+    })
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "vpci_cuda_batch_dev")]

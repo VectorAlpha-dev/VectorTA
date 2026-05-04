@@ -107,7 +107,7 @@ class TestMaczCuda:
 
         cpu_tm = np.full_like(tm, np.nan)
         for s in range(cols):
-            out = ti.macz(tm[:, s], vol[:, s], **params)
+            out = ti.macz(np.ascontiguousarray(tm[:, s]), np.ascontiguousarray(vol[:, s]), **params)
             cpu_tm[:, s] = out
         cpu_f32 = cpu_tm.astype(np.float32)
 

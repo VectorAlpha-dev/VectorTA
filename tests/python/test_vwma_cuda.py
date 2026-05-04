@@ -76,7 +76,7 @@ class TestVwmaCuda:
 
         cpu_tm = np.zeros_like(prices_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.vwma(prices_tm[:, j], volumes_tm[:, j], period)
+            cpu_tm[:, j] = ti.vwma(np.ascontiguousarray(prices_tm[:, j]), np.ascontiguousarray(volumes_tm[:, j]), period)
 
         handle = ti.vwma_cuda_many_series_one_param_dev(
             prices_tm.astype(np.float32),

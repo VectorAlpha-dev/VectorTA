@@ -2431,11 +2431,7 @@ pub fn chande_batch_py<'py>(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(
-    module = "ta_indicators.cuda",
-    name = "DeviceArrayF32Chande",
-    unsendable
-)]
+#[pyclass(module = "vector_ta", name = "DeviceArrayF32Chande", unsendable)]
 pub struct DeviceArrayF32ChandePy {
     pub(crate) inner: DeviceArrayF32,
     _ctx_guard: Arc<Context>,
@@ -2783,7 +2779,7 @@ pub fn chande_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn chande_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 

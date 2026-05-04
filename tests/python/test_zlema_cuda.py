@@ -84,7 +84,7 @@ class TestZlemaCuda:
 
         cpu_tm = np.full((rows, cols), np.nan, dtype=np.float64)
         for s in range(cols):
-            series = tm[:, s]
+            series = np.ascontiguousarray(tm[:, s])
             cpu_series = ti.zlema(series, period)
             cpu_tm[:, s] = cpu_series
 

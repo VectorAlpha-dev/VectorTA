@@ -73,7 +73,7 @@ class TestNviCuda:
 
         cpu_tm = np.zeros_like(close_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.nvi(close_tm[:, j], volume_tm[:, j])
+            cpu_tm[:, j] = ti.nvi(np.ascontiguousarray(close_tm[:, j]), np.ascontiguousarray(volume_tm[:, j]))
 
         handle = ti.nvi_cuda_many_series_one_param_dev(
             close_tm.astype(np.float32).ravel(),

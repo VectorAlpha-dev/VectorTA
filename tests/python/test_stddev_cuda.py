@@ -70,7 +70,7 @@ class TestStddevCuda:
 
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.stddev(data_tm[:, j], period, nbdev)
+            cpu_tm[:, j] = ti.stddev(np.ascontiguousarray(data_tm[:, j]), period, nbdev)
 
         handle = ti.stddev_cuda_many_series_one_param_dev(
             data_tm.astype(np.float32).ravel(),

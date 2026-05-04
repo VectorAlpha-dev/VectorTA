@@ -59,14 +59,25 @@ class TestKvoCuda:
         close = base + 0.05 * np.sin(x * 0.00111)
         volume = (np.abs(np.cos(x * 0.0031)) + 1.0) * 500.0
         high[:6] = low[:6] = close[:6] = volume[:6] = np.nan
+        high_f32 = high.astype(np.float32)
+        low_f32 = low.astype(np.float32)
+        close_f32 = close.astype(np.float32)
+        volume_f32 = volume.astype(np.float32)
 
         short, long = 6, 20
-        cpu = ti.kvo(high, low, close, volume, short, long)
+        cpu = ti.kvo(
+            high_f32.astype(np.float64),
+            low_f32.astype(np.float64),
+            close_f32.astype(np.float64),
+            volume_f32.astype(np.float64),
+            short,
+            long,
+        )
         handle, meta = ti.kvo_cuda_batch_dev(
-            high.astype(np.float32),
-            low.astype(np.float32),
-            close.astype(np.float32),
-            volume.astype(np.float32),
+            high_f32,
+            low_f32,
+            close_f32,
+            volume_f32,
             (short, short, 0),
             (long, long, 0),
         )
@@ -84,17 +95,28 @@ class TestKvoCuda:
         c = np.tile(series + 0.03 * np.sin(x * 0.0017), (N, 1)).T
         v = np.tile((np.abs(np.sin(x * 0.0042)) + 0.9) * 300.0, (N, 1)).T
         h[:6, :] = l[:6, :] = c[:6, :] = v[:6, :] = np.nan
+        h_f32 = h.astype(np.float32)
+        l_f32 = l.astype(np.float32)
+        c_f32 = c.astype(np.float32)
+        v_f32 = v.astype(np.float32)
 
         short, long = 6, 20
         cpu_tm = np.zeros((T, N), dtype=np.float64)
         for j in range(N):
-            cpu_tm[:, j] = ti.kvo(h[:, j], l[:, j], c[:, j], v[:, j], short, long)
+            cpu_tm[:, j] = ti.kvo(
+                np.ascontiguousarray(h_f32[:, j]).astype(np.float64),
+                np.ascontiguousarray(l_f32[:, j]).astype(np.float64),
+                np.ascontiguousarray(c_f32[:, j]).astype(np.float64),
+                np.ascontiguousarray(v_f32[:, j]).astype(np.float64),
+                short,
+                long,
+            )
 
         handle = ti.kvo_cuda_many_series_one_param_dev(
-            h.astype(np.float32).ravel(),
-            l.astype(np.float32).ravel(),
-            c.astype(np.float32).ravel(),
-            v.astype(np.float32).ravel(),
+            h_f32.ravel(),
+            l_f32.ravel(),
+            c_f32.ravel(),
+            v_f32.ravel(),
             N,
             T,
             short,

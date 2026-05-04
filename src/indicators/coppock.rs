@@ -2438,7 +2438,7 @@ pub fn coppock_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn coppock_free(ptr: *mut f64, len: usize) {
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len, len);
+        let _ = Vec::from_raw_parts(ptr, 0, len);
     }
 }
 
@@ -2663,7 +2663,7 @@ use crate::cuda::cuda_available;
 use crate::cuda::oscillators::coppock_wrapper::{CudaCoppock, DeviceArrayF32Coppock};
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct CoppockDeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32Coppock,
 }

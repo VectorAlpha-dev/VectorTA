@@ -86,7 +86,7 @@ class TestGatorOscCuda:
         lc_cpu = np.zeros_like(series)
         for j in range(N):
             u, l, uc, lc = ti.gatorosc(
-                series[:, j].astype(np.float64),
+                np.ascontiguousarray(series[:, j]).astype(np.float64),
                 p["jl"], p["js"], p["tl"], p["ts"], p["ll"], p["ls"]
             )
             u_cpu[:, j] = u

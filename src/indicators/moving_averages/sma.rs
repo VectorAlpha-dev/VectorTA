@@ -1257,7 +1257,7 @@ pub fn sma_cuda_many_series_one_param_dev_py(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "SmaDeviceArrayF32", unsendable)]
+#[pyclass(module = "vector_ta", name = "SmaDeviceArrayF32", unsendable)]
 pub struct SmaDeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32,
     pub(crate) _ctx: Arc<Context>,
@@ -1496,7 +1496,7 @@ pub fn sma_alloc(len: usize) -> *mut f64 {
 pub fn sma_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

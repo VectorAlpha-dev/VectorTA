@@ -2557,7 +2557,7 @@ pub fn reversal_signals_alloc(len: usize) -> *mut f64 {
 pub fn reversal_signals_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, OUTPUTS * len, OUTPUTS * len);
+            let _ = Vec::from_raw_parts(ptr, 0, OUTPUTS * len);
         }
     }
 }

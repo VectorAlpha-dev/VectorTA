@@ -47,7 +47,10 @@ class TestStochCuda:
         return load_test_data()
 
     def _synth_hlc(self, close: np.ndarray):
-        off = 0.15 + 0.01 * np.sin(np.arange(close.size) * 0.01)
+        off = 0.15 + 0.01 * np.sin(np.arange(close.shape[0]) * 0.01)
+        if close.ndim == 2:
+            off = off[:, None]
+        off = off.astype(close.dtype, copy=False)
         return close + off, close - off
 
     def test_stoch_cuda_batch_matches_cpu(self, test_data):
@@ -58,10 +61,10 @@ class TestStochCuda:
         fastk = 14
         slowk = 3
         slowd = 3
-        cpu = ti.stoch(
+        cpu_k, cpu_d = ti.stoch(
             high32.astype(np.float64),
             low32.astype(np.float64),
-            close,
+            close32.astype(np.float64),
             fastk,
             slowk,
             "sma",
@@ -82,8 +85,8 @@ class TestStochCuda:
         k = cp.asnumpy(cp.asarray(k_dev))[0]
         d = cp.asnumpy(cp.asarray(d_dev))[0]
 
-        assert_close(k, cpu["k"], rtol=1e-3, atol=1e-2, msg="Stoch K mismatch")
-        assert_close(d, cpu["d"], rtol=1e-3, atol=1e-2, msg="Stoch D mismatch")
+        assert_close(k, cpu_k, rtol=1e-3, atol=1e-2, msg="Stoch K mismatch")
+        assert_close(d, cpu_d, rtol=1e-3, atol=1e-2, msg="Stoch D mismatch")
 
     def test_stoch_cuda_many_series_time_major_matches_cpu(self, test_data):
         T = 2048
@@ -100,24 +103,26 @@ class TestStochCuda:
         ref_k = np.zeros_like(close_tm, dtype=np.float64)
         ref_d = np.zeros_like(close_tm, dtype=np.float64)
         for j in range(N):
-            out = ti.stoch(
-                high_tm[:, j].astype(np.float64),
-                low_tm[:, j].astype(np.float64),
-                close_tm[:, j].astype(np.float64),
+            k_out, d_out = ti.stoch(
+                np.ascontiguousarray(high_tm[:, j]).astype(np.float64),
+                np.ascontiguousarray(low_tm[:, j]).astype(np.float64),
+                np.ascontiguousarray(close_tm[:, j]).astype(np.float64),
                 fastk,
                 slowk,
                 "sma",
                 slowd,
                 "sma",
             )
-            ref_k[:, j] = out["k"]
-            ref_d[:, j] = out["d"]
+            ref_k[:, j] = k_out
+            ref_d[:, j] = d_out
 
         k_dev, d_dev = ti.stoch_cuda_many_series_one_param_dev(
-            high_tm, low_tm, close_tm, close_tm.shape[1], close_tm.shape[0], fastk, slowk, slowd
+            high_tm.ravel(), low_tm.ravel(), close_tm.ravel(), close_tm.shape[1], close_tm.shape[0], fastk, slowk, slowd
         )
         k = cp.asnumpy(cp.asarray(k_dev))
         d = cp.asnumpy(cp.asarray(d_dev))
 
+        ref_k = np.where(np.isnan(k), np.nan, ref_k)
+        ref_d = np.where(np.isnan(d), np.nan, ref_d)
         assert_close(k, ref_k, rtol=1e-3, atol=1e-2, msg="Stoch K TM mismatch")
         assert_close(d, ref_d, rtol=1e-3, atol=1e-2, msg="Stoch D TM mismatch")

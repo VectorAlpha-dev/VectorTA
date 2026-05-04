@@ -75,7 +75,7 @@ class TestQstickCuda:
 
         cpu_tm = np.zeros_like(open_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.qstick(open_tm[:, j], close_tm[:, j], period)
+            cpu_tm[:, j] = ti.qstick(np.ascontiguousarray(open_tm[:, j]), np.ascontiguousarray(close_tm[:, j]), period)
 
         handle = ti.qstick_cuda_many_series_one_param_dev(
             open_tm.astype(np.float32),

@@ -3084,7 +3084,7 @@ impl DeviceArrayF32Sel {
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct DeviceArrayF32PySel {
     inner: Option<DeviceArrayF32Sel>,
     device_id: u32,

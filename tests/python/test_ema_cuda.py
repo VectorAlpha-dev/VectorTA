@@ -98,7 +98,7 @@ class TestEmaCuda:
 
         cpu_tm = np.full_like(data_tm, np.nan)
         for j in range(N):
-            cpu_tm[:, j] = ti.ema(data_tm[:, j], period=period)
+            cpu_tm[:, j] = ti.ema(np.ascontiguousarray(data_tm[:, j]), period=period)
 
         handle = ti.ema_cuda_many_series_one_param_dev(
             data_tm.astype(np.float32),

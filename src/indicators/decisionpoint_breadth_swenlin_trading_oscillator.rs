@@ -797,7 +797,7 @@ pub fn decisionpoint_breadth_swenlin_trading_oscillator_alloc(len: usize) -> *mu
 pub fn decisionpoint_breadth_swenlin_trading_oscillator_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

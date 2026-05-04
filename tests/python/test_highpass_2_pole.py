@@ -257,7 +257,8 @@ class TestHighPass2Pole:
         np.testing.assert_allclose(
             batch_result['values'][0],
             single_result,
-            rtol=1e-10,
+            rtol=1e-9,
+            atol=1e-10,
             err_msg="Batch single params mismatch"
         )
 

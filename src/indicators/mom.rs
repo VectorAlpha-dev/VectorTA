@@ -1599,7 +1599,7 @@ pub fn mom_alloc(len: usize) -> *mut f64 {
 pub fn mom_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }
@@ -1808,7 +1808,7 @@ use cust::context::Context;
 use std::sync::Arc;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct MomDeviceArrayF32Py {
     pub(crate) inner: Option<DeviceArrayF32>,
     pub(crate) ctx: Arc<Context>,

@@ -73,7 +73,7 @@ class TestJmaCuda:
 
         cpu_tm = np.full_like(data_tm, np.nan)
         for j in range(N):
-            cpu_tm[:, j] = ti.jma(data_tm[:, j], period, phase=phase, power=power)
+            cpu_tm[:, j] = ti.jma(np.ascontiguousarray(data_tm[:, j]), period, phase=phase, power=power)
 
         handle = ti.jma_cuda_many_series_one_param_dev(
             data_tm.astype(np.float32), period, phase=phase, power=power

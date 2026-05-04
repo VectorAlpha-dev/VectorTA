@@ -78,10 +78,10 @@ class TestVidyaCuda:
 
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.vidya(data_tm[:, j], sp, lp, a)
+            cpu_tm[:, j] = ti.vidya(np.ascontiguousarray(data_tm[:, j]), sp, lp, a)
 
         handle = ti.vidya_cuda_many_series_one_param_dev(
-            data_tm.astype(np.float32), N, T, sp, lp, a
+            data_tm.astype(np.float32).ravel(), N, T, sp, lp, a
         )
         gpu_tm = cp.asnumpy(cp.asarray(handle))
 

@@ -1109,7 +1109,7 @@ pub fn momentum_ratio_oscillator_free(ptr: *mut f64, len: usize) {
         return;
     }
     unsafe {
-        let _ = Vec::from_raw_parts(ptr, len * 2, len * 2);
+        let _ = Vec::from_raw_parts(ptr, 0, len * 2);
     }
 }
 

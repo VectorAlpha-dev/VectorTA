@@ -86,7 +86,7 @@ class TestAlmaCuda:
         )
 
 
-        gpu = cp.fromDlpack(handle)
+        gpu = cp.from_dlpack(handle)
         gpu_first = cp.asnumpy(gpu)[0]
 
         assert_close(
@@ -135,7 +135,7 @@ class TestAlmaCuda:
 
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.alma(data_tm[:, j], period, offset, sigma)
+            cpu_tm[:, j] = ti.alma(np.ascontiguousarray(data_tm[:, j]), period, offset, sigma)
 
 
         handle = ti.alma_cuda_many_series_one_param_dev(

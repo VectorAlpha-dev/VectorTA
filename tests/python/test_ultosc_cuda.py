@@ -92,12 +92,12 @@ class TestUltoscCuda:
 
         cpu = np.full((rows, cols), np.nan, dtype=np.float64)
         for s in range(cols):
-            series_h, series_l, series_c = h[:, s], l[:, s], c[:, s]
+            series_h, series_l, series_c = np.ascontiguousarray(h[:, s]), np.ascontiguousarray(l[:, s]), np.ascontiguousarray(c[:, s])
             cpu[:, s] = ti.ultosc(series_h, series_l, series_c, p1, p2, p3)
 
-        handle = ti.ultosc_cuda_many_series_one_param_dev(h.astype(np.float32),
-                                                          l.astype(np.float32),
-                                                          c.astype(np.float32),
+        handle = ti.ultosc_cuda_many_series_one_param_dev(h.astype(np.float32).ravel(),
+                                                          l.astype(np.float32).ravel(),
+                                                          c.astype(np.float32).ravel(),
                                                           cols, rows, p1, p2, p3)
         gpu = cp.asnumpy(cp.asarray(handle)).astype(np.float64)
 

@@ -1,18 +1,18 @@
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::CudaVwma;
+use crate::cuda::moving_averages::{vwma_wrapper::CudaVwmaBatchPlan, CudaVwma};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use cust::memory::DeviceBuffer;
+use cust::memory::{CopyDestination, DeviceBuffer};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", unsendable)]
+#[pyclass(module = "vector_ta", unsendable)]
 pub struct VwmaDeviceArrayF32Py {
     pub(crate) buf: Option<DeviceBuffer<f32>>,
     pub(crate) rows: usize,
@@ -94,7 +94,7 @@ impl VwmaDeviceArrayF32Py {
     }
 }
 #[cfg(feature = "python")]
-use numpy::{IntoPyArray, PyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -1892,6 +1892,125 @@ pub fn vwma_batch_py<'py>(
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "vector_ta", name = "VwmaCudaBatchPlan", unsendable)]
+pub struct VwmaCudaBatchPlanPy {
+    cuda: CudaVwma,
+    plan: CudaVwmaBatchPlan,
+    _ctx_guard: Arc<Context>,
+    device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl VwmaCudaBatchPlanPy {
+    #[getter]
+    fn rows(&self) -> usize {
+        self.plan.rows()
+    }
+
+    #[getter]
+    fn cols(&self) -> usize {
+        self.plan.cols()
+    }
+
+    #[getter]
+    fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        let periods: Vec<u64> = self
+            .plan
+            .params()
+            .iter()
+            .map(|c| c.period.unwrap() as u64)
+            .collect();
+        dict.set_item("periods", periods.into_pyarray(py))?;
+        dict.set_item("rows", self.plan.rows())?;
+        dict.set_item("cols", self.plan.cols())?;
+        dict.set_item("first_valid", self.plan.first_valid())?;
+        dict.set_item("device_id", self.plan.device_id())?;
+        Ok(dict)
+    }
+
+    fn execute<'py>(
+        &mut self,
+        py: Python<'py>,
+        prices_f32: numpy::PyReadonlyArray1<'py, f32>,
+        volumes_f32: numpy::PyReadonlyArray1<'py, f32>,
+    ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let prices = prices_f32.as_slice()?;
+        let volumes = volumes_f32.as_slice()?;
+        let rows = self.plan.rows();
+        let cols = self.plan.cols();
+        if prices.len() != cols || volumes.len() != cols {
+            return Err(PyValueError::new_err(format!(
+                "VWMA CUDA plan input length mismatch: expected {}, got prices={} volumes={}",
+                cols,
+                prices.len(),
+                volumes.len()
+            )));
+        }
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| PyValueError::new_err("vwma CUDA plan rows*cols overflow"))?;
+        let values = py.allow_threads(|| -> PyResult<Vec<f32>> {
+            self.cuda
+                .launch_vwma_batch_plan(prices, volumes, &mut self.plan)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            self.cuda
+                .synchronize()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let mut values = vec![0f32; total];
+            self.plan
+                .output()
+                .copy_to(&mut values)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok(values)
+        })?;
+        let arr = unsafe { PyArray2::<f32>::new(py, [rows, cols], false) };
+        let raw_ptr = arr.data() as *mut f32;
+        let out = unsafe { std::slice::from_raw_parts_mut(raw_ptr, total) };
+        out.copy_from_slice(&values);
+        Ok(arr)
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "vwma_cuda_batch_plan_create")]
+#[pyo3(signature = (series_len, first_valid, period_range, device_id=0))]
+pub fn vwma_cuda_batch_plan_create_py(
+    py: Python<'_>,
+    series_len: usize,
+    first_valid: usize,
+    period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<VwmaCudaBatchPlanPy> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let sweep = VwmaBatchRange {
+        period: period_range,
+    };
+    let (cuda, plan, ctx, dev_id) = py.allow_threads(|| {
+        let cuda = CudaVwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let plan = cuda
+            .prepare_vwma_batch_plan(series_len, first_valid, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((cuda, plan, ctx, dev_id))
+    })?;
+    Ok(VwmaCudaBatchPlanPy {
+        cuda,
+        plan,
+        _ctx_guard: ctx,
+        device_id: dev_id,
+    })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "vwma_cuda_batch_dev")]
 #[pyo3(signature = (prices_f32, volumes_f32, period_range, device_id=0))]
 pub fn vwma_cuda_batch_dev_py(
@@ -2146,7 +2265,7 @@ pub fn vwma_alloc(len: usize) -> *mut f64 {
 pub fn vwma_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }

@@ -63,7 +63,7 @@ class TestSrsiCuda:
         cpu_k = np.zeros_like(tm)
         cpu_d = np.zeros_like(tm)
         for j in range(N):
-            kj, dj = ti.srsi(tm[:, j], rsi_period=rp, stoch_period=sp, k=k, d=d)
+            kj, dj = ti.srsi(np.ascontiguousarray(tm[:, j]), rsi_period=rp, stoch_period=sp, k=k, d=d)
             cpu_k[:, j] = kj
             cpu_d[:, j] = dj
 

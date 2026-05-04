@@ -75,7 +75,7 @@ class TestDecyclerCuda:
 
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.decycler(data_tm[:, j], hp_period=hp_period, k=k)
+            cpu_tm[:, j] = ti.decycler(np.ascontiguousarray(data_tm[:, j]), hp_period=hp_period, k=k)
 
         handle = ti.decycler_cuda_many_series_one_param_dev(
             data_tm.astype(np.float32), hp_period, k

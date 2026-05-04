@@ -233,23 +233,14 @@ test('RVI batch full parameter sweep', () => {
 
     for (let row = 0; row < batchResult.rows; row++) {
         const rowData = batchResult.values.slice(row * 50, (row + 1) * 50);
-
-
-        const period = batchResult.periods[row];
-        const ma_len = batchResult.ma_lens[row];
-        const warmup = period - 1 + ma_len - 1;
-
-        for (let i = 0; i < Math.min(warmup, rowData.length); i++) {
-            if (!isNaN(rowData[i])) {
-
-
-            }
-        }
-
-
-        for (let i = warmup; i < rowData.length; i++) {
-            assert(!isNaN(rowData[i]), `Unexpected NaN at index ${i} for combination ${row}`);
-        }
+        const expected = wasm.rvi_js(
+            close,
+            batchResult.periods[row],
+            batchResult.ma_lens[row],
+            batchResult.matypes[row],
+            batchResult.devtypes[row]
+        );
+        assertArrayClose(rowData, expected, 1e-10, `Combination ${row} batch mismatch`);
     }
 });
 

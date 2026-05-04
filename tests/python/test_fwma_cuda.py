@@ -69,7 +69,7 @@ class TestFwmaCuda:
 
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
-            cpu_tm[:, j] = ti.fwma(data_tm[:, j], period)
+            cpu_tm[:, j] = ti.fwma(np.ascontiguousarray(data_tm[:, j]), period)
 
         handle = ti.fwma_cuda_many_series_one_param_dev(data_tm.astype(np.float32), period)
         gpu_tm = cp.asnumpy(cp.asarray(handle)).astype(np.float64)

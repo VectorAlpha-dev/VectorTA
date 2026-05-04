@@ -128,7 +128,7 @@ class TestEhlersEcemaCuda:
             cpu_tm = np.empty_like(data_tm)
             for j in range(N):
                 cpu_tm[:, j] = ti.ehlers_ecema(
-                    data_tm[:, j],
+                    np.ascontiguousarray(data_tm[:, j]),
                     length=length,
                     gain_limit=gain,
                     pine_compatible=pine,

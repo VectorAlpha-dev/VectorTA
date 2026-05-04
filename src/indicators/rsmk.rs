@@ -2314,20 +2314,160 @@ pub fn rsmk_alloc(len: usize) -> *mut f64 {
 pub fn rsmk_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let _ = Vec::from_raw_parts(ptr, 0, len);
         }
     }
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::{cuda_available, CudaRsmk};
+use crate::cuda::cuda_available;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::rsmk_wrapper::{CudaRsmk, CudaRsmkBatchPlan};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::{CopyDestination, DeviceBuffer};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::{pyfunction, PyResult, Python};
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyclass(module = "vector_ta", name = "RsmkCudaBatchPlan", unsendable)]
+pub struct RsmkCudaBatchPlanPy {
+    cuda: CudaRsmk,
+    plan: CudaRsmkBatchPlan,
+    device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pymethods]
+impl RsmkCudaBatchPlanPy {
+    #[getter]
+    fn rows(&self) -> usize {
+        self.plan.rows()
+    }
+
+    #[getter]
+    fn cols(&self) -> usize {
+        self.plan.cols()
+    }
+
+    #[getter]
+    fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        use pyo3::types::PyList;
+
+        let dict = PyDict::new(py);
+        let params = PyList::empty(py);
+        for prm in self.plan.params() {
+            let item = PyDict::new(py);
+            item.set_item("lookback", prm.lookback.unwrap_or(90))?;
+            item.set_item("period", prm.period.unwrap_or(3))?;
+            item.set_item("signal_period", prm.signal_period.unwrap_or(20))?;
+            item.set_item("matype", prm.matype.as_deref().unwrap_or("ema"))?;
+            item.set_item(
+                "signal_matype",
+                prm.signal_matype.as_deref().unwrap_or("ema"),
+            )?;
+            params.append(item)?;
+        }
+        dict.set_item("params", params)?;
+        dict.set_item("rows", self.plan.rows())?;
+        dict.set_item("cols", self.plan.cols())?;
+        dict.set_item("device_id", self.device_id)?;
+        Ok(dict)
+    }
+
+    fn execute<'py>(
+        &mut self,
+        py: Python<'py>,
+        main_f32: PyReadonlyArray1<'py, f32>,
+        compare_f32: PyReadonlyArray1<'py, f32>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let main = main_f32.as_slice()?;
+        let compare = compare_f32.as_slice()?;
+        let rows = self.plan.rows();
+        let cols = self.plan.cols();
+        if main.len() != cols || compare.len() != cols {
+            return Err(PyValueError::new_err(format!(
+                "rsmk CUDA plan input length mismatch: expected {}, got main={}, compare={}",
+                cols,
+                main.len(),
+                compare.len()
+            )));
+        }
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| PyValueError::new_err("rsmk CUDA plan rows*cols overflow"))?;
+        let (indicator, signal) = py.allow_threads(|| -> PyResult<(Vec<f32>, Vec<f32>)> {
+            let d_main =
+                DeviceBuffer::from_slice(main).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let d_compare = DeviceBuffer::from_slice(compare)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            self.cuda
+                .launch_rsmk_batch_plan(&d_main, &d_compare, &mut self.plan)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            self.cuda
+                .synchronize()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let mut indicator = vec![0f32; total];
+            let mut signal = vec![0f32; total];
+            let (indicator_buf, signal_buf) = self.plan.outputs();
+            indicator_buf
+                .copy_to(&mut indicator)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            signal_buf
+                .copy_to(&mut signal)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok((indicator, signal))
+        })?;
+        let dict = self.metadata(py)?;
+        let indicator_arr = indicator.into_pyarray(py);
+        let signal_arr = signal.into_pyarray(py);
+        dict.set_item("indicator", indicator_arr.reshape((rows, cols))?)?;
+        dict.set_item("signal", signal_arr.reshape((rows, cols))?)?;
+        Ok(dict)
+    }
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "rsmk_cuda_batch_plan_create")]
+#[pyo3(signature = (series_len, first_valid, lookback_range, period_range, signal_period_range, device_id=0))]
+pub fn rsmk_cuda_batch_plan_create_py(
+    py: Python<'_>,
+    series_len: usize,
+    first_valid: usize,
+    lookback_range: (usize, usize, usize),
+    period_range: (usize, usize, usize),
+    signal_period_range: (usize, usize, usize),
+    device_id: usize,
+) -> PyResult<RsmkCudaBatchPlanPy> {
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+    let sweep = RsmkBatchRange {
+        lookback: lookback_range,
+        period: period_range,
+        signal_period: signal_period_range,
+    };
+    let (cuda, plan, dev_id) = py.allow_threads(|| {
+        let cuda = CudaRsmk::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dev_id = cuda.device_id();
+        let plan = cuda
+            .prepare_rsmk_batch_plan(series_len, first_valid, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((cuda, plan, dev_id))
+    })?;
+    Ok(RsmkCudaBatchPlanPy {
+        cuda,
+        plan,
+        device_id: dev_id,
+    })
+}
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "rsmk_cuda_batch_dev")]
