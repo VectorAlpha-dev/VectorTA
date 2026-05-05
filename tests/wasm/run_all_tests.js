@@ -50,14 +50,11 @@ async function runTests() {
 
 
     const args = process.argv.slice(2);
+    const reporter = args.includes('--verbose') || args.includes('-v') ? '--test-reporter=spec' : '--test-reporter=dot';
     let cmd = 'node --experimental-wasm-modules --test';
 
 
-    if (args.includes('--verbose') || args.includes('-v')) {
-        cmd += ' --test-reporter=spec';
-    } else {
-        cmd += ' --test-reporter=dot';
-    }
+    cmd += ` ${reporter}`;
 
 
     const pattern = args.find(arg => !arg.startsWith('-'));
@@ -93,7 +90,8 @@ async function runTests() {
 
             for (let i = 0; i < testFilePaths.length; i += batchSize) {
                 const batch = testFilePaths.slice(i, i + batchSize);
-                const batchCmd = `node --experimental-wasm-modules --test ${args.includes('--verbose') || args.includes('-v') ? '--test-reporter=spec' : '--test-reporter=dot'} ${batch.map(f => `"${f}"`).join(' ')}`;
+                const namePattern = pattern ? ` --test-name-pattern="${pattern}"` : '';
+                const batchCmd = `node --experimental-wasm-modules --test ${reporter}${namePattern} ${batch.map(f => `"${f}"`).join(' ')}`;
 
                 if (i > 0) {
                     process.stdout.write('\n');

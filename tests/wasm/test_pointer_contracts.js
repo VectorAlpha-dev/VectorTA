@@ -65,6 +65,24 @@ test('global f64 allocation helpers expose writable and releasable memory', () =
         assert.deepStrictEqual(Array.from(wasm.read_f64_array(ptr, 4)), [1.25, 2.5, 3.75, 5.0]);
         assert.deepStrictEqual(Array.from(wasm.read_f64_array(copyPtr, 3)), [5.5, 6.5, 7.5]);
 
+        const view = wasm.view_f64_array(ptr, 4);
+        assert.deepStrictEqual(Array.from(view), [1.25, 2.5, 3.75, 5.0]);
+        view[1] = 12.5;
+        assert.deepStrictEqual(Array.from(wasm.read_f64_array(ptr, 4)), [1.25, 12.5, 3.75, 5.0]);
+
+        const copied = new Float64Array(4);
+        wasm.read_f64_array_into(ptr, 4, copied);
+        assert.deepStrictEqual(Array.from(copied), [1.25, 12.5, 3.75, 5.0]);
+
+        assert.strictEqual(wasm.view_f64_array(0, 0).length, 0);
+        assert.doesNotThrow(() => wasm.read_f64_array_into(0, 0, new Float64Array(0)));
+        assertThrowsMessage(() => wasm.view_f64_array(0, 1), /null pointer/i);
+        assertThrowsMessage(() => wasm.read_f64_array_into(0, 1, copied), /null pointer/i);
+        assertThrowsMessage(
+            () => wasm.read_f64_array_into(ptr, 4, new Float64Array(3)),
+            /output is too small/i,
+        );
+
         wasm.write_f64_array(matrixPtr, new Float64Array([1, 2, 3, 4, 5, 6]));
         const matrix = wasm.read_f64_matrix(matrixPtr, 2, 3);
         assert.deepStrictEqual(Array.from(matrix[0]), [1, 2, 3]);

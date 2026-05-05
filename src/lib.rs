@@ -101,15 +101,61 @@ pub fn deallocate_f64_array(ptr: *mut f64) {
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn read_f64_array(ptr: *const f64, len: usize) -> Vec<f64> {
+    if len == 0 {
+        return Vec::new();
+    }
+    assert!(!ptr.is_null(), "read_f64_array: null pointer");
     unsafe { std::slice::from_raw_parts(ptr, len).to_vec() }
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn write_f64_array(ptr: *mut f64, data: &[f64]) {
+    if data.is_empty() {
+        return;
+    }
+    assert!(!ptr.is_null(), "write_f64_array: null pointer");
     unsafe {
         std::slice::from_raw_parts_mut(ptr, data.len()).copy_from_slice(data);
     }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn view_f64_array(ptr: *const f64, len: usize) -> Result<js_sys::Float64Array, JsValue> {
+    if len == 0 {
+        return Ok(js_sys::Float64Array::new_with_length(0));
+    }
+    if ptr.is_null() {
+        return Err(JsValue::from_str("view_f64_array: null pointer"));
+    }
+    let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+    Ok(unsafe { js_sys::Float64Array::view(slice) })
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn read_f64_array_into(
+    ptr: *const f64,
+    len: usize,
+    out: &js_sys::Float64Array,
+) -> Result<(), JsValue> {
+    if len == 0 {
+        return Ok(());
+    }
+    if ptr.is_null() {
+        return Err(JsValue::from_str("read_f64_array_into: null pointer"));
+    }
+    let out_len = out.length() as usize;
+    if out_len < len {
+        return Err(JsValue::from_str(
+            "read_f64_array_into: output is too small",
+        ));
+    }
+    let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+    let view = unsafe { js_sys::Float64Array::view(slice) };
+    out.set(&view, 0);
+    Ok(())
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
