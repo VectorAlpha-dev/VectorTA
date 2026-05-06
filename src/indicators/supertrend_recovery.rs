@@ -21,6 +21,47 @@ use crate::utilities::helpers::{
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn supertrend_recovery_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    atr_length: usize,
+    multiplier: f64,
+    alpha_percent: f64,
+    threshold_atr: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = supertrend_recovery_js(
+        high,
+        low,
+        close,
+        atr_length,
+        multiplier,
+        alpha_percent,
+        threshold_atr,
+    )?;
+    crate::write_wasm_object_f64_outputs("supertrend_recovery_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn supertrend_recovery_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = supertrend_recovery_batch_unified_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "supertrend_recovery_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 use std::error::Error as StdError;
 use std::mem::ManuallyDrop;

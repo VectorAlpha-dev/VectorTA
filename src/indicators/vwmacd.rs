@@ -3485,6 +3485,74 @@ pub fn vwmacd_cuda_many_series_one_param_dev_py<'py>(
     Ok(dict)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vwmacd_output_into_js(
+    close: &[f64],
+    volume: &[f64],
+    fast_period: usize,
+    slow_period: usize,
+    signal_period: usize,
+    fast_ma_type: &str,
+    slow_ma_type: &str,
+    signal_ma_type: &str,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = vwmacd_js(
+        close,
+        volume,
+        fast_period,
+        slow_period,
+        signal_period,
+        fast_ma_type,
+        slow_ma_type,
+        signal_ma_type,
+    )?;
+    crate::write_wasm_f64_output("vwmacd_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vwmacd_batch_unified_output_into_js(
+    close: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = vwmacd_batch_unified_js(close, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "vwmacd_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vwmacd_unified_output_into_js(
+    close: &[f64],
+    volume: &[f64],
+    fast_period: usize,
+    slow_period: usize,
+    signal_period: usize,
+    fast_ma_type: &str,
+    slow_ma_type: &str,
+    signal_ma_type: &str,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = vwmacd_unified_js(
+        close,
+        volume,
+        fast_period,
+        slow_period,
+        signal_period,
+        fast_ma_type,
+        slow_ma_type,
+        signal_ma_type,
+    )?;
+    crate::write_wasm_object_f64_outputs("vwmacd_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

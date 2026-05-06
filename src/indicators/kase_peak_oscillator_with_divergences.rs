@@ -2465,6 +2465,69 @@ pub fn kase_peak_oscillator_with_divergences_batch_into_js(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn kase_peak_oscillator_with_divergences_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    deviations: f64,
+    short_cycle: usize,
+    long_cycle: usize,
+    sensitivity: f64,
+    all_peaks_mode: bool,
+    lb_r: usize,
+    lb_l: usize,
+    range_upper: usize,
+    range_lower: usize,
+    plot_bull: bool,
+    plot_hidden_bull: bool,
+    plot_bear: bool,
+    plot_hidden_bear: bool,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = kase_peak_oscillator_with_divergences_js(
+        high,
+        low,
+        close,
+        deviations,
+        short_cycle,
+        long_cycle,
+        sensitivity,
+        all_peaks_mode,
+        lb_r,
+        lb_l,
+        range_upper,
+        range_lower,
+        plot_bull,
+        plot_hidden_bull,
+        plot_bear,
+        plot_hidden_bear,
+    )?;
+    crate::write_wasm_object_f64_outputs(
+        "kase_peak_oscillator_with_divergences_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn kase_peak_oscillator_with_divergences_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = kase_peak_oscillator_with_divergences_batch_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "kase_peak_oscillator_with_divergences_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

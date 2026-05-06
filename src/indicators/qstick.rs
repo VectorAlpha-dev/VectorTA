@@ -1266,6 +1266,34 @@ impl QstickStream {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn qstick_output_into_js(
+    open: &[f64],
+    close: &[f64],
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = qstick_js(open, close, period)?;
+    crate::write_wasm_f64_output("qstick_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn qstick_batch_unified_output_into_js(
+    open: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = qstick_batch_unified_js(open, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "qstick_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

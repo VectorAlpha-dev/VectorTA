@@ -1427,6 +1427,33 @@ pub fn percentile_nearest_rank_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn percentile_nearest_rank_output_into_js(
+    data: &[f64],
+    length: usize,
+    percentage: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = percentile_nearest_rank_js(data, length, percentage)?;
+    crate::write_wasm_f64_output("percentile_nearest_rank_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn percentile_nearest_rank_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = percentile_nearest_rank_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "percentile_nearest_rank_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

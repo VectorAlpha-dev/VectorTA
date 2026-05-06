@@ -2094,6 +2094,51 @@ pub fn hwma_batch_metadata_js(
     result
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn hwma_output_into_js(
+    data: &[f64],
+    na: f64,
+    nb: f64,
+    nc: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = hwma_js(data, na, nb, nc)?;
+    crate::write_wasm_f64_output("hwma_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn hwma_batch_output_into_js(
+    data: &[f64],
+    na_start: f64,
+    na_end: f64,
+    na_step: f64,
+    nb_start: f64,
+    nb_end: f64,
+    nb_step: f64,
+    nc_start: f64,
+    nc_end: f64,
+    nc_step: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = hwma_batch_js(
+        data, na_start, na_end, na_step, nb_start, nb_end, nb_step, nc_start, nc_end, nc_step,
+    )?;
+    crate::write_wasm_f64_output("hwma_batch_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn hwma_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = hwma_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("hwma_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

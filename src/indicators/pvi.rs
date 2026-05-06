@@ -1083,6 +1083,30 @@ unsafe fn pvi_row_avx512_long(
     pvi_scalar(close, volume, first, initial, out)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn pvi_output_into_js(
+    close: &[f64],
+    volume: &[f64],
+    initial_value: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = pvi_js(close, volume, initial_value)?;
+    crate::write_wasm_f64_output("pvi_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn pvi_batch_output_into_js(
+    close: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = pvi_batch_js(close, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs("pvi_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

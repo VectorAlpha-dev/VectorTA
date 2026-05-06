@@ -2250,6 +2250,50 @@ pub fn candle_strength_oscillator_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn candle_strength_oscillator_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    atr_enabled: bool,
+    atr_length: usize,
+    mode: &str,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = candle_strength_oscillator_js(
+        open,
+        high,
+        low,
+        close,
+        period,
+        atr_enabled,
+        atr_length,
+        mode,
+    )?;
+    crate::write_wasm_object_f64_outputs("candle_strength_oscillator_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn candle_strength_oscillator_batch_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = candle_strength_oscillator_batch_js(open, high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "candle_strength_oscillator_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

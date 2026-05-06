@@ -1980,6 +1980,39 @@ pub fn volume_energy_reservoirs_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn volume_energy_reservoirs_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    length: usize,
+    sensitivity: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = volume_energy_reservoirs_js(high, low, close, volume, length, sensitivity)?;
+    crate::write_wasm_object_f64_outputs("volume_energy_reservoirs_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn volume_energy_reservoirs_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = volume_energy_reservoirs_batch_js(high, low, close, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "volume_energy_reservoirs_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

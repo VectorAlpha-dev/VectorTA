@@ -1180,6 +1180,35 @@ pub fn andean_oscillator_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn andean_oscillator_output_into_js(
+    open: &[f64],
+    close: &[f64],
+    length: usize,
+    signal_length: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = andean_oscillator_js(open, close, length, signal_length)?;
+    crate::write_wasm_object_f64_outputs("andean_oscillator_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn andean_oscillator_batch_output_into_js(
+    open: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = andean_oscillator_batch_js(open, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "andean_oscillator_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

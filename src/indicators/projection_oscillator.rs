@@ -1620,6 +1620,37 @@ pub fn projection_oscillator_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn projection_oscillator_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    source: &[f64],
+    length: usize,
+    smooth_length: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = projection_oscillator_js(high, low, source, length, smooth_length)?;
+    crate::write_wasm_object_f64_outputs("projection_oscillator_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn projection_oscillator_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    source: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = projection_oscillator_batch_js(high, low, source, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "projection_oscillator_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2753,6 +2753,68 @@ pub fn insync_index_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn insync_index_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    emo_divisor: usize,
+    emo_length: usize,
+    fast_length: usize,
+    slow_length: usize,
+    mfi_length: usize,
+    bb_length: usize,
+    bb_multiplier: f64,
+    cci_length: usize,
+    dpo_length: usize,
+    roc_length: usize,
+    rsi_length: usize,
+    stoch_length: usize,
+    stoch_d_length: usize,
+    stoch_k_length: usize,
+    sma_length: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = insync_index_js(
+        high,
+        low,
+        close,
+        volume,
+        emo_divisor,
+        emo_length,
+        fast_length,
+        slow_length,
+        mfi_length,
+        bb_length,
+        bb_multiplier,
+        cci_length,
+        dpo_length,
+        roc_length,
+        rsi_length,
+        stoch_length,
+        stoch_d_length,
+        stoch_k_length,
+        sma_length,
+    )?;
+    crate::write_wasm_f64_output("insync_index_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn insync_index_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = insync_index_batch_js(high, low, close, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs("insync_index_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

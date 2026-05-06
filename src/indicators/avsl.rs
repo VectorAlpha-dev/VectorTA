@@ -2798,6 +2798,34 @@ pub fn avsl_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn avsl_output_into_js(
+    close: &[f64],
+    low: &[f64],
+    volume: &[f64],
+    fast_period: usize,
+    slow_period: usize,
+    multiplier: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = avsl_js(close, low, volume, fast_period, slow_period, multiplier)?;
+    crate::write_wasm_f64_output("avsl_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn avsl_batch_unified_output_into_js(
+    close: &[f64],
+    low: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = avsl_batch_unified_js(close, low, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs("avsl_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

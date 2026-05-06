@@ -1353,6 +1353,34 @@ pub fn daily_factor_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn daily_factor_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    threshold_level: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = daily_factor_js(open, high, low, close, threshold_level)?;
+    crate::write_wasm_object_f64_outputs("daily_factor_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn daily_factor_batch_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = daily_factor_batch_js(open, high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs("daily_factor_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

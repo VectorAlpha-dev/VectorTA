@@ -1749,6 +1749,42 @@ pub fn multi_length_stochastic_average_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn multi_length_stochastic_average_output_into_js(
+    data: &[f64],
+    length: usize,
+    presmooth: usize,
+    premethod: String,
+    postsmooth: usize,
+    postmethod: String,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = multi_length_stochastic_average_js(
+        data, length, presmooth, premethod, postsmooth, postmethod,
+    )?;
+    crate::write_wasm_object_f64_outputs(
+        "multi_length_stochastic_average_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn multi_length_stochastic_average_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = multi_length_stochastic_average_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "multi_length_stochastic_average_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

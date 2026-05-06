@@ -1241,6 +1241,13 @@ pub fn pma_cuda_many_series_one_param_dev_py(
     Ok((predict, trigger))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn pma_output_into_js(data: &[f64], out: &js_sys::Float64Array) -> Result<usize, JsValue> {
+    let values = pma_js(data)?;
+    crate::write_wasm_f64_output("pma_output_into_js", &values, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

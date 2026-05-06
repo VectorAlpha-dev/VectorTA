@@ -1213,6 +1213,29 @@ unsafe fn epma_row_avx512(
     epma_avx512(data, period, offset, first, out);
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn epma_output_into_js(
+    data: &[f64],
+    period: usize,
+    offset: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = epma_js(data, period, offset)?;
+    crate::write_wasm_f64_output("epma_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn epma_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = epma_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("epma_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

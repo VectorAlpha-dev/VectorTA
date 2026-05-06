@@ -2652,6 +2652,66 @@ pub fn ichimoku_oscillator_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ichimoku_oscillator_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    source: &[f64],
+    conversion_periods: usize,
+    base_periods: usize,
+    lagging_span_periods: usize,
+    displacement: usize,
+    ma_length: usize,
+    smoothing_length: usize,
+    extra_smoothing: bool,
+    normalize: &str,
+    window_size: usize,
+    clamp: bool,
+    top_band: f64,
+    mid_band: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ichimoku_oscillator_js(
+        high,
+        low,
+        close,
+        source,
+        conversion_periods,
+        base_periods,
+        lagging_span_periods,
+        displacement,
+        ma_length,
+        smoothing_length,
+        extra_smoothing,
+        normalize,
+        window_size,
+        clamp,
+        top_band,
+        mid_band,
+    )?;
+    crate::write_wasm_object_f64_outputs("ichimoku_oscillator_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ichimoku_oscillator_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    source: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ichimoku_oscillator_batch_js(high, low, close, source, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "ichimoku_oscillator_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

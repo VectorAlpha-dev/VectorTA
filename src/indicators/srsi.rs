@@ -2239,6 +2239,31 @@ pub fn srsi_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn srsi_output_into_js(
+    data: &[f64],
+    rsi_period: usize,
+    stoch_period: usize,
+    k: usize,
+    d: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = srsi_js(data, rsi_period, stoch_period, k, d)?;
+    crate::write_wasm_f64_output("srsi_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn srsi_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = srsi_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("srsi_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

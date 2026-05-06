@@ -1716,6 +1716,31 @@ pub fn expand_grid_vpci(r: &VpciBatchRange) -> Vec<VpciParams> {
     expand_grid(r)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vpci_output_into_js(
+    close: &[f64],
+    volume: &[f64],
+    short_range: usize,
+    long_range: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = vpci_js(close, volume, short_range, long_range)?;
+    crate::write_wasm_object_f64_outputs("vpci_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vpci_batch_unified_output_into_js(
+    close: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = vpci_batch_unified_js(close, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs("vpci_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

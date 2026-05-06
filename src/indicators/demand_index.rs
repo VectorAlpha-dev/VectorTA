@@ -1909,6 +1909,40 @@ pub fn demand_index_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn demand_index_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    len_bs: usize,
+    len_bs_ma: usize,
+    len_di_ma: usize,
+    ma_type: &str,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let result = demand_index_js(
+        high, low, close, volume, len_bs, len_bs_ma, len_di_ma, ma_type,
+    )?;
+    let value = JsValue::from(result);
+    crate::write_wasm_object_f64_outputs("demand_index_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn demand_index_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = demand_index_batch_js(high, low, close, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs("demand_index_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

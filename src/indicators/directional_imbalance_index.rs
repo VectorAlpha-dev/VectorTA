@@ -1568,6 +1568,35 @@ pub fn directional_imbalance_index_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn directional_imbalance_index_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    length: usize,
+    period: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = directional_imbalance_index_js(high, low, length, period)?;
+    crate::write_wasm_object_f64_outputs("directional_imbalance_index_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn directional_imbalance_index_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = directional_imbalance_index_batch_js(high, low, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "directional_imbalance_index_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

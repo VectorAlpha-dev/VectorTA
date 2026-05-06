@@ -1230,6 +1230,32 @@ pub fn linearreg_intercept_cuda_many_series_one_param_dev_py(
     })
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn linearreg_intercept_output_into_js(
+    data: &[f64],
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = linearreg_intercept_js(data, period)?;
+    crate::write_wasm_f64_output("linearreg_intercept_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn linearreg_intercept_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = linearreg_intercept_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "linearreg_intercept_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2122,6 +2122,39 @@ pub fn neighboring_trailing_stop_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn neighboring_trailing_stop_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    buffer_size: usize,
+    k: usize,
+    percentile: f64,
+    smooth: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = neighboring_trailing_stop_js(high, low, close, buffer_size, k, percentile, smooth)?;
+    crate::write_wasm_object_f64_outputs("neighboring_trailing_stop_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn neighboring_trailing_stop_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = neighboring_trailing_stop_batch_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "neighboring_trailing_stop_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

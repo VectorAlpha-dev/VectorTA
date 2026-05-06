@@ -1877,6 +1877,30 @@ unsafe fn long_kernel_with_tail(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn alma_output_into_js(
+    data: &[f64],
+    period: usize,
+    offset: f64,
+    sigma: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = alma_js(data, period, offset, sigma)?;
+    crate::write_wasm_f64_output("alma_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn alma_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = alma_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("alma_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

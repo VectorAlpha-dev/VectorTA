@@ -2230,6 +2230,75 @@ pub fn nadaraya_watson_envelope_batch_unified_js(
     serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn nadaraya_watson_envelope_output_into_js(
+    data: &[f64],
+    bandwidth: f64,
+    multiplier: f64,
+    lookback: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = nadaraya_watson_envelope_js(data, bandwidth, multiplier, lookback)?;
+    crate::write_wasm_f64_output("nadaraya_watson_envelope_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn nadaraya_watson_envelope_flat_output_into_js(
+    data: &[f64],
+    bandwidth: f64,
+    multiplier: f64,
+    lookback: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = nadaraya_watson_envelope_flat_js(data, bandwidth, multiplier, lookback)?;
+    crate::write_wasm_object_f64_outputs(
+        "nadaraya_watson_envelope_flat_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn nadaraya_watson_envelope_batch_unified_output_into_js(
+    data: &[f64],
+    bandwidth_range: Vec<f64>,
+    multiplier_range: Vec<f64>,
+    lookback_range: Vec<usize>,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = nadaraya_watson_envelope_batch_unified_js(
+        data,
+        bandwidth_range,
+        multiplier_range,
+        lookback_range,
+    )?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "nadaraya_watson_envelope_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn nadaraya_watson_envelope_unified_output_into_js(
+    data: &[f64],
+    bandwidth: f64,
+    multiplier: f64,
+    lookback: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = nadaraya_watson_envelope_unified_js(data, bandwidth, multiplier, lookback)?;
+    crate::write_wasm_object_f64_outputs(
+        "nadaraya_watson_envelope_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

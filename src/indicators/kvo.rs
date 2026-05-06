@@ -1316,6 +1316,35 @@ impl KvoStream {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn kvo_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    short_period: usize,
+    long_period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = kvo_js(high, low, close, volume, short_period, long_period)?;
+    crate::write_wasm_f64_output("kvo_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn kvo_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = kvo_batch_js(high, low, close, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs("kvo_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1553,6 +1553,68 @@ unsafe fn chande_row_avx512_long(
 ) {
     chande_fast_unchecked(high, low, close, period, mult, dir, first, out)
 }
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn chande_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    mult: f64,
+    direction: &str,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = chande_js(high, low, close, period, mult, direction)?;
+    crate::write_wasm_f64_output("chande_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn chande_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    mult_start: f64,
+    mult_end: f64,
+    mult_step: f64,
+    direction: &str,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = chande_batch_js(
+        high,
+        low,
+        close,
+        period_start,
+        period_end,
+        period_step,
+        mult_start,
+        mult_end,
+        mult_step,
+        direction,
+    )?;
+    crate::write_wasm_selected_object_f64_outputs("chande_batch_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn chande_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = chande_batch_unified_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "chande_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

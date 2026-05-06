@@ -120,6 +120,99 @@ test('global f64 allocation helpers do not grow memory without bound after frees
     assert(after <= before + 16 * 1024 * 1024);
 });
 
+test('reusable flat-output WASM wrappers fill caller Float64Array', () => {
+    const data = new Float64Array(64);
+    for (let i = 0; i < data.length; i++) {
+        data[i] = 100 + i * 0.5 + Math.sin(i / 4);
+    }
+
+    const out = new Float64Array(data.length);
+    const written = wasm.sma_output_into_js(data, 5, out);
+    const expected = wasm.sma(data, 5);
+
+    assert.strictEqual(written, data.length);
+    assertArrayClose(Array.from(out), Array.from(expected), 1e-12);
+    assertThrowsMessage(
+        () => wasm.sma_output_into_js(data, 5, new Float64Array(data.length - 1)),
+        /output is too small/i,
+    );
+});
+
+test('reusable structured-output WASM wrappers fill flat caller Float64Array', () => {
+    const data = new Float64Array(72);
+    for (let i = 0; i < data.length; i++) {
+        data[i] = 90 + i * 0.8 + Math.cos(i / 6);
+    }
+
+    const expected = wasm.macd_js(data, 12, 26, 9, 'ema').values;
+    const out = new Float64Array(expected.length);
+    const written = wasm.macd_output_into_js(data, 12, 26, 9, 'ema', out);
+
+    assert.strictEqual(written, expected.length);
+    assertArrayClose(Array.from(out), Array.from(expected), 1e-12);
+    assertThrowsMessage(
+        () => wasm.macd_output_into_js(data, 12, 26, 9, 'ema', new Float64Array(expected.length - 1)),
+        /output is too small/i,
+    );
+});
+
+test('reusable named-object WASM wrappers fill caller Float64Array fields', () => {
+    const len = 80;
+    const high = new Float64Array(len);
+    const low = new Float64Array(len);
+    const close = new Float64Array(len);
+    const volume = new Float64Array(len);
+    for (let i = 0; i < len; i++) {
+        close[i] = 100 + i * 0.4 + Math.sin(i / 5);
+        high[i] = close[i] + 1.5;
+        low[i] = close[i] - 1.5;
+        volume[i] = 1000 + i * 3;
+    }
+
+    const expected = wasm.demand_index_js(high, low, close, volume, 13, 5, 5, 'ema');
+    const out = {
+        demand_index: new Float64Array(len),
+        signal: new Float64Array(len),
+    };
+    const written = wasm.demand_index_output_into_js(high, low, close, volume, 13, 5, 5, 'ema', out);
+
+    assert.strictEqual(written, len * 2);
+    assertArrayClose(Array.from(out.demand_index), Array.from(expected.demand_index), 1e-12);
+    assertArrayClose(Array.from(out.signal), Array.from(expected.signal), 1e-12);
+    assertThrowsMessage(
+        () => wasm.demand_index_output_into_js(high, low, close, volume, 13, 5, 5, 'ema', {
+            demand_index: new Float64Array(len),
+        }),
+        /missing Float64Array output for field signal/i,
+    );
+});
+
+test('reusable selected batch-output WASM wrappers copy requested fields only', () => {
+    const data = new Float64Array(72);
+    for (let i = 0; i < data.length; i++) {
+        data[i] = 50 + i * 0.25 + Math.cos(i / 7);
+    }
+    const config = { period_range: [5, 7, 1] };
+    const expected = wasm.rsi_batch(data, config);
+    const out = {
+        values: new Float64Array(expected.values.length),
+    };
+
+    const written = wasm.rsi_batch_unified_output_into_js(data, config, out);
+
+    assert.strictEqual(written, expected.values.length);
+    assertArrayClose(Array.from(out.values), Array.from(expected.values), 1e-12);
+    assert.doesNotThrow(() => wasm.rsi_batch_unified_output_into_js(data, config, {
+        values: new Float64Array(expected.values.length),
+    }));
+    assertThrowsMessage(
+        () => wasm.rsi_batch_unified_output_into_js(data, config, {
+            values: new Float64Array(expected.values.length - 1),
+        }),
+        /output field values is too small/i,
+    );
+});
+
 test('single-output pointer API rejects null pointers and matches safe RVI output', () => {
     const data = new Float64Array([
         10, 10.5, 11, 10.75, 11.5, 12, 11.75, 12.25, 12.75, 13,

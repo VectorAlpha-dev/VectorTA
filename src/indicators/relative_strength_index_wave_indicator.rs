@@ -1845,6 +1845,46 @@ pub fn relative_strength_index_wave_indicator_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn relative_strength_index_wave_indicator_output_into_js(
+    source: &[f64],
+    high: &[f64],
+    low: &[f64],
+    rsi_length: usize,
+    length1: usize,
+    length2: usize,
+    length3: usize,
+    length4: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = relative_strength_index_wave_indicator_js(
+        source, high, low, rsi_length, length1, length2, length3, length4,
+    )?;
+    crate::write_wasm_object_f64_outputs(
+        "relative_strength_index_wave_indicator_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn relative_strength_index_wave_indicator_batch_output_into_js(
+    source: &[f64],
+    high: &[f64],
+    low: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = relative_strength_index_wave_indicator_batch_js(source, high, low, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "relative_strength_index_wave_indicator_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

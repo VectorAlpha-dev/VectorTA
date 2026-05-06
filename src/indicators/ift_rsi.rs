@@ -1508,6 +1508,33 @@ pub unsafe fn ift_rsi_scalar_classic(
     Ok(())
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ift_rsi_output_into_js(
+    data: &[f64],
+    rsi_period: usize,
+    wma_period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = ift_rsi_js(data, rsi_period, wma_period)?;
+    crate::write_wasm_f64_output("ift_rsi_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ift_rsi_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ift_rsi_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "ift_rsi_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

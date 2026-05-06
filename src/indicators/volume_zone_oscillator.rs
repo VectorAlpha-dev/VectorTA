@@ -1227,6 +1227,37 @@ pub fn volume_zone_oscillator_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn volume_zone_oscillator_output_into_js(
+    close: &[f64],
+    volume: &[f64],
+    length: usize,
+    intraday_smoothing: bool,
+    noise_filter: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values =
+        volume_zone_oscillator_js(close, volume, length, intraday_smoothing, noise_filter)?;
+    crate::write_wasm_f64_output("volume_zone_oscillator_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn volume_zone_oscillator_batch_output_into_js(
+    close: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = volume_zone_oscillator_batch_js(close, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "volume_zone_oscillator_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

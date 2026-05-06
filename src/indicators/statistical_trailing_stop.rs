@@ -19,6 +19,45 @@ use crate::utilities::helpers::{alloc_uninit_f64, detect_best_batch_kernel, make
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn statistical_trailing_stop_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    data_length: usize,
+    normalization_length: usize,
+    base_level: &str,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = statistical_trailing_stop_js(
+        high,
+        low,
+        close,
+        data_length,
+        normalization_length,
+        base_level,
+    )?;
+    crate::write_wasm_object_f64_outputs("statistical_trailing_stop_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn statistical_trailing_stop_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = statistical_trailing_stop_batch_unified_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "statistical_trailing_stop_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 use std::error::Error as StdError;
 use std::mem::ManuallyDrop;

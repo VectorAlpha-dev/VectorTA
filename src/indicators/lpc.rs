@@ -2639,6 +2639,48 @@ pub fn lpc_batch_par_slice(
     lpc_batch_with_kernel(high, low, close, src, sweep, detect_best_batch_kernel())
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn lpc_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    src: &[f64],
+    cutoff_type: &str,
+    fixed_period: usize,
+    max_cycle_limit: usize,
+    cycle_mult: f64,
+    tr_mult: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = lpc_js(
+        high,
+        low,
+        close,
+        src,
+        cutoff_type,
+        fixed_period,
+        max_cycle_limit,
+        cycle_mult,
+        tr_mult,
+    )?;
+    crate::write_wasm_f64_output("lpc_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn lpc_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    src: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = lpc_batch_unified_js(high, low, close, src, config)?;
+    crate::write_wasm_selected_object_f64_outputs("lpc_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

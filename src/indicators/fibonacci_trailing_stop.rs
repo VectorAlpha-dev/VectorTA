@@ -1871,6 +1871,40 @@ pub fn fibonacci_trailing_stop_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn fibonacci_trailing_stop_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    left_bars: usize,
+    right_bars: usize,
+    level: f64,
+    trigger: String,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value =
+        fibonacci_trailing_stop_js(high, low, close, left_bars, right_bars, level, trigger)?;
+    crate::write_wasm_object_f64_outputs("fibonacci_trailing_stop_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn fibonacci_trailing_stop_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = fibonacci_trailing_stop_batch_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "fibonacci_trailing_stop_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

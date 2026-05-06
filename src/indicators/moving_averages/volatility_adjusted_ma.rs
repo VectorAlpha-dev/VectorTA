@@ -1974,6 +1974,39 @@ pub fn vama_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vama_output_into_js(
+    data: &[f64],
+    base_period: usize,
+    vol_period: usize,
+    smoothing: bool,
+    smooth_type: usize,
+    smooth_period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = vama_js(
+        data,
+        base_period,
+        vol_period,
+        smoothing,
+        smooth_type,
+        smooth_period,
+    )?;
+    crate::write_wasm_f64_output("vama_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vama_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = vama_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("vama_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2419,6 +2419,61 @@ pub fn uma_batch_js(
     Ok(obj.into())
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn uma_output_into_js(
+    data: &[f64],
+    accelerator: f64,
+    min_length: usize,
+    max_length: usize,
+    smooth_length: usize,
+    volume: Option<Vec<f64>>,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = uma_js(
+        data,
+        accelerator,
+        min_length,
+        max_length,
+        smooth_length,
+        volume,
+    )?;
+    crate::write_wasm_object_f64_outputs("uma_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn uma_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = uma_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("uma_batch_unified_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn uma_batch_output_into_js(
+    data: &[f64],
+    accelerator_range: Vec<f64>,
+    min_length_range: Vec<usize>,
+    max_length_range: Vec<usize>,
+    smooth_length_range: Vec<usize>,
+    volume: Option<Vec<f64>>,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = uma_batch_js(
+        data,
+        accelerator_range,
+        min_length_range,
+        max_length_range,
+        smooth_length_range,
+        volume,
+    )?;
+    crate::write_wasm_selected_object_f64_outputs("uma_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

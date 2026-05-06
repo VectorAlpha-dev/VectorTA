@@ -2626,6 +2626,41 @@ pub fn stc_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn stc_output_into_js(
+    data: &[f64],
+    fast_period: usize,
+    slow_period: usize,
+    k_period: usize,
+    d_period: usize,
+    fast_ma_type: &str,
+    slow_ma_type: &str,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = stc_js(
+        data,
+        fast_period,
+        slow_period,
+        k_period,
+        d_period,
+        fast_ma_type,
+        slow_ma_type,
+    )?;
+    crate::write_wasm_f64_output("stc_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn stc_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = stc_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("stc_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

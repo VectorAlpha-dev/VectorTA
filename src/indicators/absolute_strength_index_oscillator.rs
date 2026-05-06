@@ -1279,6 +1279,37 @@ pub fn absolute_strength_index_oscillator_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn absolute_strength_index_oscillator_output_into_js(
+    data: &[f64],
+    ema_length: usize,
+    signal_length: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = absolute_strength_index_oscillator_js(data, ema_length, signal_length)?;
+    crate::write_wasm_object_f64_outputs(
+        "absolute_strength_index_oscillator_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn absolute_strength_index_oscillator_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = absolute_strength_index_oscillator_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "absolute_strength_index_oscillator_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

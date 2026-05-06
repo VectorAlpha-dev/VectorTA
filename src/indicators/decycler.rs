@@ -1069,6 +1069,33 @@ pub fn expand_grid_decycler(r: &DecyclerBatchRange) -> Result<Vec<DecyclerParams
     expand_grid(r)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn decycler_output_into_js(
+    data: &[f64],
+    hp_period: usize,
+    k: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = decycler_js(data, hp_period, k)?;
+    crate::write_wasm_f64_output("decycler_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn decycler_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = decycler_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "decycler_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

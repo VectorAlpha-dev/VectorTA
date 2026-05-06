@@ -1245,6 +1245,37 @@ pub fn ehlers_smoothed_adaptive_momentum_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_smoothed_adaptive_momentum_output_into_js(
+    data: &[f64],
+    alpha: f64,
+    cutoff: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = ehlers_smoothed_adaptive_momentum_js(data, alpha, cutoff)?;
+    crate::write_wasm_f64_output(
+        "ehlers_smoothed_adaptive_momentum_output_into_js",
+        &values,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_smoothed_adaptive_momentum_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ehlers_smoothed_adaptive_momentum_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "ehlers_smoothed_adaptive_momentum_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

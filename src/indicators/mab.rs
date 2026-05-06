@@ -448,6 +448,41 @@ pub fn mab_with_kernel(input: &MabInput, kernel: Kernel) -> Result<MabOutput, Ma
     })
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn mab_output_into_js(
+    data: &[f64],
+    fast_period: usize,
+    slow_period: usize,
+    devup: f64,
+    devdn: f64,
+    fast_ma_type: &str,
+    slow_ma_type: &str,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = mab_js(
+        data,
+        fast_period,
+        slow_period,
+        devup,
+        devdn,
+        fast_ma_type,
+        slow_ma_type,
+    )?;
+    crate::write_wasm_f64_output("mab_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn mab_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = mab_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("mab_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod into_parity_tests {
     use super::*;

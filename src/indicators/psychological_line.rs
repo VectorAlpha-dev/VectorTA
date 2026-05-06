@@ -980,6 +980,32 @@ pub fn psychological_line_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn psychological_line_output_into_js(
+    data: &[f64],
+    length: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = psychological_line_js(data, length)?;
+    crate::write_wasm_f64_output("psychological_line_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn psychological_line_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = psychological_line_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "psychological_line_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

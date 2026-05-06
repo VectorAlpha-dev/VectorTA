@@ -3111,6 +3111,88 @@ impl FvgTrailingStopBuilder {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn fvg_trailing_stop_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    unmitigated_fvg_lookback: usize,
+    smoothing_length: usize,
+    reset_on_cross: bool,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = fvg_trailing_stop_js(
+        high,
+        low,
+        close,
+        unmitigated_fvg_lookback,
+        smoothing_length,
+        reset_on_cross,
+    )?;
+    crate::write_wasm_object_f64_outputs("fvg_trailing_stop_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn fvg_trailing_stop_zero_copy_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    unmitigated_fvg_lookback: usize,
+    smoothing_length: usize,
+    reset_on_cross: bool,
+    ptr: *mut f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = fvg_trailing_stop_zero_copy_js(
+        high,
+        low,
+        close,
+        unmitigated_fvg_lookback,
+        smoothing_length,
+        reset_on_cross,
+        ptr,
+    )?;
+    crate::write_wasm_object_f64_outputs("fvg_trailing_stop_zero_copy_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn fvg_trailing_stop_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    lookback_start: usize,
+    lookback_end: usize,
+    lookback_step: usize,
+    smoothing_start: usize,
+    smoothing_end: usize,
+    smoothing_step: usize,
+    reset_include_false: bool,
+    reset_include_true: bool,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = fvg_trailing_stop_batch_js(
+        high,
+        low,
+        close,
+        lookback_start,
+        lookback_end,
+        lookback_step,
+        smoothing_start,
+        smoothing_end,
+        smoothing_step,
+        reset_include_false,
+        reset_include_true,
+    )?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "fvg_trailing_stop_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

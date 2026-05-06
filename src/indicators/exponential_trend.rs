@@ -19,6 +19,45 @@ use crate::utilities::helpers::{alloc_uninit_f64, detect_best_batch_kernel, make
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn exponential_trend_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    exp_rate: f64,
+    initial_distance: f64,
+    width_multiplier: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = exponential_trend_js(
+        high,
+        low,
+        close,
+        exp_rate,
+        initial_distance,
+        width_multiplier,
+    )?;
+    crate::write_wasm_object_f64_outputs("exponential_trend_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn exponential_trend_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = exponential_trend_batch_unified_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "exponential_trend_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 use std::error::Error as StdError;
 use std::mem::ManuallyDrop;

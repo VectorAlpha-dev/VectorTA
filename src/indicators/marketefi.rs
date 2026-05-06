@@ -1292,6 +1292,31 @@ pub fn marketefi_cuda_many_series_one_param_dev_py(
     ))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn marketefi_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    volume: &[f64],
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = marketefi_js(high, low, volume)?;
+    crate::write_wasm_f64_output("marketefi_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn marketefi_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    volume: &[f64],
+    _config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = marketefi_batch_js(high, low, volume, _config)?;
+    crate::write_wasm_selected_object_f64_outputs("marketefi_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

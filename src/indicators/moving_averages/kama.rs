@@ -1542,6 +1542,41 @@ pub fn kama_batch_metadata_js(
     result
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn kama_output_into_js(
+    data: &[f64],
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = kama_js(data, period)?;
+    crate::write_wasm_f64_output("kama_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn kama_batch_output_into_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = kama_batch_js(data, period_start, period_end, period_step)?;
+    crate::write_wasm_f64_output("kama_batch_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn kama_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = kama_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("kama_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

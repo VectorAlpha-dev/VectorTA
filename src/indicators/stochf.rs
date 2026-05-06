@@ -2389,6 +2389,38 @@ pub fn stochf_cuda_many_series_one_param_dev_py(
     ))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn stochf_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    fastk_period: usize,
+    fastd_period: usize,
+    fastd_matype: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = stochf_js(high, low, close, fastk_period, fastd_period, fastd_matype)?;
+    crate::write_wasm_f64_output("stochf_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn stochf_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = stochf_batch_unified_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "stochf_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

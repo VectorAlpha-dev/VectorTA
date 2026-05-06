@@ -2568,6 +2568,70 @@ pub fn stoch_into_js(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn stoch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    fastk_period: usize,
+    slowk_period: usize,
+    slowk_ma_type: &str,
+    slowd_period: usize,
+    slowd_ma_type: &str,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = stoch_js(
+        high,
+        low,
+        close,
+        fastk_period,
+        slowk_period,
+        slowk_ma_type,
+        slowd_period,
+        slowd_ma_type,
+    )?;
+    crate::write_wasm_object_f64_outputs("stoch_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn stoch_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    fastk_start: usize,
+    fastk_end: usize,
+    fastk_step: usize,
+    slowk_start: usize,
+    slowk_end: usize,
+    slowk_step: usize,
+    slowk_ma_type: &str,
+    slowd_start: usize,
+    slowd_end: usize,
+    slowd_step: usize,
+    slowd_ma_type: &str,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = stoch_batch_unified_js(
+        high,
+        low,
+        close,
+        fastk_start,
+        fastk_end,
+        fastk_step,
+        slowk_start,
+        slowk_end,
+        slowk_step,
+        slowk_ma_type,
+        slowd_start,
+        slowd_end,
+        slowd_step,
+        slowd_ma_type,
+    )?;
+    crate::write_wasm_selected_object_f64_outputs("stoch_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1927,6 +1927,32 @@ fn willr_batch_inner_into(
     Ok(combos)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn willr_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = willr_js(high, low, close, period)?;
+    crate::write_wasm_f64_output("willr_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn willr_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = willr_batch_unified_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs("willr_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

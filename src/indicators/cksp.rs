@@ -2184,6 +2184,34 @@ fn cksp_batch_inner(
     })
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn cksp_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    p: usize,
+    x: f64,
+    q: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = cksp_js(high, low, close, p, x, q)?;
+    crate::write_wasm_f64_output("cksp_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn cksp_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = cksp_batch_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs("cksp_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

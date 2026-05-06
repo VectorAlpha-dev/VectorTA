@@ -2156,6 +2156,47 @@ pub fn moving_average_cross_probability_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn moving_average_cross_probability_output_into_js(
+    data: &[f64],
+    ma_type: String,
+    smoothing_window: usize,
+    slow_length: usize,
+    fast_length: usize,
+    resolution: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = moving_average_cross_probability_js(
+        data,
+        ma_type,
+        smoothing_window,
+        slow_length,
+        fast_length,
+        resolution,
+    )?;
+    crate::write_wasm_object_f64_outputs(
+        "moving_average_cross_probability_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn moving_average_cross_probability_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = moving_average_cross_probability_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "moving_average_cross_probability_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -804,6 +804,41 @@ pub fn expand_grid_mwdx(r: &MwdxBatchRange) -> Vec<MwdxParams> {
     expand_grid(r)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn mwdx_output_into_js(
+    data: &[f64],
+    factor: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = mwdx_js(data, factor)?;
+    crate::write_wasm_f64_output("mwdx_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn mwdx_batch_output_into_js(
+    data: &[f64],
+    factor_start: f64,
+    factor_end: f64,
+    factor_step: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = mwdx_batch_js(data, factor_start, factor_end, factor_step)?;
+    crate::write_wasm_f64_output("mwdx_batch_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn mwdx_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = mwdx_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("mwdx_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1625,6 +1625,93 @@ fn expand_grid_len(r: &AlligatorBatchRange) -> usize {
         * axis(r.lips_offset)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn alligator_output_into_js(
+    data: &[f64],
+    jaw_period: usize,
+    jaw_offset: usize,
+    teeth_period: usize,
+    teeth_offset: usize,
+    lips_period: usize,
+    lips_offset: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = alligator_js(
+        data,
+        jaw_period,
+        jaw_offset,
+        teeth_period,
+        teeth_offset,
+        lips_period,
+        lips_offset,
+    )?;
+    crate::write_wasm_f64_output("alligator_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn alligator_batch_output_into_js(
+    data: &[f64],
+    jaw_period_start: usize,
+    jaw_period_end: usize,
+    jaw_period_step: usize,
+    jaw_offset_start: usize,
+    jaw_offset_end: usize,
+    jaw_offset_step: usize,
+    teeth_period_start: usize,
+    teeth_period_end: usize,
+    teeth_period_step: usize,
+    teeth_offset_start: usize,
+    teeth_offset_end: usize,
+    teeth_offset_step: usize,
+    lips_period_start: usize,
+    lips_period_end: usize,
+    lips_period_step: usize,
+    lips_offset_start: usize,
+    lips_offset_end: usize,
+    lips_offset_step: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = alligator_batch_js(
+        data,
+        jaw_period_start,
+        jaw_period_end,
+        jaw_period_step,
+        jaw_offset_start,
+        jaw_offset_end,
+        jaw_offset_step,
+        teeth_period_start,
+        teeth_period_end,
+        teeth_period_step,
+        teeth_offset_start,
+        teeth_offset_end,
+        teeth_offset_step,
+        lips_period_start,
+        lips_period_end,
+        lips_period_step,
+        lips_offset_start,
+        lips_offset_end,
+        lips_offset_step,
+    )?;
+    crate::write_wasm_f64_output("alligator_batch_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn alligator_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = alligator_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "alligator_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

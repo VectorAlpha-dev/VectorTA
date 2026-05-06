@@ -1257,6 +1257,60 @@ pub fn expand_grid_jma(r: &JmaBatchRange) -> Vec<JmaParams> {
     expand_grid(r)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn jma_output_into_js(
+    data: &[f64],
+    period: usize,
+    phase: f64,
+    power: u32,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = jma_js(data, period, phase, power)?;
+    crate::write_wasm_f64_output("jma_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn jma_batch_output_into_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    phase_start: f64,
+    phase_end: f64,
+    phase_step: f64,
+    power_start: u32,
+    power_end: u32,
+    power_step: u32,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = jma_batch_js(
+        data,
+        period_start,
+        period_end,
+        period_step,
+        phase_start,
+        phase_end,
+        phase_step,
+        power_start,
+        power_end,
+        power_step,
+    )?;
+    crate::write_wasm_f64_output("jma_batch_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn jma_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = jma_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("jma_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

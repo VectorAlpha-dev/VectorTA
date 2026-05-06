@@ -1629,6 +1629,35 @@ pub fn regression_slope_oscillator_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn regression_slope_oscillator_output_into_js(
+    data: &[f64],
+    min_range: usize,
+    max_range: usize,
+    step: usize,
+    signal_line: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = regression_slope_oscillator_js(data, min_range, max_range, step, signal_line)?;
+    crate::write_wasm_object_f64_outputs("regression_slope_oscillator_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn regression_slope_oscillator_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = regression_slope_oscillator_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "regression_slope_oscillator_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

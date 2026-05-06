@@ -2716,6 +2716,57 @@ pub fn reversal_signals_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn reversal_signals_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    lookback_period: usize,
+    confirmation_period: usize,
+    use_volume_confirmation: bool,
+    trend_ma_period: usize,
+    trend_ma_type: String,
+    ma_step_period: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = reversal_signals_js(
+        open,
+        high,
+        low,
+        close,
+        volume,
+        lookback_period,
+        confirmation_period,
+        use_volume_confirmation,
+        trend_ma_period,
+        trend_ma_type,
+        ma_step_period,
+    )?;
+    crate::write_wasm_object_f64_outputs("reversal_signals_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn reversal_signals_batch_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = reversal_signals_batch_js(open, high, low, close, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "reversal_signals_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

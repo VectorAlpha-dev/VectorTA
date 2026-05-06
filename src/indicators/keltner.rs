@@ -1784,6 +1784,40 @@ impl KeltnerStream {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn keltner_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    source: &[f64],
+    period: usize,
+    multiplier: f64,
+    ma_type: String,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = keltner_js(high, low, close, source, period, multiplier, ma_type)?;
+    crate::write_wasm_object_f64_outputs("keltner_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn keltner_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    source: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = keltner_batch_unified_js(high, low, close, source, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "keltner_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

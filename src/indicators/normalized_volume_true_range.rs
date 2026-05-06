@@ -2123,6 +2123,54 @@ impl NormalizedVolumeTrueRangeStreamWasm {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn normalized_volume_true_range_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    true_range_style: Option<String>,
+    outlier_range: Option<f64>,
+    atr_length: Option<usize>,
+    volume_length: Option<usize>,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = normalized_volume_true_range_js(
+        open,
+        high,
+        low,
+        close,
+        volume,
+        true_range_style,
+        outlier_range,
+        atr_length,
+        volume_length,
+    )?;
+    crate::write_wasm_object_f64_outputs("normalized_volume_true_range_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn normalized_volume_true_range_batch_unified_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value =
+        normalized_volume_true_range_batch_unified_js(open, high, low, close, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "normalized_volume_true_range_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

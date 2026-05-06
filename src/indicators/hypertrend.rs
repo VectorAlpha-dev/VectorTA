@@ -1806,6 +1806,34 @@ pub fn hypertrend_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn hypertrend_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    source: &[f64],
+    factor: f64,
+    slope: f64,
+    width_percent: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = hypertrend_js(high, low, source, factor, slope, width_percent)?;
+    crate::write_wasm_object_f64_outputs("hypertrend_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn hypertrend_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    source: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = hypertrend_batch_js(high, low, source, config)?;
+    crate::write_wasm_selected_object_f64_outputs("hypertrend_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

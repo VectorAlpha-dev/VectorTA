@@ -2447,6 +2447,49 @@ impl BuffAveragesContext {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn buff_averages_output_into_js(
+    price: &[f64],
+    volume: &[f64],
+    fast_period: usize,
+    slow_period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = buff_averages_js(price, volume, fast_period, slow_period)?;
+    crate::write_wasm_f64_output("buff_averages_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn buff_averages_batch_unified_output_into_js(
+    price: &[f64],
+    volume: &[f64],
+    fast_range: Vec<usize>,
+    slow_range: Vec<usize>,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = buff_averages_batch_unified_js(price, volume, fast_range, slow_range)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "buff_averages_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn buff_averages_unified_output_into_js(
+    price: &[f64],
+    volume: &[f64],
+    fast_period: usize,
+    slow_period: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = buff_averages_unified_js(price, volume, fast_period, slow_period)?;
+    crate::write_wasm_object_f64_outputs("buff_averages_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

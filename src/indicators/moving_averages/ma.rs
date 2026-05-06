@@ -2683,6 +2683,18 @@ pub fn ma_js(data: &[f64], ma_type: &str, period: usize) -> Result<Vec<f64>, JsV
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ma_output_into_js(
+    data: &[f64],
+    ma_type: &str,
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = ma_js(data, ma_type, period)?;
+    crate::write_wasm_f64_output("ma_output_into_js", &values, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

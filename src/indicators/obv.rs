@@ -637,6 +637,28 @@ fn expand_grid(_r: &ObvBatchRange) -> Vec<ObvParams> {
     vec![ObvParams::default()]
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn obv_output_into_js(
+    close: &[f64],
+    volume: &[f64],
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = obv_js(close, volume)?;
+    crate::write_wasm_f64_output("obv_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn obv_batch_output_into_js(
+    close: &[f64],
+    volume: &[f64],
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = obv_batch_js(close, volume)?;
+    crate::write_wasm_selected_object_f64_outputs("obv_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

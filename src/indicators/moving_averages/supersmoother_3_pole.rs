@@ -944,6 +944,30 @@ pub fn supersmoother_3_pole_batch_inner_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn supersmoother_3_pole_output_into_js(
+    data: &[f64],
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = supersmoother_3_pole_js(data, period)?;
+    crate::write_wasm_f64_output("supersmoother_3_pole_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn supersmoother_3_pole_batch_output_into_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = supersmoother_3_pole_batch_js(data, period_start, period_end, period_step)?;
+    crate::write_wasm_f64_output("supersmoother_3_pole_batch_output_into_js", &values, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

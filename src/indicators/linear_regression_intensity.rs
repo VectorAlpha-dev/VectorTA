@@ -1494,6 +1494,35 @@ pub fn linear_regression_intensity_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn linear_regression_intensity_output_into_js(
+    data: &[f64],
+    lookback_period: usize,
+    range_tolerance: f64,
+    linreg_length: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values =
+        linear_regression_intensity_js(data, lookback_period, range_tolerance, linreg_length)?;
+    crate::write_wasm_f64_output("linear_regression_intensity_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn linear_regression_intensity_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = linear_regression_intensity_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "linear_regression_intensity_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1569,6 +1569,45 @@ pub fn register_vi_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> 
     Ok(())
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vi_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = vi_unified_js(high, low, close, period)?;
+    crate::write_wasm_f64_output("vi_unified_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vi_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = vi_js(high, low, close, period)?;
+    crate::write_wasm_object_f64_outputs("vi_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vi_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = vi_batch_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs("vi_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

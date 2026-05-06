@@ -2560,6 +2560,49 @@ pub fn ttm_squeeze_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ttm_squeeze_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    length: usize,
+    bb_mult: f64,
+    kc_mult_high: f64,
+    kc_mult_mid: f64,
+    kc_mult_low: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ttm_squeeze_js(
+        high,
+        low,
+        close,
+        length,
+        bb_mult,
+        kc_mult_high,
+        kc_mult_mid,
+        kc_mult_low,
+    )?;
+    crate::write_wasm_object_f64_outputs("ttm_squeeze_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ttm_squeeze_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ttm_squeeze_batch_unified_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "ttm_squeeze_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

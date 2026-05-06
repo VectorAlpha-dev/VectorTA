@@ -1312,6 +1312,40 @@ pub fn acosc_free(ptr: *mut f64, len: usize) {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn acosc_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = acosc_js(high, low)?;
+    crate::write_wasm_f64_output("acosc_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn acosc_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = acosc_batch_js(high, low)?;
+    crate::write_wasm_f64_output("acosc_batch_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn acosc_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    _config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = acosc_batch_unified_js(high, low, _config)?;
+    crate::write_wasm_selected_object_f64_outputs("acosc_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

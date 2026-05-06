@@ -159,6 +159,174 @@ pub fn read_f64_array_into(
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub(crate) fn write_wasm_f64_output(
+    context: &str,
+    values: &[f64],
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let len = values.len();
+    if (out.length() as usize) < len {
+        return Err(JsValue::from_str(&format!(
+            "{}: output is too small: expected at least {}, got {}",
+            context,
+            len,
+            out.length()
+        )));
+    }
+    if len == 0 {
+        return Ok(0);
+    }
+    let view = unsafe { js_sys::Float64Array::view(values) };
+    out.set(&view, 0);
+    Ok(len)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub(crate) fn write_wasm_object_f64_outputs(
+    context: &str,
+    value: &JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let object = value
+        .dyn_ref::<js_sys::Object>()
+        .ok_or_else(|| JsValue::from_str(&format!("{}: result is not an object", context)))?;
+    let keys = js_sys::Object::keys(object);
+    let mut copied = 0usize;
+
+    for i in 0..keys.length() {
+        let key = keys.get(i);
+        let Some(key_name) = key.as_string() else {
+            continue;
+        };
+        let source = js_sys::Reflect::get(value, &key)?;
+        let source_array = if let Some(array) = source.dyn_ref::<js_sys::Float64Array>() {
+            Some(array.clone())
+        } else if js_sys::Array::is_array(&source) {
+            let array = js_sys::Array::from(&source);
+            let mut numeric = true;
+            for j in 0..array.length() {
+                if array.get(j).as_f64().is_none() {
+                    numeric = false;
+                    break;
+                }
+            }
+            if numeric {
+                Some(js_sys::Float64Array::new(&source))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let Some(source_array) = source_array else {
+            continue;
+        };
+        let dest = js_sys::Reflect::get(out, &key)?;
+        let dest_array = dest.dyn_ref::<js_sys::Float64Array>().ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "{}: missing Float64Array output for field {}",
+                context, key_name
+            ))
+        })?;
+        if dest_array.length() < source_array.length() {
+            return Err(JsValue::from_str(&format!(
+                "{}: output field {} is too small: expected at least {}, got {}",
+                context,
+                key_name,
+                source_array.length(),
+                dest_array.length()
+            )));
+        }
+        if source_array.length() > 0 {
+            dest_array.set(&source_array, 0);
+        }
+        copied += source_array.length() as usize;
+    }
+
+    if copied == 0 {
+        return Err(JsValue::from_str(&format!(
+            "{}: no f64 output fields copied",
+            context
+        )));
+    }
+
+    Ok(copied)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub(crate) fn write_wasm_selected_object_f64_outputs(
+    context: &str,
+    value: &JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let keys = js_sys::Object::keys(out);
+    let mut copied = 0usize;
+
+    for i in 0..keys.length() {
+        let key = keys.get(i);
+        let key_name = key.as_string().ok_or_else(|| {
+            JsValue::from_str(&format!("{}: output key is not a string", context))
+        })?;
+        let source = js_sys::Reflect::get(value, &key)?;
+        if source.is_undefined() || source.is_null() {
+            return Err(JsValue::from_str(&format!(
+                "{}: missing result field {}",
+                context, key_name
+            )));
+        }
+        let source_array = if let Some(array) = source.dyn_ref::<js_sys::Float64Array>() {
+            array.clone()
+        } else if js_sys::Array::is_array(&source) {
+            let array = js_sys::Array::from(&source);
+            for j in 0..array.length() {
+                if array.get(j).as_f64().is_none() {
+                    return Err(JsValue::from_str(&format!(
+                        "{}: result field {} is not numeric",
+                        context, key_name
+                    )));
+                }
+            }
+            js_sys::Float64Array::new(&source)
+        } else {
+            return Err(JsValue::from_str(&format!(
+                "{}: result field {} is not a numeric array",
+                context, key_name
+            )));
+        };
+        let dest = js_sys::Reflect::get(out, &key)?;
+        let dest_array = dest.dyn_ref::<js_sys::Float64Array>().ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "{}: output field {} is not a Float64Array",
+                context, key_name
+            ))
+        })?;
+        if dest_array.length() < source_array.length() {
+            return Err(JsValue::from_str(&format!(
+                "{}: output field {} is too small: expected at least {}, got {}",
+                context,
+                key_name,
+                source_array.length(),
+                dest_array.length()
+            )));
+        }
+        if source_array.length() > 0 {
+            dest_array.set(&source_array, 0);
+        }
+        copied += source_array.length() as usize;
+    }
+
+    if copied == 0 {
+        return Err(JsValue::from_str(&format!(
+            "{}: no f64 output fields copied",
+            context
+        )));
+    }
+
+    Ok(copied)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn allocate_f64_matrix(rows: usize, cols: usize) -> *mut f64 {
     let Some(total) = rows.checked_mul(cols) else {

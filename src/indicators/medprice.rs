@@ -928,6 +928,29 @@ pub fn medprice_batch_py<'py>(
     Ok(dict)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn medprice_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = medprice_js(high, low)?;
+    crate::write_wasm_f64_output("medprice_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn medprice_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = medprice_batch_js(high, low, config)?;
+    crate::write_wasm_selected_object_f64_outputs("medprice_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

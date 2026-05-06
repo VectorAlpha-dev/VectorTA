@@ -846,6 +846,31 @@ fn wad_batch_inner_into(
     Ok(())
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn wad_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = wad_js(high, low, close)?;
+    crate::write_wasm_f64_output("wad_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn wad_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    _config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = wad_batch_unified_js(high, low, close, _config)?;
+    crate::write_wasm_selected_object_f64_outputs("wad_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

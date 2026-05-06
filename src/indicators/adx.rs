@@ -2117,6 +2117,47 @@ impl AdxStream {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn adx_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = adx_js(high, low, close, period)?;
+    crate::write_wasm_f64_output("adx_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn adx_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = adx_batch_js(high, low, close, period_start, period_end, period_step)?;
+    crate::write_wasm_f64_output("adx_batch_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn adx_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = adx_batch_unified_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs("adx_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

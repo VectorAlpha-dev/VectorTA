@@ -2710,6 +2710,49 @@ pub fn bulls_v_bears_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn bulls_v_bears_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    ma_type: String,
+    calculation_method: String,
+    normalized_bars_back: usize,
+    raw_rolling_period: usize,
+    raw_threshold_percentile: f64,
+    threshold_level: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = bulls_v_bears_js(
+        high,
+        low,
+        close,
+        period,
+        ma_type,
+        calculation_method,
+        normalized_bars_back,
+        raw_rolling_period,
+        raw_threshold_percentile,
+        threshold_level,
+    )?;
+    crate::write_wasm_object_f64_outputs("bulls_v_bears_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn bulls_v_bears_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = bulls_v_bears_batch_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs("bulls_v_bears_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

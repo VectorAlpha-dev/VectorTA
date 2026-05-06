@@ -1668,6 +1668,36 @@ pub fn historical_volatility_rank_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn historical_volatility_rank_output_into_js(
+    data: &[f64],
+    hv_length: usize,
+    rank_length: usize,
+    annualization_days: f64,
+    bar_days: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value =
+        historical_volatility_rank_js(data, hv_length, rank_length, annualization_days, bar_days)?;
+    crate::write_wasm_object_f64_outputs("historical_volatility_rank_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn historical_volatility_rank_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = historical_volatility_rank_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "historical_volatility_rank_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3034,6 +3034,76 @@ impl AlphaTrendContext {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn alphatrend_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    coeff: f64,
+    period: usize,
+    no_volume: bool,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = alphatrend_js(open, high, low, close, volume, coeff, period, no_volume)?;
+    crate::write_wasm_object_f64_outputs("alphatrend_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn alphatrend_batch_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    coeff_start: f64,
+    coeff_end: f64,
+    coeff_step: f64,
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    no_volume: bool,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = alphatrend_batch_js(
+        open,
+        high,
+        low,
+        close,
+        volume,
+        coeff_start,
+        coeff_end,
+        coeff_step,
+        period_start,
+        period_end,
+        period_step,
+        no_volume,
+    )?;
+    crate::write_wasm_selected_object_f64_outputs("alphatrend_batch_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn alphatrend_batch_unified_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = alphatrend_batch_unified_js(open, high, low, close, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "alphatrend_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

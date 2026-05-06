@@ -1533,6 +1533,32 @@ fn treap_priority(e: Entry) -> u64 {
     z ^ (z >> 31)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn medium_ad_output_into_js(
+    data: &[f64],
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = medium_ad_js(data, period)?;
+    crate::write_wasm_f64_output("medium_ad_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn medium_ad_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = medium_ad_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "medium_ad_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

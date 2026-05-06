@@ -1183,6 +1183,32 @@ pub fn ehlers_adaptive_cyber_cycle_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_adaptive_cyber_cycle_output_into_js(
+    data: &[f64],
+    alpha: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ehlers_adaptive_cyber_cycle_js(data, alpha)?;
+    crate::write_wasm_object_f64_outputs("ehlers_adaptive_cyber_cycle_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_adaptive_cyber_cycle_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ehlers_adaptive_cyber_cycle_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "ehlers_adaptive_cyber_cycle_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

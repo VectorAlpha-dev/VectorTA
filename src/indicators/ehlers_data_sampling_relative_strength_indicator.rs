@@ -1399,6 +1399,38 @@ pub fn ehlers_data_sampling_relative_strength_indicator_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_data_sampling_relative_strength_indicator_output_into_js(
+    open_: &[f64],
+    close: &[f64],
+    length: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ehlers_data_sampling_relative_strength_indicator_js(open_, close, length)?;
+    crate::write_wasm_object_f64_outputs(
+        "ehlers_data_sampling_relative_strength_indicator_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_data_sampling_relative_strength_indicator_batch_output_into_js(
+    open_: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ehlers_data_sampling_relative_strength_indicator_batch_js(open_, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "ehlers_data_sampling_relative_strength_indicator_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

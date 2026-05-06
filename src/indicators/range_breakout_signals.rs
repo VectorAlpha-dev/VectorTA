@@ -21,6 +21,49 @@ use crate::utilities::helpers::{
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn range_breakout_signals_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    range_length: usize,
+    confirmation_length: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = range_breakout_signals_js(
+        open,
+        high,
+        low,
+        close,
+        volume,
+        range_length,
+        confirmation_length,
+    )?;
+    crate::write_wasm_object_f64_outputs("range_breakout_signals_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn range_breakout_signals_batch_unified_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = range_breakout_signals_batch_unified_js(open, high, low, close, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "range_breakout_signals_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 use std::error::Error as StdError;
 use std::mem::ManuallyDrop;

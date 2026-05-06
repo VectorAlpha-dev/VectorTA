@@ -1973,6 +1973,33 @@ pub fn ehlers_ecema_into_ex(
     Ok(())
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_ecema_output_into_js(
+    data: &[f64],
+    length: usize,
+    gain_limit: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = ehlers_ecema_js(data, length, gain_limit)?;
+    crate::write_wasm_f64_output("ehlers_ecema_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_ecema_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ehlers_ecema_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "ehlers_ecema_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

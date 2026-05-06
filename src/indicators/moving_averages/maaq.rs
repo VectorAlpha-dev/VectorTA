@@ -1135,6 +1135,41 @@ unsafe fn maaq_row_avx512_long(
     maaq_row_scalar(data, first, period, fast_p, slow_p, out)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn maaq_output_into_js(
+    data: &[f64],
+    period: usize,
+    fast_period: usize,
+    slow_period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = maaq_js(data, period, fast_period, slow_period)?;
+    crate::write_wasm_f64_output("maaq_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn maaq_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = maaq_batch_js(data, config)?;
+    crate::write_wasm_f64_output("maaq_batch_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn maaq_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = maaq_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("maaq_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

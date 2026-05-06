@@ -1576,6 +1576,43 @@ impl EhlersUndersampledDoubleMovingAverageStreamWasm {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_undersampled_double_moving_average_output_into_js(
+    data: &[f64],
+    fast_length: usize,
+    slow_length: usize,
+    sample_length: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ehlers_undersampled_double_moving_average_js(
+        data,
+        fast_length,
+        slow_length,
+        sample_length,
+    )?;
+    crate::write_wasm_object_f64_outputs(
+        "ehlers_undersampled_double_moving_average_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_undersampled_double_moving_average_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ehlers_undersampled_double_moving_average_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "ehlers_undersampled_double_moving_average_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

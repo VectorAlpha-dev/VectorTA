@@ -2633,6 +2633,31 @@ pub fn macd_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> 
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn macd_output_into_js(
+    data: &[f64],
+    fast_period: usize,
+    slow_period: usize,
+    signal_period: usize,
+    ma_type: &str,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let result = macd_js(data, fast_period, slow_period, signal_period, ma_type)?;
+    crate::write_wasm_f64_output("macd_output_into_js", &result.values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn macd_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = macd_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("macd_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

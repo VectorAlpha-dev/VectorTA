@@ -2766,6 +2766,42 @@ pub fn register_wto_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()>
     Ok(())
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn wto_output_into_js(
+    close: &[f64],
+    channel_length: usize,
+    average_length: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let result = wto_js(close, channel_length, average_length)?;
+    let value = JsValue::from(result);
+    crate::write_wasm_object_f64_outputs("wto_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn wto_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = wto_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("wto_batch_unified_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn wto_unified_output_into_js(
+    close: &[f64],
+    channel_length: usize,
+    average_length: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = wto_unified_js(close, channel_length, average_length)?;
+    crate::write_wasm_object_f64_outputs("wto_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1923,6 +1923,33 @@ impl EhlersITrendStreamPy {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_itrend_output_into_js(
+    data: &[f64],
+    warmup_bars: usize,
+    max_dc_period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = ehlers_itrend_js(data, warmup_bars, max_dc_period)?;
+    crate::write_wasm_f64_output("ehlers_itrend_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_itrend_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ehlers_itrend_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "ehlers_itrend_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

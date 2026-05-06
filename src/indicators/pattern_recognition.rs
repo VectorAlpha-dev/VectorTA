@@ -7245,6 +7245,19 @@ pub fn pattern_recognition_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn pattern_recognition_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = pattern_recognition_js(open, high, low, close)?;
+    crate::write_wasm_object_f64_outputs("pattern_recognition_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

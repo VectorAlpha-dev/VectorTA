@@ -2766,6 +2766,31 @@ pub fn dma_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn dma_output_into_js(
+    data: &[f64],
+    hull_length: usize,
+    ema_length: usize,
+    ema_gain_limit: usize,
+    hull_ma_type: &str,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = dma_js(data, hull_length, ema_length, ema_gain_limit, hull_ma_type)?;
+    crate::write_wasm_f64_output("dma_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn dma_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = dma_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("dma_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

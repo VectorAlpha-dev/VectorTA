@@ -2315,6 +2315,32 @@ pub fn half_causal_estimator_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn half_causal_estimator_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = half_causal_estimator_js(data, config)?;
+    crate::write_wasm_object_f64_outputs("half_causal_estimator_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn half_causal_estimator_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = half_causal_estimator_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "half_causal_estimator_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

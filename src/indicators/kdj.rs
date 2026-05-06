@@ -2321,6 +2321,45 @@ unsafe fn kdj_row_avx512_long(
     )
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn kdj_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    fast_k_period: usize,
+    slow_k_period: usize,
+    slow_k_ma_type: &str,
+    slow_d_period: usize,
+    slow_d_ma_type: &str,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = kdj_js(
+        high,
+        low,
+        close,
+        fast_k_period,
+        slow_k_period,
+        slow_k_ma_type,
+        slow_d_period,
+        slow_d_ma_type,
+    )?;
+    crate::write_wasm_object_f64_outputs("kdj_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn kdj_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = kdj_batch_unified_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs("kdj_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

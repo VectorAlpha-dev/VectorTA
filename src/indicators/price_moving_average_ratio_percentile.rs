@@ -1924,6 +1924,52 @@ pub fn price_moving_average_ratio_percentile_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn price_moving_average_ratio_percentile_output_into_js(
+    price: &[f64],
+    volume: &[f64],
+    ma_length: usize,
+    ma_type: &str,
+    pmarp_lookback: usize,
+    signal_ma_length: usize,
+    signal_ma_type: &str,
+    line_mode: &str,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = price_moving_average_ratio_percentile_js(
+        price,
+        volume,
+        ma_length,
+        ma_type,
+        pmarp_lookback,
+        signal_ma_length,
+        signal_ma_type,
+        line_mode,
+    )?;
+    crate::write_wasm_object_f64_outputs(
+        "price_moving_average_ratio_percentile_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn price_moving_average_ratio_percentile_batch_output_into_js(
+    price: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = price_moving_average_ratio_percentile_batch_js(price, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "price_moving_average_ratio_percentile_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

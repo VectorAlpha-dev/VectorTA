@@ -1396,6 +1396,34 @@ impl ChopStream {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn chop_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    scalar: f64,
+    drift: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = chop_js(high, low, close, period, scalar, drift)?;
+    crate::write_wasm_f64_output("chop_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn chop_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = chop_batch_unified_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs("chop_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

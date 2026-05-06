@@ -1495,6 +1495,40 @@ pub fn ehlers_autocorrelation_periodogram_batch_into_js(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_autocorrelation_periodogram_output_into_js(
+    data: &[f64],
+    min_period: usize,
+    max_period: usize,
+    avg_length: usize,
+    enhance: bool,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value =
+        ehlers_autocorrelation_periodogram_js(data, min_period, max_period, avg_length, enhance)?;
+    crate::write_wasm_object_f64_outputs(
+        "ehlers_autocorrelation_periodogram_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_autocorrelation_periodogram_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ehlers_autocorrelation_periodogram_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "ehlers_autocorrelation_periodogram_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

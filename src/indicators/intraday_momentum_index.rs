@@ -1741,6 +1741,48 @@ pub fn intraday_momentum_index_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn intraday_momentum_index_output_into_js(
+    open: &[f64],
+    close: &[f64],
+    length: usize,
+    length_ma: usize,
+    mult: f64,
+    length_bb: usize,
+    apply_smoothing: bool,
+    low_band: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = intraday_momentum_index_js(
+        open,
+        close,
+        length,
+        length_ma,
+        mult,
+        length_bb,
+        apply_smoothing,
+        low_band,
+    )?;
+    crate::write_wasm_object_f64_outputs("intraday_momentum_index_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn intraday_momentum_index_batch_output_into_js(
+    open: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = intraday_momentum_index_batch_js(open, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "intraday_momentum_index_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

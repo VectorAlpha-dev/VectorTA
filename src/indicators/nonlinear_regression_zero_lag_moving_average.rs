@@ -1587,6 +1587,38 @@ pub fn nonlinear_regression_zero_lag_moving_average_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn nonlinear_regression_zero_lag_moving_average_output_into_js(
+    data: &[f64],
+    zlma_period: usize,
+    regression_period: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value =
+        nonlinear_regression_zero_lag_moving_average_js(data, zlma_period, regression_period)?;
+    crate::write_wasm_object_f64_outputs(
+        "nonlinear_regression_zero_lag_moving_average_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn nonlinear_regression_zero_lag_moving_average_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = nonlinear_regression_zero_lag_moving_average_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "nonlinear_regression_zero_lag_moving_average_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

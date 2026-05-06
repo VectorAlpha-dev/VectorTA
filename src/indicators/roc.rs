@@ -1324,6 +1324,17 @@ pub fn roc_batch(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn roc_output_into_js(
+    data: &[f64],
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = roc_js(data, period)?;
+    crate::write_wasm_f64_output("roc_output_into_js", &values, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

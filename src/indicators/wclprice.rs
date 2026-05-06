@@ -1098,6 +1098,35 @@ pub fn wclprice_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn wclprice_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = wclprice_js(high, low, close)?;
+    crate::write_wasm_f64_output("wclprice_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn wclprice_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    cfg: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = wclprice_batch_unified_js(high, low, close, cfg)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "wclprice_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

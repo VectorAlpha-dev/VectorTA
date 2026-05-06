@@ -1111,6 +1111,32 @@ pub fn ehlers_detrending_filter_batch_into(
     .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_detrending_filter_output_into_js(
+    data: &[f64],
+    length: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ehlers_detrending_filter_js(data, length)?;
+    crate::write_wasm_object_f64_outputs("ehlers_detrending_filter_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_detrending_filter_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ehlers_detrending_filter_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "ehlers_detrending_filter_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

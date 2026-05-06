@@ -1075,6 +1075,33 @@ pub fn emv_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn emv_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = emv_js(high, low, close, volume)?;
+    crate::write_wasm_f64_output("emv_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn emv_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    _config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = emv_batch_js(high, low, close, volume, _config)?;
+    crate::write_wasm_selected_object_f64_outputs("emv_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

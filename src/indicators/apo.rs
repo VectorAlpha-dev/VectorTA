@@ -1352,6 +1352,53 @@ unsafe fn apo_batch_rows_avx512(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn apo_output_into_js(
+    data: &[f64],
+    short_period: usize,
+    long_period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = apo_js(data, short_period, long_period)?;
+    crate::write_wasm_f64_output("apo_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn apo_batch_output_into_js(
+    data: &[f64],
+    short_period_start: usize,
+    short_period_end: usize,
+    short_period_step: usize,
+    long_period_start: usize,
+    long_period_end: usize,
+    long_period_step: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = apo_batch_js(
+        data,
+        short_period_start,
+        short_period_end,
+        short_period_step,
+        long_period_start,
+        long_period_end,
+        long_period_step,
+    )?;
+    crate::write_wasm_f64_output("apo_batch_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn apo_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = apo_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("apo_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

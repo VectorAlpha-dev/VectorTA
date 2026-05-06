@@ -1623,6 +1623,81 @@ pub fn bollinger_bands_batch_inner_into(
     Ok(combos)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn bollinger_bands_batch_output_into_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    devup_start: f64,
+    devup_end: f64,
+    devup_step: f64,
+    devdn_start: f64,
+    devdn_end: f64,
+    devdn_step: f64,
+    matype: &str,
+    devtype: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = bollinger_bands_batch_js(
+        data,
+        period_start,
+        period_end,
+        period_step,
+        devup_start,
+        devup_end,
+        devup_step,
+        devdn_start,
+        devdn_end,
+        devdn_step,
+        matype,
+        devtype,
+    )?;
+    crate::write_wasm_f64_output("bollinger_bands_batch_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn bollinger_bands_output_into_js(
+    data: &[f64],
+    period: usize,
+    devup: f64,
+    devdn: f64,
+    matype: String,
+    devtype: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let result = bollinger_bands_js(data, period, devup, devdn, matype, devtype)?;
+    crate::write_wasm_f64_output("bollinger_bands_output_into_js", &result.values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn bollinger_bands_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = bollinger_bands_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "bollinger_bands_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn bb_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = bb_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("bb_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

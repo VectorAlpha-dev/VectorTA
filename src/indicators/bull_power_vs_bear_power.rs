@@ -1238,6 +1238,38 @@ pub fn bull_power_vs_bear_power_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn bull_power_vs_bear_power_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = bull_power_vs_bear_power_js(open, high, low, close, period)?;
+    crate::write_wasm_f64_output("bull_power_vs_bear_power_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn bull_power_vs_bear_power_batch_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = bull_power_vs_bear_power_batch_js(open, high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "bull_power_vs_bear_power_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

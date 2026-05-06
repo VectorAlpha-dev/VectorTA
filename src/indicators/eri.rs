@@ -2262,6 +2262,33 @@ unsafe fn eri_scalar_classic_ema_13(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn eri_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    source: &[f64],
+    period: usize,
+    ma_type: &str,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = eri_js(high, low, source, period, ma_type)?;
+    crate::write_wasm_f64_output("eri_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn eri_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    source: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = eri_batch_js(high, low, source, config)?;
+    crate::write_wasm_selected_object_f64_outputs("eri_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

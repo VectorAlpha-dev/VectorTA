@@ -1861,6 +1861,30 @@ pub fn correl_hl_cuda_many_series_one_param_dev_py(
     Ok(CorrelHlDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn correl_hl_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = correl_hl_js(high, low, period)?;
+    crate::write_wasm_f64_output("correl_hl_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn correl_hl_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = correl_hl_batch_js(high, low, config)?;
+    crate::write_wasm_selected_object_f64_outputs("correl_hl_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

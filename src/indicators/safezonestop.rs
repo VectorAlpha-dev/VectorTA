@@ -1960,6 +1960,37 @@ pub fn safezonestop_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn safezonestop_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    period: usize,
+    mult: f64,
+    max_lookback: usize,
+    direction: &str,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = safezonestop_js(high, low, period, mult, max_lookback, direction)?;
+    crate::write_wasm_f64_output("safezonestop_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn safezonestop_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = safezonestop_batch_unified_js(high, low, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "safezonestop_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

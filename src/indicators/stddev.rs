@@ -1687,6 +1687,33 @@ pub fn stddev_batch_into_cfg(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn stddev_output_into_js(
+    data: &[f64],
+    period: usize,
+    nbdev: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = stddev_js(data, period, nbdev)?;
+    crate::write_wasm_f64_output("stddev_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn stddev_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = stddev_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "stddev_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

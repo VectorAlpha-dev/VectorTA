@@ -1645,6 +1645,53 @@ pub unsafe fn vpwma_row_avx512(
     _mm_sfence();
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vpwma_output_into_js(
+    data: &[f64],
+    period: usize,
+    power: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = vpwma_js(data, period, power)?;
+    crate::write_wasm_f64_output("vpwma_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vpwma_batch_output_into_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    power_start: f64,
+    power_end: f64,
+    power_step: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = vpwma_batch_js(
+        data,
+        period_start,
+        period_end,
+        period_step,
+        power_start,
+        power_end,
+        power_step,
+    )?;
+    crate::write_wasm_f64_output("vpwma_batch_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vpwma_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = vpwma_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("vpwma_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1715,6 +1715,43 @@ pub fn mesa_stochastic_multi_length_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn mesa_stochastic_multi_length_output_into_js(
+    source: &[f64],
+    length_1: usize,
+    length_2: usize,
+    length_3: usize,
+    length_4: usize,
+    trigger_length: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = mesa_stochastic_multi_length_js(
+        source,
+        length_1,
+        length_2,
+        length_3,
+        length_4,
+        trigger_length,
+    )?;
+    crate::write_wasm_object_f64_outputs("mesa_stochastic_multi_length_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn mesa_stochastic_multi_length_batch_output_into_js(
+    source: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = mesa_stochastic_multi_length_batch_js(source, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "mesa_stochastic_multi_length_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

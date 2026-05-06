@@ -1110,6 +1110,29 @@ pub fn wave_smoother_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn wave_smoother_output_into_js(
+    data: &[f64],
+    period: usize,
+    phase: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = wave_smoother_js(data, period, phase)?;
+    crate::write_wasm_f64_output("wave_smoother_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn wave_smoother_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = wave_smoother_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("wave_smoother_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

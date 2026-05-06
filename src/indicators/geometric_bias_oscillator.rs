@@ -21,6 +21,40 @@ use crate::utilities::helpers::{
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn geometric_bias_oscillator_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    length: usize,
+    multiplier: f64,
+    atr_length: usize,
+    smooth: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values =
+        geometric_bias_oscillator_js(high, low, close, length, multiplier, atr_length, smooth)?;
+    crate::write_wasm_f64_output("geometric_bias_oscillator_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn geometric_bias_oscillator_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = geometric_bias_oscillator_batch_unified_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "geometric_bias_oscillator_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 use std::error::Error as StdError;
 use std::mem::ManuallyDrop;

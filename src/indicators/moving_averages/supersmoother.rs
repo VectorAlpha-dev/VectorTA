@@ -999,6 +999,45 @@ pub unsafe fn supersmoother_row_avx512_long(
     supersmoother_row_scalar(data, first, period, out)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn supersmoother_output_into_js(
+    data: &[f64],
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = supersmoother_js(data, period)?;
+    crate::write_wasm_f64_output("supersmoother_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn supersmoother_batch_output_into_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = supersmoother_batch_js(data, period_start, period_end, period_step)?;
+    crate::write_wasm_f64_output("supersmoother_batch_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn supersmoother_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = supersmoother_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "supersmoother_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

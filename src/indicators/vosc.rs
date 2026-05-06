@@ -1327,6 +1327,29 @@ fn vosc_batch_inner_into(
     Ok(combos)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vosc_output_into_js(
+    data: &[f64],
+    short_period: usize,
+    long_period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = vosc_js(data, short_period, long_period)?;
+    crate::write_wasm_f64_output("vosc_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vosc_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = vosc_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("vosc_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

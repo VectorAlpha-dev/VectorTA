@@ -1732,6 +1732,52 @@ pub fn market_structure_trailing_stop_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn market_structure_trailing_stop_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    length: usize,
+    increment_factor: f64,
+    reset_on: &str,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = market_structure_trailing_stop_js(
+        open,
+        high,
+        low,
+        close,
+        length,
+        increment_factor,
+        reset_on,
+    )?;
+    crate::write_wasm_object_f64_outputs(
+        "market_structure_trailing_stop_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn market_structure_trailing_stop_batch_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = market_structure_trailing_stop_batch_js(open, high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "market_structure_trailing_stop_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1796,6 +1796,30 @@ pub fn voss_cuda_many_series_one_param_dev_py<'py>(
     Ok((voss_py, filt_py))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn voss_output_into_js(
+    data: &[f64],
+    period: usize,
+    predict: usize,
+    bandwidth: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = voss_js(data, period, predict, bandwidth)?;
+    crate::write_wasm_object_f64_outputs("voss_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn voss_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = voss_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("voss_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

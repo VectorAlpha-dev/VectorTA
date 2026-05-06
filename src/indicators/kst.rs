@@ -2122,6 +2122,36 @@ impl KstStream {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn kst_output_into_js(
+    data: &[f64],
+    sma1: usize,
+    sma2: usize,
+    sma3: usize,
+    sma4: usize,
+    roc1: usize,
+    roc2: usize,
+    roc3: usize,
+    roc4: usize,
+    sig: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = kst_js(data, sma1, sma2, sma3, sma4, roc1, roc2, roc3, roc4, sig)?;
+    crate::write_wasm_object_f64_outputs("kst_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn kst_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = kst_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("kst_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

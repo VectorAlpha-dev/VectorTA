@@ -606,6 +606,17 @@ unsafe fn nvi_row_scalar(close: &[f64], volume: &[f64], first: usize, row_out_fl
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn nvi_output_into_js(
+    close: &[f64],
+    volume: &[f64],
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = nvi_js(close, volume)?;
+    crate::write_wasm_f64_output("nvi_output_into_js", &values, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

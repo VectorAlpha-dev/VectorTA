@@ -1448,6 +1448,30 @@ unsafe fn dm_row_avx512_long(
     dm_row_avx512(high, low, first, period, plus, minus)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn dm_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    period: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = dm_js(high, low, period)?;
+    crate::write_wasm_object_f64_outputs("dm_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn dm_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = dm_batch_unified_js(high, low, config)?;
+    crate::write_wasm_selected_object_f64_outputs("dm_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2459,6 +2459,41 @@ pub fn otto_cuda_many_series_one_param_dev_py(
     Ok((hott_dev, lott_dev))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn otto_output_into_js(
+    data: &[f64],
+    ott_period: usize,
+    ott_percent: f64,
+    fast_vidya_length: usize,
+    slow_vidya_length: usize,
+    correcting_constant: f64,
+    ma_type: &str,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = otto_js(
+        data,
+        ott_period,
+        ott_percent,
+        fast_vidya_length,
+        slow_vidya_length,
+        correcting_constant,
+        ma_type,
+    )?;
+    crate::write_wasm_object_f64_outputs("otto_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn otto_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = otto_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("otto_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

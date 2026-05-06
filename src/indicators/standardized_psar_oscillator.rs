@@ -21,6 +21,59 @@ use crate::utilities::helpers::{
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn standardized_psar_oscillator_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    start: f64,
+    increment: f64,
+    maximum: f64,
+    standardization_length: usize,
+    wma_length: usize,
+    wma_lag: usize,
+    pivot_left: usize,
+    pivot_right: usize,
+    plot_bullish: bool,
+    plot_bearish: bool,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = standardized_psar_oscillator_js(
+        high,
+        low,
+        close,
+        start,
+        increment,
+        maximum,
+        standardization_length,
+        wma_length,
+        wma_lag,
+        pivot_left,
+        pivot_right,
+        plot_bullish,
+        plot_bearish,
+    )?;
+    crate::write_wasm_object_f64_outputs("standardized_psar_oscillator_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn standardized_psar_oscillator_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = standardized_psar_oscillator_batch_unified_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "standardized_psar_oscillator_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 use std::error::Error as StdError;
 use std::mem::ManuallyDrop;

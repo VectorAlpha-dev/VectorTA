@@ -2019,6 +2019,47 @@ pub fn ehlers_linear_extrapolation_predictor_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_linear_extrapolation_predictor_output_into_js(
+    data: &[f64],
+    high_pass_length: usize,
+    low_pass_length: usize,
+    gain: f64,
+    bars_forward: usize,
+    signal_mode: &str,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ehlers_linear_extrapolation_predictor_js(
+        data,
+        high_pass_length,
+        low_pass_length,
+        gain,
+        bars_forward,
+        signal_mode,
+    )?;
+    crate::write_wasm_object_f64_outputs(
+        "ehlers_linear_extrapolation_predictor_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_linear_extrapolation_predictor_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ehlers_linear_extrapolation_predictor_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "ehlers_linear_extrapolation_predictor_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

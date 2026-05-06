@@ -19,6 +19,78 @@ use crate::utilities::helpers::{alloc_uninit_f64, detect_best_batch_kernel, make
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vdubus_divergence_wave_pattern_generator_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    fast_depth: usize,
+    slow_depth: usize,
+    fast_length: usize,
+    slow_length: usize,
+    signal_length: usize,
+    lookback: usize,
+    err_tol: f64,
+    show_standard: bool,
+    show_climax: bool,
+    show_rounded: bool,
+    show_predator: bool,
+    show_gartley: bool,
+    show_bat: bool,
+    show_butterfly: bool,
+    show_crab: bool,
+    show_deep: bool,
+    show_hs: bool,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = vdubus_divergence_wave_pattern_generator_js(
+        high,
+        low,
+        close,
+        fast_depth,
+        slow_depth,
+        fast_length,
+        slow_length,
+        signal_length,
+        lookback,
+        err_tol,
+        show_standard,
+        show_climax,
+        show_rounded,
+        show_predator,
+        show_gartley,
+        show_bat,
+        show_butterfly,
+        show_crab,
+        show_deep,
+        show_hs,
+    )?;
+    crate::write_wasm_object_f64_outputs(
+        "vdubus_divergence_wave_pattern_generator_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vdubus_divergence_wave_pattern_generator_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value =
+        vdubus_divergence_wave_pattern_generator_batch_unified_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "vdubus_divergence_wave_pattern_generator_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 use std::error::Error as StdError;
 use std::mem::ManuallyDrop;

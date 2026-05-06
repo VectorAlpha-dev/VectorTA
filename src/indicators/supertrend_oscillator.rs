@@ -2277,6 +2277,38 @@ pub fn supertrend_oscillator_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn supertrend_oscillator_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    source: &[f64],
+    length: usize,
+    mult: f64,
+    smooth: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = supertrend_oscillator_js(high, low, source, length, mult, smooth)?;
+    crate::write_wasm_object_f64_outputs("supertrend_oscillator_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn supertrend_oscillator_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    source: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = supertrend_oscillator_batch_js(high, low, source, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "supertrend_oscillator_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

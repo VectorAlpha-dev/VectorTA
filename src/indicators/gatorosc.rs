@@ -2694,6 +2694,41 @@ pub fn gatorosc_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn gatorosc_output_into_js(
+    data: &[f64],
+    jaws_length: usize,
+    jaws_shift: usize,
+    teeth_length: usize,
+    teeth_shift: usize,
+    lips_length: usize,
+    lips_shift: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = gatorosc_js(
+        data,
+        jaws_length,
+        jaws_shift,
+        teeth_length,
+        teeth_shift,
+        lips_length,
+        lips_shift,
+    )?;
+    crate::write_wasm_object_f64_outputs("gatorosc_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn gatorosc_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = gatorosc_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("gatorosc_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

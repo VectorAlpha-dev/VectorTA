@@ -1518,6 +1518,57 @@ impl TilsonStream {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn tilson_output_into_js(
+    data: &[f64],
+    period: usize,
+    volume_factor: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = tilson_js(data, period, volume_factor)?;
+    crate::write_wasm_f64_output("tilson_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn tilson_batch_output_into_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    v_factor_start: f64,
+    v_factor_end: f64,
+    v_factor_step: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = tilson_batch_js(
+        data,
+        period_start,
+        period_end,
+        period_step,
+        v_factor_start,
+        v_factor_end,
+        v_factor_step,
+    )?;
+    crate::write_wasm_f64_output("tilson_batch_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn tilson_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = tilson_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "tilson_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

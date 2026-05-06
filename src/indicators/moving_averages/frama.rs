@@ -1847,6 +1847,68 @@ pub unsafe fn frama_row_avx512(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn frama_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    window: usize,
+    sc: usize,
+    fc: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = frama_js(high, low, close, window, sc, fc)?;
+    crate::write_wasm_f64_output("frama_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn frama_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    window_start: usize,
+    window_end: usize,
+    window_step: usize,
+    sc_start: usize,
+    sc_end: usize,
+    sc_step: usize,
+    fc_start: usize,
+    fc_end: usize,
+    fc_step: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = frama_batch_js(
+        high,
+        low,
+        close,
+        window_start,
+        window_end,
+        window_step,
+        sc_start,
+        sc_end,
+        sc_step,
+        fc_start,
+        fc_end,
+        fc_step,
+    )?;
+    crate::write_wasm_f64_output("frama_batch_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn frama_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = frama_batch_unified_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs("frama_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

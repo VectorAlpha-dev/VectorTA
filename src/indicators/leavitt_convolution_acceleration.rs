@@ -1644,6 +1644,39 @@ pub fn leavitt_convolution_acceleration_batch_into(
     .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn leavitt_convolution_acceleration_output_into_js(
+    data: &[f64],
+    length: usize,
+    norm_length: usize,
+    use_norm_hyperbolic: bool,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value =
+        leavitt_convolution_acceleration_js(data, length, norm_length, use_norm_hyperbolic)?;
+    crate::write_wasm_object_f64_outputs(
+        "leavitt_convolution_acceleration_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn leavitt_convolution_acceleration_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = leavitt_convolution_acceleration_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "leavitt_convolution_acceleration_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

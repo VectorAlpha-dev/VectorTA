@@ -1881,6 +1881,44 @@ pub fn stochastic_money_flow_index_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn stochastic_money_flow_index_output_into_js(
+    source: &[f64],
+    volume: &[f64],
+    stoch_k_length: usize,
+    stoch_k_smooth: usize,
+    stoch_d_smooth: usize,
+    mfi_length: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = stochastic_money_flow_index_js(
+        source,
+        volume,
+        stoch_k_length,
+        stoch_k_smooth,
+        stoch_d_smooth,
+        mfi_length,
+    )?;
+    crate::write_wasm_object_f64_outputs("stochastic_money_flow_index_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn stochastic_money_flow_index_batch_output_into_js(
+    source: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = stochastic_money_flow_index_batch_js(source, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "stochastic_money_flow_index_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

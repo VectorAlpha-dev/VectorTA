@@ -2076,6 +2076,51 @@ pub fn range_filtered_trend_signals_batch_js(
     .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn range_filtered_trend_signals_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    kalman_alpha: f64,
+    kalman_beta: f64,
+    kalman_period: usize,
+    dev: f64,
+    supertrend_factor: f64,
+    supertrend_atr_period: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = range_filtered_trend_signals_js(
+        high,
+        low,
+        close,
+        kalman_alpha,
+        kalman_beta,
+        kalman_period,
+        dev,
+        supertrend_factor,
+        supertrend_atr_period,
+    )?;
+    crate::write_wasm_object_f64_outputs("range_filtered_trend_signals_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn range_filtered_trend_signals_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = range_filtered_trend_signals_batch_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "range_filtered_trend_signals_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

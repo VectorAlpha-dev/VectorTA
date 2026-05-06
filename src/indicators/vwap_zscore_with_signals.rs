@@ -1715,6 +1715,36 @@ pub fn vwap_zscore_with_signals_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vwap_zscore_with_signals_output_into_js(
+    close: &[f64],
+    volume: &[f64],
+    length: usize,
+    upper_bottom: f64,
+    lower_bottom: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = vwap_zscore_with_signals_js(close, volume, length, upper_bottom, lower_bottom)?;
+    crate::write_wasm_object_f64_outputs("vwap_zscore_with_signals_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vwap_zscore_with_signals_batch_output_into_js(
+    close: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = vwap_zscore_with_signals_batch_js(close, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "vwap_zscore_with_signals_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

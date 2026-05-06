@@ -1980,6 +1980,51 @@ impl TrendFlowTrailStreamWasm {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn trend_flow_trail_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    alpha_length: usize,
+    alpha_multiplier: f64,
+    mfi_length: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = trend_flow_trail_js(
+        open,
+        high,
+        low,
+        close,
+        volume,
+        alpha_length,
+        alpha_multiplier,
+        mfi_length,
+    )?;
+    crate::write_wasm_object_f64_outputs("trend_flow_trail_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn trend_flow_trail_batch_unified_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = trend_flow_trail_batch_unified_js(open, high, low, close, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "trend_flow_trail_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

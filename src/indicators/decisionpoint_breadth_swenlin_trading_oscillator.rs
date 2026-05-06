@@ -906,6 +906,38 @@ pub fn decisionpoint_breadth_swenlin_trading_oscillator_batch_into(
     Ok(1)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn decisionpoint_breadth_swenlin_trading_oscillator_output_into_js(
+    advancing: &[f64],
+    declining: &[f64],
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = decisionpoint_breadth_swenlin_trading_oscillator_js(advancing, declining)?;
+    crate::write_wasm_f64_output(
+        "decisionpoint_breadth_swenlin_trading_oscillator_output_into_js",
+        &values,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn decisionpoint_breadth_swenlin_trading_oscillator_batch_output_into_js(
+    advancing: &[f64],
+    declining: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value =
+        decisionpoint_breadth_swenlin_trading_oscillator_batch_js(advancing, declining, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "decisionpoint_breadth_swenlin_trading_oscillator_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

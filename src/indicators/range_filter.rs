@@ -2311,6 +2311,63 @@ impl RangeFilterStreamPy {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn range_filter_output_into_js(
+    data: &[f64],
+    range_size: Option<f64>,
+    range_period: Option<usize>,
+    smooth_range: Option<bool>,
+    smooth_period: Option<usize>,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = range_filter_js(data, range_size, range_period, smooth_range, smooth_period)?;
+    crate::write_wasm_object_f64_outputs("range_filter_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn range_filter_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = range_filter_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "range_filter_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn range_filter_batch_output_into_js(
+    data: &[f64],
+    range_size_start: f64,
+    range_size_end: f64,
+    range_size_step: f64,
+    range_period_start: usize,
+    range_period_end: usize,
+    range_period_step: usize,
+    smooth_range: bool,
+    smooth_period: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = range_filter_batch_js(
+        data,
+        range_size_start,
+        range_size_end,
+        range_size_step,
+        range_period_start,
+        range_period_end,
+        range_period_step,
+        smooth_range,
+        smooth_period,
+    )?;
+    crate::write_wasm_selected_object_f64_outputs("range_filter_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2814,6 +2814,34 @@ impl ChandelierExitStreamWasm {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ce_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    mult: f64,
+    use_close: bool,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ce_js(high, low, close, period, mult, use_close)?;
+    crate::write_wasm_object_f64_outputs("ce_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ce_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ce_batch_unified_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs("ce_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

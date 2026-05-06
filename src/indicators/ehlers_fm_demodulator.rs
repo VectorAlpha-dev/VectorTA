@@ -1049,6 +1049,34 @@ pub fn ehlers_fm_demodulator_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_fm_demodulator_output_into_js(
+    open: &[f64],
+    close: &[f64],
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = ehlers_fm_demodulator_js(open, close, period)?;
+    crate::write_wasm_f64_output("ehlers_fm_demodulator_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_fm_demodulator_batch_unified_output_into_js(
+    open: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ehlers_fm_demodulator_batch_unified_js(open, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "ehlers_fm_demodulator_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

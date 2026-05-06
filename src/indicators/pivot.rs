@@ -2572,6 +2572,34 @@ pub fn pivot_batch_js(
     serde_wasm_bindgen::to_value(&out).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn pivot_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    open: &[f64],
+    mode: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = pivot_js(high, low, close, open, mode)?;
+    crate::write_wasm_f64_output("pivot_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn pivot_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    open: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = pivot_batch_js(high, low, close, open, config)?;
+    crate::write_wasm_selected_object_f64_outputs("pivot_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

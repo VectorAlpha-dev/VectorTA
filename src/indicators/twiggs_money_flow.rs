@@ -1976,6 +1976,40 @@ pub fn twiggs_money_flow_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn twiggs_money_flow_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    length: usize,
+    smoothing_length: usize,
+    ma_type: String,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = twiggs_money_flow_js(high, low, close, volume, length, smoothing_length, ma_type)?;
+    crate::write_wasm_object_f64_outputs("twiggs_money_flow_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn twiggs_money_flow_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = twiggs_money_flow_batch_js(high, low, close, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "twiggs_money_flow_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

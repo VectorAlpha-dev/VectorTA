@@ -23,6 +23,33 @@ use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn adaptive_momentum_oscillator_output_into_js(
+    data: &[f64],
+    length: Option<usize>,
+    smoothing_length: Option<usize>,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = adaptive_momentum_oscillator_js(data, length, smoothing_length)?;
+    crate::write_wasm_object_f64_outputs("adaptive_momentum_oscillator_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn adaptive_momentum_oscillator_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = adaptive_momentum_oscillator_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "adaptive_momentum_oscillator_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 use std::error::Error as StdError;
 use std::mem::ManuallyDrop;

@@ -1606,6 +1606,39 @@ impl EhmaContext {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehma_wasm_output_into_js(
+    data: &[f64],
+    period: Option<usize>,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = ehma_wasm(data, period)?;
+    crate::write_wasm_f64_output("ehma_wasm_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehma_output_into_js(
+    data: &[f64],
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = ehma_js(data, period)?;
+    crate::write_wasm_f64_output("ehma_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehma_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ehma_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("ehma_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

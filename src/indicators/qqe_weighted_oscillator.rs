@@ -1241,6 +1241,35 @@ pub fn qqe_weighted_oscillator_batch_js(data: &[f64], config: JsValue) -> Result
     .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn qqe_weighted_oscillator_output_into_js(
+    data: &[f64],
+    length: usize,
+    factor: f64,
+    smooth: usize,
+    weight: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = qqe_weighted_oscillator_js(data, length, factor, smooth, weight)?;
+    crate::write_wasm_object_f64_outputs("qqe_weighted_oscillator_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn qqe_weighted_oscillator_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = qqe_weighted_oscillator_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "qqe_weighted_oscillator_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

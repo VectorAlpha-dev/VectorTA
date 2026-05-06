@@ -1280,6 +1280,33 @@ pub fn historical_volatility_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn historical_volatility_output_into_js(
+    data: &[f64],
+    lookback: usize,
+    annualization_days: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = historical_volatility_js(data, lookback, annualization_days)?;
+    crate::write_wasm_f64_output("historical_volatility_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn historical_volatility_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = historical_volatility_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "historical_volatility_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

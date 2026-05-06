@@ -2191,6 +2191,56 @@ pub fn keltner_channel_width_oscillator_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn keltner_channel_width_oscillator_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    source: &[f64],
+    length: usize,
+    multiplier: f64,
+    use_exponential: bool,
+    bands_style: &str,
+    atr_length: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = keltner_channel_width_oscillator_js(
+        high,
+        low,
+        close,
+        source,
+        length,
+        multiplier,
+        use_exponential,
+        bands_style,
+        atr_length,
+    )?;
+    crate::write_wasm_object_f64_outputs(
+        "keltner_channel_width_oscillator_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn keltner_channel_width_oscillator_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    source: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = keltner_channel_width_oscillator_batch_js(high, low, close, source, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "keltner_channel_width_oscillator_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

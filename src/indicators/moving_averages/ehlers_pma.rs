@@ -1288,6 +1288,13 @@ pub fn ehlers_pma_into_js(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ehlers_pma_output_into_js(data: &[f64], out: &js_sys::Object) -> Result<usize, JsValue> {
+    let value = ehlers_pma_js(data)?;
+    crate::write_wasm_object_f64_outputs("ehlers_pma_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

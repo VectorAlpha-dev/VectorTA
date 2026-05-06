@@ -1592,6 +1592,35 @@ pub fn normalized_resonator_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn normalized_resonator_output_into_js(
+    data: &[f64],
+    period: usize,
+    delta: f64,
+    lookback_mult: f64,
+    signal_length: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = normalized_resonator_js(data, period, delta, lookback_mult, signal_length)?;
+    crate::write_wasm_object_f64_outputs("normalized_resonator_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn normalized_resonator_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = normalized_resonator_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "normalized_resonator_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

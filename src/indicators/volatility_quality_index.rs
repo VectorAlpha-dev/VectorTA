@@ -1448,6 +1448,39 @@ pub fn volatility_quality_index_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn volatility_quality_index_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    fast_length: usize,
+    slow_length: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = volatility_quality_index_js(open, high, low, close, fast_length, slow_length)?;
+    crate::write_wasm_object_f64_outputs("volatility_quality_index_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn volatility_quality_index_batch_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = volatility_quality_index_batch_js(open, high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "volatility_quality_index_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

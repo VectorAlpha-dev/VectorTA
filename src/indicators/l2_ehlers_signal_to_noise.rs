@@ -1177,6 +1177,36 @@ pub fn l2_ehlers_signal_to_noise_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn l2_ehlers_signal_to_noise_output_into_js(
+    source: &[f64],
+    high: &[f64],
+    low: &[f64],
+    smooth_period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = l2_ehlers_signal_to_noise_js(source, high, low, smooth_period)?;
+    crate::write_wasm_f64_output("l2_ehlers_signal_to_noise_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn l2_ehlers_signal_to_noise_batch_output_into_js(
+    source: &[f64],
+    high: &[f64],
+    low: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = l2_ehlers_signal_to_noise_batch_js(source, high, low, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "l2_ehlers_signal_to_noise_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

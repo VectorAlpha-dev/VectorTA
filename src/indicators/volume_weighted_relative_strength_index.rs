@@ -2008,6 +2008,48 @@ pub fn volume_weighted_relative_strength_index_batch_js(
     .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn volume_weighted_relative_strength_index_output_into_js(
+    source: &[f64],
+    volume: &[f64],
+    rsi_length: usize,
+    range_length: usize,
+    ma_length: usize,
+    ma_type: &str,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = volume_weighted_relative_strength_index_js(
+        source,
+        volume,
+        rsi_length,
+        range_length,
+        ma_length,
+        ma_type,
+    )?;
+    crate::write_wasm_object_f64_outputs(
+        "volume_weighted_relative_strength_index_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn volume_weighted_relative_strength_index_batch_output_into_js(
+    source: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = volume_weighted_relative_strength_index_batch_js(source, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "volume_weighted_relative_strength_index_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

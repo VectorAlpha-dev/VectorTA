@@ -1240,6 +1240,30 @@ pub fn ttm_trend_cuda_many_series_one_param_dev_py(
     Ok(TtmTrendDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ttm_trend_output_into_js(
+    source: &[f64],
+    close: &[f64],
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = ttm_trend_js(source, close, period)?;
+    crate::write_wasm_f64_output("ttm_trend_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ttm_trend_batch_output_into_js(
+    source: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ttm_trend_batch_js(source, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs("ttm_trend_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

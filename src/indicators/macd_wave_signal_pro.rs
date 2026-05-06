@@ -1816,6 +1816,37 @@ pub fn macd_wave_signal_pro_batch_into(
     Ok(1)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn macd_wave_signal_pro_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = macd_wave_signal_pro_js(open, high, low, close)?;
+    crate::write_wasm_object_f64_outputs("macd_wave_signal_pro_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn macd_wave_signal_pro_batch_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = macd_wave_signal_pro_batch_js(open, high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "macd_wave_signal_pro_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1100,6 +1100,34 @@ pub fn volume_weighted_rsi_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn volume_weighted_rsi_output_into_js(
+    close: &[f64],
+    volume: &[f64],
+    period: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = volume_weighted_rsi_js(close, volume, period)?;
+    crate::write_wasm_object_f64_outputs("volume_weighted_rsi_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn volume_weighted_rsi_batch_output_into_js(
+    close: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = volume_weighted_rsi_batch_js(close, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "volume_weighted_rsi_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

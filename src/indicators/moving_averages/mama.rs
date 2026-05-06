@@ -1975,6 +1975,36 @@ pub unsafe fn mama_row_avx512(
     mama_avx512_inplace(data, fast_limit, slow_limit, out_mama, out_fama);
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn mama_output_into_js(
+    data: &[f64],
+    fast_limit: f64,
+    slow_limit: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = mama_js(data, fast_limit, slow_limit)?;
+    crate::write_wasm_object_f64_outputs("mama_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn mama_batch_output_into_js(
+    data: &[f64],
+    fast_start: f64,
+    fast_end: f64,
+    fast_step: f64,
+    slow_start: f64,
+    slow_end: f64,
+    slow_step: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = mama_batch_js(
+        data, fast_start, fast_end, fast_step, slow_start, slow_end, slow_step,
+    )?;
+    crate::write_wasm_selected_object_f64_outputs("mama_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -47,6 +47,57 @@ impl<'a> AsRef<[f64]> for GaussianInput<'a> {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn gaussian_output_into_js(
+    data: &[f64],
+    period: usize,
+    poles: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = gaussian_js(data, period, poles)?;
+    crate::write_wasm_f64_output("gaussian_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn gaussian_batch_output_into_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    poles_start: usize,
+    poles_end: usize,
+    poles_step: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = gaussian_batch_js(
+        data,
+        period_start,
+        period_end,
+        period_step,
+        poles_start,
+        poles_end,
+        poles_step,
+    )?;
+    crate::write_wasm_f64_output("gaussian_batch_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn gaussian_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = gaussian_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "gaussian_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests_into {
     use super::*;

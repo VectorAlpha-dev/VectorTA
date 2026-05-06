@@ -2662,6 +2662,63 @@ pub fn vwap_deviation_oscillator_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vwap_deviation_oscillator_output_into_js(
+    timestamps: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    session_mode: &str,
+    rolling_period: usize,
+    rolling_days: usize,
+    use_close: bool,
+    deviation_mode: &str,
+    z_window: usize,
+    pct_vol_lookback: usize,
+    pct_min_sigma: f64,
+    abs_vol_lookback: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = vwap_deviation_oscillator_js(
+        timestamps,
+        high,
+        low,
+        close,
+        volume,
+        session_mode,
+        rolling_period,
+        rolling_days,
+        use_close,
+        deviation_mode,
+        z_window,
+        pct_vol_lookback,
+        pct_min_sigma,
+        abs_vol_lookback,
+    )?;
+    crate::write_wasm_object_f64_outputs("vwap_deviation_oscillator_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vwap_deviation_oscillator_batch_output_into_js(
+    timestamps: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = vwap_deviation_oscillator_batch_js(timestamps, high, low, close, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "vwap_deviation_oscillator_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

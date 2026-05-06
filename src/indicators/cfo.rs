@@ -1135,6 +1135,42 @@ pub fn cfo_batch_inner_into(
     Ok(combos)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn cfo_output_into_js(
+    data: &[f64],
+    period: usize,
+    scalar: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = cfo_js(data, period, scalar)?;
+    crate::write_wasm_f64_output("cfo_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn cfo_batch_output_into_js(
+    data: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    scalar_start: f64,
+    scalar_end: f64,
+    scalar_step: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = cfo_batch_js(
+        data,
+        period_start,
+        period_end,
+        period_step,
+        scalar_start,
+        scalar_end,
+        scalar_step,
+    )?;
+    crate::write_wasm_f64_output("cfo_batch_output_into_js", &values, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

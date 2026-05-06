@@ -1417,6 +1417,35 @@ fn expand_grid(r: &VwapBatchRange) -> Vec<VwapParams> {
     expand_grid_vwap(r)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vwap_output_into_js(
+    timestamps: &[f64],
+    volumes: &[f64],
+    prices: &[f64],
+    anchor: Option<String>,
+    kernel: Option<String>,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = vwap_js(timestamps, volumes, prices, anchor, kernel)?;
+    crate::write_wasm_f64_output("vwap_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vwap_batch_unified_output_into_js(
+    timestamps: &[f64],
+    volumes: &[f64],
+    prices: &[f64],
+    start: String,
+    end: String,
+    step: u32,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = vwap_batch_unified_js(timestamps, volumes, prices, start, end, step)?;
+    crate::write_wasm_selected_object_f64_outputs("vwap_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1426,6 +1426,31 @@ pub fn n_order_ema_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn n_order_ema_output_into_js(
+    data: &[f64],
+    period: f64,
+    order: usize,
+    ema_style: &str,
+    iir_style: &str,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = n_order_ema_js(data, period, order, ema_style, iir_style)?;
+    crate::write_wasm_f64_output("n_order_ema_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn n_order_ema_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = n_order_ema_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("n_order_ema_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

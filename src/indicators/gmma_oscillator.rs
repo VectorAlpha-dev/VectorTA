@@ -1535,6 +1535,43 @@ pub fn gmma_oscillator_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn gmma_oscillator_output_into_js(
+    data: &[f64],
+    gmma_type: &str,
+    smooth_length: usize,
+    signal_length: usize,
+    anchor_minutes: usize,
+    interval_minutes: Option<usize>,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = gmma_oscillator_js(
+        data,
+        gmma_type,
+        smooth_length,
+        signal_length,
+        anchor_minutes,
+        interval_minutes,
+    )?;
+    crate::write_wasm_object_f64_outputs("gmma_oscillator_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn gmma_oscillator_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = gmma_oscillator_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "gmma_oscillator_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

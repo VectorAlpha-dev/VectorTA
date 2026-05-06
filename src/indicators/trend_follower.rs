@@ -2199,6 +2199,54 @@ pub fn trend_follower_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn trend_follower_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    matype: &str,
+    trend_period: usize,
+    ma_period: usize,
+    channel_rate_percent: f64,
+    use_linear_regression: bool,
+    linear_regression_period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = trend_follower_js(
+        high,
+        low,
+        close,
+        volume,
+        matype,
+        trend_period,
+        ma_period,
+        channel_rate_percent,
+        use_linear_regression,
+        linear_regression_period,
+    )?;
+    crate::write_wasm_f64_output("trend_follower_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn trend_follower_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = trend_follower_batch_js(high, low, close, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "trend_follower_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

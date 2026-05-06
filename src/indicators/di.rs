@@ -1538,6 +1538,32 @@ fn true_range(current_high: f64, current_low: f64, prev_close: f64) -> f64 {
     tr1
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn di_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    period: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = di_js(high, low, close, period)?;
+    crate::write_wasm_object_f64_outputs("di_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn di_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = di_batch_unified_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs("di_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1143,6 +1143,34 @@ pub fn trend_trigger_factor_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn trend_trigger_factor_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    length: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = trend_trigger_factor_js(high, low, length)?;
+    crate::write_wasm_f64_output("trend_trigger_factor_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn trend_trigger_factor_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = trend_trigger_factor_batch_js(high, low, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "trend_trigger_factor_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

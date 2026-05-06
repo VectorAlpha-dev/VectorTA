@@ -1697,6 +1697,50 @@ pub fn cycle_channel_oscillator_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn cycle_channel_oscillator_output_into_js(
+    source: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    short_cycle_length: usize,
+    medium_cycle_length: usize,
+    short_multiplier: f64,
+    medium_multiplier: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = cycle_channel_oscillator_js(
+        source,
+        high,
+        low,
+        close,
+        short_cycle_length,
+        medium_cycle_length,
+        short_multiplier,
+        medium_multiplier,
+    )?;
+    crate::write_wasm_object_f64_outputs("cycle_channel_oscillator_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn cycle_channel_oscillator_batch_output_into_js(
+    source: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = cycle_channel_oscillator_batch_js(source, high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "cycle_channel_oscillator_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

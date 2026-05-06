@@ -1775,6 +1775,45 @@ pub fn stochastic_connors_rsi_batch_into(
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn stochastic_connors_rsi_output_into_js(
+    source: &[f64],
+    stoch_length: usize,
+    smooth_k: usize,
+    smooth_d: usize,
+    rsi_length: usize,
+    updown_length: usize,
+    roc_length: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = stochastic_connors_rsi_js(
+        source,
+        stoch_length,
+        smooth_k,
+        smooth_d,
+        rsi_length,
+        updown_length,
+        roc_length,
+    )?;
+    crate::write_wasm_object_f64_outputs("stochastic_connors_rsi_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn stochastic_connors_rsi_batch_output_into_js(
+    source: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = stochastic_connors_rsi_batch_js(source, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "stochastic_connors_rsi_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

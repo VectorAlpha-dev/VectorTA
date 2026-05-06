@@ -1658,6 +1658,29 @@ impl VptDeviceArrayF32Py {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vpt_output_into_js(
+    price: &[f64],
+    volume: &[f64],
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = vpt_js(price, volume)?;
+    crate::write_wasm_f64_output("vpt_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vpt_batch_output_into_js(
+    price: &[f64],
+    volume: &[f64],
+    _config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = vpt_batch_js(price, volume, _config)?;
+    crate::write_wasm_selected_object_f64_outputs("vpt_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

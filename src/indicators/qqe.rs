@@ -1906,6 +1906,43 @@ pub fn qqe_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn qqe_unified_output_into_js(
+    data: &[f64],
+    rsi_period: usize,
+    smoothing_factor: usize,
+    fast_factor: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = qqe_unified_js(data, rsi_period, smoothing_factor, fast_factor)?;
+    crate::write_wasm_f64_output("qqe_unified_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn qqe_output_into_js(
+    data: &[f64],
+    rsi_period: usize,
+    smoothing_factor: usize,
+    fast_factor: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = qqe_js(data, rsi_period, smoothing_factor, fast_factor)?;
+    crate::write_wasm_object_f64_outputs("qqe_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn qqe_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = qqe_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("qqe_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

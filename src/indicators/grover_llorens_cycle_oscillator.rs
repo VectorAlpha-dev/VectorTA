@@ -1993,6 +1993,48 @@ pub fn grover_llorens_cycle_oscillator_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn grover_llorens_cycle_oscillator_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    length: usize,
+    mult: f64,
+    source: &str,
+    smooth: bool,
+    rsi_period: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = grover_llorens_cycle_oscillator_js(
+        open, high, low, close, length, mult, source, smooth, rsi_period,
+    )?;
+    crate::write_wasm_object_f64_outputs(
+        "grover_llorens_cycle_oscillator_output_into_js",
+        &value,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn grover_llorens_cycle_oscillator_batch_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = grover_llorens_cycle_oscillator_batch_js(open, high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "grover_llorens_cycle_oscillator_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

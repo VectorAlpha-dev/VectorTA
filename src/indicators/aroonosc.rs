@@ -1210,6 +1210,48 @@ impl AroonOscStream {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn aroonosc_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    length: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = aroonosc_js(high, low, length)?;
+    crate::write_wasm_f64_output("aroonosc_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn aroonosc_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    length_start: usize,
+    length_end: usize,
+    length_step: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = aroonosc_batch_js(high, low, length_start, length_end, length_step)?;
+    crate::write_wasm_f64_output("aroonosc_batch_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn aroon_osc_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = aroon_osc_batch_unified_js(high, low, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "aroon_osc_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1930,6 +1930,50 @@ pub fn evasive_supertrend_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn evasive_supertrend_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    atr_length: usize,
+    base_multiplier: f64,
+    noise_threshold: f64,
+    expansion_alpha: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = evasive_supertrend_js(
+        open,
+        high,
+        low,
+        close,
+        atr_length,
+        base_multiplier,
+        noise_threshold,
+        expansion_alpha,
+    )?;
+    crate::write_wasm_object_f64_outputs("evasive_supertrend_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn evasive_supertrend_batch_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = evasive_supertrend_batch_js(open, high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "evasive_supertrend_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

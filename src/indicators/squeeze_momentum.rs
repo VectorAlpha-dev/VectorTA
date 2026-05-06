@@ -2486,6 +2486,22 @@ pub fn squeeze_momentum_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn squeeze_momentum_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    length_bb: usize,
+    mult_bb: f64,
+    length_kc: usize,
+    mult_kc: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = squeeze_momentum_js(high, low, close, length_bb, mult_bb, length_kc, mult_kc)?;
+    crate::write_wasm_f64_output("squeeze_momentum_output_into_js", &values, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

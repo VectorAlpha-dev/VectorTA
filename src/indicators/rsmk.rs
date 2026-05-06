@@ -2630,6 +2630,42 @@ pub fn rsmk_batch_js(main: &[f64], compare: &[f64], config: JsValue) -> Result<J
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn rsmk_output_into_js(
+    main: &[f64],
+    compare: &[f64],
+    lookback: usize,
+    period: usize,
+    signal_period: usize,
+    matype: Option<String>,
+    signal_matype: Option<String>,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = rsmk_js(
+        main,
+        compare,
+        lookback,
+        period,
+        signal_period,
+        matype,
+        signal_matype,
+    )?;
+    crate::write_wasm_object_f64_outputs("rsmk_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn rsmk_batch_output_into_js(
+    main: &[f64],
+    compare: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = rsmk_batch_js(main, compare, config)?;
+    crate::write_wasm_selected_object_f64_outputs("rsmk_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

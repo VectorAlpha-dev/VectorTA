@@ -1206,6 +1206,32 @@ pub fn rolling_z_score_trend_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn rolling_z_score_trend_output_into_js(
+    data: &[f64],
+    lookback_period: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = rolling_z_score_trend_js(data, lookback_period)?;
+    crate::write_wasm_object_f64_outputs("rolling_z_score_trend_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn rolling_z_score_trend_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = rolling_z_score_trend_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "rolling_z_score_trend_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2289,6 +2289,51 @@ pub fn market_structure_confluence_batch_js(
     .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn market_structure_confluence_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    swing_size: usize,
+    bos_confirmation: String,
+    basis_length: usize,
+    atr_length: usize,
+    atr_smooth: usize,
+    vol_mult: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = market_structure_confluence_js(
+        high,
+        low,
+        close,
+        swing_size,
+        bos_confirmation,
+        basis_length,
+        atr_length,
+        atr_smooth,
+        vol_mult,
+    )?;
+    crate::write_wasm_object_f64_outputs("market_structure_confluence_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn market_structure_confluence_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = market_structure_confluence_batch_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "market_structure_confluence_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

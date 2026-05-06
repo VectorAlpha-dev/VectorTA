@@ -1883,6 +1883,29 @@ fn expand_grid_for_bandpass(r: &BandPassBatchRange) -> Vec<BandPassParams> {
     expand_grid(r)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn bandpass_output_into_js(
+    data: &[f64],
+    period: usize,
+    bandwidth: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = bandpass_js(data, period, bandwidth)?;
+    crate::write_wasm_object_f64_outputs("bandpass_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn bandpass_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = bandpass_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("bandpass_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

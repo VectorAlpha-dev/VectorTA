@@ -22,6 +22,38 @@ use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn polynomial_regression_extrapolation_output_into_js(
+    data: &[f64],
+    length: usize,
+    extrapolate: usize,
+    degree: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = polynomial_regression_extrapolation_js(data, length, extrapolate, degree)?;
+    crate::write_wasm_f64_output(
+        "polynomial_regression_extrapolation_output_into_js",
+        &values,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn polynomial_regression_extrapolation_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = polynomial_regression_extrapolation_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "polynomial_regression_extrapolation_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 use std::error::Error as StdError;
 use std::mem::{ManuallyDrop, MaybeUninit};

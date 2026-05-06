@@ -939,6 +939,28 @@ unsafe fn rsx_row_avx512_long(data: &[f64], first: usize, period: usize, out: &m
     rsx_avx512_long(data, period, first, out);
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn rsx_output_into_js(
+    data: &[f64],
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = rsx_js(data, period)?;
+    crate::write_wasm_f64_output("rsx_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn rsx_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = rsx_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("rsx_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

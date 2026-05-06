@@ -1875,6 +1875,37 @@ pub fn range_oscillator_batch_js(
     .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn range_oscillator_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    length: usize,
+    mult: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = range_oscillator_js(high, low, close, length, mult)?;
+    crate::write_wasm_object_f64_outputs("range_oscillator_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn range_oscillator_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = range_oscillator_batch_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "range_oscillator_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

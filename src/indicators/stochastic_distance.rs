@@ -1462,6 +1462,37 @@ pub fn stochastic_distance_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn stochastic_distance_output_into_js(
+    data: &[f64],
+    lookback_length: usize,
+    length1: usize,
+    length2: usize,
+    ob_level: i32,
+    os_level: i32,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value =
+        stochastic_distance_js(data, lookback_length, length1, length2, ob_level, os_level)?;
+    crate::write_wasm_object_f64_outputs("stochastic_distance_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn stochastic_distance_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = stochastic_distance_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "stochastic_distance_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

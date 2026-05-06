@@ -2769,6 +2769,53 @@ pub fn possible_rsi_batch_into(
     Ok(rows)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn possible_rsi_output_into_js(
+    data: &[f64],
+    period: usize,
+    rsi_mode: &str,
+    norm_period: usize,
+    normalization_mode: &str,
+    normalization_length: usize,
+    nonlag_period: usize,
+    dynamic_zone_period: usize,
+    buy_probability: f64,
+    sell_probability: f64,
+    signal_type: &str,
+    run_highpass: bool,
+    highpass_period: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = possible_rsi_js(
+        data,
+        period,
+        rsi_mode,
+        norm_period,
+        normalization_mode,
+        normalization_length,
+        nonlag_period,
+        dynamic_zone_period,
+        buy_probability,
+        sell_probability,
+        signal_type,
+        run_highpass,
+        highpass_period,
+    )?;
+    crate::write_wasm_object_f64_outputs("possible_rsi_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn possible_rsi_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = possible_rsi_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("possible_rsi_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

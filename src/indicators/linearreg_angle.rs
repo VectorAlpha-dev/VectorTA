@@ -1156,6 +1156,32 @@ unsafe fn linearreg_angle_row_avx512_with_prefixes(
     )
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn linearreg_angle_output_into_js(
+    data: &[f64],
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = linearreg_angle_js(data, period)?;
+    crate::write_wasm_f64_output("linearreg_angle_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn linearreg_angle_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = linearreg_angle_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "linearreg_angle_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

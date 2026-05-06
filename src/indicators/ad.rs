@@ -1391,6 +1391,47 @@ pub fn ad_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ad_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = ad_js(high, low, close, volume)?;
+    crate::write_wasm_f64_output("ad_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ad_batch_output_into_js(
+    highs_flat: &[f64],
+    lows_flat: &[f64],
+    closes_flat: &[f64],
+    volumes_flat: &[f64],
+    rows: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = ad_batch_js(highs_flat, lows_flat, closes_flat, volumes_flat, rows)?;
+    crate::write_wasm_f64_output("ad_batch_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ad_batch_unified_output_into_js(
+    highs_flat: &[f64],
+    lows_flat: &[f64],
+    closes_flat: &[f64],
+    volumes_flat: &[f64],
+    rows: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ad_batch_unified_js(highs_flat, lows_flat, closes_flat, volumes_flat, rows)?;
+    crate::write_wasm_selected_object_f64_outputs("ad_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1204,6 +1204,44 @@ fn expand_grid(_r: &VwmaBatchRange) -> Vec<VwmaParams> {
     expand_grid_vwma(_r)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vwma_output_into_js(
+    prices: &[f64],
+    volumes: &[f64],
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = vwma_js(prices, volumes, period)?;
+    crate::write_wasm_f64_output("vwma_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vwma_batch_output_into_js(
+    prices: &[f64],
+    volumes: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = vwma_batch_js(prices, volumes, period_start, period_end, period_step)?;
+    crate::write_wasm_f64_output("vwma_batch_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vwma_batch_unified_output_into_js(
+    prices: &[f64],
+    volumes: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = vwma_batch_unified_js(prices, volumes, config)?;
+    crate::write_wasm_selected_object_f64_outputs("vwma_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

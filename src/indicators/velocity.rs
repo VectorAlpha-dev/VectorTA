@@ -1274,6 +1274,29 @@ impl VelocityStreamWasm {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn velocity_output_into_js(
+    data: &[f64],
+    length: usize,
+    smooth_length: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = velocity_js(data, length, smooth_length)?;
+    crate::write_wasm_f64_output("velocity_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn velocity_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = velocity_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("velocity_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

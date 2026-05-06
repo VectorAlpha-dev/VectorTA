@@ -1351,6 +1351,28 @@ pub fn cmo_cuda_many_series_one_param_dev_py(
     })
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn cmo_output_into_js(
+    data: &[f64],
+    period: Option<usize>,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = cmo_js(data, period)?;
+    crate::write_wasm_f64_output("cmo_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn cmo_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = cmo_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("cmo_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

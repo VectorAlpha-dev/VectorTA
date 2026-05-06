@@ -1108,6 +1108,29 @@ pub unsafe fn tsi_row_avx512_into(
     tsi_compute_into_streaming(data, long, short, first, out_row)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn tsi_output_into_js(
+    data: &[f64],
+    long_period: usize,
+    short_period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = tsi_js(data, long_period, short_period)?;
+    crate::write_wasm_f64_output("tsi_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn tsi_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = tsi_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("tsi_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

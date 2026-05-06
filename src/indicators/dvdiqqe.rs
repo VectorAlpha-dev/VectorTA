@@ -3270,6 +3270,72 @@ pub fn dvdiqqe_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn dvdiqqe_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: Option<Vec<f64>>,
+    period: Option<usize>,
+    smoothing_period: Option<usize>,
+    fast_multiplier: Option<f64>,
+    slow_multiplier: Option<f64>,
+    volume_type: Option<String>,
+    center_type: Option<String>,
+    tick_size: Option<f64>,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = dvdiqqe_js(
+        open,
+        high,
+        low,
+        close,
+        volume,
+        period,
+        smoothing_period,
+        fast_multiplier,
+        slow_multiplier,
+        volume_type,
+        center_type,
+        tick_size,
+    )?;
+    crate::write_wasm_object_f64_outputs("dvdiqqe_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn dvdiqqe_batch_unified_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: Option<Vec<f64>>,
+    config: JsValue,
+    volume_type: String,
+    center_type: String,
+    tick_size: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = dvdiqqe_batch_unified_js(
+        open,
+        high,
+        low,
+        close,
+        volume,
+        config,
+        volume_type,
+        center_type,
+        tick_size,
+    )?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "dvdiqqe_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

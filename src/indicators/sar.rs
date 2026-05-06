@@ -1760,6 +1760,31 @@ pub fn sar_batch_unified_js(
     serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn sar_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    acceleration: f64,
+    maximum: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = sar_js(high, low, acceleration, maximum)?;
+    crate::write_wasm_f64_output("sar_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn sar_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = sar_batch_unified_js(high, low, config)?;
+    crate::write_wasm_selected_object_f64_outputs("sar_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

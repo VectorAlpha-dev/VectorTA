@@ -66,6 +66,30 @@ impl<'a> AsRef<[f64]> for VidyaInput<'a> {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vidya_output_into_js(
+    data: &[f64],
+    short_period: usize,
+    long_period: usize,
+    alpha: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = vidya_js(data, short_period, long_period, alpha)?;
+    crate::write_wasm_f64_output("vidya_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn vidya_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = vidya_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("vidya_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests_into_parity {
     use super::*;

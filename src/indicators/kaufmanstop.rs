@@ -2286,6 +2286,69 @@ pub unsafe fn kaufmanstop_scalar_classic_ema(
     Ok(())
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn kaufmanstop_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    period: usize,
+    mult: f64,
+    direction: &str,
+    ma_type: &str,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = kaufmanstop_js(high, low, period, mult, direction, ma_type)
+        .map_err(|e| JsValue::from(e))?;
+    crate::write_wasm_f64_output("kaufmanstop_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn kaufmanstop_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    period_start: usize,
+    period_end: usize,
+    period_step: usize,
+    mult_start: f64,
+    mult_end: f64,
+    mult_step: f64,
+    direction: &str,
+    ma_type: &str,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = kaufmanstop_batch_js(
+        high,
+        low,
+        period_start,
+        period_end,
+        period_step,
+        mult_start,
+        mult_end,
+        mult_step,
+        direction,
+        ma_type,
+    )
+    .map_err(|e| JsValue::from(e))?;
+    crate::write_wasm_selected_object_f64_outputs("kaufmanstop_batch_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn kaufmanstop_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = kaufmanstop_batch_unified_js(high, low, config).map_err(|e| JsValue::from(e))?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "kaufmanstop_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

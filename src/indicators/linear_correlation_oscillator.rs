@@ -22,6 +22,17 @@ use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn linear_correlation_oscillator_output_into_js(
+    data: &[f64],
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = linear_correlation_oscillator_js(data, period)?;
+    crate::write_wasm_f64_output("linear_correlation_oscillator_output_into_js", &values, out)
+}
+
 #[cfg(test)]
 use std::error::Error as StdError;
 use std::mem::{ManuallyDrop, MaybeUninit};

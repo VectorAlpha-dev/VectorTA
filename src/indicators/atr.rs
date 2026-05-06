@@ -1379,6 +1379,48 @@ unsafe fn precompute_tr_into_avx512(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn atr_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    length: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = atr_js(high, low, close, length).map_err(|e| JsValue::from(e))?;
+    crate::write_wasm_f64_output("atr_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn atr_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    length_start: usize,
+    length_end: usize,
+    length_step: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = atr_batch_js(high, low, close, length_start, length_end, length_step)
+        .map_err(|e| JsValue::from(e))?;
+    crate::write_wasm_f64_output("atr_batch_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn atr_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = atr_batch_unified_js(high, low, close, config).map_err(|e| JsValue::from(e))?;
+    crate::write_wasm_selected_object_f64_outputs("atr_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

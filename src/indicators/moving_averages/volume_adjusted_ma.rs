@@ -2192,6 +2192,37 @@ pub fn volume_adjusted_ma_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn volume_adjusted_ma_output_into_js(
+    data: &[f64],
+    volume: &[f64],
+    length: usize,
+    vi_factor: f64,
+    strict: bool,
+    sample_period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = volume_adjusted_ma_js(data, volume, length, vi_factor, strict, sample_period)?;
+    crate::write_wasm_f64_output("volume_adjusted_ma_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn volume_adjusted_ma_unified_output_into_js(
+    data: &[f64],
+    volume: &[f64],
+    length: Option<usize>,
+    vi_factor: Option<f64>,
+    strict: Option<bool>,
+    sample_period: Option<usize>,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value =
+        volume_adjusted_ma_unified_js(data, volume, length, vi_factor, strict, sample_period)?;
+    crate::write_wasm_object_f64_outputs("volume_adjusted_ma_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

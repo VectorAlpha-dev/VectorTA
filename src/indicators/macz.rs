@@ -2843,6 +2843,36 @@ pub struct MaczBatchConfig {
     pub gamma: f64,
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn macz_output_into_js(
+    data: &[f64],
+    fast_length: usize,
+    slow_length: usize,
+    signal_length: usize,
+    lengthz: usize,
+    length_stdev: usize,
+    a: f64,
+    b: f64,
+    use_lag: bool,
+    gamma: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = macz_js(
+        data,
+        fast_length,
+        slow_length,
+        signal_length,
+        lengthz,
+        length_stdev,
+        a,
+        b,
+        use_lag,
+        gamma,
+    )?;
+    crate::write_wasm_f64_output("macz_output_into_js", &values, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

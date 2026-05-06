@@ -1451,6 +1451,30 @@ impl DonchianStream {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn donchian_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let result = donchian_js(high, low, period)?;
+    crate::write_wasm_f64_output("donchian_output_into_js", &result.values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn donchian_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = donchian_batch_js(high, low, config)?;
+    crate::write_wasm_selected_object_f64_outputs("donchian_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

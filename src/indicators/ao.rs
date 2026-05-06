@@ -1078,6 +1078,57 @@ pub unsafe fn ao_row_avx512_long(
     ao_scalar(data, short, long, first, out)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ao_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    short_period: usize,
+    long_period: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = ao_js(high, low, short_period, long_period)?;
+    crate::write_wasm_f64_output("ao_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ao_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    short_start: usize,
+    short_end: usize,
+    short_step: usize,
+    long_start: usize,
+    long_end: usize,
+    long_step: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = ao_batch_js(
+        high,
+        low,
+        short_start,
+        short_end,
+        short_step,
+        long_start,
+        long_end,
+        long_step,
+    )?;
+    crate::write_wasm_f64_output("ao_batch_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ao_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ao_batch_unified_js(high, low, config)?;
+    crate::write_wasm_selected_object_f64_outputs("ao_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

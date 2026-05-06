@@ -1947,6 +1947,49 @@ pub fn adaptive_schaff_trend_cycle_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn adaptive_schaff_trend_cycle_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    adaptive_length: usize,
+    stc_length: usize,
+    smoothing_factor: f64,
+    fast_length: usize,
+    slow_length: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = adaptive_schaff_trend_cycle_js(
+        high,
+        low,
+        close,
+        adaptive_length,
+        stc_length,
+        smoothing_factor,
+        fast_length,
+        slow_length,
+    )?;
+    crate::write_wasm_object_f64_outputs("adaptive_schaff_trend_cycle_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn adaptive_schaff_trend_cycle_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = adaptive_schaff_trend_cycle_batch_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "adaptive_schaff_trend_cycle_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

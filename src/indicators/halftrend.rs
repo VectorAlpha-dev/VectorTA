@@ -1306,6 +1306,38 @@ pub fn halftrend_into(
     )
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn halftrend_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    amplitude: usize,
+    channel_deviation: f64,
+    atr_period: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = halftrend_js(high, low, close, amplitude, channel_deviation, atr_period)?;
+    crate::write_wasm_object_f64_outputs("halftrend_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn halftrend_batch_unified_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = halftrend_batch_unified_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "halftrend_batch_unified_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

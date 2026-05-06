@@ -2598,6 +2598,80 @@ pub fn prb_cuda_many_series_one_param_dev_py(
     ))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn prb_output_into_js(
+    data: &[f64],
+    smooth_data: bool,
+    smooth_period: usize,
+    regression_period: usize,
+    polynomial_order: usize,
+    regression_offset: i32,
+    ndev: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let result = prb_js(
+        data,
+        smooth_data,
+        smooth_period,
+        regression_period,
+        polynomial_order,
+        regression_offset,
+        ndev,
+    )?;
+    crate::write_wasm_f64_output("prb_output_into_js", &result.values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn prb_batch_output_into_js(
+    data: &[f64],
+    smooth_data: bool,
+    smooth_period_start: usize,
+    smooth_period_end: usize,
+    smooth_period_step: usize,
+    regression_period_start: usize,
+    regression_period_end: usize,
+    regression_period_step: usize,
+    polynomial_order_start: usize,
+    polynomial_order_end: usize,
+    polynomial_order_step: usize,
+    regression_offset_start: i32,
+    regression_offset_end: i32,
+    regression_offset_step: i32,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = prb_batch_js(
+        data,
+        smooth_data,
+        smooth_period_start,
+        smooth_period_end,
+        smooth_period_step,
+        regression_period_start,
+        regression_period_end,
+        regression_period_step,
+        polynomial_order_start,
+        polynomial_order_end,
+        polynomial_order_step,
+        regression_offset_start,
+        regression_offset_end,
+        regression_offset_step,
+    )?;
+    crate::write_wasm_selected_object_f64_outputs("prb_batch_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn prb_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    smooth_data: bool,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = prb_batch_unified_js(data, config, smooth_data)?;
+    crate::write_wasm_selected_object_f64_outputs("prb_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

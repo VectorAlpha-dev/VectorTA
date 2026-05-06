@@ -2635,6 +2635,31 @@ unsafe fn rvi_row_avx512_long(data: &[f64], first: usize, params: &RviParams, ou
     )
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn rvi_output_into_js(
+    data: &[f64],
+    period: usize,
+    ma_len: usize,
+    matype: usize,
+    devtype: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = rvi_js(data, period, ma_len, matype, devtype)?;
+    crate::write_wasm_f64_output("rvi_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn rvi_batch_unified_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = rvi_batch_unified_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("rvi_batch_unified_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

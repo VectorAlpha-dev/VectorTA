@@ -1137,6 +1137,38 @@ pub fn accumulation_swing_index_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn accumulation_swing_index_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    daily_limit: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = accumulation_swing_index_js(open, high, low, close, daily_limit)?;
+    crate::write_wasm_f64_output("accumulation_swing_index_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn accumulation_swing_index_batch_output_into_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = accumulation_swing_index_batch_js(open, high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "accumulation_swing_index_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1208,3 +1208,27 @@ mod tests {
         ));
     }
 }
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn l1_ehlers_phasor_output_into_js(
+    data: &[f64],
+    domestic_cycle_length: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = l1_ehlers_phasor_js(data, domestic_cycle_length)?;
+    crate::write_wasm_f64_output("l1_ehlers_phasor_output_into_js", &values, out)
+}
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn l1_ehlers_phasor_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = l1_ehlers_phasor_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "l1_ehlers_phasor_batch_output_into_js",
+        &value,
+        out,
+    )
+}

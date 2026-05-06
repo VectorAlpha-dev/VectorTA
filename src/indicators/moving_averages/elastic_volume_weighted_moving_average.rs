@@ -1339,6 +1339,46 @@ impl ElasticVolumeWeightedMovingAverageStreamWasm {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn elastic_volume_weighted_moving_average_output_into_js(
+    prices: &[f64],
+    volumes: &[f64],
+    length: Option<usize>,
+    absolute_volume_millions: Option<f64>,
+    use_volume_sum: Option<bool>,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = elastic_volume_weighted_moving_average_js(
+        prices,
+        volumes,
+        length,
+        absolute_volume_millions,
+        use_volume_sum,
+    )?;
+    crate::write_wasm_f64_output(
+        "elastic_volume_weighted_moving_average_output_into_js",
+        &values,
+        out,
+    )
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn elastic_volume_weighted_moving_average_batch_output_into_js(
+    prices: &[f64],
+    volumes: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = elastic_volume_weighted_moving_average_batch_js(prices, volumes, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "elastic_volume_weighted_moving_average_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

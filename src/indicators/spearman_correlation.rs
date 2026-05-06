@@ -1572,6 +1572,35 @@ pub fn spearman_correlation_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn spearman_correlation_output_into_js(
+    main: &[f64],
+    compare: &[f64],
+    lookback: usize,
+    smoothing_length: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = spearman_correlation_js(main, compare, lookback, smoothing_length)?;
+    crate::write_wasm_object_f64_outputs("spearman_correlation_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn spearman_correlation_batch_output_into_js(
+    main: &[f64],
+    compare: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = spearman_correlation_batch_js(main, compare, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "spearman_correlation_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

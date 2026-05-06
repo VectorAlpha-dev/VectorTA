@@ -1580,6 +1580,34 @@ pub fn monotonicity_index_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn monotonicity_index_output_into_js(
+    data: &[f64],
+    length: usize,
+    mode: &str,
+    index_smooth: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = monotonicity_index_js(data, length, mode, index_smooth)?;
+    crate::write_wasm_object_f64_outputs("monotonicity_index_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn monotonicity_index_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = monotonicity_index_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "monotonicity_index_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

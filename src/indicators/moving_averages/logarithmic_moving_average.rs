@@ -2246,6 +2246,50 @@ pub fn logarithmic_moving_average_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn logarithmic_moving_average_output_into_js(
+    data: &[f64],
+    volume: &[f64],
+    period: usize,
+    steepness: f64,
+    ma_type: &str,
+    smooth: usize,
+    momentum_weight: f64,
+    long_threshold: f64,
+    short_threshold: f64,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = logarithmic_moving_average_js(
+        data,
+        volume,
+        period,
+        steepness,
+        ma_type,
+        smooth,
+        momentum_weight,
+        long_threshold,
+        short_threshold,
+    )?;
+    crate::write_wasm_object_f64_outputs("logarithmic_moving_average_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn logarithmic_moving_average_batch_output_into_js(
+    data: &[f64],
+    volume: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = logarithmic_moving_average_batch_js(data, volume, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "logarithmic_moving_average_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

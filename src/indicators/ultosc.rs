@@ -1259,6 +1259,34 @@ pub fn ultosc_batch_inner_into(
     Ok(combos)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ultosc_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    timeperiod1: usize,
+    timeperiod2: usize,
+    timeperiod3: usize,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = ultosc_js(high, low, close, timeperiod1, timeperiod2, timeperiod3)?;
+    crate::write_wasm_f64_output("ultosc_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn ultosc_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = ultosc_batch_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs("ultosc_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

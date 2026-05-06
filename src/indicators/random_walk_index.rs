@@ -1285,6 +1285,36 @@ pub fn random_walk_index_batch_into(
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn random_walk_index_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    length: usize,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = random_walk_index_js(high, low, close, length)?;
+    crate::write_wasm_object_f64_outputs("random_walk_index_output_into_js", &value, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn random_walk_index_batch_output_into_js(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = random_walk_index_batch_js(high, low, close, config)?;
+    crate::write_wasm_selected_object_f64_outputs(
+        "random_walk_index_batch_output_into_js",
+        &value,
+        out,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

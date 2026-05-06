@@ -1028,6 +1028,29 @@ impl DecOscStream {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn dec_osc_output_into_js(
+    data: &[f64],
+    hp_period: usize,
+    k: f64,
+    out: &js_sys::Float64Array,
+) -> Result<usize, JsValue> {
+    let values = dec_osc_js(data, hp_period, k)?;
+    crate::write_wasm_f64_output("dec_osc_output_into_js", &values, out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn dec_osc_batch_output_into_js(
+    data: &[f64],
+    config: JsValue,
+    out: &js_sys::Object,
+) -> Result<usize, JsValue> {
+    let value = dec_osc_batch_js(data, config)?;
+    crate::write_wasm_selected_object_f64_outputs("dec_osc_batch_output_into_js", &value, out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
