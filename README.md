@@ -12,7 +12,7 @@ For the full indicator list, API reference, and usage guides, see: https://vecto
 
 ## Benchmarks
 
-The table below compares indicators that have a Tulip Indicators C counterpart. The CPU workload is 100,000 candles with one parameter set per indicator measured as average per call time after warmup. The CUDA columns use the corresponding GPU benchmark scenario for the same indicator; most are 1M x 250 one-series parameter runs, while rows labeled otherwise use that indicator's available single CUDA profile. CUDA timings are reported as the measured scenario time divided by 250, rounded to microseconds, and the CUDA speedup is relative to Tulip C CPU. Lower time is better within the same workload. 
+The table below compares indicators that have a Tulip Indicators C counterpart. The CPU workload is 100,000 candles with one parameter set per indicator measured as average per call time after warmup. The CUDA columns use the corresponding GPU benchmark scenario for the same indicator, as most are 1M x 250 one-series parameter runs, while rows labeled otherwise use that indicator's available single CUDA profile. CUDA timings are reported as the measured scenario time divided by 250, rounded to microseconds, and the CUDA speedup is relative to Tulip C CPU. Lower time is better within the same workload.  
 
 Environment: AMD Ryzen 9 9950X, NVIDIA GeForce RTX 4090, Windows 11 Pro, Rust `1.95.0-nightly`.
 
@@ -49,7 +49,7 @@ Add the crate as `vector-ta` and import it as `vector_ta`:
 
 ```toml
 [dependencies]
-vector-ta = "0.2.8"
+vector-ta = "0.2.9"
 ```
 
 For full SIMD functionality on `x86_64`, use a nightly Rust toolchain and enable the `nightly-avx` feature. Stable Rust still works for the scalar implementation.
@@ -105,7 +105,7 @@ Enable the CUDA feature:
 
 ```toml
 [dependencies]
-vector-ta = {version = "0.2.8", features = ["cuda"]}
+vector-ta = {version = "0.2.9", features = ["cuda"]}
 ```
 
 Notes:
