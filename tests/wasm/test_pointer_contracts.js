@@ -138,6 +138,24 @@ test('reusable flat-output WASM wrappers fill caller Float64Array', () => {
     );
 });
 
+test('RSI reusable output wrapper matches safe API', () => {
+    const data = new Float64Array(64);
+    for (let i = 0; i < data.length; i++) {
+        data[i] = 80 + i * 0.35 + Math.cos(i / 5);
+    }
+
+    const out = new Float64Array(data.length);
+    const written = wasm.rsi_output_into_js(data, 14, out);
+    const expected = wasm.rsi_js(data, 14);
+
+    assert.strictEqual(written, data.length);
+    assertArrayClose(Array.from(out), Array.from(expected), 1e-12);
+    assertThrowsMessage(
+        () => wasm.rsi_output_into_js(data, 14, new Float64Array(data.length - 1)),
+        /output is too small/i,
+    );
+});
+
 test('reusable structured-output WASM wrappers fill flat caller Float64Array', () => {
     const data = new Float64Array(72);
     for (let i = 0; i < data.length; i++) {

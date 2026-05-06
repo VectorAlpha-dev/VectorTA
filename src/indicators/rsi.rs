@@ -1126,7 +1126,21 @@ pub fn rsi_output_into_js(
     period: usize,
     out: &js_sys::Float64Array,
 ) -> Result<usize, JsValue> {
-    let values = rsi_js(data, period)?;
+    let len = data.len();
+    if (out.length() as usize) < len {
+        return Err(JsValue::from_str(&format!(
+            "rsi_output_into_js: output is too small: expected at least {}, got {}",
+            len,
+            out.length()
+        )));
+    }
+    let params = RsiParams {
+        period: Some(period),
+    };
+    let input = RsiInput::from_slice(data, params);
+    let mut values = vec![0.0; len];
+    rsi_into_slice(&mut values, &input, detect_best_kernel())
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
     crate::write_wasm_f64_output("rsi_output_into_js", &values, out)
 }
 
