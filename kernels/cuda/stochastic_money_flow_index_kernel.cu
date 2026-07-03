@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include <math.h>
 #include <math_constants.h>
+#include <cfloat>
 
 extern "C" __global__ void stochastic_money_flow_index_batch_f64(
     const double* __restrict__ source,

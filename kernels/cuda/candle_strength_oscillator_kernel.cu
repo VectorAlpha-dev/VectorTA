@@ -1,5 +1,6 @@
 #include <cmath>
 #include <cstddef>
+#include <cfloat>
 
 namespace {
 

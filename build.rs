@@ -1939,7 +1939,7 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         }
         let digits: String = t.chars().filter(|c| c.is_ascii_digit()).collect();
         if digits.len() >= 2 {
-            return format!("compute_{}{}", &digits[0..1], &digits[1..2]);
+            return format!("compute_{digits}");
         }
 
         t.to_string()
