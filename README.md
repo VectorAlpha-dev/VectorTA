@@ -49,7 +49,7 @@ Add the crate as `vector-ta` and import it as `vector_ta`:
 
 ```toml
 [dependencies]
-vector-ta = "0.3.0"
+vector-ta = "0.3.1"
 ```
 
 For full SIMD functionality on `x86_64`, use a nightly Rust toolchain and enable the `nightly-avx` feature. Stable Rust still works for the scalar implementation.
@@ -105,7 +105,7 @@ Enable the CUDA feature:
 
 ```toml
 [dependencies]
-vector-ta = {version = "0.2.9", features = ["cuda"]}
+vector-ta = {version = "0.3.1", features = ["cuda"]}
 ```
 
 Notes:
