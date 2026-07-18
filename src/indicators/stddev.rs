@@ -1320,7 +1320,7 @@ pub fn stddev_py<'py>(
     let input = StdDevInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| stddev_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| stddev_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1383,7 +1383,7 @@ pub fn stddev_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1441,7 +1441,7 @@ pub fn stddev_cuda_batch_dev_py<'py>(
         nbdev: nbdev_range,
     };
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaStddev::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.stddev_batch_dev(slice_in, &sweep)
             .map(|(dev, _)| dev)
@@ -1470,7 +1470,7 @@ pub fn stddev_cuda_many_series_one_param_dev_py<'py>(
     }
 
     let slice_in = data_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaStddev::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.stddev_many_series_one_param_time_major_dev(slice_in, cols, rows, period, nbdev as f32)
             .map_err(|e| PyValueError::new_err(e.to_string()))

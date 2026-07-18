@@ -2013,7 +2013,7 @@ pub fn linearreg_angle_py<'py>(
     let linearreg_angle_in = Linearreg_angleInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| linearreg_angle_with_kernel(&linearreg_angle_in, kern).map(|o| o.values))
+        .detach(|| linearreg_angle_with_kernel(&linearreg_angle_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2124,7 +2124,7 @@ pub fn linearreg_angle_batch_py<'py>(
         _ => unreachable!(),
     };
 
-    py.allow_threads(|| linearreg_angle_batch_inner_into(slice_in, &sweep, simd, true, slice_out))
+    py.detach(|| linearreg_angle_batch_inner_into(slice_in, &sweep, simd, true, slice_out))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -2185,11 +2185,11 @@ impl LinearregAngleDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2240,7 +2240,7 @@ pub fn linearreg_angle_cuda_batch_dev_py<'py>(
     let sweep = Linearreg_angleBatchRange {
         period: period_range,
     };
-    let (buf, rows, cols, ctx, dev_id) = py.allow_threads(|| {
+    let (buf, rows, cols, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaLinearregAngle::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out = cuda
@@ -2277,7 +2277,7 @@ pub fn linearreg_angle_cuda_many_series_one_param_dev_py<'py>(
         period: Some(period),
     };
     let slice_in = data_tm_f32.as_slice()?;
-    let (buf, r_out, c_out, ctx, dev_id) = py.allow_threads(|| {
+    let (buf, r_out, c_out, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaLinearregAngle::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out = cuda

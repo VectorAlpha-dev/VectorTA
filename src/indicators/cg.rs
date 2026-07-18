@@ -768,11 +768,11 @@ impl CgDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -830,7 +830,7 @@ pub fn cg_cuda_batch_dev_py(
     let sweep = CgBatchRange {
         period: period_range,
     };
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = crate::cuda::oscillators::cg_wrapper::CudaCg::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev = cuda
@@ -871,7 +871,7 @@ pub fn cg_cuda_many_series_one_param_dev_py(
     let params = CgParams {
         period: Some(period),
     };
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = crate::cuda::oscillators::cg_wrapper::CudaCg::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev = cuda
@@ -1938,7 +1938,7 @@ pub fn cg_py<'py>(
     let cg_in = CgInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| cg_with_kernel(&cg_in, kern).map(|o| o.values))
+        .detach(|| cg_with_kernel(&cg_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2004,7 +2004,7 @@ pub fn cg_batch_py<'py>(
     }
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,

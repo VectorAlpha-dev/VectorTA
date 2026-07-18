@@ -3784,7 +3784,7 @@ pub fn gatorosc_py<'py>(
     let input = GatorOscInput::from_slice(slice_in, params);
 
     let (upper_vec, lower_vec, upper_change_vec, lower_change_vec) = py
-        .allow_threads(|| {
+        .detach(|| {
             gatorosc_with_kernel(&input, kern)
                 .map(|o| (o.upper, o.lower, o.upper_change, o.lower_change))
         })
@@ -3882,7 +3882,7 @@ pub fn gatorosc_batch_py<'py>(
     let slice_lower_change = unsafe { lower_change_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -4018,11 +4018,11 @@ impl DeviceArrayF32GatorPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<pyo3::PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<pyo3::Py<pyo3::PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -4104,7 +4104,7 @@ pub fn gatorosc_cuda_batch_dev_py(
         lips_length: lips_length_range,
         lips_shift: lips_shift_range,
     };
-    let (upper, lower, upper_change, lower_change) = py.allow_threads(|| {
+    let (upper, lower, upper_change, lower_change) = py.detach(|| {
         let cuda =
             CudaGatorOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
@@ -4169,7 +4169,7 @@ pub fn gatorosc_cuda_many_series_one_param_dev_py(
     if prices.len() != expected {
         return Err(PyValueError::new_err("time-major input length mismatch"));
     }
-    let (upper, lower, upper_change, lower_change) = py.allow_threads(|| {
+    let (upper, lower, upper_change, lower_change) = py.detach(|| {
         let cuda =
             CudaGatorOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();

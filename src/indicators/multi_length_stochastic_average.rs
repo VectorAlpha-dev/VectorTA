@@ -1336,7 +1336,7 @@ pub fn multi_length_stochastic_average_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| multi_length_stochastic_average_with_kernel(&input, kernel))
+        .detach(|| multi_length_stochastic_average_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(out.values.into_pyarray(py))
 }
@@ -1429,7 +1429,7 @@ pub fn multi_length_stochastic_average_batch_py<'py>(
     let values_slice = unsafe { values_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch = match kernel {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,

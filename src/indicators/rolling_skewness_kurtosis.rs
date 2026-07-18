@@ -1130,7 +1130,7 @@ pub fn rolling_skewness_kurtosis_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| rolling_skewness_kurtosis_with_kernel(&input, kern))
+        .detach(|| rolling_skewness_kurtosis_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((out.skewness.into_pyarray(py), out.kurtosis.into_pyarray(py)))
 }
@@ -1177,7 +1177,7 @@ pub fn rolling_skewness_kurtosis_batch_py<'py>(
     let data = data.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             rolling_skewness_kurtosis_batch_with_kernel(
                 data,
                 &RollingSkewnessKurtosisBatchRange {

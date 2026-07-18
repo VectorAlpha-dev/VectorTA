@@ -1295,7 +1295,7 @@ pub fn geometric_bias_oscillator_py<'py>(
         },
     );
     let output = py
-        .allow_threads(|| geometric_bias_oscillator_with_kernel(&input, kernel))
+        .detach(|| geometric_bias_oscillator_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(output.values.into_pyarray(py))
 }
@@ -1337,7 +1337,7 @@ pub fn geometric_bias_oscillator_batch_py<'py>(
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             geometric_bias_oscillator_batch_inner_into(
                 high_slice,
                 low_slice,

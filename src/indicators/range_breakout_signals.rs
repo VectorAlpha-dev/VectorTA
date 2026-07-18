@@ -1921,7 +1921,7 @@ pub fn range_breakout_signals_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| range_breakout_signals_with_kernel(&input, kernel))
+        .detach(|| range_breakout_signals_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     dict.set_item("range_top", out.range_top.into_pyarray(py))?;

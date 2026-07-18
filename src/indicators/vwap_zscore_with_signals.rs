@@ -1346,7 +1346,7 @@ pub fn vwap_zscore_with_signals_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| vwap_zscore_with_signals_with_kernel(&input, kern))
+        .detach(|| vwap_zscore_with_signals_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.zvwap.into_pyarray(py),
@@ -1401,7 +1401,7 @@ pub fn vwap_zscore_with_signals_batch_py<'py>(
     let resistance_slice = unsafe { resistance_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,

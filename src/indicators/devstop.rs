@@ -1666,7 +1666,7 @@ pub fn devstop_py<'py>(
         *v = f64::NAN;
     }
 
-    py.allow_threads(|| devstop_into_slice(slice_out, &input, kern))
+    py.detach(|| devstop_into_slice(slice_out, &input, kern))
         .map_err(|e| {
             let msg = e.to_string();
             if msg.contains("InvalidPeriod") {
@@ -1710,7 +1710,7 @@ pub fn devstop_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let out = py
-        .allow_threads(|| devstop_batch_with_kernel(h, l, &sweep, kern))
+        .detach(|| devstop_batch_with_kernel(h, l, &sweep, kern))
         .map_err(|e| {
             let msg = e.to_string();
             if msg.contains("InvalidPeriod") || msg.contains("Invalid period") {
@@ -1968,7 +1968,7 @@ pub fn devstop_cuda_batch_dev_py<'py>(
         devtype: devtype_range,
     };
     let is_long = direction.eq_ignore_ascii_case("long");
-    let (inner, meta) = py.allow_threads(|| {
+    let (inner, meta) = py.detach(|| {
         let cuda = CudaDevStop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.devstop_batch_dev(h, l, &sweep, is_long)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -2010,7 +2010,7 @@ pub fn devstop_cuda_many_series_one_param_dev_py(
     let rows = high_tm_f32.shape()[0];
     let cols = high_tm_f32.shape()[1];
     let is_long = direction.eq_ignore_ascii_case("long");
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaDevStop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.devstop_many_series_one_param_time_major_dev(
             flat_h,

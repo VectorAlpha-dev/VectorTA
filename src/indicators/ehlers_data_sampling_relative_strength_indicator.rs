@@ -1076,7 +1076,7 @@ pub fn ehlers_data_sampling_relative_strength_indicator_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| {
+        .detach(|| {
             ehlers_data_sampling_relative_strength_indicator_with_kernel(&input, kern)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1131,7 +1131,7 @@ pub fn ehlers_data_sampling_relative_strength_indicator_batch_py<'py>(
     let close = close.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             ehlers_data_sampling_relative_strength_indicator_batch_with_kernel(
                 open_,
                 close,

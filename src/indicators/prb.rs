@@ -2110,7 +2110,7 @@ pub fn prb_py<'py>(
     let input = PrbInput::from_slice(slice_in, params);
     let kern = validate_kernel(kernel, false)?;
     let (m, u, l) = py
-        .allow_threads(|| {
+        .detach(|| {
             prb_with_kernel(&input, kern).map(|o| (o.values, o.upper_band, o.lower_band))
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2515,7 +2515,7 @@ pub fn prb_cuda_batch_dev_py(
         polynomial_order: polynomial_order_range,
         regression_offset: regression_offset_range,
     };
-    let (main_d, up_d, lo_d, ctx, dev) = py.allow_threads(|| {
+    let (main_d, up_d, lo_d, ctx, dev) = py.detach(|| {
         let cuda = CudaPrb::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev = cuda.device_id();
@@ -2571,7 +2571,7 @@ pub fn prb_cuda_many_series_one_param_dev_py(
         ndev: Some(ndev),
         equ_from: Some(0),
     };
-    let (m_d, u_d, l_d, ctx, dev) = py.allow_threads(|| {
+    let (m_d, u_d, l_d, ctx, dev) = py.detach(|| {
         let cuda = CudaPrb::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev = cuda.device_id();

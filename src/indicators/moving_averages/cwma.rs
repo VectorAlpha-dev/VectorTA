@@ -1627,7 +1627,7 @@ pub fn cwma_py<'py>(
     let cwma_in = CwmaInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| cwma_with_kernel(&cwma_in, kern).map(|o| o.values))
+        .detach(|| cwma_with_kernel(&cwma_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1696,7 +1696,7 @@ pub fn cwma_batch_py<'py>(
     }
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1763,11 +1763,11 @@ impl DeviceArrayF32CwmaPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();
@@ -1831,7 +1831,7 @@ pub fn cwma_cuda_batch_dev_py(
 
     let cuda =
         Arc::new(CudaCwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?);
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         cuda.cwma_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -1863,7 +1863,7 @@ pub fn cwma_cuda_many_series_one_param_dev_py(
 
     let cuda =
         Arc::new(CudaCwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?);
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         cuda.cwma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;

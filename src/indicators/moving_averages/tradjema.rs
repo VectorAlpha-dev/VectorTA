@@ -1067,7 +1067,7 @@ pub fn tradjema_py<'py>(
     );
 
     let values = py
-        .allow_threads(|| tradjema_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| tradjema_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(values.into_pyarray(py))
 }
@@ -1134,7 +1134,7 @@ pub fn tradjema_batch_py<'py>(
     };
 
     let combos = py
-        .allow_threads(|| tradjema_batch_inner_into(h, l, c, &sweep, simd, true, slice_out))
+        .detach(|| tradjema_batch_inner_into(h, l, c, &sweep, simd, true, slice_out))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -1189,7 +1189,7 @@ pub fn tradjema_cuda_batch_dev_py(
         mult: mult_range,
     };
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaTradjema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -1240,7 +1240,7 @@ pub fn tradjema_cuda_many_series_one_param_dev_py(
         mult: Some(mult),
     };
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaTradjema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -1298,11 +1298,11 @@ impl DeviceArrayF32TradjemaPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
         use cust::memory::DeviceBuffer;
 

@@ -2446,7 +2446,7 @@ pub fn vdubus_divergence_wave_pattern_generator_py<'py>(
     );
     let kernel = validate_kernel(kernel, false)?;
     let output = py
-        .allow_threads(|| vdubus_divergence_wave_pattern_generator_with_kernel(&input, kernel))
+        .detach(|| vdubus_divergence_wave_pattern_generator_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     output_to_pydict(py, output)
 }
@@ -2502,7 +2502,7 @@ pub fn vdubus_divergence_wave_pattern_generator_batch_py<'py>(
     };
     let _ = validate_kernel(kernel, true)?;
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             vdubus_divergence_wave_pattern_generator_batch_with_kernel(
                 high_slice,
                 low_slice,

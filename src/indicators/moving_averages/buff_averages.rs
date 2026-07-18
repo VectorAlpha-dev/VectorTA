@@ -87,11 +87,11 @@ impl BuffAveragesDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();
@@ -1889,7 +1889,7 @@ pub fn buff_averages_py<'py>(
     let input = BuffAveragesInput::from_slices(price_slice, volume_slice, params);
 
     let result = py
-        .allow_threads(|| buff_averages_with_kernel(&input, kern))
+        .detach(|| buff_averages_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((
@@ -1928,7 +1928,7 @@ pub fn buff_averages_batch_py<'py>(
     let slow_slice = unsafe { slow_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             buff_averages_batch_inner_into(p, v, &sweep, kern, fast_slice, slow_slice)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1977,7 +1977,7 @@ pub fn buff_averages_cuda_batch_dev_py(
         slow_period: slow_range,
     };
 
-    let (fast, slow, rows, cols, ctx, dev) = py.allow_threads(|| {
+    let (fast, slow, rows, cols, ctx, dev) = py.detach(|| {
         let cuda =
             CudaBuffAverages::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (f, s) = cuda
@@ -2028,7 +2028,7 @@ pub fn buff_averages_cuda_many_series_one_param_dev_py(
     let prices = prices_tm_f32.as_slice()?;
     let volumes = volumes_tm_f32.as_slice()?;
 
-    let (fast, slow, rows_o, cols_o, ctx, dev) = py.allow_threads(|| {
+    let (fast, slow, rows_o, cols_o, ctx, dev) = py.detach(|| {
         let cuda =
             CudaBuffAverages::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (f, s) = cuda

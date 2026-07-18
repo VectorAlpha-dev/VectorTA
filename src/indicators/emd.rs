@@ -3041,7 +3041,7 @@ pub fn emd_py<'py>(
     let mbm = unsafe { mb.as_slice_mut()? };
     let lbm = unsafe { lb.as_slice_mut()? };
 
-    py.allow_threads(|| emd_into_slices(ubm, mbm, lbm, &inp, kern))
+    py.detach(|| emd_into_slices(ubm, mbm, lbm, &inp, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((ub, mb, lb))
@@ -3116,7 +3116,7 @@ pub fn emd_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let k = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -3188,7 +3188,7 @@ pub fn emd_cuda_batch_dev_py<'py>(
         delta: delta_range,
         fraction: fraction_range,
     };
-    let (outputs, combos, dev_id) = py.allow_threads(|| {
+    let (outputs, combos, dev_id) = py.detach(|| {
         let cuda = CudaEmd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
         let res = cuda
@@ -3262,7 +3262,7 @@ pub fn emd_cuda_many_series_one_param_dev_py<'py>(
         delta: Some(delta),
         fraction: Some(fraction),
     };
-    let (outputs, dev_id) = py.allow_threads(|| {
+    let (outputs, dev_id) = py.detach(|| {
         let cuda = CudaEmd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
         cuda.emd_many_series_one_param_time_major_dev(flat, cols, rows, &params, &first_valids)

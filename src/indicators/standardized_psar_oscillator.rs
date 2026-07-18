@@ -2215,7 +2215,7 @@ pub fn standardized_psar_oscillator_py<'py>(
     );
 
     let out = py
-        .allow_threads(|| standardized_psar_oscillator_with_kernel(&input, kernel))
+        .detach(|| standardized_psar_oscillator_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -2267,7 +2267,7 @@ pub fn standardized_psar_oscillator_batch_py<'py>(
         plot_bearish,
     };
     let out = py
-        .allow_threads(|| {
+        .detach(|| {
             standardized_psar_oscillator_batch_with_kernel(
                 high_slice,
                 low_slice,

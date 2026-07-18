@@ -992,7 +992,7 @@ pub fn ema_deviation_corrected_t3_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| ema_deviation_corrected_t3_with_kernel(&input, kern))
+        .detach(|| ema_deviation_corrected_t3_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((out.corrected.into_pyarray(py), out.t3.into_pyarray(py)))
 }
@@ -1058,7 +1058,7 @@ pub fn ema_deviation_corrected_t3_batch_py<'py>(
     let t3_slice = unsafe { t3_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             ema_deviation_corrected_t3_batch_inner_into(
                 slice,
                 &range,

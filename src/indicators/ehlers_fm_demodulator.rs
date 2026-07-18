@@ -813,7 +813,7 @@ pub fn ehlers_fm_demodulator_py<'py>(
     );
 
     let result = py
-        .allow_threads(|| ehlers_fm_demodulator_with_kernel(&input, kernel).map(|o| o.values))
+        .detach(|| ehlers_fm_demodulator_with_kernel(&input, kernel).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result.into_pyarray(py))
@@ -868,7 +868,7 @@ pub fn ehlers_fm_demodulator_batch_py<'py>(
     };
 
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             ehlers_fm_demodulator_batch_with_kernel(open_slice, close_slice, &sweep, kernel)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;

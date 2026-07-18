@@ -1299,7 +1299,7 @@ pub fn trima_py<'py>(
     let trima_in = TrimaInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| trima_with_kernel(&trima_in, kern).map(|o| o.values))
+        .detach(|| trima_with_kernel(&trima_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1370,7 +1370,7 @@ pub fn trima_batch_py<'py>(
     };
 
     let combos = py
-        .allow_threads(|| trima_batch_inner_into(slice_in, &sweep, simd, true, slice_out))
+        .detach(|| trima_batch_inner_into(slice_in, &sweep, simd, true, slice_out))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -1408,7 +1408,7 @@ pub fn trima_cuda_batch_dev_py(
 
     let data_f32: Vec<f32> = slice_in.iter().map(|&v| v as f32).collect();
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaTrima::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.trima_batch_dev(&data_f32, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -1439,7 +1439,7 @@ pub fn trima_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaTrima::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.trima_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -1501,11 +1501,11 @@ impl DeviceArrayF32TrimaPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
 
         if let Some(dev_obj) = dl_device.as_ref() {

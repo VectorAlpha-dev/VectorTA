@@ -1639,7 +1639,7 @@ pub fn linreg_py<'py>(
     let input = LinRegInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| linreg_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| linreg_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1671,7 +1671,7 @@ pub fn linreg_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1723,7 +1723,7 @@ pub fn linreg_cuda_batch_dev_py<'py>(
         period: period_range,
     };
 
-    let (inner, combos, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, combos, ctx, dev_id) = py.detach(|| {
         let cuda = CudaLinreg::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.ctx();
         let dev_id = cuda.device_id();
@@ -1762,7 +1762,7 @@ pub fn linreg_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaLinreg::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.ctx();
         let dev_id = cuda.device_id();
@@ -1819,11 +1819,11 @@ impl DeviceArrayF32LinregPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();

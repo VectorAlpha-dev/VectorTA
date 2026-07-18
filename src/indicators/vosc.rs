@@ -84,11 +84,11 @@ mod vosc_python_cuda_handle {
         fn __dlpack__<'py>(
             &mut self,
             py: Python<'py>,
-            stream: Option<pyo3::PyObject>,
-            max_version: Option<pyo3::PyObject>,
-            dl_device: Option<pyo3::PyObject>,
-            copy: Option<pyo3::PyObject>,
-        ) -> PyResult<PyObject> {
+            stream: Option<pyo3::Py<pyo3::PyAny>>,
+            max_version: Option<pyo3::Py<pyo3::PyAny>>,
+            dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+            copy: Option<pyo3::Py<pyo3::PyAny>>,
+        ) -> PyResult<Py<PyAny>> {
             let (kdl, alloc_dev) = self.__dlpack_device__();
             if let Some(dev_obj) = dl_device.as_ref() {
                 if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2028,7 +2028,7 @@ pub fn vosc_py<'py>(
     let input = VoscInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| vosc_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| vosc_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2095,7 +2095,7 @@ pub fn vosc_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| -> Result<Vec<VoscParams>, VoscError> {
+        .detach(|| -> Result<Vec<VoscParams>, VoscError> {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2155,7 +2155,7 @@ pub fn vosc_cuda_batch_dev_py(
         short_period: short_period_range,
         long_period: long_period_range,
     };
-    let (dev, ctx, dev_id_u32) = py.allow_threads(|| {
+    let (dev, ctx, dev_id_u32) = py.detach(|| {
         let cuda = CudaVosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id_u32 = cuda.device_id();
@@ -2196,7 +2196,7 @@ pub fn vosc_cuda_many_series_one_param_dev_py(
         short_period: Some(short_period),
         long_period: Some(long_period),
     };
-    let (dev, ctx, dev_id_u32) = py.allow_threads(|| {
+    let (dev, ctx, dev_id_u32) = py.detach(|| {
         let cuda = CudaVosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id_u32 = cuda.device_id();

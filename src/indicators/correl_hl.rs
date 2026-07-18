@@ -1504,7 +1504,7 @@ pub fn correl_hl_py<'py>(
     let input = CorrelHlInput::from_slices(high_slice, low_slice, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| correl_hl_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| correl_hl_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1567,7 +1567,7 @@ pub fn correl_hl_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1632,7 +1632,7 @@ impl CorrelHlDeviceArrayF32Py {
         max_version: Option<(u32, u32)>,
         dl_device: Option<(i32, i32)>,
         copy: Option<bool>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         use pyo3::ffi as pyffi;
         use std::ffi::{c_void, CString};
 
@@ -1675,7 +1675,7 @@ impl CorrelHlDeviceArrayF32Py {
             strides: *mut i64,
             _shape: Box<[i64; 2]>,
             _strides: Box<[i64; 2]>,
-            _self_ref: PyObject,
+            _self_ref: Py<PyAny>,
             _arr: DeviceArrayF32,
             _ctx: Arc<Context>,
         }
@@ -1711,7 +1711,7 @@ impl CorrelHlDeviceArrayF32Py {
         let strides_ptr = strides.as_mut_ptr();
 
         let self_ref =
-            unsafe { PyObject::from_borrowed_ptr(py, self as *mut _ as *mut pyo3::ffi::PyObject) };
+            unsafe { Py::<PyAny>::from_borrowed_ptr(py, self as *mut _ as *mut pyo3::ffi::PyObject) };
         let mgr = Box::new(ManagerCtx {
             shape: shape_ptr,
             strides: strides_ptr,
@@ -1770,7 +1770,7 @@ impl CorrelHlDeviceArrayF32Py {
                     let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
                     return Err(PyValueError::new_err("failed to create DLPack capsule"));
                 }
-                Ok(PyObject::from_owned_ptr(py, cap))
+                Ok(Py::<PyAny>::from_owned_ptr(py, cap))
             } else {
                 let ptr = Box::into_raw(mt) as *mut c_void;
                 let name = CString::new("dltensor").unwrap();
@@ -1779,7 +1779,7 @@ impl CorrelHlDeviceArrayF32Py {
                     let _ = Box::from_raw(ptr as *mut DLManagedTensor);
                     return Err(PyValueError::new_err("failed to create DLPack capsule"));
                 }
-                Ok(PyObject::from_owned_ptr(py, cap))
+                Ok(Py::<PyAny>::from_owned_ptr(py, cap))
             }
         }
     }
@@ -1816,7 +1816,7 @@ pub fn correl_hl_cuda_batch_dev_py(
     let sweep = CorrelHlBatchRange {
         period: period_range,
     };
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaCorrelHl::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (dev, _combos) = cuda
@@ -1850,7 +1850,7 @@ pub fn correl_hl_cuda_many_series_one_param_dev_py(
     let cols = shape[1];
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaCorrelHl::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev = cuda

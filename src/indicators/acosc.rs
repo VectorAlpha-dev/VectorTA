@@ -718,7 +718,7 @@ pub fn acosc_py<'py>(
     let acosc_in = AcoscInput::from_slices(high_slice, low_slice, params);
 
     let (osc_vec, change_vec) = py
-        .allow_threads(|| {
+        .detach(|| {
             acosc_with_kernel(&acosc_in, kern).map(|output| (output.osc, output.change))
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -771,7 +771,7 @@ pub fn acosc_batch_py<'py>(
     let slice_osc = unsafe { out_osc.as_slice_mut()? };
     let slice_change = unsafe { out_change.as_slice_mut()? };
 
-    py.allow_threads(|| -> Result<(), AcoscError> {
+    py.detach(|| -> Result<(), AcoscError> {
         let simd = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
@@ -836,7 +836,7 @@ pub fn acosc_cuda_batch_dev_py(
     }
     let h = high_f32.as_slice()?;
     let l = low_f32.as_slice()?;
-    let pair = py.allow_threads(|| {
+    let pair = py.detach(|| {
         let cuda = CudaAcosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.acosc_batch_dev(h, l)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -875,7 +875,7 @@ pub fn acosc_cuda_many_series_one_param_dev_py(
     let cols = shape_h[1];
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
-    let pair = py.allow_threads(|| {
+    let pair = py.detach(|| {
         let cuda = CudaAcosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.acosc_many_series_one_param_time_major_dev(h, l, cols, rows)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -940,7 +940,7 @@ impl AcoscDeviceArrayF32Py {
         max_version: Option<(u32, u32)>,
         dl_device: Option<(i32, i32)>,
         _copy: Option<bool>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let inner = self

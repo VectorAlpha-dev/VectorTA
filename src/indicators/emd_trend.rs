@@ -1429,7 +1429,7 @@ pub fn emd_trend_py<'py>(
     );
     let kern = validate_kernel(kernel, false)?;
     let out = py
-        .allow_threads(|| emd_trend_with_kernel(&input, kern))
+        .detach(|| emd_trend_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.direction.into_pyarray(py),
@@ -1462,7 +1462,7 @@ pub fn emd_trend_batch_py<'py>(
     let close = close.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
     let batch = py
-        .allow_threads(|| {
+        .detach(|| {
             emd_trend_batch_with_kernel(
                 open,
                 high,

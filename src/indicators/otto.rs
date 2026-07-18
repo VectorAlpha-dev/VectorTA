@@ -2058,7 +2058,7 @@ pub fn otto_py<'py>(
     let input = OttoInput::from_slice(slice_in, params);
 
     let out = py
-        .allow_threads(|| otto_with_kernel(&input, kern))
+        .detach(|| otto_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((out.hott.into_pyarray(py), out.lott.into_pyarray(py)))
@@ -2090,7 +2090,7 @@ pub fn otto_batch_py<'py>(
         ma_types,
     };
     let out = py
-        .allow_threads(|| otto_batch_with_kernel(slice_in, &sweep, kern))
+        .detach(|| otto_batch_with_kernel(slice_in, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -2407,7 +2407,7 @@ pub fn otto_cuda_batch_dev_py(
         correcting_constant: correcting_constant_range,
         ma_types,
     };
-    let (hott, lott) = py.allow_threads(|| {
+    let (hott, lott) = py.detach(|| {
         let cuda = crate::cuda::moving_averages::CudaOtto::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.otto_batch_dev(slice, &sweep)
@@ -2448,7 +2448,7 @@ pub fn otto_cuda_many_series_one_param_dev_py(
         correcting_constant: Some(correcting_constant),
         ma_type: Some("VAR".to_string()),
     };
-    let (hott, lott) = py.allow_threads(|| {
+    let (hott, lott) = py.detach(|| {
         let cuda = crate::cuda::moving_averages::CudaOtto::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.otto_many_series_one_param_time_major_dev(prices, cols, rows, &params)

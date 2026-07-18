@@ -1357,7 +1357,7 @@ pub fn price_moving_average_ratio_percentile_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| price_moving_average_ratio_percentile_with_kernel(&input, kernel))
+        .detach(|| price_moving_average_ratio_percentile_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     dict.set_item("pmar", out.pmar.into_pyarray(py))?;
@@ -1490,7 +1490,7 @@ pub fn price_moving_average_ratio_percentile_batch_py<'py>(
         ),
     };
     let out = py
-        .allow_threads(|| {
+        .detach(|| {
             price_moving_average_ratio_percentile_batch_with_kernel(price, volume, &sweep, kernel)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;

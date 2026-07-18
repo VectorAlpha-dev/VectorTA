@@ -817,11 +817,11 @@ impl AdDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -876,7 +876,7 @@ pub fn ad_cuda_dev_py(
     let close = close_f32.as_slice()?;
     let volume = volume_f32.as_slice()?;
 
-    let (buf, rows, cols, ctx, dev_id) = py.allow_threads(|| {
+    let (buf, rows, cols, ctx, dev_id) = py.detach(|| {
         let cuda = CudaAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out = cuda
             .ad_series_dev(high, low, close, volume)
@@ -916,7 +916,7 @@ pub fn ad_cuda_many_series_one_param_dev_py(
     let close_tm = close_tm_f32.as_slice()?;
     let volume_tm = volume_tm_f32.as_slice()?;
 
-    let (buf, r_out, c_out, ctx, dev_id) = py.allow_threads(|| {
+    let (buf, r_out, c_out, ctx, dev_id) = py.detach(|| {
         let cuda = CudaAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out = cuda
             .ad_many_series_one_param_time_major_dev(
@@ -1014,7 +1014,7 @@ pub fn ad_py<'py>(
     );
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| ad_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| ad_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1102,7 +1102,7 @@ pub fn ad_batch_py<'py>(
 
     let kern = crate::utilities::kernel_validation::validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| -> Result<(), AdError> {
+    py.detach(|| -> Result<(), AdError> {
         let batch_input = AdBatchInput {
             highs: &high_slices,
             lows: &low_slices,

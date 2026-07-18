@@ -1106,7 +1106,7 @@ pub fn zig_zag_channels_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| zig_zag_channels_with_kernel(&input, kern))
+        .detach(|| zig_zag_channels_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.middle.into_pyarray(py),
@@ -1134,7 +1134,7 @@ pub fn zig_zag_channels_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             zig_zag_channels_batch_with_kernel(
                 open,
                 high,

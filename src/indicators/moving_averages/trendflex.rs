@@ -113,11 +113,11 @@ impl TrendFlexDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: pyo3::prelude::Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> pyo3::PyResult<pyo3::prelude::PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> pyo3::PyResult<pyo3::prelude::Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2261,7 +2261,7 @@ pub fn trendflex_py<'py>(
     let trendflex_in = TrendFlexInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| trendflex_with_kernel(&trendflex_in, kern).map(|o| o.values))
+        .detach(|| trendflex_with_kernel(&trendflex_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2319,7 +2319,7 @@ pub fn trendflex_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| -> Result<Vec<TrendFlexParams>, TrendFlexError> {
+        .detach(|| -> Result<Vec<TrendFlexParams>, TrendFlexError> {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2372,7 +2372,7 @@ pub fn trendflex_cuda_batch_dev_py<'py>(
         period: period_range,
     };
 
-    let (inner, combos, ctx_arc, dev_id) = py.allow_threads(|| {
+    let (inner, combos, ctx_arc, dev_id) = py.detach(|| {
         let cuda =
             CudaTrendflex::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (dev, combos) = cuda
@@ -2421,7 +2421,7 @@ pub fn trendflex_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let (inner, ctx_arc, dev_id) = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id) = py.detach(|| {
         let cuda =
             CudaTrendflex::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev = cuda

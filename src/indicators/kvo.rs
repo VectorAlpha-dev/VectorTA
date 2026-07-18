@@ -2218,7 +2218,7 @@ pub fn kvo_py<'py>(
     let input = KvoInput::from_slices(high_slice, low_slice, close_slice, volume_slice, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| kvo_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| kvo_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2289,7 +2289,7 @@ pub fn kvo_batch_py<'py>(
         k => k,
     };
 
-    py.allow_threads(|| kvo_batch_inner_into(h, l, c, v, &sweep, simd, true, out_flat))
+    py.detach(|| kvo_batch_inner_into(h, l, c, v, &sweep, simd, true, out_flat))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -2346,7 +2346,7 @@ pub fn kvo_cuda_batch_dev_py<'py>(
         short_period: short_range,
         long_period: long_range,
     };
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, combos) = py.detach(|| {
         let cuda = CudaKvo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.kvo_batch_dev(h, l, c, v, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -2414,7 +2414,7 @@ pub fn kvo_cuda_many_series_one_param_dev_py<'py>(
         short_period: Some(short_period),
         long_period: Some(long_period),
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaKvo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.kvo_many_series_one_param_time_major_dev(h, l, c, v, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))

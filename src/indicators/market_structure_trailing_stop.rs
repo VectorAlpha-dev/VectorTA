@@ -1346,7 +1346,7 @@ pub fn market_structure_trailing_stop_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| market_structure_trailing_stop_with_kernel(&input, kern))
+        .detach(|| market_structure_trailing_stop_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.trailing_stop.into_pyarray(py),
@@ -1378,7 +1378,7 @@ pub fn market_structure_trailing_stop_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             market_structure_trailing_stop_batch_with_kernel(
                 open,
                 high,

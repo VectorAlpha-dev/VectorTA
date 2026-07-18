@@ -2205,7 +2205,7 @@ pub fn sinwma_py<'py>(
     let input = SinWmaInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| sinwma_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| sinwma_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2266,7 +2266,7 @@ pub fn sinwma_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2313,7 +2313,7 @@ pub fn sinwma_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaSinwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.sinwma_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -2342,7 +2342,7 @@ pub fn sinwma_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaSinwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.sinwma_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))

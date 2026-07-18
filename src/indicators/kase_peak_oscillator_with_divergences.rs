@@ -1838,7 +1838,7 @@ pub fn kase_peak_oscillator_with_divergences_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| kase_peak_oscillator_with_divergences_with_kernel(&input, kern))
+        .detach(|| kase_peak_oscillator_with_divergences_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.oscillator.into_pyarray(py),
@@ -1986,7 +1986,7 @@ pub fn kase_peak_oscillator_with_divergences_batch_py<'py>(
     let go_short_slice = unsafe { go_short_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,

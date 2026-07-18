@@ -1147,7 +1147,7 @@ pub fn nvi_py<'py>(
     let input = NviInput::from_slices(close_slice, volume_slice, NviParams);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| nvi_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| nvi_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1174,7 +1174,7 @@ pub fn nvi_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
-    py.allow_threads(|| -> Result<(), NviError> {
+    py.detach(|| -> Result<(), NviError> {
         if close_slice.len() != volume_slice.len() {
             return Err(NviError::MismatchedLength {
                 close_len: close_slice.len(),
@@ -1336,7 +1336,7 @@ pub fn nvi_cuda_batch_dev_py(
     if close_slice.len() != volume_slice.len() {
         return Err(PyValueError::new_err("mismatched input lengths"));
     }
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaNvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -1368,7 +1368,7 @@ pub fn nvi_cuda_many_series_one_param_dev_py(
     }
     let close_slice = close_tm.as_slice()?;
     let volume_slice = volume_tm.as_slice()?;
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaNvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();

@@ -1862,7 +1862,7 @@ pub fn half_causal_estimator_py<'py>(
     };
     let input = HalfCausalEstimatorInput::from_slice(data, params);
     let out = py
-        .allow_threads(|| half_causal_estimator_with_kernel(&input, kernel))
+        .detach(|| half_causal_estimator_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     dict.set_item("estimate", out.estimate.into_pyarray(py))?;
@@ -1983,7 +1983,7 @@ pub fn half_causal_estimator_batch_py<'py>(
     let expected_slice = unsafe { expected_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch = match kernel {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,

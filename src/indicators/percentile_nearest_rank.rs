@@ -778,7 +778,7 @@ pub fn percentile_nearest_rank_py<'py>(
     let input = PercentileNearestRankInput::from_slice(data_slice, params);
 
     let result = py
-        .allow_threads(|| percentile_nearest_rank_with_kernel(&input, kern))
+        .detach(|| percentile_nearest_rank_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result.values.into_pyarray(py))
@@ -848,7 +848,7 @@ pub fn percentile_nearest_rank_batch_py<'py>(
     }
 
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| {
+    py.detach(|| {
         let k = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
@@ -2178,7 +2178,7 @@ pub fn percentile_nearest_rank_cuda_batch_dev_py<'py>(
         length: length_range,
         percentage: percentage_range,
     };
-    let (inner, ctx, dev_id, combos) = py.allow_threads(|| {
+    let (inner, ctx, dev_id, combos) = py.detach(|| {
         let cuda = CudaPercentileNearestRank::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -2225,7 +2225,7 @@ pub fn percentile_nearest_rank_cuda_many_series_one_param_dev_py<'py>(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice_in = data_tm_f32.as_slice()?;
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaPercentileNearestRank::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();

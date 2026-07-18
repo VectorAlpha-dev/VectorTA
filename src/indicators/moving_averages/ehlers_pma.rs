@@ -154,11 +154,11 @@ impl EhlersPmaDeviceArrayF32Py {
     fn __dlpack__<'py>(
         mut slf: pyo3::PyRefMut<'py, Self>,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<pyo3::PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<pyo3::Py<pyo3::PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = slf.__dlpack_device__();
@@ -1030,7 +1030,7 @@ pub fn ehlers_pma_py<'py>(
     let input = EhlersPmaInput::from_slice(slice, EhlersPmaParams::default());
 
     let out = py
-        .allow_threads(|| ehlers_pma_with_kernel(&input, kern))
+        .detach(|| ehlers_pma_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((out.predict.into_pyarray(py), out.trigger.into_pyarray(py)))
@@ -1054,7 +1054,7 @@ pub fn ehlers_pma_flat_py<'py>(
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
     let input = EhlersPmaInput::from_slice(slice, EhlersPmaParams::default());
-    py.allow_threads(|| ehlers_pma_into_flat_with_kernel(out_slice, &input, kern))
+    py.detach(|| ehlers_pma_into_flat_with_kernel(out_slice, &input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -1119,7 +1119,7 @@ pub fn ehlers_pma_cuda_batch_dev_py(
 
     let sweep = EhlersPmaBatchRange { combos };
     let (predict, trigger, ctx_arc, dev_id, stream_handle) = py
-        .allow_threads(|| -> Result<_, crate::cuda::moving_averages::ehlers_pma_wrapper::CudaEhlersPmaError> {
+        .detach(|| -> Result<_, crate::cuda::moving_averages::ehlers_pma_wrapper::CudaEhlersPmaError> {
             let cuda = CudaEhlersPma::new(device_id)?;
             let pair = cuda.ehlers_pma_batch_dev(slice_in, &sweep)?;
             let ctx = cuda.context_arc();
@@ -1167,7 +1167,7 @@ pub fn ehlers_pma_cuda_many_series_one_param_dev_py(
     let flat = data_tm_f32.as_slice()?;
 
     let (predict, trigger, ctx_arc, dev_id, stream_handle) = py
-        .allow_threads(|| -> Result<_, crate::cuda::moving_averages::ehlers_pma_wrapper::CudaEhlersPmaError> {
+        .detach(|| -> Result<_, crate::cuda::moving_averages::ehlers_pma_wrapper::CudaEhlersPmaError> {
             let cuda = CudaEhlersPma::new(device_id)?;
             let pair = cuda
                 .ehlers_pma_many_series_one_param_time_major_dev(flat, cols, rows)?;

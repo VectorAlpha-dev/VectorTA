@@ -1067,7 +1067,7 @@ pub fn stochastic_distance_py<'py>(
         },
     );
     let output = py
-        .allow_threads(|| stochastic_distance_with_kernel(&input, kernel))
+        .detach(|| stochastic_distance_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         output.oscillator.into_pyarray(py),
@@ -1150,7 +1150,7 @@ pub fn stochastic_distance_batch_py<'py>(
     let signal_slice = unsafe { signal_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch = match kernel {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,

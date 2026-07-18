@@ -2034,7 +2034,7 @@ pub fn rsmk_py<'py>(
     let input = RsmkInput::from_slices(main_slice, compare_slice, params);
 
     let output = py
-        .allow_threads(|| rsmk_with_kernel(&input, kern))
+        .detach(|| rsmk_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((
@@ -2086,7 +2086,7 @@ pub fn rsmk_batch_py<'py>(
     let signal_slice = unsafe { signal_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2403,7 +2403,7 @@ impl RsmkCudaBatchPlanPy {
         let total = rows
             .checked_mul(cols)
             .ok_or_else(|| PyValueError::new_err("rsmk CUDA plan rows*cols overflow"))?;
-        let (indicator, signal) = py.allow_threads(|| -> PyResult<(Vec<f32>, Vec<f32>)> {
+        let (indicator, signal) = py.detach(|| -> PyResult<(Vec<f32>, Vec<f32>)> {
             let d_main =
                 DeviceBuffer::from_slice(main).map_err(|e| PyValueError::new_err(e.to_string()))?;
             let d_compare = DeviceBuffer::from_slice(compare)
@@ -2454,7 +2454,7 @@ pub fn rsmk_cuda_batch_plan_create_py(
         period: period_range,
         signal_period: signal_period_range,
     };
-    let (cuda, plan, dev_id) = py.allow_threads(|| {
+    let (cuda, plan, dev_id) = py.detach(|| {
         let cuda = CudaRsmk::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
         let plan = cuda
@@ -2491,7 +2491,7 @@ pub fn rsmk_cuda_batch_dev_py(
         period: period_range,
         signal_period: signal_period_range,
     };
-    let (pair, ctx, dev_id) = py.allow_threads(|| {
+    let (pair, ctx, dev_id) = py.detach(|| {
         let cuda = CudaRsmk::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -2539,7 +2539,7 @@ pub fn rsmk_cuda_many_series_one_param_dev_py(
         matype: Some("ema".into()),
         signal_matype: Some("ema".into()),
     };
-    let (pair, ctx, dev_id) = py.allow_threads(|| {
+    let (pair, ctx, dev_id) = py.detach(|| {
         let cuda = CudaRsmk::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();

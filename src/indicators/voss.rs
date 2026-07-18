@@ -1615,11 +1615,11 @@ impl VossDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (exp_dev_ty, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1673,7 +1673,7 @@ pub fn voss_cuda_batch_dev_py<'py>(
         predict,
         bandwidth,
     };
-    let (voss_dev, filt_dev, combos, ctx, dev_id) = py.allow_threads(|| -> PyResult<_> {
+    let (voss_dev, filt_dev, combos, ctx, dev_id) = py.detach(|| -> PyResult<_> {
         let cuda = crate::cuda::CudaVoss::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (voss_dev, filt_dev, combos) = cuda
@@ -1769,7 +1769,7 @@ pub fn voss_cuda_many_series_one_param_dev_py<'py>(
         predict: Some(predict),
         bandwidth: Some(bandwidth),
     };
-    let (voss_dev, filt_dev, ctx, dev_id) = py.allow_threads(|| -> PyResult<_> {
+    let (voss_dev, filt_dev, ctx, dev_id) = py.detach(|| -> PyResult<_> {
         let cuda = crate::cuda::CudaVoss::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (voss_dev, filt_dev) = cuda
@@ -2658,7 +2658,7 @@ pub fn voss_py<'py>(
     let input = VossInput::from_slice(slice_in, params);
 
     let (voss_vec, filt_vec) = py
-        .allow_threads(|| voss_with_kernel(&input, kern).map(|o| (o.voss, o.filt)))
+        .detach(|| voss_with_kernel(&input, kern).map(|o| (o.voss, o.filt)))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((voss_vec.into_pyarray(py), filt_vec.into_pyarray(py)))
@@ -2726,7 +2726,7 @@ pub fn voss_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let k = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,

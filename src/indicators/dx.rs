@@ -2137,7 +2137,7 @@ pub fn dx_py<'py>(
     };
     let inp = DxInput::from_hlc_slices(h, l, c, params);
     let vec_out: Vec<f64> = py
-        .allow_threads(|| dx_with_kernel(&inp, kern).map(|o| o.values))
+        .detach(|| dx_with_kernel(&inp, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(vec_out.into_pyarray(py))
 }
@@ -2164,7 +2164,7 @@ pub fn dx_batch_py<'py>(
     let cols = h.len().min(l.len()).min(c.len());
     let kern = validate_kernel(kernel, true)?;
     let DxBatchOutput { values, .. } = py
-        .allow_threads(|| dx_batch_with_kernel(h, l, c, &sweep, kern))
+        .detach(|| dx_batch_with_kernel(h, l, c, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let out_arr = PyArray1::from_vec(py, values);
@@ -2210,7 +2210,7 @@ pub fn dx_cuda_batch_dev_py<'py>(
     let l = low_f32.as_slice()?;
     let c = close_f32.as_slice()?;
     let sweep = DxBatchRange::from_tuple(period_range);
-    let (inner, combos, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, combos, ctx, dev_id) = py.detach(|| {
         let cuda = CudaDx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -2257,7 +2257,7 @@ pub fn dx_cuda_many_series_one_param_dev_py(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaDx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -2332,11 +2332,11 @@ impl DxDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {

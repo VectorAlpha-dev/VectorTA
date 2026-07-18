@@ -2042,7 +2042,7 @@ pub fn insync_index_py<'py>(
         },
     );
     let output = py
-        .allow_threads(|| insync_index_with_kernel(&input, kernel))
+        .detach(|| insync_index_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(output.values.into_pyarray(py))
 }
@@ -2187,7 +2187,7 @@ pub fn insync_index_batch_py<'py>(
         sma_length: sma_length_range,
     };
     let output = py
-        .allow_threads(|| insync_index_batch_with_kernel(high, low, close, volume, &sweep, kernel))
+        .detach(|| insync_index_batch_with_kernel(high, low, close, volume, &sweep, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let values = output

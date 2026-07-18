@@ -1596,11 +1596,11 @@ impl WavetrendDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -3616,7 +3616,7 @@ pub fn wavetrend_py<'py>(
     let input = WavetrendInput::from_slice(slice_in, params);
 
     let (wt1_vec, wt2_vec, wt_diff_vec) = py
-        .allow_threads(|| wavetrend_with_kernel(&input, kern).map(|o| (o.wt1, o.wt2, o.wt_diff)))
+        .detach(|| wavetrend_with_kernel(&input, kern).map(|o| (o.wt1, o.wt2, o.wt_diff)))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((
@@ -3698,7 +3698,7 @@ pub fn wavetrend_batch_py<'py>(
     let slice_wt_diff = unsafe { wt_diff_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -3787,7 +3787,7 @@ pub fn wavetrend_cuda_batch_dev_py<'py>(
         factor: factor_range,
     };
 
-    let (batch, ctx, dev_id) = py.allow_threads(|| {
+    let (batch, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaWavetrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -3903,7 +3903,7 @@ pub fn wavetrend_cuda_many_series_one_param_dev_py<'py>(
         factor: Some(factor),
     };
 
-    let (wt1, wt2, wt_diff, ctx, dev_id) = py.allow_threads(|| {
+    let (wt1, wt2, wt_diff, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaWavetrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();

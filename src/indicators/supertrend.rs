@@ -1191,11 +1191,11 @@ impl SupertrendDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use cust::memory::DeviceBuffer;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();
@@ -1271,7 +1271,7 @@ pub fn supertrend_cuda_batch_dev_py<'py>(
         period: period_range,
         factor: factor_range,
     };
-    let (trend, changed, combos, ctx_arc, dev_id) = py.allow_threads(|| -> PyResult<_> {
+    let (trend, changed, combos, ctx_arc, dev_id) = py.detach(|| -> PyResult<_> {
         let cuda =
             CudaSupertrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let h32: Vec<f32> = h.iter().map(|&v| v as f32).collect();
@@ -1342,7 +1342,7 @@ pub fn supertrend_cuda_many_series_one_param_dev_py<'py>(
     let h32: Vec<f32> = h.iter().map(|&v| v as f32).collect();
     let l32: Vec<f32> = l.iter().map(|&v| v as f32).collect();
     let c32: Vec<f32> = c.iter().map(|&v| v as f32).collect();
-    let (out, ctx_arc, dev_id) = py.allow_threads(|| -> PyResult<_> {
+    let (out, ctx_arc, dev_id) = py.detach(|| -> PyResult<_> {
         let cuda =
             CudaSupertrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out = cuda
@@ -2130,7 +2130,7 @@ pub fn supertrend_py<'py>(
     let input = SuperTrendInput::from_slices(high_slice, low_slice, close_slice, params);
 
     let (trend_vec, changed_vec) = py
-        .allow_threads(|| supertrend_with_kernel(&input, kern).map(|o| (o.trend, o.changed)))
+        .detach(|| supertrend_with_kernel(&input, kern).map(|o| (o.trend, o.changed)))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((trend_vec.into_pyarray(py), changed_vec.into_pyarray(py)))
@@ -2180,7 +2180,7 @@ pub fn supertrend_batch_py<'py>(
     let changed_out = unsafe { changed_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,

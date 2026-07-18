@@ -1999,7 +1999,7 @@ pub fn kurtosis_py<'py>(
     let input = KurtosisInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| kurtosis_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| kurtosis_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2059,7 +2059,7 @@ pub fn kurtosis_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2106,7 +2106,7 @@ pub fn kurtosis_cuda_batch_dev_py(
     let sweep = KurtosisBatchRange {
         period: period_range,
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda =
             CudaKurtosis::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (dev, _combos) = cuda
@@ -2139,7 +2139,7 @@ pub fn kurtosis_cuda_many_series_one_param_dev_py(
     let rows = shape[0];
     let cols = shape[1];
     let slice_in = data_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda =
             CudaKurtosis::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev = cuda

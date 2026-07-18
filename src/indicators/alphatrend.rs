@@ -1503,7 +1503,7 @@ pub fn alphatrend_py<'py>(
     );
 
     let result = py
-        .allow_threads(|| alphatrend_with_kernel(&input, kern))
+        .detach(|| alphatrend_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((result.k1.into_pyarray(py), result.k2.into_pyarray(py)))
@@ -2445,7 +2445,7 @@ pub fn alphatrend_batch_py<'py>(
     let k1_slice = unsafe { out_k1.as_slice_mut()? };
     let k2_slice = unsafe { out_k2.as_slice_mut()? };
 
-    py.allow_threads(|| {
+    py.detach(|| {
         alphatrend_batch_inner_into_slices(o, h, l, c, v, &sweep, kern, true, k1_slice, k2_slice)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2507,7 +2507,7 @@ pub fn alphatrend_cuda_batch_dev_py<'py>(
         period: period_range,
         no_volume,
     };
-    let (batch, coeffs_vec, periods_vec, ctx_guard, dev_id) = py.allow_threads(|| {
+    let (batch, coeffs_vec, periods_vec, ctx_guard, dev_id) = py.detach(|| {
         let cuda =
             CudaAlphaTrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out = cuda
@@ -2582,7 +2582,7 @@ pub fn alphatrend_cuda_many_series_one_param_dev_py<'py>(
     {
         return Err(PyValueError::new_err("Inconsistent time-major shapes"));
     }
-    let (k1, k2, ctx_guard, dev_id) = py.allow_threads(|| {
+    let (k1, k2, ctx_guard, dev_id) = py.detach(|| {
         let cuda =
             CudaAlphaTrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out = cuda
@@ -2655,11 +2655,11 @@ impl AtDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {

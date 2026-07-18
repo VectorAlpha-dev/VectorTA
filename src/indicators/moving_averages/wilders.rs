@@ -1955,7 +1955,7 @@ pub fn wilders_py<'py>(
     let wilders_in = WildersInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| wilders_with_kernel(&wilders_in, kern).map(|o| o.values))
+        .detach(|| wilders_with_kernel(&wilders_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2024,7 +2024,7 @@ pub fn wilders_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2075,7 +2075,7 @@ pub fn wilders_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaWilders::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.wilders_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -2108,7 +2108,7 @@ pub fn wilders_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaWilders::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.wilders_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -2158,11 +2158,11 @@ impl WildersDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();

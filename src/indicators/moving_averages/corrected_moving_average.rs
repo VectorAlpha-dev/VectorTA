@@ -713,7 +713,7 @@ pub fn corrected_moving_average_py<'py>(
         },
     );
     let values = py
-        .allow_threads(|| corrected_moving_average_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| corrected_moving_average_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(values.into_pyarray(py))
 }
@@ -757,7 +757,7 @@ pub fn corrected_moving_average_batch_py<'py>(
         other => other,
     };
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             corrected_moving_average_batch_with_kernel(
                 slice,
                 &CorrectedMovingAverageBatchRange {

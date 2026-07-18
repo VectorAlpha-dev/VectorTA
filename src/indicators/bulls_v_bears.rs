@@ -2011,7 +2011,7 @@ pub fn bulls_v_bears_py<'py>(
     );
     let kernel = validate_kernel(kernel, false)?;
     let out = py
-        .allow_threads(|| bulls_v_bears_with_kernel(&input, kernel))
+        .detach(|| bulls_v_bears_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     dict.set_item("value", out.value.into_pyarray(py))?;
@@ -2158,7 +2158,7 @@ pub fn bulls_v_bears_batch_py<'py>(
     let zero_cross_down_slice = unsafe { out_zero_cross_down.as_slice_mut()? };
     let kernel = validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch_kernel = match kernel {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

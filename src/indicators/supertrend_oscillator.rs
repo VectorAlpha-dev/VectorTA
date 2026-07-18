@@ -1875,7 +1875,7 @@ pub fn supertrend_oscillator_py<'py>(
     );
     let kernel = validate_kernel(kernel, false)?;
     let out = py
-        .allow_threads(|| supertrend_oscillator_with_kernel(&input, kernel))
+        .detach(|| supertrend_oscillator_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.oscillator.into_pyarray(py),
@@ -1946,7 +1946,7 @@ pub fn supertrend_oscillator_batch_py<'py>(
     let out_histogram = unsafe { histogram_arr.as_slice_mut()? };
     let kernel = validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch_kernel = match kernel {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

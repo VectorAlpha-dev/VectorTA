@@ -977,7 +977,7 @@ pub fn rocp_py<'py>(
     let rocp_in = RocpInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| rocp_with_kernel(&rocp_in, kern).map(|o| o.values))
+        .detach(|| rocp_with_kernel(&rocp_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1037,7 +1037,7 @@ pub fn rocp_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other if other.is_batch() => other,
@@ -1104,7 +1104,7 @@ pub fn rocp_cuda_batch_dev_py<'py>(
     let sweep = RocpBatchRange {
         period: period_range,
     };
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, combos) = py.detach(|| {
         let cuda = CudaRocp::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.rocp_batch_dev(d, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -1137,7 +1137,7 @@ pub fn rocp_cuda_many_series_one_param_dev_py(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let tm = data_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaRocp::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.rocp_many_series_one_param_time_major_dev(tm, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))

@@ -1257,7 +1257,7 @@ pub fn hma_py<'py>(
     let hma_in = HmaInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| hma_with_kernel(&hma_in, kern).map(|o| o.values))
+        .detach(|| hma_with_kernel(&hma_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1289,7 +1289,7 @@ pub fn hma_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1341,7 +1341,7 @@ pub fn hma_cuda_batch_dev_py<'py>(
         period: period_range,
     };
 
-    let (inner, combos, stream_u64, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, combos, stream_u64, ctx, dev_id) = py.detach(|| {
         let cuda = CudaHma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.ctx();
         let dev_id = cuda.device_id();
@@ -1390,7 +1390,7 @@ pub fn hma_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let (inner, ctx, dev_id, stream_u64) = py.allow_threads(|| {
+    let (inner, ctx, dev_id, stream_u64) = py.detach(|| {
         let cuda = CudaHma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.ctx();
         let dev_id = cuda.device_id();
@@ -1477,11 +1477,11 @@ impl DeviceArrayF32HmaPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<pyo3::PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<pyo3::Py<pyo3::PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
         use pyo3::ffi as pyffi;
         use std::ffi::{c_void, CString};

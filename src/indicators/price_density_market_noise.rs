@@ -1068,7 +1068,7 @@ pub fn price_density_market_noise_py<'py>(
         },
     );
     let output = py
-        .allow_threads(|| price_density_market_noise_with_kernel(&input, kernel))
+        .detach(|| price_density_market_noise_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         output.price_density.into_pyarray(py),
@@ -1133,7 +1133,7 @@ pub fn price_density_market_noise_batch_py<'py>(
     let out_price_density_percent = unsafe { price_density_percent_arr.as_slice_mut()? };
     let kernel = validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch_kernel = match kernel {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

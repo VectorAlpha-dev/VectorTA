@@ -933,7 +933,7 @@ pub fn l2_ehlers_signal_to_noise_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| l2_ehlers_signal_to_noise_with_kernel(&input, kernel))
+        .detach(|| l2_ehlers_signal_to_noise_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(out.values.into_pyarray(py))
 }
@@ -981,7 +981,7 @@ pub fn l2_ehlers_signal_to_noise_batch_py<'py>(
         smooth_period: smooth_period_range,
     };
     let out = py
-        .allow_threads(|| {
+        .detach(|| {
             l2_ehlers_signal_to_noise_batch_with_kernel(source, high, low, &sweep, kernel)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;

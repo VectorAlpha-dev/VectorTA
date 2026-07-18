@@ -1110,7 +1110,7 @@ pub fn sar_py<'py>(
     let input = SarInput::from_slices(high_trimmed, low_trimmed, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| sar_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| sar_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1174,7 +1174,7 @@ pub fn sar_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| {
+    py.detach(|| {
         let k = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
@@ -1395,11 +1395,11 @@ impl SarDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1462,7 +1462,7 @@ pub fn sar_cuda_batch_dev_py(
         acceleration: acceleration_range,
         maximum: maximum_range,
     };
-    let (buf, rows, cols, ctx, dev_id) = py.allow_threads(|| {
+    let (buf, rows, cols, ctx, dev_id) = py.detach(|| {
         let cuda = CudaSar::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (dev, _combos) = cuda
             .sar_batch_dev(h, l, &sweep)
@@ -1512,7 +1512,7 @@ pub fn sar_cuda_many_series_one_param_dev_py(
         acceleration: Some(acceleration),
         maximum: Some(maximum),
     };
-    let (buf, r_out, c_out, ctx, dev_id) = py.allow_threads(|| {
+    let (buf, r_out, c_out, ctx, dev_id) = py.detach(|| {
         let cuda = CudaSar::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev = cuda
             .sar_many_series_one_param_time_major_dev(h, l, cols, rows, &params)

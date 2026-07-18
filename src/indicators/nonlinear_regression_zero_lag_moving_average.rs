@@ -1219,7 +1219,7 @@ pub fn nonlinear_regression_zero_lag_moving_average_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| nonlinear_regression_zero_lag_moving_average_with_kernel(&input, kern))
+        .detach(|| nonlinear_regression_zero_lag_moving_average_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.value.into_pyarray(py),
@@ -1285,7 +1285,7 @@ pub fn nonlinear_regression_zero_lag_moving_average_batch_py<'py>(
     let data = data.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
     let out = py
-        .allow_threads(|| {
+        .detach(|| {
             nonlinear_regression_zero_lag_moving_average_batch_with_kernel(
                 data,
                 &NonlinearRegressionZeroLagMovingAverageBatchRange {

@@ -1938,7 +1938,7 @@ pub fn midpoint_py<'py>(
     let input = MidpointInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| midpoint_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| midpoint_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1995,7 +1995,7 @@ pub fn midpoint_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,

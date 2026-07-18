@@ -1454,7 +1454,7 @@ pub fn exponential_trend_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| exponential_trend_with_kernel(&input, kernel))
+        .detach(|| exponential_trend_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     dict.set_item("uptrend_base", out.uptrend_base.into_pyarray(py))?;

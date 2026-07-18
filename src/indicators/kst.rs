@@ -3239,7 +3239,7 @@ pub fn kst_py<'py>(
     let input = KstInput::from_slice(slice, prm);
     let kern = validate_kernel(kernel, false)?;
     let (line, signal) = py
-        .allow_threads(|| kst_with_kernel(&input, kern).map(|o| (o.line, o.signal)))
+        .detach(|| kst_with_kernel(&input, kern).map(|o| (o.line, o.signal)))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((line.into_pyarray(py), signal.into_pyarray(py)))
 }
@@ -3333,7 +3333,7 @@ pub fn kst_batch_py<'py>(
         let out_sig = unsafe { PyArray1::<f64>::new(py, [total], false) };
         let lo = unsafe { out_line.as_slice_mut()? };
         let so = unsafe { out_sig.as_slice_mut()? };
-        py.allow_threads(|| {
+        py.detach(|| {
             let k = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 x => x,
@@ -3480,7 +3480,7 @@ pub fn kst_cuda_batch_dev_py(
         roc_period4: r4_range,
         signal_period: sig_range,
     };
-    let (pair, ctx, dev) = py.allow_threads(|| {
+    let (pair, ctx, dev) = py.detach(|| {
         let cuda = CudaKst::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev = cuda.device_id();
@@ -3544,7 +3544,7 @@ pub fn kst_cuda_many_series_one_param_dev_py(
         roc_period4: Some(r4),
         signal_period: Some(sig),
     };
-    let (pair, ctx, dev) = py.allow_threads(|| {
+    let (pair, ctx, dev) = py.detach(|| {
         let cuda = CudaKst::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev = cuda.device_id();

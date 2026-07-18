@@ -2487,7 +2487,7 @@ pub fn fvg_trailing_stop_py<'py>(
     };
     let input = FvgTrailingStopInput::from_slices(h, l, c, params);
     let out = py
-        .allow_threads(|| fvg_trailing_stop_with_kernel(&input, kern))
+        .detach(|| fvg_trailing_stop_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.upper.into_pyarray(py),
@@ -2528,7 +2528,7 @@ pub fn fvg_trailing_stop_cuda_batch_dev_py(
         smoothing: smoothing_range,
         reset_on_cross: reset_toggle,
     };
-    let (u, lwr, uts, lts) = py.allow_threads(|| {
+    let (u, lwr, uts, lts) = py.detach(|| {
         let cuda = crate::cuda::fvg_trailing_stop_wrapper::CudaFvgTs::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let batch = cuda
@@ -2582,7 +2582,7 @@ pub fn fvg_trailing_stop_cuda_many_series_one_param_dev_py(
         smoothing_length: Some(smoothing_length),
         reset_on_cross: Some(reset_on_cross),
     };
-    let (u, lw, uts, lts) = py.allow_threads(|| {
+    let (u, lw, uts, lts) = py.detach(|| {
         let cuda = crate::cuda::fvg_trailing_stop_wrapper::CudaFvgTs::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.fvg_ts_many_series_one_param_time_major_dev(h, l, c, cols, rows, &params)
@@ -2631,7 +2631,7 @@ pub fn fvg_trailing_stop_batch_py<'py>(
     let flat = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let flat_mut = unsafe { flat.as_slice_mut()? };
 
-    py.allow_threads(|| fvg_ts_batch_inner_into(h, l, c, &sweep, kern, true, flat_mut))
+    py.detach(|| fvg_ts_batch_inner_into(h, l, c, &sweep, kern, true, flat_mut))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);

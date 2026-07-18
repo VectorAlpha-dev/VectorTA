@@ -1315,7 +1315,7 @@ pub fn net_myrsi_py<'py>(
     let input = NetMyrsiInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| net_myrsi_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| net_myrsi_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1349,7 +1349,7 @@ pub fn net_myrsi_batch_py<'py>(
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| {
+    py.detach(|| {
         let actual = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
@@ -1389,7 +1389,7 @@ pub fn net_myrsi_cuda_batch_dev_py<'py>(
     let sweep = NetMyrsiBatchRange {
         period: period_range,
     };
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = crate::cuda::CudaNetMyrsi::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -1426,7 +1426,7 @@ pub fn net_myrsi_cuda_many_series_one_param_dev_py(
     let params = NetMyrsiParams {
         period: Some(period),
     };
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = crate::cuda::CudaNetMyrsi::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();

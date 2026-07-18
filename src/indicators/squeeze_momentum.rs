@@ -2118,7 +2118,7 @@ pub fn squeeze_momentum_py<'py>(
     };
     let input = SqueezeMomentumInput::from_slices(h, l, c, params);
 
-    py.allow_threads(|| {
+    py.detach(|| {
         squeeze_momentum_into_slices(&mut sq_slice, &mut mo_slice, &mut si_slice, &input, kern)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2157,7 +2157,7 @@ pub fn squeeze_momentum_cuda_batch_dev_py(
         length_kc: length_kc_range,
         mult_kc: mult_kc_range,
     };
-    let (sq, mo, si, ctx, dev_id) = py.allow_threads(|| {
+    let (sq, mo, si, ctx, dev_id) = py.detach(|| {
         let cuda = CudaSqueezeMomentum::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -2207,7 +2207,7 @@ pub fn squeeze_momentum_cuda_many_series_one_param_dev_py(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
-    let (sq, mo, si, ctx, dev_id) = py.allow_threads(|| {
+    let (sq, mo, si, ctx, dev_id) = py.detach(|| {
         let cuda = CudaSqueezeMomentum::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -2262,7 +2262,7 @@ pub fn squeeze_momentum_batch_py<'py>(
         mult_kc: mult_kc_range,
     };
 
-    let out = py.allow_threads(|| {
+    let out = py.detach(|| {
         let k = validate_kernel(kernel, true)?;
         let simd = match k {
             Kernel::Auto => detect_best_batch_kernel(),

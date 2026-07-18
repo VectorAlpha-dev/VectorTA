@@ -2434,7 +2434,7 @@ pub fn di_py<'py>(
     let input = DiInput::from_slices(high_slice, low_slice, close_slice, params);
 
     let (plus_vec, minus_vec) = py
-        .allow_threads(|| di_with_kernel(&input, kern).map(|o| (o.plus, o.minus)))
+        .detach(|| di_with_kernel(&input, kern).map(|o| (o.plus, o.minus)))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((plus_vec.into_pyarray(py), minus_vec.into_pyarray(py)))
@@ -2518,7 +2518,7 @@ pub fn di_batch_py<'py>(
     }
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let simd = match kern {
                 Kernel::Auto => match detect_best_batch_kernel() {
                     Kernel::Avx512Batch => Kernel::Avx512,
@@ -2610,11 +2610,11 @@ impl DeviceArrayF32DiPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2677,7 +2677,7 @@ pub fn di_cuda_batch_dev_py<'py>(
     let sweep = DiBatchRange {
         period: period_range,
     };
-    let (plus_dev, minus_dev, combos, ctx, dev_id) = py.allow_threads(|| {
+    let (plus_dev, minus_dev, combos, ctx, dev_id) = py.detach(|| {
         let cuda = CudaDi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let res = cuda
             .di_batch_dev(h, l, c, &sweep)
@@ -2747,7 +2747,7 @@ pub fn di_cuda_many_series_one_param_dev_py<'py>(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
-    let (pair, ctx, dev_id) = py.allow_threads(|| {
+    let (pair, ctx, dev_id) = py.detach(|| {
         let cuda = CudaDi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let p = cuda
             .di_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)

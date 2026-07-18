@@ -62,11 +62,11 @@ impl HwmaDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<pyo3::PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<pyo3::Py<pyo3::PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();
@@ -1662,7 +1662,7 @@ pub fn hwma_py<'py>(
     let input = HwmaInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| hwma_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| hwma_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1700,7 +1700,7 @@ pub fn hwma_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let (combos_result, _, _) = py
-        .allow_threads(|| {
+        .detach(|| {
             let simd = match kern {
                 Kernel::Auto => Kernel::Scalar,
                 kernel => match kernel {
@@ -1769,7 +1769,7 @@ pub fn hwma_cuda_batch_dev_py(
     };
     let data_f32: Vec<f32> = slice_in.iter().map(|&v| v as f32).collect();
 
-    let (inner, ctx_arc) = py.allow_threads(|| {
+    let (inner, ctx_arc) = py.detach(|| {
         let cuda = CudaHwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let out = cuda
@@ -1811,7 +1811,7 @@ pub fn hwma_cuda_many_series_one_param_dev_py(
         nc: Some(nc),
     };
 
-    let (inner, ctx_arc) = py.allow_threads(|| {
+    let (inner, ctx_arc) = py.detach(|| {
         let cuda = CudaHwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let out = cuda

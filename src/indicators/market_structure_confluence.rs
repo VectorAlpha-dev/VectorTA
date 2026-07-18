@@ -1825,7 +1825,7 @@ pub fn market_structure_confluence_py<'py>(
         },
     );
     let output = py
-        .allow_threads(|| market_structure_confluence_with_kernel(&input, kernel))
+        .detach(|| market_structure_confluence_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     dict.set_item("basis", output.basis.into_pyarray(py))?;
@@ -1871,7 +1871,7 @@ pub fn market_structure_confluence_batch_py<'py>(
     let close = close.as_slice()?;
     let kernel = validate_kernel(kernel, true)?;
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             market_structure_confluence_batch_with_kernel(
                 high,
                 low,

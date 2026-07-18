@@ -1304,7 +1304,7 @@ pub fn macd_wave_signal_pro_py<'py>(
     let input =
         MacdWaveSignalProInput::from_slices(open, high, low, close, MacdWaveSignalProParams);
     let out = py
-        .allow_threads(|| macd_wave_signal_pro_with_kernel(&input, kernel))
+        .detach(|| macd_wave_signal_pro_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.diff.into_pyarray(py),
@@ -1399,7 +1399,7 @@ pub fn macd_wave_signal_pro_batch_py<'py>(
     let buy_slice = unsafe { buy_arr.as_slice_mut()? };
     let sell_slice = unsafe { sell_arr.as_slice_mut()? };
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let kernel = match kernel {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

@@ -1174,7 +1174,7 @@ pub fn midprice_py<'py>(
     let input = MidpriceInput::from_slices(high_slice, low_slice, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| midprice_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| midprice_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1232,7 +1232,7 @@ pub fn midprice_batch_py<'py>(
     init_matrix_prefixes(out_mu, cols, &warm);
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,

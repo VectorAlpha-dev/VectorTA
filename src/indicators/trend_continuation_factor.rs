@@ -927,7 +927,7 @@ pub fn trend_continuation_factor_py<'py>(
         },
     );
     let output = py
-        .allow_threads(|| trend_continuation_factor_with_kernel(&input, kernel))
+        .detach(|| trend_continuation_factor_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         output.plus_tcf.into_pyarray(py),
@@ -985,7 +985,7 @@ pub fn trend_continuation_factor_batch_py<'py>(
     let out_minus = unsafe { minus_arr.as_slice_mut()? };
     let kernel = validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch_kernel = match kernel {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

@@ -2171,7 +2171,7 @@ pub fn medium_ad_py<'py>(
     let input = MediumAdInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| medium_ad_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| medium_ad_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2228,7 +2228,7 @@ pub fn medium_ad_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => Kernel::ScalarBatch,
                 k => k,
@@ -2331,11 +2331,11 @@ impl MediumAdDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         if let Some(obj) = &stream {
             if let Ok(i) = obj.extract::<i64>(py) {
                 if i == 0 {
@@ -2482,7 +2482,7 @@ impl MediumAdCudaBatchPlanPy {
         let total = rows
             .checked_mul(cols)
             .ok_or_else(|| PyValueError::new_err("medium_ad CUDA plan rows*cols overflow"))?;
-        let values = py.allow_threads(|| -> PyResult<Vec<f32>> {
+        let values = py.detach(|| -> PyResult<Vec<f32>> {
             let d_prices = DeviceBuffer::from_slice(slice)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
             self.cuda
@@ -2533,7 +2533,7 @@ pub fn medium_ad_cuda_batch_plan_create_py(
         period: period_range,
     };
     let periods = medium_ad_periods_from_range(period_range);
-    let (cuda, plan, dev_id) = py.allow_threads(|| {
+    let (cuda, plan, dev_id) = py.detach(|| {
         let cuda =
             CudaMediumAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
@@ -2568,7 +2568,7 @@ pub fn medium_ad_cuda_batch_dev_py(
         period: period_range,
     };
     let (inner, ctx, dev_id) =
-        py.allow_threads(|| -> PyResult<(DeviceArrayF32, Arc<Context>, u32)> {
+        py.detach(|| -> PyResult<(DeviceArrayF32, Arc<Context>, u32)> {
             let cuda =
                 CudaMediumAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
             let ctx = cuda.context_arc();
@@ -2602,7 +2602,7 @@ pub fn medium_ad_cuda_many_series_one_param_dev_py(
     }
     let slice = data_tm_f32.as_slice()?;
     let (inner, ctx, dev_id) =
-        py.allow_threads(|| -> PyResult<(DeviceArrayF32, Arc<Context>, u32)> {
+        py.detach(|| -> PyResult<(DeviceArrayF32, Arc<Context>, u32)> {
             let cuda =
                 CudaMediumAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
             let ctx = cuda.context_arc();

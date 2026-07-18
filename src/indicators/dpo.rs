@@ -1786,7 +1786,7 @@ pub fn dpo_py<'py>(
     let input = DpoInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| dpo_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| dpo_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1843,7 +1843,7 @@ pub fn dpo_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1892,7 +1892,7 @@ pub fn dpo_cuda_batch_dev_py<'py>(
     };
 
     let combos = expand_grid(&sweep);
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = crate::cuda::oscillators::dpo_wrapper::CudaDpo::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.dpo_batch_dev(slice_in, &sweep)
@@ -1936,7 +1936,7 @@ pub fn dpo_cuda_many_series_one_param_dev_py<'py>(
     let params = DpoParams {
         period: Some(period),
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = crate::cuda::oscillators::dpo_wrapper::CudaDpo::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.dpo_many_series_one_param_time_major_dev(flat, cols, rows, &params)

@@ -1818,7 +1818,7 @@ pub fn mass_py<'py>(
     let input = MassInput::from_slices(high_slice, low_slice, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| mass_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| mass_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1882,7 +1882,7 @@ pub fn mass_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => Kernel::ScalarBatch,
                 k => k,
@@ -1931,7 +1931,7 @@ pub fn mass_cuda_batch_dev_py<'py>(
         period: period_range,
     };
 
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, combos) = py.detach(|| {
         let mut cuda =
             CudaMass::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.mass_batch_dev(high, low, &sweep)
@@ -1977,7 +1977,7 @@ pub fn mass_cuda_many_series_one_param_dev_py<'py>(
         period: Some(period),
     };
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let mut cuda =
             CudaMass::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.mass_many_series_one_param_time_major_dev(high, low, cols, rows, &params)

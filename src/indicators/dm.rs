@@ -2272,7 +2272,7 @@ pub fn dm_py<'py>(
     let plus_slice = unsafe { out_plus.as_slice_mut()? };
     let minus_slice = unsafe { out_minus.as_slice_mut()? };
 
-    py.allow_threads(|| dm_into_slice(plus_slice, minus_slice, &input, kern))
+    py.detach(|| dm_into_slice(plus_slice, minus_slice, &input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((out_plus, out_minus))
@@ -2300,7 +2300,7 @@ pub fn dm_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let output = py
-        .allow_threads(|| dm_batch_with_kernel(h, l, &sweep, kern))
+        .detach(|| dm_batch_with_kernel(h, l, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let plus = unsafe { PyArray1::from_vec(py, output.plus).reshape((output.rows, output.cols))? };
@@ -2341,7 +2341,7 @@ pub fn dm_cuda_batch_dev_py(
     let sweep = DmBatchRange {
         period: period_range,
     };
-    let (pair, ctx, dev) = py.allow_threads(|| {
+    let (pair, ctx, dev) = py.detach(|| {
         let cuda = CudaDm::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev = cuda.device_id();
@@ -2381,7 +2381,7 @@ pub fn dm_cuda_many_series_one_param_dev_py(
     }
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
-    let (pair, ctx, dev) = py.allow_threads(|| {
+    let (pair, ctx, dev) = py.detach(|| {
         let cuda = CudaDm::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev = cuda.device_id();

@@ -19,7 +19,7 @@ pub fn export_f32_cuda_dlpack_2d<'py>(
     cols: usize,
     device_id: i32,
     max_version: Option<Bound<'py, PyAny>>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     use std::ffi::c_void;
     use std::os::raw::c_char;
     use std::ptr::null_mut;
@@ -223,7 +223,7 @@ pub fn export_f32_cuda_dlpack_2d<'py>(
             unsafe { deleter_v1(raw) };
             return Err(PyValueError::new_err("failed to create DLPack capsule"));
         }
-        Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        Ok(unsafe { Py::<PyAny>::from_owned_ptr(py, cap) })
     } else {
         let mt = Box::new(DLManagedTensor {
             dl_tensor: DLTensor {
@@ -258,7 +258,7 @@ pub fn export_f32_cuda_dlpack_2d<'py>(
             unsafe { deleter_legacy(raw) };
             return Err(PyValueError::new_err("failed to create DLPack capsule"));
         }
-        Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        Ok(unsafe { Py::<PyAny>::from_owned_ptr(py, cap) })
     }
 }
 
@@ -270,7 +270,7 @@ pub fn export_u64_cuda_dlpack_2d<'py>(
     cols: usize,
     device_id: i32,
     max_version: Option<Bound<'py, PyAny>>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     use std::ffi::c_void;
     use std::os::raw::c_char;
     use std::ptr::null_mut;
@@ -474,7 +474,7 @@ pub fn export_u64_cuda_dlpack_2d<'py>(
             unsafe { deleter_v1(raw) };
             return Err(PyValueError::new_err("failed to create DLPack capsule"));
         }
-        Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        Ok(unsafe { Py::<PyAny>::from_owned_ptr(py, cap) })
     } else {
         let mt = Box::new(DLManagedTensor {
             dl_tensor: DLTensor {
@@ -509,7 +509,7 @@ pub fn export_u64_cuda_dlpack_2d<'py>(
             unsafe { deleter_legacy(raw) };
             return Err(PyValueError::new_err("failed to create DLPack capsule"));
         }
-        Ok(unsafe { PyObject::from_owned_ptr(py, cap) })
+        Ok(unsafe { Py::<PyAny>::from_owned_ptr(py, cap) })
     }
 }
 
@@ -569,11 +569,11 @@ impl DeviceArrayF32Py {
     pub fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {

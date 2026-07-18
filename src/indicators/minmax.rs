@@ -462,11 +462,11 @@ impl MinmaxDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
         max_version: Option<(u8, u8)>,
         dl_device: Option<(i32, i32)>,
         copy: Option<bool>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let _ = stream;
         let _ = max_version;
 
@@ -506,7 +506,7 @@ pub fn minmax_cuda_batch_dev_py<'py>(
     let hs = high.as_slice()?;
     let ls = low.as_slice()?;
     let sweep = MinmaxBatchRange { order: order_range };
-    let (quad, combos, ctx, dev_id) = py.allow_threads(|| -> PyResult<_> {
+    let (quad, combos, ctx, dev_id) = py.detach(|| -> PyResult<_> {
         let cuda = CudaMinmax::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (quad, combos) = cuda
             .minmax_batch_dev(hs, ls, &sweep)
@@ -605,7 +605,7 @@ pub fn minmax_cuda_many_series_one_param_dev_py<'py>(
     let hflat = high_tm.as_slice()?;
     let lflat = low_tm.as_slice()?;
     let params = MinmaxParams { order: Some(order) };
-    let (quad, ctx, dev_id) = py.allow_threads(|| -> PyResult<_> {
+    let (quad, ctx, dev_id) = py.detach(|| -> PyResult<_> {
         let cuda = CudaMinmax::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let quad = cuda
             .minmax_many_series_one_param_time_major_dev(hflat, lflat, cols, rows, &params)
@@ -2030,7 +2030,7 @@ pub fn minmax_py<'py>(
     let input = MinmaxInput::from_slices(high_slice, low_slice, params);
 
     let output = py
-        .allow_threads(|| minmax_with_kernel(&input, kern))
+        .detach(|| minmax_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((
@@ -2099,7 +2099,7 @@ pub fn minmax_batch_py<'py>(
     let last_max_slice = unsafe { last_max_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,

@@ -901,7 +901,7 @@ pub fn garman_klass_volatility_py<'py>(
         },
     );
     let output = py
-        .allow_threads(|| garman_klass_volatility_with_kernel(&input, kernel))
+        .detach(|| garman_klass_volatility_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(output.values.into_pyarray(py))
 }
@@ -954,7 +954,7 @@ pub fn garman_klass_volatility_batch_py<'py>(
     };
     let output = {
         let kernel = validate_kernel(kernel, true)?;
-        py.allow_threads(|| {
+        py.detach(|| {
             let batch = match kernel {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,
@@ -1029,7 +1029,7 @@ pub fn garman_klass_volatility_cuda_batch_dev_py<'py>(
     let sweep = GarmanKlassVolatilityBatchRange {
         lookback: lookback_range,
     };
-    let result = py.allow_threads(|| {
+    let result = py.detach(|| {
         let cuda = CudaGarmanKlassVolatility::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.garman_klass_volatility_batch_dev(open, high, low, close, &sweep)
@@ -1073,7 +1073,7 @@ pub fn garman_klass_volatility_cuda_many_series_one_param_dev_py<'py>(
     let high = high_tm_f32.as_slice()?;
     let low = low_tm_f32.as_slice()?;
     let close = close_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaGarmanKlassVolatility::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.garman_klass_volatility_many_series_one_param_time_major_dev(

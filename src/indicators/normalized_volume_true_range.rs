@@ -1500,7 +1500,7 @@ pub fn normalized_volume_true_range_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| normalized_volume_true_range_with_kernel(&input, kernel))
+        .detach(|| normalized_volume_true_range_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.normalized_volume.into_pyarray(py),

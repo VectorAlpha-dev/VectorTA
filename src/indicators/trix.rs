@@ -1090,7 +1090,7 @@ pub fn trix_py<'py>(
     let trix_in = TrixInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| trix_with_kernel(&trix_in, kern).map(|o| o.values))
+        .detach(|| trix_with_kernel(&trix_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1141,7 +1141,7 @@ pub fn trix_cuda_batch_dev_py<'py>(
         period: period_range,
     };
 
-    let inner = py.allow_threads(|| -> PyResult<_> {
+    let inner = py.detach(|| -> PyResult<_> {
         let cuda = CudaTrix::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let arr = cuda
             .trix_batch_dev(slice_in, &sweep)
@@ -1189,7 +1189,7 @@ pub fn trix_cuda_many_series_one_param_dev_py(
     let rows = data_tm_f32.shape()[0];
     let cols = data_tm_f32.shape()[1];
 
-    let inner = py.allow_threads(|| -> PyResult<_> {
+    let inner = py.detach(|| -> PyResult<_> {
         let cuda = CudaTrix::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let arr = cuda
             .trix_many_series_one_param_time_major_dev(flat_in, cols, rows, period)
@@ -1245,7 +1245,7 @@ pub fn trix_batch_py<'py>(
     }
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => Kernel::ScalarBatch,
                 k => k,

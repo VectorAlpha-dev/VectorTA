@@ -1573,7 +1573,7 @@ pub fn msw_py<'py>(
     let msw_in = MswInput::from_slice(slice_in, params);
 
     let out = py
-        .allow_threads(|| msw_with_kernel(&msw_in, kern))
+        .detach(|| msw_with_kernel(&msw_in, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((out.sine.into_pyarray(py), out.lead.into_pyarray(py)))
@@ -1634,7 +1634,7 @@ pub fn msw_batch_py<'py>(
     let slice_out_lead = unsafe { out_lead.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -3029,7 +3029,7 @@ pub fn msw_cuda_batch_dev_py<'py>(
     let sweep = MswBatchRange {
         period: period_range,
     };
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, combos) = py.detach(|| {
         let cuda = CudaMsw::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.msw_batch_dev(slice, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -3072,7 +3072,7 @@ pub fn msw_cuda_many_series_one_param_dev_py<'py>(
     let params = MswParams {
         period: Some(period),
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaMsw::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.msw_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))

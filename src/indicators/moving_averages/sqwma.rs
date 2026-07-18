@@ -1765,7 +1765,7 @@ pub fn sqwma_py<'py>(
     let sqwma_in = SqwmaInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| sqwma_with_kernel(&sqwma_in, kern).map(|o| o.values))
+        .detach(|| sqwma_with_kernel(&sqwma_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1824,7 +1824,7 @@ pub fn sqwma_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| {
+    py.detach(|| {
         let first = slice_in
             .iter()
             .position(|x| !x.is_nan())
@@ -1884,7 +1884,7 @@ pub fn sqwma_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaSqwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.sqwma_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -1912,7 +1912,7 @@ pub fn sqwma_cuda_many_series_one_param_dev_py(
     let cols = data_tm_f32.shape()[1];
     let flat = data_tm_f32.as_slice()?;
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaSqwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.sqwma_many_series_one_param_time_major_dev(flat, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))

@@ -1944,7 +1944,7 @@ pub fn yang_zhang_volatility_py<'py>(
     let input = YangZhangVolatilityInput::from_slices(o, h, l, c, params);
 
     let out = py
-        .allow_threads(|| yang_zhang_volatility_with_kernel(&input, kern))
+        .detach(|| yang_zhang_volatility_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((out.yz.into_pyarray(py), out.rs.into_pyarray(py)))
@@ -2018,7 +2018,7 @@ pub fn yang_zhang_volatility_batch_py<'py>(
     let rs_out = unsafe { rs_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,

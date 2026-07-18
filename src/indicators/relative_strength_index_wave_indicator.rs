@@ -1337,7 +1337,7 @@ pub fn relative_strength_index_wave_indicator_py<'py>(
     );
     let kernel = validate_kernel(kernel, false)?;
     let out = py
-        .allow_threads(|| relative_strength_index_wave_indicator_with_kernel(&input, kernel))
+        .detach(|| relative_strength_index_wave_indicator_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     dict.set_item("rsi_ma1", out.rsi_ma1.into_pyarray(py))?;
@@ -1438,7 +1438,7 @@ pub fn relative_strength_index_wave_indicator_batch_py<'py>(
     let state_slice = unsafe { out_state.as_slice_mut()? };
     let kernel = validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch_kernel = match kernel {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

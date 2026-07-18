@@ -2640,7 +2640,7 @@ pub fn ma_py<'py>(
     let kern = validate_kernel(kernel, false)?;
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| -> Result<Vec<f64>, Box<dyn Error + Send + Sync>> {
+        .detach(|| -> Result<Vec<f64>, Box<dyn Error + Send + Sync>> {
             match ma_with_kernel(ma_type, MaData::Slice(slice_in), period, kern) {
                 Ok(result) => Ok(result),
                 Err(e) => {

@@ -2019,7 +2019,7 @@ pub fn vwap_deviation_oscillator_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| vwap_deviation_oscillator_with_kernel(&input, kern))
+        .detach(|| vwap_deviation_oscillator_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.osc.into_pyarray(py),
@@ -2149,7 +2149,7 @@ pub fn vwap_deviation_oscillator_batch_py<'py>(
     let std3_out = unsafe { std3_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

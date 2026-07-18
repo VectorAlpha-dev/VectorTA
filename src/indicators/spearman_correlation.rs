@@ -1221,7 +1221,7 @@ pub fn spearman_correlation_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| spearman_correlation_with_kernel(&input, kernel))
+        .detach(|| spearman_correlation_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     dict.set_item("raw", out.raw.into_pyarray(py))?;
@@ -1299,7 +1299,7 @@ pub fn spearman_correlation_batch_py<'py>(
     let smoothed_slice = unsafe { out_smoothed.as_slice_mut()? };
     let kernel = validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch_kernel = match kernel {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

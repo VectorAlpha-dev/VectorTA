@@ -2250,7 +2250,7 @@ pub fn ift_rsi_py<'py>(
     let input = IftRsiInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| ift_rsi_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| ift_rsi_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2310,7 +2310,7 @@ pub fn ift_rsi_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2369,7 +2369,7 @@ pub fn ift_rsi_cuda_batch_dev_py(
         rsi_period: rsi_range,
         wma_period: wma_range,
     };
-    let (inner, dev_id, ctx) = py.allow_threads(|| {
+    let (inner, dev_id, ctx) = py.detach(|| {
         let cuda = CudaIftRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
         let ctx = cuda.context_arc();
@@ -2411,7 +2411,7 @@ pub fn ift_rsi_cuda_many_series_one_param_dev_py(
         rsi_period: Some(rsi_period),
         wma_period: Some(wma_period),
     };
-    let (inner, dev_id, ctx) = py.allow_threads(|| {
+    let (inner, dev_id, ctx) = py.detach(|| {
         let cuda = CudaIftRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
         let ctx = cuda.context_arc();

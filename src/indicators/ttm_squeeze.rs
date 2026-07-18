@@ -1451,7 +1451,7 @@ pub fn ttm_squeeze_py<'py>(
     let mut momentum = vec![f64::NAN; c.len()];
     let mut squeeze = vec![f64::NAN; c.len()];
 
-    py.allow_threads(|| ttm_squeeze_into_slices(&mut momentum, &mut squeeze, &input, kern))
+    py.detach(|| ttm_squeeze_into_slices(&mut momentum, &mut squeeze, &input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((momentum.into_pyarray(py), squeeze.into_pyarray(py)))
@@ -1492,7 +1492,7 @@ pub fn ttm_squeeze_cuda_batch_dev_py(
         kc_mid: kc_mid_range,
         kc_low: kc_low_range,
     };
-    let (mo, sq, ctx, dev_id_u32) = py.allow_threads(|| {
+    let (mo, sq, ctx, dev_id_u32) = py.detach(|| {
         let cuda =
             CudaTtmSqueeze::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -1539,7 +1539,7 @@ pub fn ttm_squeeze_cuda_many_series_one_param_dev_py(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
-    let (mo, sq, ctx, dev_id_u32) = py.allow_threads(|| {
+    let (mo, sq, ctx, dev_id_u32) = py.detach(|| {
         let cuda =
             CudaTtmSqueeze::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -2445,7 +2445,7 @@ pub fn ttm_squeeze_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let out = py
-        .allow_threads(|| ttm_squeeze_batch_with_kernel(h, l, c, &sweep, kern))
+        .detach(|| ttm_squeeze_batch_with_kernel(h, l, c, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let rows = out.rows;

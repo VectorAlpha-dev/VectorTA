@@ -1210,7 +1210,7 @@ pub fn obv_py<'py>(
     let input = ObvInput::from_slices(close_slice, volume_slice, ObvParams::default());
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| obv_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| obv_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1273,7 +1273,7 @@ pub fn obv_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [expected], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
@@ -1314,7 +1314,7 @@ pub fn obv_cuda_batch_dev_py(
         return Err(PyValueError::new_err("mismatched input lengths"));
     }
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaObv::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.obv_batch_dev(close_slice, volume_slice)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -1349,7 +1349,7 @@ pub fn obv_cuda_many_series_one_param_dev_py(
         return Err(PyValueError::new_err("mismatched input sizes or dims"));
     }
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaObv::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.obv_many_series_one_param_time_major_dev(close_slice, volume_slice, cols, rows)
             .map_err(|e| PyValueError::new_err(e.to_string()))

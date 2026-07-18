@@ -1413,7 +1413,7 @@ pub fn goertzel_cycle_composite_wave_py<'py>(
     )?;
     let input = GoertzelCycleCompositeWaveInput::from_slice(data, params);
     let out = py
-        .allow_threads(|| goertzel_cycle_composite_wave_with_kernel(&input, kern))
+        .detach(|| goertzel_cycle_composite_wave_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(out.values.into_pyarray(py))
 }
@@ -1590,7 +1590,7 @@ pub fn goertzel_cycle_composite_wave_batch_py<'py>(
         use_cycle_strength,
     )?;
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             goertzel_cycle_composite_wave_batch_with_kernel(
                 data,
                 &GoertzelCycleCompositeWaveBatchRange {

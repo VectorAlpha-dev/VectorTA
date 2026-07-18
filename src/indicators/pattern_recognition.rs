@@ -6840,7 +6840,7 @@ pub fn pattern_recognition_py<'py>(
         close_slice,
     );
     let output = py
-        .allow_threads(|| pattern_recognition_with_kernel(&input, kern))
+        .detach(|| pattern_recognition_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -6881,7 +6881,7 @@ pub fn pattern_recognition_cuda_batch_dev_py(
     let low_slice = low_f32.as_slice()?;
     let close_slice = close_f32.as_slice()?;
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaPatternRecognition::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -6927,7 +6927,7 @@ pub fn pattern_recognition_cuda_host_f32_py<'py>(
     let low_slice = low_f32.as_slice()?;
     let close_slice = close_f32.as_slice()?;
 
-    let (values_f32, pattern_ids, rows, cols) = py.allow_threads(|| {
+    let (values_f32, pattern_ids, rows, cols) = py.detach(|| {
         let cuda = CudaPatternRecognition::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let native_ids = CudaPatternRecognition::native_supported_pattern_ids();
@@ -7010,11 +7010,11 @@ impl PatternRecognitionDeviceBitmaskU64Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -7078,7 +7078,7 @@ pub fn pattern_recognition_cuda_bitmask_dev_py<'py>(
     let low_slice = low_f32.as_slice()?;
     let close_slice = close_f32.as_slice()?;
 
-    let (bitmask, pattern_ids) = py.allow_threads(|| {
+    let (bitmask, pattern_ids) = py.detach(|| {
         let cuda = CudaPatternRecognition::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let bitmask = cuda

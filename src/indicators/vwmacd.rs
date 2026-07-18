@@ -3011,7 +3011,7 @@ pub fn vwmacd_py<'py>(
     let signal_slice = unsafe { signal_arr.as_slice_mut()? };
     let hist_slice = unsafe { hist_arr.as_slice_mut()? };
 
-    py.allow_threads(|| vwmacd_into_slice(macd_slice, signal_slice, hist_slice, &input, kern))
+    py.detach(|| vwmacd_into_slice(macd_slice, signal_slice, hist_slice, &input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((macd_arr, signal_arr, hist_arr))
@@ -3101,7 +3101,7 @@ pub fn vwmacd_batch_py<'py>(
     let hist_slice = unsafe { hist_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| {
+    py.detach(|| {
         let simd = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
@@ -3280,7 +3280,7 @@ impl VwmacdCudaBatchPlanPy {
             .checked_mul(cols)
             .ok_or_else(|| PyValueError::new_err("VWMACD CUDA plan rows*cols overflow"))?;
         let (macd, signal, hist) =
-            py.allow_threads(|| -> PyResult<(Vec<f32>, Vec<f32>, Vec<f32>)> {
+            py.detach(|| -> PyResult<(Vec<f32>, Vec<f32>, Vec<f32>)> {
                 let d_close = DeviceBuffer::from_slice(close)
                     .map_err(|e| PyValueError::new_err(e.to_string()))?;
                 let d_volume = DeviceBuffer::from_slice(volume)
@@ -3342,7 +3342,7 @@ pub fn vwmacd_cuda_batch_plan_create_py(
         slow_ma_type: "sma".to_string(),
         signal_ma_type: "ema".to_string(),
     };
-    let (cuda, plan, dev_id) = py.allow_threads(|| {
+    let (cuda, plan, dev_id) = py.detach(|| {
         let cuda = CudaVwmacd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let plan = cuda
             .prepare_vwmacd_batch_plan(series_len, first_valid, &sweep)
@@ -3384,7 +3384,7 @@ pub fn vwmacd_cuda_batch_dev_py<'py>(
         signal_ma_type: "ema".to_string(),
     };
 
-    let ((macd_buf, signal_buf, hist_buf), combos) = py.allow_threads(|| {
+    let ((macd_buf, signal_buf, hist_buf), combos) = py.detach(|| {
         let cuda = CudaVwmacd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.vwmacd_batch_dev(prices, volumes, &sweep)
             .map(|(triplet, combos)| ((triplet.macd, triplet.signal, triplet.hist), combos))
@@ -3463,7 +3463,7 @@ pub fn vwmacd_cuda_many_series_one_param_dev_py<'py>(
         signal_ma_type: Some("ema".into()),
     };
 
-    let (macd_buf, signal_buf, hist_buf) = py.allow_threads(|| {
+    let (macd_buf, signal_buf, hist_buf) = py.detach(|| {
         let cuda = CudaVwmacd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.vwmacd_many_series_one_param_time_major_dev(p, v, cols, rows, &params)
             .map(|triplet| (triplet.macd, triplet.signal, triplet.hist))

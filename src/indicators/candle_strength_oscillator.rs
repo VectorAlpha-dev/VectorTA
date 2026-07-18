@@ -1732,7 +1732,7 @@ pub fn candle_strength_oscillator_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| candle_strength_oscillator_with_kernel(&input, kern))
+        .detach(|| candle_strength_oscillator_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.strength.into_pyarray(py),
@@ -1813,7 +1813,7 @@ pub fn candle_strength_oscillator_batch_py<'py>(
     let close = close.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             candle_strength_oscillator_batch_with_kernel(
                 open,
                 high,

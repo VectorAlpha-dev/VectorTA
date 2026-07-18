@@ -2589,7 +2589,7 @@ pub fn vpci_py<'py>(
     let input = VpciInput::from_slices(close_slice, volume_slice, params);
 
     let (vpci_vec, vpcis_vec) = py
-        .allow_threads(|| vpci_with_kernel(&input, kern).map(|o| (o.vpci, o.vpcis)))
+        .detach(|| vpci_with_kernel(&input, kern).map(|o| (o.vpci, o.vpcis)))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((vpci_vec.into_pyarray(py), vpcis_vec.into_pyarray(py)))
@@ -2668,7 +2668,7 @@ pub fn vpci_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2912,7 +2912,7 @@ impl VpciCudaBatchPlanPy {
         let total = rows
             .checked_mul(cols)
             .ok_or_else(|| PyValueError::new_err("vpci CUDA plan rows*cols overflow"))?;
-        let (vpci, vpcis) = py.allow_threads(|| -> PyResult<(Vec<f32>, Vec<f32>)> {
+        let (vpci, vpcis) = py.detach(|| -> PyResult<(Vec<f32>, Vec<f32>)> {
             let d_close = DeviceBuffer::from_slice(close)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
             let d_volume = DeviceBuffer::from_slice(volume)
@@ -2961,7 +2961,7 @@ pub fn vpci_cuda_batch_plan_create_py(
         short_range: short_range_tuple,
         long_range: long_range_tuple,
     };
-    let (cuda, plan, dev_id) = py.allow_threads(|| {
+    let (cuda, plan, dev_id) = py.detach(|| {
         let cuda = CudaVpci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
         let plan = cuda
@@ -3000,7 +3000,7 @@ pub fn vpci_cuda_batch_dev_py<'py>(
         short_range: short_range_tuple,
         long_range: long_range_tuple,
     };
-    let (pair, combos, ctx, dev_id_u32) = py.allow_threads(|| {
+    let (pair, combos, ctx, dev_id_u32) = py.detach(|| {
         let cuda = CudaVpci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id_u32 = cuda.device_id();
@@ -3084,7 +3084,7 @@ pub fn vpci_cuda_many_series_one_param_dev_py<'py>(
         short_range: Some(short_range),
         long_range: Some(long_range),
     };
-    let (pair, ctx, dev_id_u32) = py.allow_threads(|| {
+    let (pair, ctx, dev_id_u32) = py.detach(|| {
         let cuda = CudaVpci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id_u32 = cuda.device_id();

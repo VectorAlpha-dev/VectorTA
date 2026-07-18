@@ -1610,7 +1610,7 @@ pub fn supersmoother_3_pole_py<'py>(
     let input = SuperSmoother3PoleInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| supersmoother_3_pole_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| supersmoother_3_pole_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1692,7 +1692,7 @@ pub fn supersmoother_3_pole_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
@@ -1747,7 +1747,7 @@ pub fn supersmoother_3_pole_cuda_batch_dev_py(
     let dev_id = cuda.device_id();
     let ctx_guard = cuda.context_arc();
     let inner = py
-        .allow_threads(|| cuda.supersmoother_3_pole_batch_dev(slice_in, &sweep))
+        .detach(|| cuda.supersmoother_3_pole_batch_dev(slice_in, &sweep))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(DeviceArrayF32Py::new_from_rust(
@@ -1783,7 +1783,7 @@ pub fn supersmoother_3_pole_cuda_many_series_one_param_dev_py(
     let dev_id = cuda.device_id();
     let ctx_guard = cuda.context_arc();
     let inner = py
-        .allow_threads(|| {
+        .detach(|| {
             cuda.supersmoother_3_pole_many_series_one_param_time_major_dev(
                 flat_in, cols, rows, &params,
             )

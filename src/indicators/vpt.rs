@@ -1266,7 +1266,7 @@ pub fn vpt_py<'py>(
     let input = VptInput::from_slices(price_slice, volume_slice);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| vpt_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| vpt_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1335,7 +1335,7 @@ pub fn vpt_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let _combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1398,7 +1398,7 @@ pub fn vpt_cuda_batch_dev_py(
     if price_slice.len() != volume_slice.len() {
         return Err(PyValueError::new_err("length mismatch"));
     }
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaVpt::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context();
         let dev_id = cuda.device_id();
@@ -1432,7 +1432,7 @@ pub fn vpt_cuda_many_series_one_param_dev_py(
     }
     let price_slice = price_tm.as_slice()?;
     let volume_slice = volume_tm.as_slice()?;
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaVpt::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context();
         let dev_id = cuda.device_id();
@@ -1619,11 +1619,11 @@ impl VptDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<pyo3::PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<pyo3::Py<pyo3::PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {

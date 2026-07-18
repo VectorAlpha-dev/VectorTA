@@ -71,11 +71,11 @@ mod nwe_python_cuda_handle {
         fn __dlpack__<'py>(
             &mut self,
             py: Python<'py>,
-            stream: Option<pyo3::PyObject>,
-            max_version: Option<pyo3::PyObject>,
-            dl_device: Option<pyo3::PyObject>,
-            copy: Option<pyo3::PyObject>,
-        ) -> PyResult<PyObject> {
+            stream: Option<pyo3::Py<pyo3::PyAny>>,
+            max_version: Option<pyo3::Py<pyo3::PyAny>>,
+            dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+            copy: Option<pyo3::Py<pyo3::PyAny>>,
+        ) -> PyResult<Py<PyAny>> {
             let (kdl, alloc_dev) = self.__dlpack_device__();
 
             if let Some(dev_obj) = dl_device.as_ref() {
@@ -1661,7 +1661,7 @@ pub fn nadaraya_watson_envelope_py<'py>(
     let mut upper = alloc_with_nan_prefix(len, 0);
     let mut lower = alloc_with_nan_prefix(len, 0);
 
-    py.allow_threads(|| nadaraya_watson_envelope_into_slices(&input, &mut upper, &mut lower))
+    py.detach(|| nadaraya_watson_envelope_into_slices(&input, &mut upper, &mut lower))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((upper.into_pyarray(py), lower.into_pyarray(py)))
@@ -1694,7 +1694,7 @@ pub fn nadaraya_watson_envelope_batch_py<'py>(
     };
 
     let result = py
-        .allow_threads(|| nadaraya_watson_envelope_batch_with_kernel(slice_in, &sweep, kern))
+        .detach(|| nadaraya_watson_envelope_batch_with_kernel(slice_in, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -1811,7 +1811,7 @@ pub fn nadaraya_watson_envelope_cuda_batch_dev_py<'py>(
         lookback: lookback_range,
     };
     let dict = PyDict::new(py);
-    let (pair, combos, ctx, dev_id) = py.allow_threads(|| {
+    let (pair, combos, ctx, dev_id) = py.detach(|| {
         let cuda = CudaNwe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -1886,7 +1886,7 @@ pub fn nadaraya_watson_envelope_cuda_many_series_one_param_dev_py<'py>(
         multiplier: Some(multiplier),
         lookback: Some(lookback),
     };
-    let (pair, ctx, dev_id) = py.allow_threads(|| {
+    let (pair, ctx, dev_id) = py.detach(|| {
         let cuda = CudaNwe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();

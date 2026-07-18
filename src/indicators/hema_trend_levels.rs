@@ -1453,7 +1453,7 @@ pub fn hema_trend_levels_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| hema_trend_levels_with_kernel(&input, kernel))
+        .detach(|| hema_trend_levels_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     hema_trend_levels_output_to_pydict(py, out)
 }
@@ -1568,7 +1568,7 @@ pub fn hema_trend_levels_batch_py<'py>(
     let bull_test_level_slice = unsafe { bull_test_level_arr.as_slice_mut()? };
     let bear_test_level_slice = unsafe { bear_test_level_arr.as_slice_mut()? };
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch_kernel = match kernel {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,

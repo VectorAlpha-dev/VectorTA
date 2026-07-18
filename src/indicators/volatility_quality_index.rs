@@ -1069,7 +1069,7 @@ pub fn volatility_quality_index_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| volatility_quality_index_with_kernel(&input, kern))
+        .detach(|| volatility_quality_index_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.vqi_sum.into_pyarray(py),
@@ -1142,7 +1142,7 @@ pub fn volatility_quality_index_batch_py<'py>(
     let slow_out = unsafe { slow_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

@@ -1984,7 +1984,7 @@ pub fn tsi_py<'py>(
     let input = TsiInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| tsi_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| tsi_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2024,7 +2024,7 @@ pub fn tsi_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => Kernel::ScalarBatch,
                 k => k,
@@ -2102,11 +2102,11 @@ impl TsiDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use cust::memory::DeviceBuffer;
 
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
@@ -2179,7 +2179,7 @@ pub fn tsi_cuda_batch_dev_py<'py>(
         long_period: long_period_range,
         short_period: short_period_range,
     };
-    let (inner, combos, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, combos, ctx, dev_id) = py.detach(|| {
         let mut cuda = CudaTsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -2226,7 +2226,7 @@ pub fn tsi_cuda_many_series_one_param_dev_py<'py>(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice_in = data_tm_f32.as_slice()?;
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let mut cuda = CudaTsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();

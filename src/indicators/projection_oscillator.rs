@@ -1296,7 +1296,7 @@ pub fn projection_oscillator_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| projection_oscillator_with_kernel(&input, kern))
+        .detach(|| projection_oscillator_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((out.pbo.into_pyarray(py), out.signal.into_pyarray(py)))
 }
@@ -1347,7 +1347,7 @@ pub fn projection_oscillator_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             projection_oscillator_batch_with_kernel(
                 high,
                 low,

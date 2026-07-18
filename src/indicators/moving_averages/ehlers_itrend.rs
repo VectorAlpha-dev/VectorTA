@@ -1551,13 +1551,13 @@ pub fn ehlers_itrend_py<'py>(
 
     let result_vec: Vec<f64> = if let Ok(slice_in) = data.as_slice() {
         let input = EhlersITrendInput::from_slice(slice_in, params);
-        py.allow_threads(|| ehlers_itrend_with_kernel(&input, kern).map(|o| o.values))
+        py.detach(|| ehlers_itrend_with_kernel(&input, kern).map(|o| o.values))
             .map_err(|e| PyValueError::new_err(e.to_string()))?
     } else {
         let owned = data.as_array().to_owned();
         let slice_in = owned.as_slice().expect("owned array should be contiguous");
         let input = EhlersITrendInput::from_slice(slice_in, params);
-        py.allow_threads(|| ehlers_itrend_with_kernel(&input, kern).map(|o| o.values))
+        py.detach(|| ehlers_itrend_with_kernel(&input, kern).map(|o| o.values))
             .map_err(|e| PyValueError::new_err(e.to_string()))?
     };
     Ok(result_vec.into_pyarray(py))
@@ -1589,7 +1589,7 @@ pub fn ehlers_itrend_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| {
+    py.detach(|| {
         let simd = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
@@ -1651,7 +1651,7 @@ pub fn ehlers_itrend_cuda_batch_dev_py(
     let cuda = Arc::new(
         CudaEhlersITrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?,
     );
-    let inner = py.allow_threads(|| -> PyResult<_> {
+    let inner = py.detach(|| -> PyResult<_> {
         cuda.ehlers_itrend_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -1694,7 +1694,7 @@ pub fn ehlers_itrend_cuda_many_series_one_param_dev_py(
     let cuda = Arc::new(
         CudaEhlersITrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?,
     );
-    let inner = py.allow_threads(|| -> PyResult<_> {
+    let inner = py.detach(|| -> PyResult<_> {
         cuda.ehlers_itrend_many_series_one_param_time_major_dev(
             flat, num_series, series_len, &params,
         )
@@ -1743,11 +1743,11 @@ impl DeviceArrayF32ITrendPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();

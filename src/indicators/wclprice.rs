@@ -783,7 +783,7 @@ pub fn wclprice_py<'py>(
     let out_slice = unsafe { out.as_slice_mut()? };
     let input = WclpriceInput::from_slices(hs, ls, cs);
     let kern = validate_kernel(kernel, false)?;
-    py.allow_threads(|| wclprice_into_slice(out_slice, &input, kern))
+    py.detach(|| wclprice_into_slice(out_slice, &input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(out)
 }
@@ -836,7 +836,7 @@ pub fn wclprice_batch_py<'py>(
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch_kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
@@ -878,7 +878,7 @@ pub fn wclprice_cuda_dev_py(
     let ls = low.as_slice()?;
     let cs = close.as_slice()?;
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaWclprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -907,7 +907,7 @@ pub fn wclprice_cuda_batch_dev_py(
     let hs = high_f32.as_slice()?;
     let ls = low_f32.as_slice()?;
     let cs = close_f32.as_slice()?;
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaWclprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -944,7 +944,7 @@ pub fn wclprice_cuda_many_series_one_param_dev_py(
     let hs = high_tm_f32.as_slice()?;
     let ls = low_tm_f32.as_slice()?;
     let cs = close_tm_f32.as_slice()?;
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaWclprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();

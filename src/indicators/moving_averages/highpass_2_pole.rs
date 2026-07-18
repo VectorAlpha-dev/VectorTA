@@ -88,11 +88,11 @@ impl HighPass2DeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();
@@ -2194,7 +2194,7 @@ pub fn highpass_2_pole_py<'py>(
     let hp2_in = HighPass2Input::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| highpass_2_pole_with_kernel(&hp2_in, kern).map(|o| o.values))
+        .detach(|| highpass_2_pole_with_kernel(&hp2_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2231,7 +2231,7 @@ pub fn highpass_2_pole_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2288,7 +2288,7 @@ pub fn highpass_2_pole_cuda_batch_dev_py(
         k: k_range,
     };
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaHighPass2::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out = cuda
@@ -2336,7 +2336,7 @@ pub fn highpass_2_pole_cuda_many_series_one_param_dev_py(
         k: Some(k),
     };
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaHighPass2::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out = cuda

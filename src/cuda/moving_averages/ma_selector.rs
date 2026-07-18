@@ -3122,11 +3122,11 @@ impl DeviceArrayF32PySel {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();
@@ -3188,7 +3188,7 @@ pub fn ma_selector_cuda_to_device_py(
     let prices = not_empty_f32(data)?;
     let is = |s: &str| ma_type.eq_ignore_ascii_case(s);
     let inner = py
-        .allow_threads(|| -> Result<DeviceArrayF32Sel, String> {
+        .detach(|| -> Result<DeviceArrayF32Sel, String> {
             if is("sma") {
                 let sweep = crate::indicators::moving_averages::sma::SmaBatchRange {
                     period: (period, period, 0),
@@ -3248,7 +3248,7 @@ pub fn ma_selector_cuda_sweep_to_device_py(
     let prices = not_empty_f32(data)?;
     let is = |s: &str| ma_type.eq_ignore_ascii_case(s);
     let inner = py
-        .allow_threads(|| -> Result<DeviceArrayF32Sel, String> {
+        .detach(|| -> Result<DeviceArrayF32Sel, String> {
             if is("sma") {
                 let sweep = crate::indicators::moving_averages::sma::SmaBatchRange {
                     period: period_range,

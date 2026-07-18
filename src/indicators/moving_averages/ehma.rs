@@ -1129,7 +1129,7 @@ pub fn ehma_py<'py>(
 
     let result_vec: Vec<f64> = if let Ok(slice_in) = data.as_slice() {
         let input = EhmaInput::from_slice(slice_in, params);
-        py.allow_threads(|| ehma_with_kernel(&input, kern).map(|o| o.values))
+        py.detach(|| ehma_with_kernel(&input, kern).map(|o| o.values))
             .map_err(|e| PyValueError::new_err(e.to_string()))?
     } else {
         let owned = data.as_array().to_owned();
@@ -1137,7 +1137,7 @@ pub fn ehma_py<'py>(
             .as_slice()
             .expect("owned numpy array should be contiguous");
         let input = EhmaInput::from_slice(slice_in, params);
-        py.allow_threads(|| ehma_with_kernel(&input, kern).map(|o| o.values))
+        py.detach(|| ehma_with_kernel(&input, kern).map(|o| o.values))
             .map_err(|e| PyValueError::new_err(e.to_string()))?
     };
 
@@ -1181,7 +1181,7 @@ pub fn ehma_batch_py<'py>(
 
     let kern = validate_kernel(kernel, true)?;
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch = match kern {
                 Kernel::Auto => match detect_best_batch_kernel() {
                     Kernel::Avx512Batch => Kernel::Avx2Batch,
@@ -1233,7 +1233,7 @@ pub fn ehma_cuda_batch_dev_py(
     };
     let data_f32: Vec<f32> = slice_in.iter().map(|&v| v as f32).collect();
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaEhma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.ehma_batch_dev(&data_f32, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -1264,7 +1264,7 @@ pub fn ehma_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaEhma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.ehma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))

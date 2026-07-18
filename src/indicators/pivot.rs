@@ -2149,7 +2149,7 @@ pub fn pivot_py<'py>(
     let input = PivotInput::from_slices(high_slice, low_slice, close_slice, open_slice, params);
 
     let result = py
-        .allow_threads(|| pivot_with_kernel(&input, kern))
+        .detach(|| pivot_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((
@@ -2190,7 +2190,7 @@ pub fn pivot_cuda_batch_dev_py<'py>(
     let c = close_f32.as_slice()?;
     let o = open_f32.as_slice()?;
     let sweep = PivotBatchRange { mode: mode_range };
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, combos) = py.detach(|| {
         let cuda = CudaPivot::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.pivot_batch_dev(h, l, c, o, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -2230,7 +2230,7 @@ pub fn pivot_cuda_many_series_one_param_dev_py(
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
     let o = open_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaPivot::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.pivot_many_series_one_param_time_major_dev(h, l, c, o, cols, rows, mode)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -2291,7 +2291,7 @@ pub fn pivot_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let flat = py
-        .allow_threads(|| pivot_batch_flat_with_kernel(h, l, c, o, &sweep, kern))
+        .detach(|| pivot_batch_flat_with_kernel(h, l, c, o, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let combos = flat.combos.len();

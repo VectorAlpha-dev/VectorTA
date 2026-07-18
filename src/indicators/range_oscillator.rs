@@ -1600,7 +1600,7 @@ pub fn range_oscillator_py<'py>(
         },
     );
     let output = py
-        .allow_threads(|| range_oscillator_with_kernel(&input, kernel))
+        .detach(|| range_oscillator_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     dict.set_item("oscillator", output.oscillator.into_pyarray(py))?;
@@ -1632,7 +1632,7 @@ pub fn range_oscillator_batch_py<'py>(
     let close = close.as_slice()?;
     let kernel = validate_kernel(kernel, true)?;
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             range_oscillator_batch_with_kernel(
                 high,
                 low,

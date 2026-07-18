@@ -943,7 +943,7 @@ pub fn fosc_py<'py>(
     };
     let input = FoscInput::from_slice(data_slice, params);
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let output = fosc_with_kernel(&input, kernel_enum)
             .map_err(|e| PyErr::new::<PyValueError, _>(format!("Rust computation error: {}", e)))?;
         Ok(output)
@@ -981,7 +981,7 @@ pub fn fosc_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1033,7 +1033,7 @@ pub fn fosc_cuda_batch_dev_py<'py>(
     let sweep = FoscBatchRange {
         period: period_range,
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaFosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.fosc_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -1064,7 +1064,7 @@ pub fn fosc_cuda_many_series_one_param_dev_py(
     let params = FoscParams {
         period: Some(period),
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaFosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.fosc_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))

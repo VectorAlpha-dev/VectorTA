@@ -1519,7 +1519,7 @@ pub fn reverse_rsi_py<'py>(
     };
     let inp = ReverseRsiInput::from_slice(slice_in, params);
     let out: Vec<f64> = py
-        .allow_threads(|| reverse_rsi_with_kernel(&inp, kern).map(|o| o.values))
+        .detach(|| reverse_rsi_with_kernel(&inp, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(out.into_pyarray(py))
 }
@@ -1550,7 +1550,7 @@ pub fn reverse_rsi_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    py.allow_threads(|| {
+    py.detach(|| {
         reverse_rsi_batch_inner_into(
             slice_in,
             &combos,
@@ -1605,7 +1605,7 @@ pub fn reverse_rsi_cuda_batch_dev_py<'py>(
         rsi_length_range,
         rsi_level_range,
     };
-    let (inner, combos, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, combos, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaReverseRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -1655,7 +1655,7 @@ pub fn reverse_rsi_cuda_many_series_one_param_dev_py<'py>(
         rsi_length: Some(rsi_length),
         rsi_level: Some(rsi_level),
     };
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaReverseRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();

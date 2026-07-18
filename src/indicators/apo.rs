@@ -2251,7 +2251,7 @@ pub fn apo_py<'py>(
     let apo_in = ApoInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| apo_with_kernel(&apo_in, kern).map(|o| o.values))
+        .detach(|| apo_with_kernel(&apo_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2327,7 +2327,7 @@ pub fn apo_batch_py<'py>(
     init_matrix_prefixes(out_mu, cols, &warm);
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let k = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2418,11 +2418,11 @@ impl DeviceArrayF32ApoPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2477,7 +2477,7 @@ pub fn apo_cuda_batch_dev_py(
         short: short_range,
         long: long_range,
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaApo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.apo_batch_dev(slice, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -2518,7 +2518,7 @@ pub fn apo_cuda_many_series_one_param_dev_py(
         short_period: Some(short_period),
         long_period: Some(long_period),
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaApo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.apo_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))

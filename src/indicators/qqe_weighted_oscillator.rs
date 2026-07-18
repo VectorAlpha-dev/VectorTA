@@ -1018,7 +1018,7 @@ pub fn qqe_weighted_oscillator_py<'py>(
         },
     );
     let output = py
-        .allow_threads(|| qqe_weighted_oscillator_with_kernel(&input, kernel))
+        .detach(|| qqe_weighted_oscillator_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     dict.set_item("rsi", output.rsi.into_pyarray(py))?;
@@ -1041,7 +1041,7 @@ pub fn qqe_weighted_oscillator_batch_py<'py>(
     let data = data.as_slice()?;
     let kernel = validate_kernel(kernel, true)?;
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             qqe_weighted_oscillator_batch_with_kernel(
                 data,
                 &QqeWeightedOscillatorBatchRange {

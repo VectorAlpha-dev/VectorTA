@@ -1805,7 +1805,7 @@ pub fn cora_wave_py<'py>(
     let input = CoraWaveInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| cora_wave_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| cora_wave_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1865,7 +1865,7 @@ pub fn cora_wave_batch_py<'py>(
 
     let kern = validate_kernel(kernel, true)?;
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1980,7 +1980,7 @@ pub fn cora_wave_cuda_batch_dev_py<'py>(
         out
     }
 
-    let (inner, ctx_arc, dev_id, combos) = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id, combos) = py.detach(|| {
         let cuda =
             CudaCoraWave::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -2038,7 +2038,7 @@ pub fn cora_wave_cuda_many_series_one_param_dev_py<'py>(
         r_multi: Some(r_multi),
         smooth: Some(smooth),
     };
-    let (inner, ctx_arc, dev_id) = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id) = py.detach(|| {
         let cuda =
             CudaCoraWave::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();

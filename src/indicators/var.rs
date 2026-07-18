@@ -2127,7 +2127,7 @@ pub fn var_py<'py>(
     let input = VarInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| var_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| var_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2188,7 +2188,7 @@ pub fn var_batch_py<'py>(
     };
 
     let out = py
-        .allow_threads(|| var_batch_par_slice(slice_in, &sweep, simd))
+        .detach(|| var_batch_par_slice(slice_in, &sweep, simd))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let rows = out.rows;
@@ -2276,11 +2276,11 @@ impl VarDeviceArrayF32Py {
     fn __dlpack__<'py>(
         mut slf: pyo3::PyRefMut<'py, Self>,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use cust::memory::DeviceBuffer;
 
         let (expected_type, expected_dev) = slf.__dlpack_device__();
@@ -2345,7 +2345,7 @@ pub fn var_cuda_batch_dev_py(
             nbdev_range.2 as f64,
         ),
     };
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaVar::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -2380,7 +2380,7 @@ pub fn var_cuda_many_series_one_param_dev_py(
         period: Some(period),
         nbdev: Some(nbdev),
     };
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaVar::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();

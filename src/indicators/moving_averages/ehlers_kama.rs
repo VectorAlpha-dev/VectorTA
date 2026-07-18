@@ -1101,7 +1101,7 @@ pub fn ehlers_kama_py<'py>(
     };
     let input = EhlersKamaInput::from_slice(slice_in, params);
     let result_vec: Vec<f64> = py
-        .allow_threads(|| ehlers_kama_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| ehlers_kama_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(result_vec.into_pyarray(py))
 }
@@ -1141,7 +1141,7 @@ pub fn ehlers_kama_batch_py<'py>(
     init_matrix_prefixes(out_mu, cols, &warm);
 
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| {
+    py.detach(|| {
         let resolved = match kern {
             Kernel::Auto => Kernel::ScalarBatch,
             k => k,
@@ -1184,7 +1184,7 @@ pub fn ehlers_kama_cuda_batch_dev_py(
     let data_f32: Vec<f32> = slice_in.iter().map(|&v| v as f32).collect();
 
     let (inner, ctx, dev_id) = py
-        .allow_threads(|| -> Result<_, CudaEhlersKamaError> {
+        .detach(|| -> Result<_, CudaEhlersKamaError> {
             let cuda = CudaEhlersKama::new(device_id)?;
             let arr = cuda.ehlers_kama_batch_dev(&data_f32, &sweep)?;
             Ok((arr, cuda.context_arc(), cuda.device_id()))
@@ -1217,7 +1217,7 @@ pub fn ehlers_kama_cuda_many_series_one_param_dev_py(
     };
 
     let (inner, ctx, dev_id) = py
-        .allow_threads(|| -> Result<_, CudaEhlersKamaError> {
+        .detach(|| -> Result<_, CudaEhlersKamaError> {
             let cuda = CudaEhlersKama::new(device_id)?;
             let arr = cuda
                 .ehlers_kama_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)?;
@@ -1451,11 +1451,11 @@ impl DeviceArrayF32KamaPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<pyo3::PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<pyo3::Py<pyo3::PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
         use cust::memory::DeviceBuffer;
 

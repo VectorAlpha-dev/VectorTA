@@ -1209,7 +1209,7 @@ pub fn mesa_stochastic_multi_length_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| mesa_stochastic_multi_length_with_kernel(&input, kernel))
+        .detach(|| mesa_stochastic_multi_length_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     dict.set_item("mesa_1", out.mesa_1.into_pyarray(py))?;
@@ -1304,7 +1304,7 @@ pub fn mesa_stochastic_multi_length_batch_py<'py>(
         trigger_length: trigger_length_range,
     };
     let out = py
-        .allow_threads(|| mesa_stochastic_multi_length_batch_with_kernel(source, &sweep, kernel))
+        .detach(|| mesa_stochastic_multi_length_batch_with_kernel(source, &sweep, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     dict.set_item(

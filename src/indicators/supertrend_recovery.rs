@@ -1297,7 +1297,7 @@ pub fn supertrend_recovery_py<'py>(
         },
     );
     let output = py
-        .allow_threads(|| supertrend_recovery_with_kernel(&input, kernel))
+        .detach(|| supertrend_recovery_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         output.band.into_pyarray(py),
@@ -1351,7 +1351,7 @@ pub fn supertrend_recovery_batch_py<'py>(
     let changed_out = unsafe { changed_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             supertrend_recovery_batch_inner_into(
                 high_slice,
                 low_slice,

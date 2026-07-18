@@ -786,7 +786,7 @@ pub fn ewma_volatility_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| ewma_volatility_with_kernel(&input, kernel))
+        .detach(|| ewma_volatility_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(out.values.into_pyarray(py))
 }
@@ -827,7 +827,7 @@ pub fn ewma_volatility_batch_py<'py>(
         lambda: lambda_range,
     };
     let out = py
-        .allow_threads(|| ewma_volatility_batch_with_kernel(slice, &sweep, kernel))
+        .detach(|| ewma_volatility_batch_with_kernel(slice, &sweep, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);

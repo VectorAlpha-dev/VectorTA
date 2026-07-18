@@ -1290,7 +1290,7 @@ pub fn rogers_satchell_volatility_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| rogers_satchell_volatility_with_kernel(&input, kernel))
+        .detach(|| rogers_satchell_volatility_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((out.rs.into_pyarray(py), out.signal.into_pyarray(py)))
 }
@@ -1358,7 +1358,7 @@ pub fn rogers_satchell_volatility_batch_py<'py>(
     let signal_out = unsafe { signal_arr.as_slice_mut()? };
 
     let kernel = validate_kernel(kernel, true)?;
-    py.allow_threads(|| {
+    py.detach(|| {
         rogers_satchell_volatility_batch_inner_into(
             open, high, low, close, &sweep, kernel, true, rs_out, signal_out,
         )
@@ -1425,7 +1425,7 @@ pub fn rogers_satchell_volatility_cuda_batch_dev_py<'py>(
         expand_grid_rogers_satchell(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
-    let (result, ctx, dev_id) = py.allow_threads(|| {
+    let (result, ctx, dev_id) = py.detach(|| {
         let cuda = CudaRogersSatchellVolatility::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc_clone();
@@ -1510,7 +1510,7 @@ pub fn rogers_satchell_volatility_cuda_many_series_one_param_dev_py<'py>(
     let close = close_tm_f32.as_slice()?;
 
     let dict = PyDict::new(py);
-    let (result, ctx, dev_id) = py.allow_threads(|| {
+    let (result, ctx, dev_id) = py.detach(|| {
         let cuda = CudaRogersSatchellVolatility::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc_clone();

@@ -1731,7 +1731,7 @@ pub fn lpc_batch_py<'py>(
         }
     }
 
-    py.allow_threads(|| {
+    py.detach(|| {
         lpc_batch_inner_into(h, l, c, s, &sweep, kern, first, slice_out)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -1825,7 +1825,7 @@ pub fn lpc_cuda_batch_dev_py<'py>(
         cutoff_type: cutoff_type.to_string(),
         max_cycle_limit,
     };
-    let (triplet, combos, ctx, dev_id) = py.allow_threads(|| {
+    let (triplet, combos, ctx, dev_id) = py.detach(|| {
         let cuda = CudaLpc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -1934,7 +1934,7 @@ pub fn lpc_cuda_many_series_one_param_dev_py<'py>(
         cycle_mult: Some(1.0),
         tr_mult: Some(tr_mult),
     };
-    let (triplet, ctx, dev_id) = py.allow_threads(|| {
+    let (triplet, ctx, dev_id) = py.detach(|| {
         let cuda = CudaLpc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();

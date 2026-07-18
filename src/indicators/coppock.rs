@@ -2555,7 +2555,7 @@ pub fn coppock_py<'py>(
     let input = CoppockInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| coppock_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| coppock_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2624,7 +2624,7 @@ pub fn coppock_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2726,11 +2726,11 @@ impl CoppockDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
         use cust::memory::DeviceBuffer;
 
@@ -2809,7 +2809,7 @@ pub fn coppock_cuda_batch_dev_py(
         long: long_range,
         ma: ma_range,
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaCoppock::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.coppock_batch_dev(&price_f32, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -2841,7 +2841,7 @@ pub fn coppock_cuda_many_series_one_param_dev_py(
         return Err(PyValueError::new_err("time-major input length mismatch"));
     }
     let price_f32: Vec<f32> = slice.iter().map(|&v| v as f32).collect();
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaCoppock::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.coppock_many_series_one_param_time_major_dev(
             &price_f32,

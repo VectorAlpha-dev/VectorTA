@@ -980,7 +980,7 @@ pub fn velocity_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| velocity_with_kernel(&input, kernel).map(|output| output.values))
+        .detach(|| velocity_with_kernel(&input, kernel).map(|output| output.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(out.into_pyarray(py))
 }
@@ -1013,7 +1013,7 @@ pub fn velocity_batch_py<'py>(
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch_kernel = match kernel {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,

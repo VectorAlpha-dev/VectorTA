@@ -2187,7 +2187,7 @@ pub fn reversal_signals_py<'py>(
     let volume = volume.as_slice()?;
     let kern = validate_kernel(kernel, false)?;
     let out = py
-        .allow_threads(|| {
+        .detach(|| {
             reversal_signals_with_kernel(
                 &ReversalSignalsInput::from_slices(
                     open,
@@ -2243,7 +2243,7 @@ pub fn reversal_signals_batch_py<'py>(
     let volume = volume.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
     let out = py
-        .allow_threads(|| {
+        .detach(|| {
             reversal_signals_batch_with_kernel(
                 open,
                 high,

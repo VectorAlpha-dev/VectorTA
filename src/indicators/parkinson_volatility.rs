@@ -931,7 +931,7 @@ pub fn parkinson_volatility_py<'py>(
     };
     let input = ParkinsonVolatilityInput::from_slices(high, low, params);
     let output = py
-        .allow_threads(|| parkinson_volatility_with_kernel(&input, kernel))
+        .detach(|| parkinson_volatility_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         output.volatility.into_pyarray(py),
@@ -990,7 +990,7 @@ pub fn parkinson_volatility_batch_py<'py>(
     let variance_out = unsafe { variance_arr.as_slice_mut()? };
     let kernel = validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch_kernel = match kernel {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,
@@ -1068,11 +1068,11 @@ impl ParkinsonVolatilityDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
+        stream: Option<Py<PyAny>>,
         max_version: Option<(u8, u8)>,
         dl_device: Option<(i32, i32)>,
         copy: Option<bool>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let _ = stream;
         let _ = max_version;
         let _ = &self.ctx;
@@ -1113,7 +1113,7 @@ pub fn parkinson_volatility_cuda_batch_dev_py<'py>(
     let sweep = ParkinsonVolatilityBatchRange {
         period: period_range,
     };
-    let (result, ctx, dev_id) = py.allow_threads(|| -> PyResult<_> {
+    let (result, ctx, dev_id) = py.detach(|| -> PyResult<_> {
         let cuda = crate::cuda::CudaParkinsonVolatility::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let result = cuda
@@ -1189,7 +1189,7 @@ pub fn parkinson_volatility_cuda_many_series_one_param_dev_py<'py>(
     let cols = sh[1];
     let high = high_tm_f32.as_slice()?;
     let low = low_tm_f32.as_slice()?;
-    let (outputs, ctx, dev_id) = py.allow_threads(|| -> PyResult<_> {
+    let (outputs, ctx, dev_id) = py.detach(|| -> PyResult<_> {
         let cuda = crate::cuda::CudaParkinsonVolatility::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let outputs = cuda

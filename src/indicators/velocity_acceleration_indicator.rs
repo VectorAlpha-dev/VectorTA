@@ -1186,7 +1186,7 @@ pub fn velocity_acceleration_indicator_py<'py>(
         },
     );
     let output = py
-        .allow_threads(|| velocity_acceleration_indicator_with_kernel(&input, kernel))
+        .detach(|| velocity_acceleration_indicator_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(output.values.into_pyarray(py))
 }
@@ -1250,7 +1250,7 @@ pub fn velocity_acceleration_indicator_batch_py<'py>(
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch = match kernel {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,

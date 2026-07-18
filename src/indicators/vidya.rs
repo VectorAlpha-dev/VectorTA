@@ -2257,7 +2257,7 @@ pub fn vidya_py<'py>(
     let input = VidyaInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| vidya_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| vidya_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2321,7 +2321,7 @@ pub fn vidya_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => match detect_best_batch_kernel() {
                     Kernel::Avx512Batch => Kernel::Avx2Batch,
@@ -2406,11 +2406,11 @@ impl VidyaDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        _stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        _dl_device: Option<pyo3::PyObject>,
-        _copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        _stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        _dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        _copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = _dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2473,7 +2473,7 @@ pub fn vidya_cuda_batch_dev_py(
         long_period: long_period_range,
         alpha: alpha_range,
     };
-    let (inner, ctx_arc, dev_id) = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id) = py.detach(|| {
         let cuda = CudaVidya::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let arr = cuda
             .vidya_batch_dev(slice, &sweep)
@@ -2516,7 +2516,7 @@ pub fn vidya_cuda_many_series_one_param_dev_py(
         long_period: Some(long_period),
         alpha: Some(alpha),
     };
-    let (inner, ctx_arc, dev_id) = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id) = py.detach(|| {
         let cuda = CudaVidya::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let arr = cuda
             .vidya_many_series_one_param_time_major_dev(slice, cols, rows, &params)

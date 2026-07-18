@@ -2120,7 +2120,7 @@ pub fn cci_py<'py>(
     let cci_in = CciInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| cci_with_kernel(&cci_in, kern).map(|o| o.values))
+        .detach(|| cci_with_kernel(&cci_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2170,7 +2170,7 @@ pub fn cci_batch_py<'py>(
     };
 
     let output = py
-        .allow_threads(|| cci_batch_with_kernel(slice_in, &sweep, kern))
+        .detach(|| cci_batch_with_kernel(slice_in, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let values_arr = output.values.into_pyarray(py);
@@ -2230,11 +2230,11 @@ impl CciDeviceArrayF32Py {
     pub fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2292,7 +2292,7 @@ pub fn cci_cuda_batch_dev_py(
     let sweep = CciBatchRange {
         period: period_range,
     };
-    let (inner, dev_id, ctx, stream) = py.allow_threads(|| -> PyResult<_> {
+    let (inner, dev_id, ctx, stream) = py.detach(|| -> PyResult<_> {
         let cuda = CudaCci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
         let ctx = cuda.context_arc();
@@ -2328,7 +2328,7 @@ pub fn cci_cuda_many_series_one_param_dev_py(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice = data_tm.as_slice()?;
-    let (inner, dev_id, ctx, stream) = py.allow_threads(|| -> PyResult<_> {
+    let (inner, dev_id, ctx, stream) = py.detach(|| -> PyResult<_> {
         let cuda = CudaCci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
         let ctx = cuda.context_arc();

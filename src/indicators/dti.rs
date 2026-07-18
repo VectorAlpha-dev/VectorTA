@@ -967,7 +967,7 @@ pub fn dti_py<'py>(
     let input = DtiInput::from_slices(high_slice, low_slice, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| dti_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| dti_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1033,7 +1033,7 @@ pub fn dti_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1134,11 +1134,11 @@ impl DtiDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1207,7 +1207,7 @@ pub fn dti_cuda_batch_dev_py<'py>(
         s: s_range,
         u: u_range,
     };
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, combos) = py.detach(|| {
         let cuda = CudaDti::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.dti_batch_dev(high, low, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -1257,7 +1257,7 @@ pub fn dti_cuda_many_series_one_param_dev_py(
         s: Some(s),
         u: Some(u),
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaDti::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.dti_many_series_one_param_time_major_dev(high_flat, low_flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))

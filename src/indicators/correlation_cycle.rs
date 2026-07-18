@@ -2937,11 +2937,11 @@ impl DeviceArrayF32CcPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<pyo3::PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<pyo3::Py<pyo3::PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
@@ -3034,7 +3034,7 @@ pub fn correlation_cycle_cuda_batch_dev_py(
         period: period_range,
         threshold: threshold_range,
     };
-    let (quad, ctx, dev_id) = py.allow_threads(|| {
+    let (quad, ctx, dev_id) = py.detach(|| {
         let mut cuda = CudaCorrelationCycle::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.ctx();
@@ -3090,7 +3090,7 @@ pub fn correlation_cycle_cuda_many_series_one_param_dev_py(
         period: Some(period),
         threshold: Some(threshold),
     };
-    let (quad, ctx, dev_id) = py.allow_threads(|| {
+    let (quad, ctx, dev_id) = py.detach(|| {
         let mut cuda = CudaCorrelationCycle::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.ctx();
@@ -3130,7 +3130,7 @@ pub fn correlation_cycle_py<'py>(
     let input = CorrelationCycleInput::from_slice(data_slice, params);
 
     let output = py
-        .allow_threads(|| correlation_cycle_with_kernel(&input, kern))
+        .detach(|| correlation_cycle_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -3179,7 +3179,7 @@ pub fn correlation_cycle_batch_py<'py>(
     let mut_st = unsafe { out_state.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| {
+    py.detach(|| {
         let simd = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,

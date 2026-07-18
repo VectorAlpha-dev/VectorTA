@@ -1757,7 +1757,7 @@ pub fn ott_py<'py>(
     let input = OttInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| ott_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| ott_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1821,7 +1821,7 @@ pub fn ott_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1902,7 +1902,7 @@ pub fn ott_cuda_batch_dev_py(
             ));
         }
     }
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaOtt::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.ott_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -1934,7 +1934,7 @@ pub fn ott_cuda_many_series_one_param_dev_py(
         percent: Some(percent),
         ma_type: Some(ma_type.to_string()),
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaOtt::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.ott_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))

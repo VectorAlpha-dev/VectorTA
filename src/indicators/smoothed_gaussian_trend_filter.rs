@@ -1464,7 +1464,7 @@ pub fn smoothed_gaussian_trend_filter_py<'py>(
     );
     let kernel = validate_kernel(kernel, false)?;
     let out = py
-        .allow_threads(|| smoothed_gaussian_trend_filter_with_kernel(&input, kernel))
+        .detach(|| smoothed_gaussian_trend_filter_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.filter.into_pyarray(py),
@@ -1548,7 +1548,7 @@ pub fn smoothed_gaussian_trend_filter_batch_py<'py>(
     let out_ranging = unsafe { ranging_arr.as_slice_mut()? };
     let kernel = validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch_kernel = match kernel {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

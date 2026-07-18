@@ -1620,7 +1620,7 @@ pub fn aroon_cuda_batch_dev_py<'py>(
     let sweep = AroonBatchRange {
         length: length_range,
     };
-    let (up_dev, dn_dev, ctx_arc, dev_id) = py.allow_threads(|| {
+    let (up_dev, dn_dev, ctx_arc, dev_id) = py.detach(|| {
         let cuda = CudaAroon::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let res = cuda
             .aroon_batch_dev(h, l, &sweep)
@@ -1667,7 +1667,7 @@ pub fn aroon_cuda_many_series_one_param_dev_py<'py>(
     let cols = shape[1];
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
-    let (up_dev, dn_dev, ctx_arc, dev_id) = py.allow_threads(|| {
+    let (up_dev, dn_dev, ctx_arc, dev_id) = py.detach(|| {
         let cuda = CudaAroon::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let pair = cuda
             .aroon_many_series_one_param_time_major_dev(h, l, cols, rows, length)
@@ -1730,11 +1730,11 @@ impl AroonDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use cust::memory::DeviceBuffer;
         use pyo3::types::PyAny;
         use pyo3::Bound;
@@ -3105,7 +3105,7 @@ pub fn aroon_py<'py>(
     let input = AroonInput::from_slices_hl(h, l, params);
 
     let out = py
-        .allow_threads(|| aroon_with_kernel(&input, kern))
+        .detach(|| aroon_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((
@@ -3177,7 +3177,7 @@ pub fn aroon_batch_py<'py>(
     let down_slice = unsafe { down_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,

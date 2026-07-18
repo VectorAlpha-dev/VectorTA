@@ -1153,7 +1153,7 @@ pub fn directional_imbalance_index_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| directional_imbalance_index_with_kernel(&input, kern))
+        .detach(|| directional_imbalance_index_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.up.into_pyarray(py),
@@ -1220,7 +1220,7 @@ pub fn directional_imbalance_index_batch_py<'py>(
     let low = low.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
     let out = py
-        .allow_threads(|| {
+        .detach(|| {
             directional_imbalance_index_batch_with_kernel(
                 high,
                 low,

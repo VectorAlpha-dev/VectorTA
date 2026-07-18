@@ -55,11 +55,11 @@ impl VwmaDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1842,7 +1842,7 @@ pub fn vwma_py<'py>(
     let vwma_in = VwmaInput::from_slice(prices_slice, volumes_slice, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| vwma_with_kernel(&vwma_in, kern).map(|o| o.values))
+        .detach(|| vwma_with_kernel(&vwma_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1901,7 +1901,7 @@ pub fn vwma_batch_py<'py>(
 
     let kern = validate_kernel(kernel, true)?;
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1993,7 +1993,7 @@ impl VwmaCudaBatchPlanPy {
         let total = rows
             .checked_mul(cols)
             .ok_or_else(|| PyValueError::new_err("vwma CUDA plan rows*cols overflow"))?;
-        let values = py.allow_threads(|| -> PyResult<Vec<f32>> {
+        let values = py.detach(|| -> PyResult<Vec<f32>> {
             self.cuda
                 .launch_vwma_batch_plan(prices, volumes, &mut self.plan)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2031,7 +2031,7 @@ pub fn vwma_cuda_batch_plan_create_py(
     let sweep = VwmaBatchRange {
         period: period_range,
     };
-    let (cuda, plan, ctx, dev_id) = py.allow_threads(|| {
+    let (cuda, plan, ctx, dev_id) = py.detach(|| {
         let cuda = CudaVwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -2068,7 +2068,7 @@ pub fn vwma_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let (buf, rows, cols, ctx, dev) = py.allow_threads(|| {
+    let (buf, rows, cols, ctx, dev) = py.detach(|| {
         let cuda = CudaVwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let arr = cuda
             .vwma_batch_dev(price_slice, volume_slice, &sweep)
@@ -2117,7 +2117,7 @@ pub fn vwma_cuda_many_series_one_param_dev_py(
     let prices_flat = prices_tm_f32.as_slice()?;
     let volumes_flat = volumes_tm_f32.as_slice()?;
 
-    let (buf, rows_o, cols_o, ctx, dev) = py.allow_threads(|| {
+    let (buf, rows_o, cols_o, ctx, dev) = py.detach(|| {
         let cuda = CudaVwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let arr = cuda
             .vwma_many_series_one_param_time_major_dev(

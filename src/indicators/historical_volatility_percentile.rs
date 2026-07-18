@@ -1204,7 +1204,7 @@ pub fn historical_volatility_percentile_py<'py>(
     };
     let input = HistoricalVolatilityPercentileInput::from_slice(data, params);
     let output = py
-        .allow_threads(|| historical_volatility_percentile_with_kernel(&input, kernel))
+        .detach(|| historical_volatility_percentile_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((output.hvp.into_pyarray(py), output.hvp_sma.into_pyarray(py)))
 }
@@ -1263,7 +1263,7 @@ pub fn historical_volatility_percentile_batch_py<'py>(
     let hvp_sma_out = unsafe { hvp_sma_arr.as_slice_mut()? };
     let kernel = validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch_kernel = match kernel {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

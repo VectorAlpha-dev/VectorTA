@@ -1137,7 +1137,7 @@ pub fn polynomial_regression_extrapolation_py<'py>(
         },
     );
     let values = py
-        .allow_threads(|| {
+        .detach(|| {
             polynomial_regression_extrapolation_with_kernel(&input, kern)
                 .map(|output| output.values)
         })
@@ -1173,7 +1173,7 @@ pub fn polynomial_regression_extrapolation_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch_kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,

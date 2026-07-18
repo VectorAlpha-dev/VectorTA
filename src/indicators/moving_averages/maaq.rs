@@ -2039,11 +2039,11 @@ impl DeviceArrayF32MaaqPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        _stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        _dl_device: Option<pyo3::PyObject>,
-        _copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        _stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        _dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        _copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
@@ -2113,13 +2113,13 @@ pub fn maaq_py<'py>(
 
     let result_vec: Vec<f64> = if let Ok(slice_in) = data.as_slice() {
         let input = MaaqInput::from_slice(slice_in, params);
-        py.allow_threads(|| maaq_with_kernel(&input, kern).map(|o| o.values))
+        py.detach(|| maaq_with_kernel(&input, kern).map(|o| o.values))
             .map_err(|e| PyValueError::new_err(e.to_string()))?
     } else {
         let owned = data.as_array().to_owned();
         let slice_in = owned.as_slice().expect("owned array should be contiguous");
         let input = MaaqInput::from_slice(slice_in, params);
-        py.allow_threads(|| maaq_with_kernel(&input, kern).map(|o| o.values))
+        py.detach(|| maaq_with_kernel(&input, kern).map(|o| o.values))
             .map_err(|e| PyValueError::new_err(e.to_string()))?
     };
 
@@ -2160,7 +2160,7 @@ pub fn maaq_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2230,7 +2230,7 @@ pub fn maaq_cuda_batch_dev_py(
     };
     let data_f32: Vec<f32> = slice_in.iter().map(|&v| v as f32).collect();
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaMaaq::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.maaq_batch_dev_ex(&data_f32, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -2271,7 +2271,7 @@ pub fn maaq_cuda_many_series_one_param_dev_py(
         slow_period: Some(slow_period),
     };
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaMaaq::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.maaq_multi_series_one_param_time_major_dev_ex(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))

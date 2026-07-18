@@ -1173,7 +1173,7 @@ pub fn gmma_oscillator_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| gmma_oscillator_with_kernel(&input, kern))
+        .detach(|| gmma_oscillator_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((out.oscillator.into_pyarray(py), out.signal.into_pyarray(py)))
 }
@@ -1237,7 +1237,7 @@ pub fn gmma_oscillator_batch_py<'py>(
     let data = data.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             gmma_oscillator_batch_with_kernel(
                 data,
                 &GmmaOscillatorBatchRange {

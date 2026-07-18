@@ -2375,7 +2375,7 @@ pub fn vi_py<'py>(
     let kern = validate_kernel(kernel, false)?;
 
     let (plus, minus) = py
-        .allow_threads(|| {
+        .detach(|| {
             let mut plus = vec![0.0; h.len()];
             let mut minus = vec![0.0; h.len()];
             vi_into_slice(&mut plus, &mut minus, &input, kern).map(|_| (plus, minus))
@@ -2422,7 +2422,7 @@ pub fn vi_batch_py<'py>(
     let slice_plus = unsafe { out_plus.as_slice_mut()? };
     let slice_minus = unsafe { out_minus.as_slice_mut()? };
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let simd = match kern {
             Kernel::Avx512Batch => Kernel::Avx512,
             Kernel::Avx2Batch => Kernel::Avx2,
@@ -2546,7 +2546,7 @@ pub fn vi_cuda_batch_dev_py<'py>(
     let sweep = ViBatchRange {
         period: period_range,
     };
-    let ((pair, combos), ctx, dev_id) = py.allow_threads(|| {
+    let ((pair, combos), ctx, dev_id) = py.detach(|| {
         let cuda = CudaVi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -2622,7 +2622,7 @@ pub fn vi_cuda_many_series_one_param_dev_py<'py>(
     let params = ViParams {
         period: Some(period),
     };
-    let (pair, ctx, dev_id) = py.allow_threads(|| {
+    let (pair, ctx, dev_id) = py.detach(|| {
         let cuda = CudaVi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();

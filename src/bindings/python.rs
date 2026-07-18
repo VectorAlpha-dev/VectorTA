@@ -977,13 +977,13 @@ fn vama_unified_py<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let is_volume_variant = || -> PyResult<bool> {
         if args.len() >= 2 {
-            if args.get_item(1)?.downcast::<PyArray1<f64>>().is_ok() {
+            if args.get_item(1)?.cast::<PyArray1<f64>>().is_ok() {
                 return Ok(true);
             }
         }
         if let Some(kw) = &kwargs {
             if let Ok(Some(_v)) = kw.get_item("volume") {
-                if _v.downcast::<PyArray1<f64>>().is_ok() {
+                if _v.cast::<PyArray1<f64>>().is_ok() {
                     return Ok(true);
                 }
             }
@@ -1142,7 +1142,7 @@ fn vama_batch_unified_py<'py>(
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     let is_volume_variant = || -> PyResult<bool> {
         if args.len() >= 2 {
-            if args.get_item(1)?.downcast::<PyArray1<f64>>().is_ok() {
+            if args.get_item(1)?.cast::<PyArray1<f64>>().is_ok() {
                 return Ok(true);
             }
         }
@@ -1701,7 +1701,7 @@ pub fn tsf_cuda_batch_dev_py_bindings<'py>(
     let sweep = TsfBatchRange {
         period: period_range,
     };
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, combos) = py.detach(|| {
         let cuda = CudaTsf::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.tsf_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -1739,7 +1739,7 @@ pub fn tsf_cuda_many_series_one_param_dev_py_bindings(
     let params = TsfParams {
         period: Some(period),
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaTsf::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.tsf_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))

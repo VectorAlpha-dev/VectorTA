@@ -970,7 +970,7 @@ pub fn random_walk_index_py<'py>(
     );
     let kernel = validate_kernel(kernel, false)?;
     let out = py
-        .allow_threads(|| random_walk_index_with_kernel(&input, kernel))
+        .detach(|| random_walk_index_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     dict.set_item("high", out.high.into_pyarray(py))?;
@@ -1032,7 +1032,7 @@ pub fn random_walk_index_batch_py<'py>(
     let low_slice = unsafe { out_low.as_slice_mut()? };
     let kernel = validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch_kernel = match kernel {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

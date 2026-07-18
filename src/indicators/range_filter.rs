@@ -1424,7 +1424,7 @@ pub fn range_filter_py<'py>(
     let input = RangeFilterInput::from_slice(slice_in, params);
 
     let (f, h, l) = py
-        .allow_threads(|| {
+        .detach(|| {
             range_filter_with_kernel(&input, kern).map(|o| (o.filter, o.high_band, o.low_band))
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1478,7 +1478,7 @@ pub fn range_filter_batch_py<'py>(
     let h_slice = unsafe { h_arr.as_slice_mut() }.unwrap();
     let l_slice = unsafe { l_arr.as_slice_mut() }.unwrap();
 
-    py.allow_threads(|| {
+    py.detach(|| {
         range_filter_batch_inner_into(slice_in, &combos, kern, true, f_slice, h_slice, l_slice)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1723,11 +1723,11 @@ impl RangeFilterDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1801,7 +1801,7 @@ pub fn range_filter_cuda_batch_dev_py<'py>(
         smooth_period: Some(smooth_period),
     };
     let slice_in: &[f32] = data_f32.as_slice()?;
-    let (dev_trio, combos) = py.allow_threads(|| {
+    let (dev_trio, combos) = py.detach(|| {
         let cuda =
             CudaRangeFilter::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.range_filter_batch_dev(slice_in, &sweep)
@@ -1911,7 +1911,7 @@ pub fn range_filter_cuda_many_series_one_param_dev_py<'py>(
         smooth_range: Some(smooth_range),
         smooth_period: Some(smooth_period),
     };
-    let dev_trio = py.allow_threads(|| {
+    let dev_trio = py.detach(|| {
         let cuda =
             CudaRangeFilter::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.range_filter_many_series_one_param_time_major_dev(flat, cols, rows, &params)

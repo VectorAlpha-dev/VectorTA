@@ -56,11 +56,11 @@ impl DeviceDvdiqqePlanePy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2682,7 +2682,7 @@ pub fn dvdiqqe_py<'py>(
     let input = DvdiqqeInput::from_slices(o, h, l, c, v, params);
     let kern = validate_kernel(kernel, false).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    py.allow_threads(|| dvdiqqe_into_slices(dvdi_s, fast_s, slow_s, cent_s, &input, kern))
+    py.detach(|| dvdiqqe_into_slices(dvdi_s, fast_s, slow_s, cent_s, &input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((dvdi.into(), fast.into(), slow.into(), cent.into()))
@@ -2725,7 +2725,7 @@ pub fn dvdiqqe_batch_py<'py>(
     };
     let kern = validate_kernel(kernel, true).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let out = py
-        .allow_threads(|| {
+        .detach(|| {
             dvdiqqe_batch_with_kernel_flat(
                 o, h, l, c, None, &sweep, kern, "default", "dynamic", 0.01,
             )
@@ -2847,7 +2847,7 @@ pub fn dvdiqqe_cuda_batch_dev_py(
         slow_multiplier: slow_mult_range,
     };
 
-    let (dvdi, fast, slow, center) = py.allow_threads(|| {
+    let (dvdi, fast, slow, center) = py.detach(|| {
         let cuda = CudaDvdiqqe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev = cuda.device_id();
@@ -2928,7 +2928,7 @@ pub fn dvdiqqe_cuda_many_series_one_param_dev_py(
         }
     }
 
-    let (dvdi, fast, slow, center) = py.allow_threads(|| {
+    let (dvdi, fast, slow, center) = py.detach(|| {
         let cuda = CudaDvdiqqe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev = cuda.device_id();

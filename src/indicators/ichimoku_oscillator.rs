@@ -2039,7 +2039,7 @@ pub fn ichimoku_oscillator_py<'py>(
     );
     let kernel = validate_kernel(kernel, false)?;
     let out = py
-        .allow_threads(|| ichimoku_oscillator_with_kernel(&input, kernel))
+        .detach(|| ichimoku_oscillator_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     set_output_dict(py, &dict, out)?;
@@ -2173,7 +2173,7 @@ pub fn ichimoku_oscillator_batch_py<'py>(
     };
     let kernel = validate_kernel(kernel, true)?;
     let out = py
-        .allow_threads(|| {
+        .detach(|| {
             ichimoku_oscillator_batch_with_kernel(high, low, close, source, &sweep, kernel)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;

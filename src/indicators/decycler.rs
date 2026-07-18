@@ -82,11 +82,11 @@ impl DeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<pyo3::PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<pyo3::Py<pyo3::PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1838,7 +1838,7 @@ pub fn decycler_py<'py>(
     let decycler_in = DecyclerInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| decycler_with_kernel(&decycler_in, kern).map(|o| o.values))
+        .detach(|| decycler_with_kernel(&decycler_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1908,7 +1908,7 @@ pub fn decycler_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1964,7 +1964,7 @@ pub fn decycler_cuda_batch_dev_py(
         hp_period: hp_period_range,
         k: k_range,
     };
-    let inner = py.allow_threads(|| -> PyResult<_> {
+    let inner = py.detach(|| -> PyResult<_> {
         let cuda =
             CudaDecycler::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.decycler_batch_dev(slice_in, &sweep)
@@ -2001,7 +2001,7 @@ pub fn decycler_cuda_many_series_one_param_dev_py(
         hp_period: Some(hp_period),
         k: Some(k),
     };
-    let inner = py.allow_threads(|| -> PyResult<_> {
+    let inner = py.detach(|| -> PyResult<_> {
         let cuda =
             CudaDecycler::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.decycler_many_series_one_param_time_major_dev(flat, num_series, series_len, &params)

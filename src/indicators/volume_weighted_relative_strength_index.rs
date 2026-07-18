@@ -1693,7 +1693,7 @@ pub fn volume_weighted_relative_strength_index_py<'py>(
         },
     );
     let output = py
-        .allow_threads(|| volume_weighted_relative_strength_index_with_kernel(&input, kernel))
+        .detach(|| volume_weighted_relative_strength_index_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     dict.set_item("rsi", output.rsi.into_pyarray(py))?;
@@ -1779,7 +1779,7 @@ pub fn volume_weighted_relative_strength_index_batch_py<'py>(
     let volume = volume.as_slice()?;
     let kernel = validate_kernel(kernel, true)?;
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             volume_weighted_relative_strength_index_batch_with_kernel(
                 source,
                 volume,

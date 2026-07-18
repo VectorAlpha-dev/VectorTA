@@ -1298,7 +1298,7 @@ pub fn dynamic_momentum_index_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| dynamic_momentum_index_with_kernel(&input, kern))
+        .detach(|| dynamic_momentum_index_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(out.values.into_pyarray(py))
 }
@@ -1372,7 +1372,7 @@ pub fn dynamic_momentum_index_batch_py<'py>(
     upper_limit_range: (usize, usize, usize),
     lower_limit_range: (usize, usize, usize),
     kernel: Option<&str>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let data = data.as_slice()?;
     let kern = validate_kernel(kernel, false)?;
     let sweep = DynamicMomentumIndexBatchRange {
@@ -1383,7 +1383,7 @@ pub fn dynamic_momentum_index_batch_py<'py>(
         lower_limit: lower_limit_range,
     };
     let out = py
-        .allow_threads(|| dynamic_momentum_index_batch_with_kernel(data, &sweep, kern))
+        .detach(|| dynamic_momentum_index_batch_with_kernel(data, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let values = out

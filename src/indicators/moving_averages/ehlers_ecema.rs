@@ -89,11 +89,11 @@ mod ecema_python_cuda_handle {
         fn __dlpack__<'py>(
             &mut self,
             py: Python<'py>,
-            stream: Option<pyo3::PyObject>,
-            max_version: Option<pyo3::PyObject>,
-            dl_device: Option<pyo3::PyObject>,
-            copy: Option<pyo3::PyObject>,
-        ) -> PyResult<PyObject> {
+            stream: Option<pyo3::Py<pyo3::PyAny>>,
+            max_version: Option<pyo3::Py<pyo3::PyAny>>,
+            dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+            copy: Option<pyo3::Py<pyo3::PyAny>>,
+        ) -> PyResult<Py<PyAny>> {
             use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
             let (kdl, alloc_dev) = self.__dlpack_device__();
@@ -1555,7 +1555,7 @@ pub fn ehlers_ecema_py<'py>(
     let input = EhlersEcemaInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| ehlers_ecema_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| ehlers_ecema_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1586,7 +1586,7 @@ pub fn ehlers_ecema_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let simd = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
@@ -1646,7 +1646,7 @@ pub fn ehlers_ecema_cuda_batch_dev_py(
         confirmed_only: Some(confirmed_only),
     };
 
-    let (arr, ctx, dev_id) = py.allow_threads(|| {
+    let (arr, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaEhlersEcema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -1693,7 +1693,7 @@ pub fn ehlers_ecema_cuda_many_series_one_param_dev_py(
         confirmed_only: Some(confirmed_only),
     };
 
-    let (arr, ctx, dev_id) = py.allow_threads(|| {
+    let (arr, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaEhlersEcema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();

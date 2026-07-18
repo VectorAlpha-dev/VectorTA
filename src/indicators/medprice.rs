@@ -853,7 +853,7 @@ pub fn medprice_py<'py>(
     let input = MedpriceInput::from_slices(high_slice, low_slice, MedpriceParams::default());
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| medprice_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| medprice_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -911,7 +911,7 @@ pub fn medprice_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let _combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => Kernel::ScalarBatch,
                 k => k,
@@ -1389,7 +1389,7 @@ pub fn medprice_cuda_dev_py(
     let hs = high.as_slice()?;
     let ls = low.as_slice()?;
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaMedprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -1420,7 +1420,7 @@ pub fn medprice_cuda_batch_dev_py(
     }
     let hs = high.as_slice()?;
     let ls = low.as_slice()?;
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaMedprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -1452,7 +1452,7 @@ pub fn medprice_cuda_many_series_one_param_dev_py(
     }
     let hs = high_tm.as_slice()?;
     let ls = low_tm.as_slice()?;
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaMedprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();

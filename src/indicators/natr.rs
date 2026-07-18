@@ -2247,7 +2247,7 @@ pub fn natr_py<'py>(
     let input = NatrInput::from_slices(high_slice, low_slice, close_slice, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| natr_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| natr_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2286,7 +2286,7 @@ pub fn natr_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2632,7 +2632,7 @@ use cust::memory::DeviceBuffer;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::exceptions::PyBufferError;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use pyo3::PyObject;
+use pyo3::{Py, PyAny};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 
@@ -2681,11 +2681,11 @@ impl NatrDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2756,7 +2756,7 @@ pub fn natr_cuda_batch_dev_py(
     let sweep = NatrBatchRange {
         period: period_range,
     };
-    let dev = py.allow_threads(|| {
+    let dev = py.detach(|| {
         let mut cuda =
             CudaNatr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.natr_batch_dev(h, l, c, &sweep)
@@ -2802,7 +2802,7 @@ pub fn natr_cuda_many_series_one_param_dev_py(
     let rows = high_tm.shape()[0];
     let cols = high_tm.shape()[1];
 
-    let dev = py.allow_threads(|| {
+    let dev = py.detach(|| {
         let mut cuda =
             CudaNatr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.natr_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)

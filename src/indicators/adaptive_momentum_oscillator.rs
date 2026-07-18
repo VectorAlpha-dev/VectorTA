@@ -1090,7 +1090,7 @@ pub fn adaptive_momentum_oscillator_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| adaptive_momentum_oscillator_with_kernel(&input, kernel))
+        .detach(|| adaptive_momentum_oscillator_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((out.amo.into_pyarray(py), out.ama.into_pyarray(py)))
 }
@@ -1125,7 +1125,7 @@ pub fn adaptive_momentum_oscillator_batch_py<'py>(
     let ama_slice = unsafe { ama_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch_kernel = match kernel {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,

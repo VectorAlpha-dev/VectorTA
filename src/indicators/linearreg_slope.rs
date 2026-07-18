@@ -1116,7 +1116,7 @@ pub fn linearreg_slope_py<'py>(
     let linearreg_slope_in = LinearRegSlopeInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| linearreg_slope_with_kernel(&linearreg_slope_in, kern).map(|o| o.values))
+        .detach(|| linearreg_slope_with_kernel(&linearreg_slope_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1172,7 +1172,7 @@ pub fn linearreg_slope_batch_py<'py>(
     }
 
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| {
+    py.detach(|| {
         let k = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
@@ -1227,7 +1227,7 @@ pub fn linearreg_slope_cuda_batch_dev_py<'py>(
         period: period_range,
     };
 
-    let (inner, combos, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, combos, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaLinearregSlope::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -1274,7 +1274,7 @@ pub fn linearreg_slope_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaLinearregSlope::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();

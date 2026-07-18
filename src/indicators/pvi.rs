@@ -1817,7 +1817,7 @@ pub fn pvi_py<'py>(
     let input = PviInput::from_slices(close_slice, volume_slice, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| pvi_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| pvi_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1852,7 +1852,7 @@ pub fn pvi_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2108,11 +2108,11 @@ impl PviDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         if let Some(s_obj) = stream.as_ref() {
             if let Ok(s) = s_obj.extract::<usize>(py) {
                 if s == 0 {
@@ -2190,7 +2190,7 @@ pub fn pvi_cuda_batch_dev_py(
     if inits_slice.is_empty() {
         return Err(PyValueError::new_err("initial_values must be non-empty"));
     }
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaPvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -2219,7 +2219,7 @@ pub fn pvi_cuda_many_series_one_param_dev_py(
     }
     let close_slice = close_tm.as_slice()?;
     let volume_slice = volume_tm.as_slice()?;
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaPvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();

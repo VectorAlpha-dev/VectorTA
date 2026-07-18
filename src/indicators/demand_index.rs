@@ -1542,7 +1542,7 @@ pub fn demand_index_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| demand_index_with_kernel(&input, kern))
+        .detach(|| demand_index_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.demand_index.into_pyarray(py),
@@ -1609,7 +1609,7 @@ pub fn demand_index_batch_py<'py>(
         ma_type: Some(ma_type.unwrap_or("ema").to_string()),
     };
     let out = py
-        .allow_threads(|| demand_index_batch_with_kernel(high, low, close, volume, &sweep, kern))
+        .detach(|| demand_index_batch_with_kernel(high, low, close, volume, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);

@@ -1638,7 +1638,7 @@ pub fn moving_average_cross_probability_py<'py>(
     );
     let kernel = validate_kernel(kernel, false)?;
     let out = py
-        .allow_threads(|| moving_average_cross_probability_with_kernel(&input, kernel))
+        .detach(|| moving_average_cross_probability_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     dict.set_item("value", out.value.into_pyarray(py))?;
@@ -1750,7 +1750,7 @@ pub fn moving_average_cross_probability_batch_py<'py>(
     let direction_slice = unsafe { out_direction.as_slice_mut()? };
     let kernel = validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch_kernel = match kernel {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

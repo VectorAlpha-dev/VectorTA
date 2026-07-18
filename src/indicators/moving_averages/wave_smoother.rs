@@ -854,7 +854,7 @@ pub fn wave_smoother_py<'py>(
         },
     );
     let values = py
-        .allow_threads(|| wave_smoother_with_kernel(&input, kernel).map(|o| o.values))
+        .detach(|| wave_smoother_with_kernel(&input, kernel).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(values.into_pyarray(py))
 }
@@ -914,7 +914,7 @@ pub fn wave_smoother_batch_py<'py>(
     };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             wave_smoother_batch_inner_into(slice, &range, batch_kernel, true, out_slice)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;

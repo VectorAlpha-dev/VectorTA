@@ -2148,7 +2148,7 @@ pub fn fisher_py<'py>(
     };
     let input = FisherInput::from_slices(high_slice, low_slice, params);
 
-    py.allow_threads(|| fisher_into_slice(fisher_slice, signal_slice, &input, kern))
+    py.detach(|| fisher_into_slice(fisher_slice, signal_slice, &input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((fisher_arr, signal_arr))
@@ -2244,7 +2244,7 @@ pub fn fisher_batch_py<'py>(
     let fisher_ptr = unsafe { fisher_arr.as_slice_mut()?.as_mut_ptr() } as usize;
     let signal_ptr = unsafe { signal_arr.as_slice_mut()?.as_mut_ptr() } as usize;
 
-    py.allow_threads(move || {
+    py.detach(move || {
         let kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
@@ -2317,11 +2317,11 @@ impl FisherDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         if let Some(ref s_obj) = stream {
             if let Ok(s) = s_obj.extract::<usize>(py) {
                 if s == 0 {
@@ -2376,7 +2376,7 @@ pub fn fisher_cuda_batch_dev_py<'py>(
     let cuda = CudaFisher::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let ctx_guard = cuda.context_arc();
     let dev_id = cuda.device_id();
-    let ((pair, combos)) = py.allow_threads(|| {
+    let ((pair, combos)) = py.detach(|| {
         cuda.fisher_batch_dev(high, low, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -2428,7 +2428,7 @@ pub fn fisher_cuda_many_series_one_param_dev_py<'py>(
     let cuda = CudaFisher::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let ctx_guard = cuda.context_arc();
     let dev_id = cuda.device_id();
-    let pair = py.allow_threads(|| {
+    let pair = py.detach(|| {
         cuda.fisher_many_series_one_param_time_major_dev(high_tm, low_tm, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;

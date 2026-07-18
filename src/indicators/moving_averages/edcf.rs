@@ -1529,7 +1529,7 @@ pub fn edcf_py<'py>(
     let edcf_in = EdcfInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| edcf_with_kernel(&edcf_in, kern).map(|o| o.values))
+        .detach(|| edcf_with_kernel(&edcf_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1615,7 +1615,7 @@ pub fn edcf_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => Kernel::ScalarBatch,
                 k => k,
@@ -1665,7 +1665,7 @@ pub fn edcf_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let (inner, dev_id) = py.allow_threads(|| {
+    let (inner, dev_id) = py.detach(|| {
         let cuda = CudaEdcf::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
         let out = cuda
@@ -1701,7 +1701,7 @@ pub fn edcf_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let (inner, dev_id) = py.allow_threads(|| {
+    let (inner, dev_id) = py.detach(|| {
         let mut cuda =
             CudaEdcf::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();

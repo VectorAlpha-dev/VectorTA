@@ -1160,7 +1160,7 @@ pub fn autocorrelation_indicator_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| autocorrelation_indicator_with_kernel(&input, kern))
+        .detach(|| autocorrelation_indicator_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -1222,7 +1222,7 @@ pub fn autocorrelation_indicator_batch_py<'py>(
     let data = data.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             autocorrelation_indicator_batch_with_kernel(
                 data,
                 &AutocorrelationIndicatorBatchRange {

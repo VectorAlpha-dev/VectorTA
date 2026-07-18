@@ -3184,7 +3184,7 @@ pub fn damiani_py<'py>(
             .as_slice_mut()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-        py.allow_threads(|| damiani_volatmeter_into_slice(vol_sl, anti_sl, &input, kern))
+        py.detach(|| damiani_volatmeter_into_slice(vol_sl, anti_sl, &input, kern))
     }
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
@@ -3473,7 +3473,7 @@ pub fn damiani_batch_py<'py>(
 
     let kern = validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
@@ -3569,11 +3569,11 @@ impl DeviceArrayF32DamianiPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use crate::cuda::damiani_volatmeter_wrapper::DeviceArrayF32Damiani;
         use cust::memory::DeviceBuffer;
 
@@ -3656,7 +3656,7 @@ pub fn damiani_cuda_batch_dev_py<'py>(
         sed_std: sed_std_range,
         threshold: threshold_range,
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = crate::cuda::CudaDamianiVolatmeter::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (arr, _combos) = cuda
@@ -3705,7 +3705,7 @@ pub fn damiani_cuda_many_series_one_param_dev_py<'py>(
         sed_std: Some(sed_std),
         threshold: Some(threshold),
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = crate::cuda::CudaDamianiVolatmeter::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.damiani_volatmeter_many_series_one_param_time_major_dev(h, l, c, cols, rows, &params)

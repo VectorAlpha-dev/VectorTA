@@ -928,7 +928,7 @@ pub fn momentum_ratio_oscillator_py<'py>(
         },
     );
     let output = py
-        .allow_threads(|| momentum_ratio_oscillator_with_kernel(&input, kernel))
+        .detach(|| momentum_ratio_oscillator_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((output.line.into_pyarray(py), output.signal.into_pyarray(py)))
 }
@@ -983,7 +983,7 @@ pub fn momentum_ratio_oscillator_batch_py<'py>(
     let signal_out = unsafe { signal_arr.as_slice_mut()? };
     let kernel = validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch_kernel = match kernel {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

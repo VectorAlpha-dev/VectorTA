@@ -1834,7 +1834,7 @@ pub fn ao_py<'py>(
     let kern = validate_kernel(kernel, false)?;
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| -> Result<Vec<f64>, AoError> {
+        .detach(|| -> Result<Vec<f64>, AoError> {
             let hl2 = compute_hl2(high_slice, low_slice)?;
 
             let params = AoParams {
@@ -1910,7 +1910,7 @@ pub fn ao_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| -> Result<Vec<AoParams>, AoError> {
+        .detach(|| -> Result<Vec<AoParams>, AoError> {
             let hl2 = compute_hl2(high_slice, low_slice)?;
 
             let first = hl2.iter().position(|x| !x.is_nan()).unwrap_or(0);
@@ -2010,11 +2010,11 @@ impl DeviceArrayF32AoPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2088,7 +2088,7 @@ pub fn ao_cuda_batch_dev_py(
         short_period: short_period_range,
         long_period: long_period_range,
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaAo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.ao_batch_dev(&hl2_f32, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -2138,7 +2138,7 @@ pub fn ao_cuda_many_series_one_param_dev_py(
     for i in 0..expected {
         hl2_f32[i] = (high_slice[i] + low_slice[i]) * 0.5;
     }
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaAo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.ao_many_series_one_param_time_major_dev(
             &hl2_f32,

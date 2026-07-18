@@ -1689,7 +1689,7 @@ pub fn mab_py<'py>(
     let chosen_kernel = validate_kernel(kernel, false)?;
 
     let result = py
-        .allow_threads(|| match chosen_kernel {
+        .detach(|| match chosen_kernel {
             Kernel::Auto => mab(&input),
             k => mab_with_kernel(&input, k),
         })
@@ -1839,7 +1839,7 @@ pub fn mab_batch_py<'py>(
     init_matrix_prefixes(mu_lower, cols, &warmup_prefixes);
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2448,7 +2448,7 @@ impl MabCudaBatchPlanPy {
             .checked_mul(cols)
             .ok_or_else(|| PyValueError::new_err("mab CUDA plan rows*cols overflow"))?;
         let (upper, middle, lower) =
-            py.allow_threads(|| -> PyResult<(Vec<f32>, Vec<f32>, Vec<f32>)> {
+            py.detach(|| -> PyResult<(Vec<f32>, Vec<f32>, Vec<f32>)> {
                 let d_prices = DeviceBuffer::from_slice(slice)
                     .map_err(|e| PyValueError::new_err(e.to_string()))?;
                 self.cuda
@@ -2517,7 +2517,7 @@ pub fn mab_cuda_batch_plan_create_py(
             String::new(),
         ),
     };
-    let (cuda, plan, dev_id) = py.allow_threads(|| {
+    let (cuda, plan, dev_id) = py.detach(|| {
         let cuda = CudaMab::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
         let plan = cuda
@@ -2566,7 +2566,7 @@ pub fn mab_cuda_batch_dev_py(
             String::new(),
         ),
     };
-    let (up, mid, lo) = py.allow_threads(|| {
+    let (up, mid, lo) = py.detach(|| {
         let cuda = CudaMab::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (trip, _combos) = cuda
             .mab_batch_dev(slice, &sweep)
@@ -2609,7 +2609,7 @@ pub fn mab_cuda_many_series_one_param_dev_py(
         fast_ma_type: Some(fast_ma_type.to_string()),
         slow_ma_type: Some(slow_ma_type.to_string()),
     };
-    let (up, mid, lo) = py.allow_threads(|| {
+    let (up, mid, lo) = py.detach(|| {
         let cuda = CudaMab::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let trip = cuda
             .mab_many_series_one_param_time_major_dev(flat, cols, rows, &params)

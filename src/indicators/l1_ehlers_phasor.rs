@@ -849,7 +849,7 @@ pub fn l1_ehlers_phasor_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| l1_ehlers_phasor_with_kernel(&input, kernel))
+        .detach(|| l1_ehlers_phasor_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(out.values.into_pyarray(py))
 }
@@ -893,7 +893,7 @@ pub fn l1_ehlers_phasor_batch_py<'py>(
         domestic_cycle_length: domestic_cycle_length_range,
     };
     let out = py
-        .allow_threads(|| l1_ehlers_phasor_batch_with_kernel(data, &sweep, kernel))
+        .detach(|| l1_ehlers_phasor_batch_with_kernel(data, &sweep, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     dict.set_item(

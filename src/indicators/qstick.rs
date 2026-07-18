@@ -1896,11 +1896,11 @@ impl QstickDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1965,7 +1965,7 @@ pub fn qstick_py<'py>(
     let input = QstickInput::from_slices(open_slice, close_slice, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| qstick_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| qstick_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2021,7 +2021,7 @@ pub fn qstick_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2096,7 +2096,7 @@ pub fn qstick_cuda_batch_dev_py(
     let sweep = QstickBatchRange {
         period: period_range,
     };
-    let (buf, rows, cols, ctx, dev_id) = py.allow_threads(|| {
+    let (buf, rows, cols, ctx, dev_id) = py.detach(|| {
         let cuda = CudaQstick::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out: DeviceArrayF32 = cuda
             .qstick_batch_dev(open_slice, close_slice, &sweep)
@@ -2142,7 +2142,7 @@ pub fn qstick_cuda_many_series_one_param_dev_py(
     let rows = open_tm_f32.shape()[0];
     let cols = open_tm_f32.shape()[1];
 
-    let (buf, r_out, c_out, ctx, dev_id) = py.allow_threads(|| {
+    let (buf, r_out, c_out, ctx, dev_id) = py.detach(|| {
         let cuda = CudaQstick::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out: DeviceArrayF32 = cuda
             .qstick_many_series_one_param_time_major_dev(flat_open, flat_close, cols, rows, period)

@@ -1488,7 +1488,7 @@ pub fn cyberpunk_value_trend_analyzer_py<'py>(
     let close = close.as_slice()?;
     let kern = validate_kernel(kernel, false)?;
     let out = py
-        .allow_threads(|| {
+        .detach(|| {
             cyberpunk_value_trend_analyzer_with_kernel(
                 &CyberpunkValueTrendAnalyzerInput::from_slices(
                     open,
@@ -1535,7 +1535,7 @@ pub fn cyberpunk_value_trend_analyzer_batch_py<'py>(
     let close = close.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
     let out = py
-        .allow_threads(|| {
+        .detach(|| {
             cyberpunk_value_trend_analyzer_batch_with_kernel(
                 open,
                 high,

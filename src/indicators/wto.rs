@@ -1211,7 +1211,7 @@ pub fn wto_py<'py>(
     };
     let inp = WtoInput::from_slice(slice, p);
     let out = py
-        .allow_threads(|| wto_with_kernel(&inp, kern))
+        .detach(|| wto_with_kernel(&inp, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.wavetrend1.into_pyarray(py),
@@ -2615,7 +2615,7 @@ pub fn wto_batch_py<'py>(
         average: average_range,
     };
     let out = py
-        .allow_threads(|| wto_batch_all_outputs_with_kernel(slice, &sweep, kern))
+        .detach(|| wto_batch_all_outputs_with_kernel(slice, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = pyo3::types::PyDict::new(py);
@@ -2673,7 +2673,7 @@ pub fn wto_cuda_batch_dev_py<'py>(
         average: average_range,
     };
 
-    let (CudaWtoBatchResult { outputs, combos }, dev_id) = py.allow_threads(|| {
+    let (CudaWtoBatchResult { outputs, combos }, dev_id) = py.detach(|| {
         let cuda = CudaWto::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let res = cuda
             .wto_batch_dev(slice, &sweep)
@@ -2730,7 +2730,7 @@ pub fn wto_cuda_many_series_one_param_dev_py<'py>(
         average_length: Some(average_length),
     };
 
-    let (DeviceArrayF32Triplet { wt1, wt2, hist }, dev_id) = py.allow_threads(|| {
+    let (DeviceArrayF32Triplet { wt1, wt2, hist }, dev_id) = py.detach(|| {
         let cuda = CudaWto::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let res = cuda
             .wto_many_series_one_param_time_major_dev(flat, cols, rows, &params)

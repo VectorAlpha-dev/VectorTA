@@ -1515,7 +1515,7 @@ pub fn ehlers_linear_extrapolation_predictor_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| ehlers_linear_extrapolation_predictor_with_kernel(&input, kern))
+        .detach(|| ehlers_linear_extrapolation_predictor_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.prediction.into_pyarray(py),
@@ -1617,7 +1617,7 @@ pub fn ehlers_linear_extrapolation_predictor_batch_py<'py>(
     let short_slice = unsafe { short_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,

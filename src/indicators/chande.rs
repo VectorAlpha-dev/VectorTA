@@ -2383,7 +2383,7 @@ pub fn chande_py<'py>(
     let input = ChandeInput::from_slices(h, l, c, params);
 
     let result_vec = py
-        .allow_threads(|| chande_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| chande_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2448,7 +2448,7 @@ pub fn chande_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| {
+    py.detach(|| {
         let simd = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
@@ -2531,11 +2531,11 @@ impl DeviceArrayF32ChandePy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        _stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        _dl_device: Option<pyo3::PyObject>,
-        _copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        _stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        _dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        _copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use cust::memory::DeviceBuffer;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();
@@ -2622,7 +2622,7 @@ pub fn chande_cuda_batch_dev_py(
         mult: mult_range,
     };
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let mut cuda =
             CudaChande::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -2669,7 +2669,7 @@ pub fn chande_cuda_many_series_one_param_dev_py(
         return Err(PyValueError::new_err("time-major input length mismatch"));
     }
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaChande::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();

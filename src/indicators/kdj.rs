@@ -3646,7 +3646,7 @@ pub fn kdj_py<'py>(
     let d_slice = unsafe { d_arr.as_slice_mut()? };
     let j_slice = unsafe { j_arr.as_slice_mut()? };
 
-    py.allow_threads(|| kdj_into_slices(k_slice, d_slice, j_slice, &inp, kern))
+    py.detach(|| kdj_into_slices(k_slice, d_slice, j_slice, &inp, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((k_arr, d_arr, j_arr))
@@ -3735,7 +3735,7 @@ pub fn kdj_batch_py<'py>(
     let j_arr = unsafe { PyArray1::<f64>::new(py, [1], false) };
 
     let (k_vec, d_vec, j_vec, cmbs, rws) = py
-        .allow_threads(|| {
+        .detach(|| {
             let out = kdj_batch_inner(
                 h,
                 l,
@@ -3856,7 +3856,7 @@ pub fn kdj_cuda_batch_dev_py(
         slow_d_period: slow_d_range,
         slow_d_ma_type: slow_d_ma_range,
     };
-    let (k_dev, d_dev, j_dev) = py.allow_threads(|| {
+    let (k_dev, d_dev, j_dev) = py.detach(|| {
         let cuda = CudaKdj::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.kdj_batch_dev(h, l, c, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -3897,7 +3897,7 @@ pub fn kdj_cuda_many_series_one_param_dev_py(
         slow_d_period: Some(slow_d),
         slow_d_ma_type: Some(slow_d_ma),
     };
-    let (k_dev, d_dev, j_dev) = py.allow_threads(|| {
+    let (k_dev, d_dev, j_dev) = py.detach(|| {
         let cuda = CudaKdj::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.kdj_many_series_one_param_time_major_dev(htm, ltm, ctm, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))

@@ -3542,7 +3542,7 @@ pub fn rvi_py<'py>(
     };
     let input = RviInput::from_slice(slice_in, params);
 
-    py.allow_threads(|| rvi_into_slice(out_slice, &input, kern))
+    py.detach(|| rvi_into_slice(out_slice, &input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(out_arr)
@@ -3594,7 +3594,7 @@ pub fn rvi_batch_py<'py>(
     };
 
     let combos_back = py
-        .allow_threads(|| rvi_batch_inner_into(slice_in, &sweep, simd, true, out_slice))
+        .detach(|| rvi_batch_inner_into(slice_in, &sweep, simd, true, out_slice))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let d = PyDict::new(py);
@@ -3698,7 +3698,7 @@ pub fn rvi_cuda_batch_dev_py<'py>(
         matype: matype_range,
         devtype: devtype_range,
     };
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, combos) = py.detach(|| {
         let cuda = CudaRvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.rvi_batch_dev(d, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -3765,7 +3765,7 @@ pub fn rvi_cuda_many_series_one_param_dev_py(
         matype: Some(matype),
         devtype: Some(devtype),
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaRvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.rvi_many_series_one_param_time_major_dev(tm, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))

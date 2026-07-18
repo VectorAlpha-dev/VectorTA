@@ -85,11 +85,11 @@ impl EmaDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1785,7 +1785,7 @@ pub fn ema_py<'py>(
 
     let result_vec: Vec<f64> = if let Ok(slice_in) = data.as_slice() {
         let ema_in = EmaInput::from_slice(slice_in, params);
-        py.allow_threads(|| ema_with_kernel(&ema_in, kern).map(|o| o.values))
+        py.detach(|| ema_with_kernel(&ema_in, kern).map(|o| o.values))
             .map_err(|e| PyValueError::new_err(e.to_string()))?
     } else {
         let owned = data.as_array().to_owned();
@@ -1793,7 +1793,7 @@ pub fn ema_py<'py>(
             .as_slice()
             .expect("owned numpy array should be contiguous");
         let ema_in = EmaInput::from_slice(slice_in, params);
-        py.allow_threads(|| ema_with_kernel(&ema_in, kern).map(|o| o.values))
+        py.detach(|| ema_with_kernel(&ema_in, kern).map(|o| o.values))
             .map_err(|e| PyValueError::new_err(e.to_string()))?
     };
 
@@ -1836,7 +1836,7 @@ pub fn ema_batch_py<'py>(
     }
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1883,7 +1883,7 @@ pub fn ema_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let (buf, rows, cols, ctx, dev) = py.allow_threads(|| {
+    let (buf, rows, cols, ctx, dev) = py.detach(|| {
         let cuda = CudaEma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let handle = cuda
             .ema_batch_dev(slice_in, &sweep)
@@ -1926,7 +1926,7 @@ pub fn ema_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let (buf, rows, cols, ctx, dev) = py.allow_threads(|| {
+    let (buf, rows, cols, ctx, dev) = py.detach(|| {
         let cuda = CudaEma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let handle = cuda
             .ema_many_series_one_param_time_major_dev(flat, num_series, series_len, &params)

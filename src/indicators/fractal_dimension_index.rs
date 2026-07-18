@@ -983,7 +983,7 @@ pub fn fractal_dimension_index_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| fractal_dimension_index_with_kernel(&input, kern))
+        .detach(|| fractal_dimension_index_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(out.values.into_pyarray(py))
 }
@@ -1027,7 +1027,7 @@ pub fn fractal_dimension_index_batch_py<'py>(
     };
 
     let output = py
-        .allow_threads(|| fractal_dimension_index_batch_with_kernel(slice_in, &sweep, kern))
+        .detach(|| fractal_dimension_index_batch_with_kernel(slice_in, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let rows = output.rows;

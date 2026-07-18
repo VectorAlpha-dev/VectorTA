@@ -2117,7 +2117,7 @@ pub fn stc_py<'py>(
     let stc_in = StcInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| stc_with_kernel(&stc_in, kern).map(|o| o.values))
+        .detach(|| stc_with_kernel(&stc_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2191,7 +2191,7 @@ pub fn stc_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let k = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2280,7 +2280,7 @@ pub fn stc_cuda_batch_dev_py<'py>(
         k_period: k_period_range,
         d_period: d_period_range,
     };
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, combos) = py.detach(|| {
         let cuda = CudaStc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.stc_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -2350,7 +2350,7 @@ pub fn stc_cuda_many_series_one_param_dev_py<'py>(
         fast_ma_type: None,
         slow_ma_type: None,
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaStc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.stc_many_series_one_param_time_major_dev(tm, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))

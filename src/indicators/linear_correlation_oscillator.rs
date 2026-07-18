@@ -890,7 +890,7 @@ pub fn linear_correlation_oscillator_py<'py>(
         },
     );
     let values = py
-        .allow_threads(|| linear_correlation_oscillator_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| linear_correlation_oscillator_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(values.into_pyarray(py))
 }
@@ -920,7 +920,7 @@ pub fn linear_correlation_oscillator_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,

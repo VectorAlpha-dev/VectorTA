@@ -1430,7 +1430,7 @@ pub fn volume_energy_reservoirs_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| volume_energy_reservoirs_with_kernel(&input, kernel))
+        .detach(|| volume_energy_reservoirs_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.momentum.into_pyarray(py),
@@ -1544,7 +1544,7 @@ pub fn volume_energy_reservoirs_batch_py<'py>(
     let range_low_slice = unsafe { range_low_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch_kernel = match kernel {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,

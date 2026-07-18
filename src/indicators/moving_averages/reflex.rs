@@ -898,7 +898,7 @@ pub fn reflex_py<'py>(
     let input = ReflexInput::from_slice(data_slice, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| reflex_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| reflex_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -951,7 +951,7 @@ pub fn reflex_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let metadata = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1004,7 +1004,7 @@ pub fn reflex_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaReflex::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = device_id as u32;
@@ -1042,7 +1042,7 @@ pub fn reflex_cuda_many_series_one_param_dev_py(
     let cols = shape[1];
     let flat = data_tm_f32.as_slice()?;
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaReflex::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = device_id as u32;

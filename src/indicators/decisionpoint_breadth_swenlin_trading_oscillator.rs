@@ -663,7 +663,7 @@ pub fn decisionpoint_breadth_swenlin_trading_oscillator_py<'py>(
         DecisionPointBreadthSwenlinTradingOscillatorParams,
     );
     let values = py
-        .allow_threads(|| {
+        .detach(|| {
             decisionpoint_breadth_swenlin_trading_oscillator_with_kernel(&input, kern)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?
@@ -727,7 +727,7 @@ pub fn decisionpoint_breadth_swenlin_trading_oscillator_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

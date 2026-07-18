@@ -1623,11 +1623,11 @@ impl SrsiDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         if let Some(sobj) = stream.as_ref() {
             if let Ok(s) = sobj.extract::<usize>(py) {
                 if s == 0 {
@@ -1724,7 +1724,7 @@ pub fn srsi_cuda_batch_dev_py<'py>(
         k: k_range,
         d: d_range,
     };
-    let ((pair, combos), ctx, dev_id) = py.allow_threads(|| {
+    let ((pair, combos), ctx, dev_id) = py.detach(|| {
         let cuda = CudaSrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -1817,7 +1817,7 @@ pub fn srsi_cuda_many_series_one_param_dev_py<'py>(
         d: Some(d),
         source: None,
     };
-    let (pair, ctx, dev_id) = py.allow_threads(|| {
+    let (pair, ctx, dev_id) = py.detach(|| {
         let cuda = CudaSrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -1878,7 +1878,7 @@ pub fn srsi_py<'py>(
     let input = SrsiInput::from_slice(slice_in, params);
 
     let (k_vec, d_vec) = py
-        .allow_threads(|| srsi_with_kernel(&input, kern).map(|o| (o.k, o.d)))
+        .detach(|| srsi_with_kernel(&input, kern).map(|o| (o.k, o.d)))
         .map_err(|e| {
             let msg = e.to_string();
             if msg.contains("Not enough valid data")
@@ -1965,7 +1965,7 @@ pub fn srsi_batch_py<'py>(
     let d_slice = unsafe { d_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,

@@ -2133,7 +2133,7 @@ pub fn adxr_py<'py>(
     let adxr_in = AdxrInput::from_slices(high_slice, low_slice, close_slice, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| adxr_with_kernel(&adxr_in, kern).map(|o| o.values))
+        .detach(|| adxr_with_kernel(&adxr_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2219,7 +2219,7 @@ pub fn adxr_batch_py<'py>(
     };
 
     let combos = py
-        .allow_threads(|| adxr_batch_inner_into(h, l, c, &sweep, simd, true, out_slice))
+        .detach(|| adxr_batch_inner_into(h, l, c, &sweep, simd, true, out_slice))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -2255,7 +2255,7 @@ pub fn adxr_cuda_batch_dev_py<'py>(
     let sweep = AdxrBatchRange {
         period: period_range,
     };
-    let (inner, ctx_arc, dev_id) = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id) = py.detach(|| {
         let cuda = CudaAdxr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (dev, _combos) = cuda
             .adxr_batch_dev(h, l, c, &sweep)
@@ -2292,7 +2292,7 @@ pub fn adxr_cuda_many_series_one_param_dev_py<'py>(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
-    let (inner, ctx_arc, dev_id) = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id) = py.detach(|| {
         let cuda = CudaAdxr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev = cuda
             .adxr_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
@@ -2347,11 +2347,11 @@ impl AdxrDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();

@@ -1103,11 +1103,11 @@ impl TtmTrendDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         if let Some(ref s_obj) = stream {
             if let Ok(s) = s_obj.extract::<usize>(py) {
                 if s == 0 {
@@ -1197,7 +1197,7 @@ pub fn ttm_trend_cuda_batch_dev_py(
     let sweep = TtmTrendBatchRange {
         period: period_range,
     };
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaTtmTrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -1227,7 +1227,7 @@ pub fn ttm_trend_cuda_many_series_one_param_dev_py(
     }
     let src_tm = source_tm_f32.as_slice()?;
     let cls_tm = close_tm_f32.as_slice()?;
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaTtmTrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -1918,7 +1918,7 @@ pub fn ttm_trend_py<'py>(
     let out = unsafe { PyArray1::<f64>::new(py, [len], false) };
     let dst = unsafe { out.as_slice_mut()? };
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let (ss, cc, p, first, chosen) = ttm_prepare(&input, kern).map_err(|e| e.to_string())?;
         for v in &mut dst[..first + p - 1] {
             *v = f64::NAN;
@@ -1973,7 +1973,7 @@ pub fn ttm_trend_batch_py<'py>(
     };
 
     let (vals_f64, combos, rows, cols) = py
-        .allow_threads(|| {
+        .detach(|| {
             let k = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,

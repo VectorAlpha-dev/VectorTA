@@ -2154,7 +2154,7 @@ pub fn stochf_py<'py>(
     let input = StochfInput::from_slices(high_slice, low_slice, close_slice, params);
 
     let (k_vec, d_vec) = py
-        .allow_threads(|| stochf_with_kernel(&input, kern).map(|o| (o.k, o.d)))
+        .detach(|| stochf_with_kernel(&input, kern).map(|o| (o.k, o.d)))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((k_vec.into_pyarray(py), d_vec.into_pyarray(py)))
@@ -2236,7 +2236,7 @@ pub fn stochf_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2317,7 +2317,7 @@ pub fn stochf_cuda_batch_dev_py(
         fastk_period: fastk_range,
         fastd_period: fastd_range,
     };
-    let (pair, ctx, dev_id) = py.allow_threads(|| {
+    let (pair, ctx, dev_id) = py.detach(|| {
         let cuda = CudaStochf::new(device_id).map_err(|e| PyErrValue::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -2366,7 +2366,7 @@ pub fn stochf_cuda_many_series_one_param_dev_py(
         fastd_period: Some(fastd),
         fastd_matype: Some(fastd_matype),
     };
-    let (k, d, ctx, dev_id) = py.allow_threads(|| {
+    let (k, d, ctx, dev_id) = py.detach(|| {
         let cuda = CudaStochf::new(device_id).map_err(|e| PyErrValue::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();

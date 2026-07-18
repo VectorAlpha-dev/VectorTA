@@ -1182,7 +1182,7 @@ pub fn cmo_py<'py>(
     let input = CmoInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| cmo_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| cmo_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1241,7 +1241,7 @@ pub fn cmo_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1290,7 +1290,7 @@ pub fn cmo_cuda_batch_dev_py<'py>(
     let sweep = CmoBatchRange {
         period: period_range,
     };
-    let (inner, ctx_arc, dev_id) = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id) = py.detach(|| {
         let cuda = CudaCmo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx_arc = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -1336,7 +1336,7 @@ pub fn cmo_cuda_many_series_one_param_dev_py(
     let params = CmoParams {
         period: Some(period),
     };
-    let (inner, ctx_arc, dev_id) = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id) = py.detach(|| {
         let cuda = CudaCmo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx_arc = cuda.context_arc();
         let dev_id = cuda.device_id();

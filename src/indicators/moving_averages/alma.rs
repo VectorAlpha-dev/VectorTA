@@ -2744,14 +2744,14 @@ pub fn alma_py<'py>(
 
     let result_vec: Vec<f64> = if let Ok(slice_in) = data.as_slice() {
         let alma_in = AlmaInput::from_slice(slice_in, params);
-        py.allow_threads(|| alma_with_kernel(&alma_in, kern).map(|o| o.values))
+        py.detach(|| alma_with_kernel(&alma_in, kern).map(|o| o.values))
             .map_err(|e| PyValueError::new_err(e.to_string()))?
     } else {
         let owned = data.as_array().to_owned();
         let slice_in = owned.as_slice().expect("owned array should be contiguous");
         let alma_in = AlmaInput::from_slice(slice_in, params);
         let out = py
-            .allow_threads(|| alma_with_kernel(&alma_in, kern).map(|o| o.values))
+            .detach(|| alma_with_kernel(&alma_in, kern).map(|o| o.values))
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         out
     };
@@ -2821,7 +2821,7 @@ pub fn alma_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2891,7 +2891,7 @@ pub fn alma_cuda_batch_dev_py(
         sigma: sigma_range,
     };
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaAlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = device_id as u32;
@@ -2931,7 +2931,7 @@ pub fn alma_cuda_many_series_one_param_dev_py(
         sigma: Some(sigma),
     };
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaAlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = device_id as u32;

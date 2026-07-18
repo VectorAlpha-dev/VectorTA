@@ -2920,7 +2920,7 @@ pub fn alligator_py<'py>(
     let kern = validate_kernel(kernel, false)?;
 
     let out = py
-        .allow_threads(|| alligator_with_kernel(&input, kern))
+        .detach(|| alligator_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -3008,7 +3008,7 @@ pub fn alligator_batch_py<'py>(
 
     let kern = validate_kernel(kernel, true)?;
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch_k = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -3236,7 +3236,7 @@ pub fn alligator_cuda_batch_dev_py<'py>(
         lips_offset,
     };
     let (jaw, teeth, lips, rows, cols, jp, jo, tp, to, lp, lo, guard_dev, guard_ctx) = py
-        .allow_threads(|| {
+        .detach(|| {
             let cuda =
                 CudaAlligator::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
             let res = cuda
@@ -3328,7 +3328,7 @@ pub fn alligator_cuda_many_series_one_param_dev_py<'py>(
         lips_period: Some(lips_period),
         lips_offset: Some(lips_offset),
     };
-    let (jaw, teeth, lips, guard_dev, guard_ctx) = py.allow_threads(|| {
+    let (jaw, teeth, lips, guard_dev, guard_ctx) = py.detach(|| {
         let cuda =
             CudaAlligator::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out = cuda

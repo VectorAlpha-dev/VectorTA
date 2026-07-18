@@ -2146,11 +2146,11 @@ impl DeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use cust::memory::DeviceBuffer;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();
@@ -2280,7 +2280,7 @@ pub fn atr_py<'py>(
     let input = AtrInput::from_slices(high_slice, low_slice, close_slice, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| atr_with_kernel(&input, kernel_enum).map(|output| output.values))
+        .detach(|| atr_with_kernel(&input, kernel_enum).map(|output| output.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2338,7 +2338,7 @@ pub fn atr_batch_py<'py>(
     let out_arr = unsafe { numpy::PyArray1::<f64>::new(py, [total], false) };
     let buf = unsafe { out_arr.as_slice_mut()? };
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let simd = match match k {
             Kernel::Auto => detect_best_batch_kernel(),
             k if k.is_batch() => k,
@@ -2396,7 +2396,7 @@ pub fn atr_cuda_batch_dev_py(
     let sweep = AtrBatchRange {
         length: length_range,
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaAtr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.atr_batch_dev(hs, ls, cs, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -2429,7 +2429,7 @@ pub fn atr_cuda_many_series_one_param_dev_py(
     if h.len() != expected || l.len() != expected || c.len() != expected {
         return Err(PyValueError::new_err("time-major input length mismatch"));
     }
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaAtr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.atr_many_series_one_param_time_major_dev(h, l, c, cols, rows, length)
             .map_err(|e| PyValueError::new_err(e.to_string()))

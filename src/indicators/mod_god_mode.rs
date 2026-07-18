@@ -3211,7 +3211,7 @@ pub fn mod_god_mode_py<'py>(
     };
     let kern = validate_kernel(kernel, false).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let out = py
-        .allow_threads(|| {
+        .detach(|| {
             mod_god_mode_with_kernel(&ModGodModeInput::from_slices(h, l, c, v_opt, params), kern)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -3252,7 +3252,7 @@ pub fn mod_god_mode_batch_py<'py>(
     };
     let kern = validate_kernel(kernel, true).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let o = py
-        .allow_threads(|| mod_god_mode_batch_with_kernel(h, l, c, v, &sweep, kern))
+        .detach(|| mod_god_mode_batch_with_kernel(h, l, c, v, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let d = pyo3::types::PyDict::new(py);
     use numpy::IntoPyArray;
@@ -3357,7 +3357,7 @@ pub fn mod_god_mode_cuda_batch_dev_py<'py>(
         n3: n3_range,
         mode: m,
     };
-    let (wt, sig, hist, combos, rows, cols, ctx, dev_id) = py.allow_threads(|| {
+    let (wt, sig, hist, combos, rows, cols, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaModGodMode::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let res = cuda
@@ -3486,7 +3486,7 @@ pub fn mod_god_mode_cuda_many_series_one_param_dev_py<'py>(
         mode: Some(m),
         use_volume: Some(use_volume),
     };
-    let (wt, sig, hist, ctx, dev_id) = py.allow_threads(|| {
+    let (wt, sig, hist, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaModGodMode::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.mod_god_mode_many_series_one_param_time_major_dev(h, l, c, vol, cols, rows, &params)

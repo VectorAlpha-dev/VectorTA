@@ -1098,7 +1098,7 @@ pub fn er_py<'py>(
     let input = ErInput::from_slice(slice_in, params);
 
     let result_vec = py
-        .allow_threads(|| er_with_kernel(&input, kern))
+        .detach(|| er_with_kernel(&input, kern))
         .map(|result| result.values)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
@@ -1154,7 +1154,7 @@ pub fn er_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let simd = match kern {
                 Kernel::Auto => {
                     let base = detect_best_kernel();
@@ -1373,7 +1373,7 @@ pub fn er_cuda_batch_dev_py(
     let sweep = ErBatchRange {
         period: period_range,
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaEr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.er_batch_dev(slice, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -1397,7 +1397,7 @@ pub fn er_cuda_many_series_one_param_dev_py(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice = data_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaEr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.er_many_series_one_param_time_major_dev(slice, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -1439,11 +1439,11 @@ impl DeviceArrayF32ErPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use cust::memory::DeviceBuffer;
         use pyo3::types::PyAny;
         use pyo3::Bound;

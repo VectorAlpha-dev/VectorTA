@@ -1554,7 +1554,7 @@ pub fn trend_flow_trail_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| trend_flow_trail_with_kernel(&input, kernel))
+        .detach(|| trend_flow_trail_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     dict.set_item("alpha_trail", out.alpha_trail.into_pyarray(py))?;

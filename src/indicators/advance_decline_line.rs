@@ -511,7 +511,7 @@ pub fn advance_decline_line_py<'py>(
     let kern = validate_kernel(kernel, false)?;
     let input = AdvanceDeclineLineInput::from_slice(data_slice, AdvanceDeclineLineParams);
     let values = py
-        .allow_threads(|| advance_decline_line_with_kernel(&input, kern).map(|out| out.values))
+        .detach(|| advance_decline_line_with_kernel(&input, kern).map(|out| out.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(values.into_pyarray(py))
 }
@@ -569,7 +569,7 @@ pub fn advance_decline_line_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

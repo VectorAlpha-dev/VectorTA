@@ -1511,7 +1511,7 @@ pub fn adaptive_schaff_trend_cycle_py<'py>(
     );
     let kernel = validate_kernel(kernel, false)?;
     let out = py
-        .allow_threads(|| adaptive_schaff_trend_cycle_with_kernel(&input, kernel))
+        .detach(|| adaptive_schaff_trend_cycle_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((out.stc.into_pyarray(py), out.histogram.into_pyarray(py)))
 }
@@ -1588,7 +1588,7 @@ pub fn adaptive_schaff_trend_cycle_batch_py<'py>(
     let out_histogram = unsafe { histogram_arr.as_slice_mut()? };
     let kernel = validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch_kernel = match kernel {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

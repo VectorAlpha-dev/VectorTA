@@ -1080,11 +1080,11 @@ impl DeviceArrayF32DemaPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<pyo3::PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<pyo3::Py<pyo3::PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();
@@ -1952,7 +1952,7 @@ pub fn dema_py<'py>(
     let dema_in = DemaInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| dema_with_kernel(&dema_in, kern).map(|o| o.values))
+        .detach(|| dema_with_kernel(&dema_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2035,7 +2035,7 @@ pub fn dema_batch_py<'py>(
     };
 
     let combos = py
-        .allow_threads(|| dema_batch_inner_into(slice_in, &sweep, simd, true, out))
+        .detach(|| dema_batch_inner_into(slice_in, &sweep, simd, true, out))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let values: Vec<f64> = unsafe {
@@ -2080,7 +2080,7 @@ pub fn dema_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaDema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.ctx();
         let dev_id = cuda.device_id();
@@ -2117,7 +2117,7 @@ pub fn dema_cuda_many_series_one_param_dev_py(
     let params = DemaParams {
         period: Some(period),
     };
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaDema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.ctx();
         let dev_id = cuda.device_id();

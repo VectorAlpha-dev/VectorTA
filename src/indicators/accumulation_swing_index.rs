@@ -842,7 +842,7 @@ pub fn accumulation_swing_index_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| accumulation_swing_index_with_kernel(&input, kernel))
+        .detach(|| accumulation_swing_index_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(out.values.into_pyarray(py))
 }
@@ -901,7 +901,7 @@ pub fn accumulation_swing_index_batch_py<'py>(
     let out_slice = unsafe { out_arr.as_slice_mut()? };
     let kernel = validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch_kernel = match kernel {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

@@ -99,11 +99,11 @@ impl DeviceArrayF32PyNama {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();
@@ -1500,7 +1500,7 @@ pub fn nama_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
-    py.allow_threads(|| nama_into_slice(out_slice, &input, kern))
+    py.detach(|| nama_into_slice(out_slice, &input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(out_arr)
 }
@@ -1560,7 +1560,7 @@ pub fn nama_batch_py<'py>(
     let out_flat = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| -> Result<(), NamaError> {
+    py.detach(|| -> Result<(), NamaError> {
         for (r, prm) in combos.iter().enumerate() {
             let start = r * cols;
             let input = NamaInput::from_slice(slice_in, *prm);
@@ -1601,7 +1601,7 @@ pub fn nama_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaNama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out = cuda
             .nama_batch_dev(slice_in, &sweep)
@@ -1641,7 +1641,7 @@ pub fn nama_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaNama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out = cuda
             .nama_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)

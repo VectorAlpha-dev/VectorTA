@@ -1562,7 +1562,7 @@ pub fn twiggs_money_flow_py<'py>(
     );
     let kernel = validate_kernel(kernel, false)?;
     let out = py
-        .allow_threads(|| twiggs_money_flow_with_kernel(&input, kernel))
+        .detach(|| twiggs_money_flow_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((out.tmf.into_pyarray(py), out.smoothed.into_pyarray(py)))
 }
@@ -1629,7 +1629,7 @@ pub fn twiggs_money_flow_batch_py<'py>(
     let smoothed_out = unsafe { smoothed_arr.as_slice_mut()? };
     let kernel = validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch_kernel = match kernel {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

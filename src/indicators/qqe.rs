@@ -1390,7 +1390,7 @@ pub fn qqe_py<'py>(
     let input = QqeInput::from_slice(slice_in, params);
 
     let result = py
-        .allow_threads(|| qqe_with_kernel(&input, kern))
+        .detach(|| qqe_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((result.fast.into_pyarray(py), result.slow.into_pyarray(py)))
@@ -1474,7 +1474,7 @@ pub fn qqe_batch_py<'py>(
         _ => Kernel::Scalar,
     };
 
-    py.allow_threads(|| -> PyResult<()> {
+    py.detach(|| -> PyResult<()> {
         for (row, combo) in combos.iter().enumerate() {
             let rsi_p = combo.rsi_period.unwrap();
             let ema_p = combo.smoothing_factor.unwrap();
@@ -1571,7 +1571,7 @@ pub fn qqe_cuda_batch_dev_py<'py>(
         smoothing_factor: smoothing_factor_range,
         fast_factor: fast_factor_range,
     };
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, combos) = py.detach(|| {
         let cuda = CudaQqe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.qqe_batch_dev(slice, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -1634,7 +1634,7 @@ pub fn qqe_cuda_many_series_one_param_dev_py<'py>(
         smoothing_factor: Some(smoothing_factor),
         fast_factor: Some(fast_factor),
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaQqe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.qqe_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))

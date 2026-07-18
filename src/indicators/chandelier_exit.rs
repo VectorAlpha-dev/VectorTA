@@ -81,11 +81,11 @@ impl CeDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2040,7 +2040,7 @@ pub fn chandelier_exit_py<'py>(
     let input = ChandelierExitInput::from_slices(h, l, c, params);
     let kern = validate_kernel(kernel, false)?;
     let (long_vec, short_vec) = py
-        .allow_threads(|| {
+        .detach(|| {
             chandelier_exit_with_kernel(&input, kern).map(|o| (o.long_stop, o.short_stop))
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2086,7 +2086,7 @@ pub fn chandelier_exit_batch_py<'py>(
 
     let kern = validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let simd = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             Kernel::Avx512Batch => Kernel::Avx512,
@@ -2354,7 +2354,7 @@ pub fn chandelier_exit_cuda_batch_dev_py<'py>(
         mult: mult_range,
         use_close: (use_close, use_close, false),
     };
-    let (inner, combos, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, combos, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaChandelierExit::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -2421,7 +2421,7 @@ pub fn chandelier_exit_cuda_many_series_one_param_dev_py<'py>(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda =
             CudaChandelierExit::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();

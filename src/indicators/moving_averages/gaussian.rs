@@ -2600,7 +2600,7 @@ pub fn gaussian_py<'py>(
     let gaussian_in = GaussianInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| gaussian_with_kernel(&gaussian_in, kern).map(|o| o.values))
+        .detach(|| gaussian_with_kernel(&gaussian_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2660,7 +2660,7 @@ pub fn gaussian_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => match detect_best_batch_kernel() {
                     Kernel::Avx512Batch => Kernel::Avx2Batch,
@@ -2725,7 +2725,7 @@ pub fn gaussian_cuda_batch_dev_py(
     let dev_id = cuda.device_id();
     let ctx_guard = cuda.context_arc();
     let inner = py
-        .allow_threads(|| cuda.gaussian_batch_dev(slice, &sweep))
+        .detach(|| cuda.gaussian_batch_dev(slice, &sweep))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(DeviceArrayF32Py::new_from_rust(
@@ -2764,7 +2764,7 @@ pub fn gaussian_cuda_many_series_one_param_dev_py(
     let dev_id = cuda.device_id();
     let ctx_guard = cuda.context_arc();
     let inner = py
-        .allow_threads(|| {
+        .detach(|| {
             cuda.gaussian_many_series_one_param_time_major_dev(flat, cols, rows, &params)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;

@@ -1502,7 +1502,7 @@ pub fn wad_cuda_dev_py(
     let low = low_f32.as_slice()?;
     let close = close_f32.as_slice()?;
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaWad::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.wad_series_dev(high, low, close)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -1528,7 +1528,7 @@ pub fn wad_cuda_batch_dev_py(
     let high = high_f32.as_slice()?;
     let low = low_f32.as_slice()?;
     let close = close_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaWad::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.wad_batch_dev(high, low, close)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -1559,7 +1559,7 @@ pub fn wad_cuda_many_series_one_param_dev_py(
     let high = high_tm_f32.as_slice()?;
     let low = low_tm_f32.as_slice()?;
     let close = close_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaWad::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.wad_many_series_one_param_time_major_dev(high, low, close, cols, rows)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -1586,7 +1586,7 @@ pub fn wad_py<'py>(
     let input = WadInput::from_slices(high_slice, low_slice, close_slice);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| wad_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| wad_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1639,7 +1639,7 @@ pub fn wad_batch_py<'py>(
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| {
+    py.detach(|| {
         wad_batch_inner_into(high_slice, low_slice, close_slice, kern, true, out_slice)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;

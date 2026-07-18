@@ -1565,7 +1565,7 @@ pub fn adjustable_ma_alternating_extremities_py<'py>(
         },
     );
     let output = py
-        .allow_threads(|| adjustable_ma_alternating_extremities_with_kernel(&input, kern))
+        .detach(|| adjustable_ma_alternating_extremities_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     dict.set_item("ma", output.ma.into_pyarray(py))?;
@@ -1600,7 +1600,7 @@ pub fn adjustable_ma_alternating_extremities_batch_py<'py>(
     let close = close.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             adjustable_ma_alternating_extremities_batch_with_kernel(
                 high,
                 low,

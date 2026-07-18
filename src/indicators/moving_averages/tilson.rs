@@ -2465,7 +2465,7 @@ pub fn tilson_py<'py>(
     let tilson_in = TilsonInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| tilson_with_kernel(&tilson_in, kern).map(|o| o.values))
+        .detach(|| tilson_with_kernel(&tilson_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2529,7 +2529,7 @@ pub fn tilson_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2587,7 +2587,7 @@ pub fn tilson_cuda_batch_dev_py(
         volume_factor: volume_factor_range.unwrap_or((0.0, 0.0, 0.0)),
     };
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaTilson::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.tilson_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -2620,7 +2620,7 @@ pub fn tilson_cuda_many_series_one_param_dev_py(
         volume_factor: Some(volume_factor),
     };
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaTilson::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.tilson_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -2664,11 +2664,11 @@ impl DeviceArrayF32TilsonPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();
@@ -2738,7 +2738,7 @@ pub fn tilson_into_py<'py>(
     };
     let input = TilsonInput::from_slice(slice_in, params);
 
-    py.allow_threads(|| tilson_into_slice(slice_out, &input, kern))
+    py.detach(|| tilson_into_slice(slice_out, &input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(out)
 }

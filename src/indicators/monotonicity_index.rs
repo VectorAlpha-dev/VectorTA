@@ -1224,7 +1224,7 @@ pub fn monotonicity_index_py<'py>(
         },
     );
     let output = py
-        .allow_threads(|| monotonicity_index_with_kernel(&input, kernel))
+        .detach(|| monotonicity_index_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         output.index.into_pyarray(py),
@@ -1308,7 +1308,7 @@ pub fn monotonicity_index_batch_py<'py>(
     let upper_bound_slice = unsafe { upper_bound_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch = match kernel {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,

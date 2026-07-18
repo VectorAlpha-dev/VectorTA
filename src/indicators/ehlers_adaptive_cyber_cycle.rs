@@ -918,7 +918,7 @@ pub fn ehlers_adaptive_cyber_cycle_py<'py>(
     );
     let kernel = validate_kernel(kernel, false)?;
     let out = py
-        .allow_threads(|| ehlers_adaptive_cyber_cycle_with_kernel(&input, kernel))
+        .detach(|| ehlers_adaptive_cyber_cycle_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     dict.set_item("cycle", out.cycle.into_pyarray(py))?;
@@ -974,7 +974,7 @@ pub fn ehlers_adaptive_cyber_cycle_batch_py<'py>(
     let trigger_slice = unsafe { out_trigger.as_slice_mut()? };
     let kernel = validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch_kernel = match kernel {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

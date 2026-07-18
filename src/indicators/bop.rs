@@ -1547,7 +1547,7 @@ pub fn bop_py<'py>(
     let input = BopInput::from_slices(open_slice, high_slice, low_slice, close_slice, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| bop_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| bop_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1625,11 +1625,11 @@ impl BopDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1693,7 +1693,7 @@ pub fn bop_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    let result = py.allow_threads(|| {
+    let result = py.detach(|| {
         bop_batch_inner_into(
             open_slice,
             high_slice,
@@ -1915,7 +1915,7 @@ pub fn bop_cuda_batch_dev_py(
     {
         return Err(PyValueError::new_err("empty or mismatched OHLC lengths"));
     }
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaBop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -1966,7 +1966,7 @@ pub fn bop_cuda_many_series_one_param_dev_py(
     {
         return Err(PyValueError::new_err("time-major input length mismatch"));
     }
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaBop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();

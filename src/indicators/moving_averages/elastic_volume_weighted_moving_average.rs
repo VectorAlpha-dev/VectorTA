@@ -1006,7 +1006,7 @@ pub fn elastic_volume_weighted_moving_average_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| elastic_volume_weighted_moving_average_with_kernel(&input, kernel))
+        .detach(|| elastic_volume_weighted_moving_average_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(out.values.into_pyarray(py))
 }
@@ -1078,7 +1078,7 @@ pub fn elastic_volume_weighted_moving_average_batch_py<'py>(
         other => other,
     };
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             elastic_volume_weighted_moving_average_batch_inner_into(
                 prices,
                 volumes,

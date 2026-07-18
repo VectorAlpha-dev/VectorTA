@@ -1545,7 +1545,7 @@ pub fn eri_py<'py>(
     let input = EriInput::from_slices(high_slice, low_slice, source_slice, params);
 
     let result = py
-        .allow_threads(|| eri_with_kernel(&input, kern))
+        .detach(|| eri_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((result.bull.into_pyarray(py), result.bear.into_pyarray(py)))
@@ -1651,7 +1651,7 @@ pub fn eri_batch_py<'py>(
     };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             eri_batch_inner_into(
                 high_slice,
                 low_slice,
@@ -1941,7 +1941,7 @@ pub fn eri_cuda_batch_dev_py(
         period: period_range,
         ma_type: ma_type.to_string(),
     };
-    let (bull, bear) = py.allow_threads(|| {
+    let (bull, bear) = py.detach(|| {
         let cuda = CudaEri::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.eri_batch_dev(h, l, s, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -1973,7 +1973,7 @@ pub fn eri_cuda_many_series_one_param_dev_py(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let s = source_tm_f32.as_slice()?;
-    let (bull, bear) = py.allow_threads(|| {
+    let (bull, bear) = py.detach(|| {
         let cuda = CudaEri::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.eri_many_series_one_param_time_major_dev(h, l, s, cols, rows, period, ma_type)
             .map_err(|e| PyValueError::new_err(e.to_string()))

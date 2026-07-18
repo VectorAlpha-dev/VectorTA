@@ -1453,7 +1453,7 @@ pub fn kaufmanstop_py<'py>(
     };
     let input = KaufmanstopInput::from_slices(high_slice, low_slice, params);
 
-    let result = py.allow_threads(|| kaufmanstop_with_kernel(&input, kern));
+    let result = py.detach(|| kaufmanstop_with_kernel(&input, kern));
 
     match result {
         Ok(output) => Ok(output.values.into_pyarray(py)),
@@ -1531,7 +1531,7 @@ pub fn kaufmanstop_batch_py<'py>(
 
     let kern = validate_kernel(kernel, true)?;
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let simd = match match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1615,7 +1615,7 @@ pub fn kaufmanstop_cuda_batch_dev_py(
         direction: (direction.to_string(), direction.to_string(), 0.0),
         ma_type: (ma_type.to_string(), ma_type.to_string(), 0.0),
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda =
             CudaKaufmanstop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (dev, _combos) = cuda
@@ -1658,7 +1658,7 @@ pub fn kaufmanstop_cuda_many_series_one_param_dev_py(
         direction: Some(direction.to_string()),
         ma_type: Some(ma_type.to_string()),
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda =
             CudaKaufmanstop::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.kaufmanstop_many_series_one_param_time_major_dev(h, l, cols, rows, &params)

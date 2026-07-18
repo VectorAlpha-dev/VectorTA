@@ -3410,7 +3410,7 @@ pub fn cksp_py<'py>(
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let result = py
-        .allow_threads(|| unsafe {
+        .detach(|| unsafe {
             match chosen {
                 Kernel::Scalar | Kernel::ScalarBatch => {
                     cksp_scalar(high_slice, low_slice, close_slice, p, x, q, first_valid_idx)
@@ -3626,7 +3626,7 @@ pub fn cksp_batch_py<'py>(
     let short_slice = unsafe { short_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -3708,7 +3708,7 @@ pub fn cksp_cuda_batch_dev_py<'py>(
         x: (x_range.0 as f64, x_range.1 as f64, x_range.2 as f64),
         q: q_range,
     };
-    let (pair, combos) = py.allow_threads(|| {
+    let (pair, combos) = py.detach(|| {
         let cuda = CudaCksp::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.cksp_batch_dev(hs, ls, cs, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -3782,7 +3782,7 @@ pub fn cksp_cuda_many_series_one_param_dev_py<'py>(
         x: Some(x),
         q: Some(q),
     };
-    let pair = py.allow_threads(|| {
+    let pair = py.detach(|| {
         let cuda = CudaCksp::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.cksp_many_series_one_param_time_major_dev(hflat, lflat, cflat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))

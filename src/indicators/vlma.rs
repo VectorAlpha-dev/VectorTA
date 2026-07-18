@@ -1661,7 +1661,7 @@ pub fn vlma_py<'py>(
     let input = VlmaInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| vlma_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| vlma_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1742,7 +1742,7 @@ pub fn vlma_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1817,7 +1817,7 @@ pub fn vlma_cuda_batch_dev_py(
         devtype: devtype_range,
     };
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let mut cuda =
             CudaVlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.vlma_batch_dev(slice_in, &sweep)
@@ -1850,7 +1850,7 @@ pub fn vlma_cuda_many_series_one_param_dev_py(
         matype: Some(matype.to_string()),
         devtype: Some(devtype),
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let mut cuda =
             CudaVlma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.vlma_many_series_one_param_time_major_dev(flat, cols, rows, &params)

@@ -2689,7 +2689,7 @@ pub fn bollinger_bands_py<'py>(
         let u = unsafe { out_u.as_slice_mut()? };
         let m = unsafe { out_m.as_slice_mut()? };
         let l = unsafe { out_l.as_slice_mut()? };
-        py.allow_threads(|| bollinger_bands_into_slices(u, m, l, &input, kern))
+        py.detach(|| bollinger_bands_into_slices(u, m, l, &input, kern))
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
     }
     Ok((out_u, out_m, out_l))
@@ -2763,7 +2763,7 @@ pub fn bollinger_bands_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos_clone = py
-        .allow_threads(
+        .detach(
             || -> Result<Vec<BollingerBandsParams>, BollingerBandsError> {
                 let kernel = match kern {
                     Kernel::Auto => detect_best_batch_kernel(),
@@ -3291,11 +3291,11 @@ impl BollingerDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -3367,7 +3367,7 @@ pub fn bollinger_bands_cuda_batch_dev_py(
         matype: ("sma".to_string(), "sma".to_string(), 0),
         devtype: (0, 0, 0),
     };
-    let (up, mid, lo) = py.allow_threads(|| {
+    let (up, mid, lo) = py.detach(|| {
         let cuda =
             CudaBollingerBands::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.bollinger_bands_batch_dev(slice, &sweep)
@@ -3401,7 +3401,7 @@ pub fn bollinger_bands_cuda_many_series_one_param_dev_py(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let tm = prices_tm_f32.as_slice()?;
-    let (up, mid, lo) = py.allow_threads(|| {
+    let (up, mid, lo) = py.detach(|| {
         let cuda =
             CudaBollingerBands::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.bollinger_bands_many_series_one_param_time_major_dev(

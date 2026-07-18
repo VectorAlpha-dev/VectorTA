@@ -738,7 +738,7 @@ pub fn psychological_line_py<'py>(
         },
     );
     let output = py
-        .allow_threads(|| psychological_line_with_kernel(&input, kernel))
+        .detach(|| psychological_line_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(output.values.into_pyarray(py))
 }
@@ -791,7 +791,7 @@ pub fn psychological_line_batch_py<'py>(
     let out = unsafe { arr.as_slice_mut()? };
     let kernel = validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch_kernel = match kernel {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

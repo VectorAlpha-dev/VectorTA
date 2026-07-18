@@ -1094,7 +1094,7 @@ pub fn ehlers_autocorrelation_periodogram_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| ehlers_autocorrelation_periodogram_with_kernel(&input, kern))
+        .detach(|| ehlers_autocorrelation_periodogram_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.dominant_cycle.into_pyarray(py),
@@ -1174,7 +1174,7 @@ pub fn ehlers_autocorrelation_periodogram_batch_py<'py>(
     let pwr_slice = unsafe { pwr_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,

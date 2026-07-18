@@ -1168,11 +1168,11 @@ impl BandPassDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -3048,7 +3048,7 @@ pub fn bandpass_py<'py>(
     let inp = BandPassInput::from_slice(slice_in, params);
 
     let out = py
-        .allow_threads(|| bandpass_with_kernel(&inp, kern))
+        .detach(|| bandpass_with_kernel(&inp, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -3104,7 +3104,7 @@ pub fn bandpass_batch_py<'py>(
 
     let kern = validate_kernel(kernel, true)?;
     let output = py
-        .allow_threads(|| bandpass_batch_with_kernel(slice_in, &sweep, kern))
+        .detach(|| bandpass_batch_with_kernel(slice_in, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let rows = output.rows;
@@ -3172,7 +3172,7 @@ pub fn bandpass_cuda_batch_dev_py<'py>(
         period: period_range,
         bandwidth: bandwidth_range,
     };
-    let (outputs, combos, dev_id, ctx) = py.allow_threads(|| -> PyResult<_> {
+    let (outputs, combos, dev_id, ctx) = py.detach(|| -> PyResult<_> {
         let cuda =
             CudaBandpass::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
@@ -3270,7 +3270,7 @@ pub fn bandpass_cuda_many_series_one_param_dev_py<'py>(
         bandwidth: Some(bandwidth),
     };
 
-    let (outputs, dev_id, ctx) = py.allow_threads(|| -> PyResult<_> {
+    let (outputs, dev_id, ctx) = py.detach(|| -> PyResult<_> {
         let cuda =
             CudaBandpass::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();

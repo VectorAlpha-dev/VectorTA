@@ -1127,7 +1127,7 @@ pub fn kairi_relative_index_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| kairi_relative_index_with_kernel(&input, kern))
+        .detach(|| kairi_relative_index_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(out.values.into_pyarray(py))
 }
@@ -1172,7 +1172,7 @@ pub fn kairi_relative_index_batch_py<'py>(
     let volume = volume.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             kairi_relative_index_batch_with_kernel(
                 source,
                 volume,

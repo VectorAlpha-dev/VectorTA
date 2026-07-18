@@ -1247,7 +1247,7 @@ pub fn intraday_momentum_index_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| intraday_momentum_index_with_kernel(&input, kern))
+        .detach(|| intraday_momentum_index_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.imi.into_pyarray(py),
@@ -1342,7 +1342,7 @@ pub fn intraday_momentum_index_batch_py<'py>(
     let signal_slice = unsafe { signal_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,

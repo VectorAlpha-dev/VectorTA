@@ -2036,7 +2036,7 @@ pub fn possible_rsi_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| possible_rsi_with_kernel(&input, kern))
+        .detach(|| possible_rsi_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.value.into_pyarray(py),
@@ -2139,7 +2139,7 @@ pub fn possible_rsi_batch_py<'py>(
     let data = data.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             possible_rsi_batch_with_kernel(
                 data,
                 &PossibleRsiBatchRange {

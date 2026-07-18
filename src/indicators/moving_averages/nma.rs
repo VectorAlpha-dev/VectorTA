@@ -1959,7 +1959,7 @@ pub fn nma_py<'py>(
     let nma_in = NmaInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| nma_with_kernel(&nma_in, kern).map(|o| o.values))
+        .detach(|| nma_with_kernel(&nma_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2019,7 +2019,7 @@ pub fn nma_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2071,7 +2071,7 @@ pub fn nma_cuda_batch_dev_py<'py>(
         period: period_range,
     };
 
-    let (inner, combos, ctx_arc, dev_id) = py.allow_threads(|| {
+    let (inner, combos, ctx_arc, dev_id) = py.detach(|| {
         let cuda = CudaNma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (dev, combos) = cuda
             .nma_batch_dev(slice_in, &sweep)
@@ -2118,7 +2118,7 @@ pub fn nma_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let (inner, ctx_arc, dev_id) = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id) = py.detach(|| {
         let cuda = CudaNma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev = cuda
             .nma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
@@ -2172,11 +2172,11 @@ impl NmaDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();

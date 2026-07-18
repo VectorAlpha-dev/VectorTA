@@ -922,7 +922,7 @@ pub fn absolute_strength_index_oscillator_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| absolute_strength_index_oscillator_with_kernel(&input, kern))
+        .detach(|| absolute_strength_index_oscillator_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.oscillator.into_pyarray(py),
@@ -994,7 +994,7 @@ pub fn absolute_strength_index_oscillator_batch_py<'py>(
     let histogram_slice = unsafe { histogram_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,

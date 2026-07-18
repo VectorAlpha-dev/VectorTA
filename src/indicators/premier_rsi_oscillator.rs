@@ -843,7 +843,7 @@ pub fn premier_rsi_oscillator_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| premier_rsi_oscillator_with_kernel(&input, kern))
+        .detach(|| premier_rsi_oscillator_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(out.values.into_pyarray(py))
 }
@@ -909,7 +909,7 @@ pub fn premier_rsi_oscillator_batch_py<'py>(
     let values_slice = unsafe { values_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,

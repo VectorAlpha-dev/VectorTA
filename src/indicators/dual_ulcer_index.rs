@@ -1360,7 +1360,7 @@ pub fn dual_ulcer_index_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| dual_ulcer_index_with_kernel(&input, kern))
+        .detach(|| dual_ulcer_index_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.long_ulcer.into_pyarray(py),
@@ -1415,7 +1415,7 @@ pub fn dual_ulcer_index_batch_py<'py>(
     };
 
     let output = py
-        .allow_threads(|| dual_ulcer_index_batch_with_kernel(slice_in, &sweep, kern))
+        .detach(|| dual_ulcer_index_batch_with_kernel(slice_in, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let rows = output.rows;

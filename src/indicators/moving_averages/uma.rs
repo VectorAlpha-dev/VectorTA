@@ -1764,7 +1764,7 @@ pub fn uma_py<'py>(
     let input = UmaInput::from_slice(slice_in, vol_slice, params);
 
     let out: Vec<f64> = py
-        .allow_threads(|| uma_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| uma_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(out.into_pyarray(py))
 }
@@ -1840,7 +1840,7 @@ pub fn uma_batch_py<'py>(
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| uma_batch_inner_into(slice_in, vol_slice, &sweep, kern, false, out_slice))
+    py.detach(|| uma_batch_inner_into(slice_in, vol_slice, &sweep, kern, false, out_slice))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -1944,11 +1944,11 @@ impl UmaDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2011,7 +2011,7 @@ pub fn uma_cuda_batch_dev_py(
     };
 
     let (inner, ctx, dev_id) = py
-        .allow_threads(
+        .detach(
             || -> Result<_, crate::cuda::moving_averages::uma_wrapper::CudaUmaError> {
                 let cuda = CudaUma::new(device_id)?;
                 let out = cuda.uma_batch_dev(slice_in, volume_slice, &sweep)?;
@@ -2074,7 +2074,7 @@ pub fn uma_cuda_many_series_one_param_dev_py(
     };
 
     let (inner, ctx, dev_id) = py
-        .allow_threads(
+        .detach(
             || -> Result<_, crate::cuda::moving_averages::uma_wrapper::CudaUmaError> {
                 let cuda = CudaUma::new(device_id)?;
                 let out = cuda.uma_many_series_one_param_time_major_dev(
@@ -3023,7 +3023,7 @@ mod tests {
             .unwrap();
             let v = d.get_item("values").unwrap().expect("values missing");
 
-            assert!(v.downcast::<numpy::PyArray2<f64>>().is_ok());
+            assert!(v.cast::<numpy::PyArray2<f64>>().is_ok());
         });
     }
 

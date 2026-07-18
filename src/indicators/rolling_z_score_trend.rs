@@ -934,7 +934,7 @@ pub fn rolling_z_score_trend_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| rolling_z_score_trend_with_kernel(&input, kern))
+        .detach(|| rolling_z_score_trend_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((out.zscore.into_pyarray(py), out.momentum.into_pyarray(py)))
 }
@@ -979,7 +979,7 @@ pub fn rolling_z_score_trend_batch_py<'py>(
     let data = data.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             rolling_z_score_trend_batch_with_kernel(
                 data,
                 &RollingZScoreTrendBatchRange {

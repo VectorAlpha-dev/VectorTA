@@ -2733,11 +2733,11 @@ impl KeltnerDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use cust::memory::DeviceBuffer;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();
@@ -2845,7 +2845,7 @@ pub fn keltner_py<'py>(
     let input = KeltnerInput::from_slice(h, l, c, s, params);
     let kern = validate_kernel(kernel, false)?;
 
-    py.allow_threads(|| keltner_into_slice(up, mid, lowo, &input, kern))
+    py.detach(|| keltner_into_slice(up, mid, lowo, &input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((up_arr, mid_arr, low_arr))
@@ -2903,7 +2903,7 @@ pub fn keltner_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let out = py
-        .allow_threads(|| {
+        .detach(|| {
             keltner_batch_par_slice(
                 h,
                 l,
@@ -2985,7 +2985,7 @@ pub fn keltner_cuda_batch_dev_py<'py>(
         period: period_range,
         multiplier: multiplier_range,
     };
-    let (up, mid, low, rows, cols, ctx, dev_id) = py.allow_threads(|| {
+    let (up, mid, low, rows, cols, ctx, dev_id) = py.detach(|| {
         let cuda = CudaKeltner::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -3084,7 +3084,7 @@ pub fn keltner_cuda_many_series_one_param_dev_py(
     {
         return Err(PyValueError::new_err("time-major input length mismatch"));
     }
-    let (up, mid, low, ctx, dev_id) = py.allow_threads(|| {
+    let (up, mid, low, ctx, dev_id) = py.detach(|| {
         let cuda = CudaKeltner::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();

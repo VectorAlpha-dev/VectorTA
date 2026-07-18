@@ -2749,7 +2749,7 @@ mod python_bindings {
         let sm = unsafe { out_m.as_slice_mut()? };
         let sf = unsafe { out_f.as_slice_mut()? };
 
-        py.allow_threads(|| mama_into_slice(sm, sf, &input, kern))
+        py.detach(|| mama_into_slice(sm, sf, &input, kern))
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         Ok((out_m, out_f))
@@ -2786,7 +2786,7 @@ mod python_bindings {
         let kern = validate_kernel(kernel, true)?;
 
         let combos = py
-            .allow_threads(|| -> Result<Vec<MamaParams>, MamaError> {
+            .detach(|| -> Result<Vec<MamaParams>, MamaError> {
                 let simd = match kern {
                     Kernel::Auto | Kernel::ScalarBatch => Kernel::Scalar,
                     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -2844,7 +2844,7 @@ mod python_bindings {
             slow_limit: slow_limit_range,
         };
 
-        let (pair, ctx, dev_id) = py.allow_threads(|| {
+        let (pair, ctx, dev_id) = py.detach(|| {
             let cuda =
                 CudaMama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
             let ctx = cuda.context_arc();
@@ -2901,7 +2901,7 @@ mod python_bindings {
         let fast = fast_limit as f32;
         let slow = slow_limit as f32;
 
-        let (pair, ctx, dev_id) = py.allow_threads(|| {
+        let (pair, ctx, dev_id) = py.detach(|| {
             let cuda =
                 CudaMama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
             let ctx = cuda.context_arc();
@@ -3245,7 +3245,7 @@ impl DeviceArrayF32Py {
         max_version: Option<&pyo3::types::PyAny>,
         dl_device: Option<&pyo3::types::PyAny>,
         copy: Option<&pyo3::types::PyAny>,
-    ) -> pyo3::PyResult<pyo3::PyObject> {
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
         use std::os::raw::c_char;
 
         let buf = self.buf.take().ok_or_else(|| {
@@ -3451,7 +3451,7 @@ impl DeviceArrayF32Py {
                     "failed to create DLPack capsule",
                 ));
             }
-            Ok(unsafe { pyo3::PyObject::from_owned_ptr(py, cap) })
+            Ok(unsafe { pyo3::Py::<pyo3::PyAny>::from_owned_ptr(py, cap) })
         } else {
             let mut holder = Box::new(HolderLegacy {
                 managed: DLManagedTensor {
@@ -3498,7 +3498,7 @@ impl DeviceArrayF32Py {
                     "failed to create DLPack capsule",
                 ));
             }
-            Ok(unsafe { pyo3::PyObject::from_owned_ptr(py, cap) })
+            Ok(unsafe { pyo3::Py::<pyo3::PyAny>::from_owned_ptr(py, cap) })
         }
     }
 
@@ -3506,11 +3506,11 @@ impl DeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: pyo3::Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> pyo3::PyResult<pyo3::PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();

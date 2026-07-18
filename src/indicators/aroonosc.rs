@@ -1924,7 +1924,7 @@ pub fn aroon_osc_py<'py>(
     let aroon_in = AroonOscInput::from_slices_hl(high_slice, low_slice, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| aroon_osc_with_kernel(&aroon_in, kern).map(|o| o.values))
+        .detach(|| aroon_osc_with_kernel(&aroon_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1992,7 +1992,7 @@ pub fn aroon_osc_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| -> Result<Vec<AroonOscParams>, AroonOscError> {
+        .detach(|| -> Result<Vec<AroonOscParams>, AroonOscError> {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2104,11 +2104,11 @@ impl AroonOscDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();
@@ -2180,7 +2180,7 @@ pub fn aroonosc_cuda_batch_dev_py(
     let sweep = AroonOscBatchRange {
         length: length_range,
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda =
             CudaAroonOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.aroonosc_batch_dev(high, low, &sweep)
@@ -2222,7 +2222,7 @@ pub fn aroonosc_cuda_many_series_one_param_dev_py(
     let cols = shape_h[1];
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda =
             CudaAroonOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.aroonosc_many_series_one_param_time_major_dev(h, l, cols, rows, length)

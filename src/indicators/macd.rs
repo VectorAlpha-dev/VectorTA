@@ -1888,7 +1888,7 @@ pub fn macd_py<'py>(
     let input = MacdInput::from_slice(slice_in, params);
 
     let result = py
-        .allow_threads(|| macd_with_kernel(&input, kern))
+        .detach(|| macd_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     macd_slice.copy_from_slice(&result.macd);
@@ -2014,7 +2014,7 @@ pub fn macd_batch_py<'py>(
     let hist_slice = unsafe { hist_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2115,11 +2115,11 @@ impl DeviceArrayF32MacdPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2208,7 +2208,7 @@ pub fn macd_cuda_batch_dev_py<'py>(
         ma_type: (ma_type.to_string(), ma_type.to_string(), String::new()),
     };
 
-    let (outputs, combos) = py.allow_threads(|| {
+    let (outputs, combos) = py.detach(|| {
         let cuda = CudaMacd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.macd_batch_dev(slice, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -2283,7 +2283,7 @@ pub fn macd_cuda_many_series_one_param_dev_py<'py>(
         signal_period: Some(signal_period),
         ma_type: Some(ma_type.to_string()),
     };
-    let DeviceMacdTriplet { macd, signal, hist } = py.allow_threads(|| {
+    let DeviceMacdTriplet { macd, signal, hist } = py.detach(|| {
         let cuda = CudaMacd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.macd_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))

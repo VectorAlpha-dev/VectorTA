@@ -1455,7 +1455,7 @@ pub fn evasive_supertrend_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| evasive_supertrend_with_kernel(&input, kern))
+        .detach(|| evasive_supertrend_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.band.into_pyarray(py),
@@ -1489,7 +1489,7 @@ pub fn evasive_supertrend_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             evasive_supertrend_batch_with_kernel(
                 open,
                 high,

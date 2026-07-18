@@ -1047,7 +1047,7 @@ pub fn sgf_py<'py>(
         },
     );
     let values = py
-        .allow_threads(|| sgf_with_kernel(&input, kernel).map(|out| out.values))
+        .detach(|| sgf_with_kernel(&input, kernel).map(|out| out.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(values.into_pyarray(py))
 }
@@ -1095,7 +1095,7 @@ pub fn sgf_batch_py<'py>(
         poly_order: poly_order_range,
     };
     let out = py
-        .allow_threads(|| sgf_batch_with_kernel(slice, &sweep, kernel))
+        .detach(|| sgf_batch_with_kernel(slice, &sweep, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -1148,7 +1148,7 @@ pub fn sgf_cuda_batch_dev_py(
         poly_order: poly_order_range,
     };
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaSgf::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -1186,7 +1186,7 @@ pub fn sgf_cuda_many_series_one_param_dev_py(
     let cols = data_tm_f32.shape()[1];
     let rows = data_tm_f32.shape()[0];
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaSgf::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -1240,11 +1240,11 @@ impl DeviceArrayF32SgfPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         self.inner
             .take()
             .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?

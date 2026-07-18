@@ -997,7 +997,7 @@ pub fn jsa_py<'py>(
             period: Some(period),
         };
         let input = JsaInput::from_slice(slice_in, params);
-        py.allow_threads(|| jsa_with_kernel_into(&input, kern, slice_out))
+        py.detach(|| jsa_with_kernel_into(&input, kern, slice_out))
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(out_arr)
     } else {
@@ -1008,7 +1008,7 @@ pub fn jsa_py<'py>(
         };
         let input = JsaInput::from_slice(slice_in, params);
         let mut buf = vec![f64::NAN; slice_in.len()];
-        py.allow_threads(|| jsa_with_kernel_into(&input, kern, &mut buf))
+        py.detach(|| jsa_with_kernel_into(&input, kern, &mut buf))
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(PyArray1::from_vec(py, buf))
     }
@@ -1046,7 +1046,7 @@ pub fn jsa_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let (combos, _, _) = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1098,7 +1098,7 @@ pub fn jsa_cuda_batch_dev_py(
 
     use crate::cuda::moving_averages::CudaJsaError;
     let handle: JsaDeviceHandle = py
-        .allow_threads(|| -> Result<_, CudaJsaError> {
+        .detach(|| -> Result<_, CudaJsaError> {
             let cuda = CudaJsa::new(device_id)?;
             cuda.jsa_batch_dev_handle(slice_in, &sweep)
         })
@@ -1136,7 +1136,7 @@ pub fn jsa_cuda_many_series_one_param_dev_py(
 
     use crate::cuda::moving_averages::CudaJsaError;
     let handle: JsaDeviceHandle = py
-        .allow_threads(|| -> Result<_, CudaJsaError> {
+        .detach(|| -> Result<_, CudaJsaError> {
             let cuda = CudaJsa::new(device_id)?;
             cuda.jsa_many_series_one_param_time_major_dev_handle(
                 flat, num_series, series_len, &params,
@@ -1416,11 +1416,11 @@ impl JsaDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();

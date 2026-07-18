@@ -1981,7 +1981,7 @@ pub fn lrsi_py<'py>(
     let inp = LrsiInput::from_slices(h, l, params);
 
     let vec_out: Vec<f64> = py
-        .allow_threads(|| lrsi_with_kernel(&inp, kern).map(|o| o.values))
+        .detach(|| lrsi_with_kernel(&inp, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(vec_out.into_pyarray(py))
 }
@@ -2032,7 +2032,7 @@ pub fn lrsi_batch_py<'py>(
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| {
+    py.detach(|| {
         let resolved = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
@@ -2081,7 +2081,7 @@ pub fn lrsi_cuda_batch_dev_py(
         return Err(PyValueError::new_err("mismatched input lengths"));
     }
     let sweep = LrsiBatchRange { alpha: alpha_range };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let mut cuda =
             CudaLrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.lrsi_batch_dev(h, l, &sweep)
@@ -2114,7 +2114,7 @@ pub fn lrsi_cuda_many_series_one_param_dev_py(
     if low_tm_f32.shape() != [rows, cols] {
         return Err(PyValueError::new_err("mismatched matrix shapes"));
     }
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let mut cuda =
             CudaLrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.lrsi_many_series_one_param_time_major_dev(h, l, cols, rows, alpha)

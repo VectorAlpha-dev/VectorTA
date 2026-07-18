@@ -75,11 +75,11 @@ impl DeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<pyo3::PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<pyo3::Py<pyo3::PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();
@@ -1761,7 +1761,7 @@ pub fn zlema_py<'py>(
     let zlema_in = ZlemaInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| zlema_with_kernel(&zlema_in, kern).map(|o| o.values))
+        .detach(|| zlema_with_kernel(&zlema_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1818,7 +1818,7 @@ pub fn zlema_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| zlema_batch_inner_into(slice_in, &sweep, kern, true, slice_out))
+        .detach(|| zlema_batch_inner_into(slice_in, &sweep, kern, true, slice_out))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -1859,7 +1859,7 @@ pub fn zlema_cuda_batch_dev_py<'py>(
     };
 
     let (inner, combos, ctx_arc, dev_id, stream_handle) = py
-        .allow_threads(
+        .detach(
             || -> Result<_, crate::cuda::moving_averages::zlema_wrapper::CudaZlemaError> {
                 let cuda = CudaZlema::new(device_id)?;
                 let (dev, combos) = cuda.zlema_batch_dev(slice_in, &sweep)?;
@@ -1910,7 +1910,7 @@ pub fn zlema_cuda_many_series_one_param_dev_py(
     let cols = data_tm_f32.shape()[1];
 
     let (inner, ctx_arc, dev_id, stream_handle) = py
-        .allow_threads(
+        .detach(
             || -> Result<_, crate::cuda::moving_averages::zlema_wrapper::CudaZlemaError> {
                 let cuda = CudaZlema::new(device_id)?;
                 let params = ZlemaParams {

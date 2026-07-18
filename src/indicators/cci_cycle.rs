@@ -1562,7 +1562,7 @@ pub fn cci_cycle_py<'py>(
     let input = CciCycleInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| cci_cycle_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| cci_cycle_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1650,7 +1650,7 @@ pub fn cci_cycle_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch_k = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
@@ -1834,7 +1834,7 @@ pub fn cci_cycle_cuda_batch_dev_py(
         length: length_range,
         factor: factor_range,
     };
-    let (inner, dev_id, ctx) = py.allow_threads(|| {
+    let (inner, dev_id, ctx) = py.detach(|| {
         let cuda =
             CudaCciCycle::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
@@ -1875,7 +1875,7 @@ pub fn cci_cycle_cuda_many_series_one_param_dev_py(
         length: Some(length),
         factor: Some(factor),
     };
-    let (inner, dev_id, ctx) = py.allow_threads(|| {
+    let (inner, dev_id, ctx) = py.detach(|| {
         let cuda =
             CudaCciCycle::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
@@ -1939,11 +1939,11 @@ impl CciCycleDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {

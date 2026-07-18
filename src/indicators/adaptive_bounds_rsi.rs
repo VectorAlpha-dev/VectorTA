@@ -1269,7 +1269,7 @@ pub fn adaptive_bounds_rsi_py<'py>(
         },
     );
     let output = py
-        .allow_threads(|| adaptive_bounds_rsi_with_kernel(&input, kernel))
+        .detach(|| adaptive_bounds_rsi_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let dict = PyDict::new(py);
     dict.set_item("rsi", output.rsi.into_pyarray(py))?;
@@ -1298,7 +1298,7 @@ pub fn adaptive_bounds_rsi_batch_py<'py>(
     let data = data.as_slice()?;
     let kernel = validate_kernel(kernel, true)?;
     let output = py
-        .allow_threads(|| {
+        .detach(|| {
             adaptive_bounds_rsi_batch_with_kernel(
                 data,
                 &AdaptiveBoundsRsiBatchRange {

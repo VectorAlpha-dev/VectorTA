@@ -1106,7 +1106,7 @@ pub fn pma_py<'py>(
     let input = PmaInput::from_slice(slice_in, PmaParams {});
 
     let out = py
-        .allow_threads(|| pma_with_kernel(&input, kern))
+        .detach(|| pma_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((out.predict.into_pyarray(py), out.trigger.into_pyarray(py)))
@@ -1152,7 +1152,7 @@ pub fn pma_batch_py<'py>(
     let values_arr = unsafe { PyArray1::<f64>::new(py, [size], false) };
     let values_slice = unsafe { values_arr.as_slice_mut()? };
 
-    py.allow_threads(|| -> PyResult<()> {
+    py.detach(|| -> PyResult<()> {
         let first =
             pma_first_valid_idx(slice_in).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
@@ -1203,7 +1203,7 @@ pub fn pma_cuda_batch_dev_py(
     }
     let slice_in = data_f32.as_slice()?;
     let sweep = PmaBatchRange::default();
-    let pair = py.allow_threads(|| {
+    let pair = py.detach(|| {
         let cuda = CudaPma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.pma_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -1231,7 +1231,7 @@ pub fn pma_cuda_many_series_one_param_dev_py(
     let rows = shape[0];
     let cols = shape[1];
     let flat = data_tm_f32.as_slice()?;
-    let pair = py.allow_threads(|| {
+    let pair = py.detach(|| {
         let cuda = CudaPma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.pma_many_series_one_param_time_major_dev(flat, cols, rows)
             .map_err(|e| PyValueError::new_err(e.to_string()))

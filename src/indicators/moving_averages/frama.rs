@@ -2628,11 +2628,11 @@ impl DeviceArrayF32FramaPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();
@@ -2757,7 +2757,7 @@ impl FramaCudaBatchPlanPy {
         let total = rows
             .checked_mul(cols)
             .ok_or_else(|| PyValueError::new_err("frama CUDA plan rows*cols overflow"))?;
-        let values = py.allow_threads(|| -> PyResult<Vec<f32>> {
+        let values = py.detach(|| -> PyResult<Vec<f32>> {
             let d_high =
                 DeviceBuffer::from_slice(high).map_err(|e| PyValueError::new_err(e.to_string()))?;
             let d_low =
@@ -2805,7 +2805,7 @@ pub fn frama_cuda_batch_plan_create_py(
         sc: sc_range,
         fc: fc_range,
     };
-    let (cuda, plan, ctx, dev_id) = py.allow_threads(|| {
+    let (cuda, plan, ctx, dev_id) = py.detach(|| {
         let cuda = CudaFrama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.ctx();
         let dev_id = cuda.device_id();
@@ -2848,7 +2848,7 @@ pub fn frama_py<'py>(
     let kern = validate_kernel(kernel, false)?;
 
     let out: Vec<f64> = py
-        .allow_threads(|| frama_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| frama_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(out.into_pyarray(py))
@@ -2888,7 +2888,7 @@ pub fn frama_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos_result = py
-        .allow_threads(|| -> Result<Vec<FramaParams>, FramaError> {
+        .detach(|| -> Result<Vec<FramaParams>, FramaError> {
             let kernel = match kern {
                 Kernel::Auto => match detect_best_batch_kernel() {
                     Kernel::Avx512Batch => Kernel::Avx2Batch,
@@ -2990,7 +2990,7 @@ pub fn frama_cuda_batch_dev_py<'py>(
         fc: fc_range,
     };
 
-    let (inner, combos, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, combos, ctx, dev_id) = py.detach(|| {
         let cuda = CudaFrama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.ctx();
         let dev_id = cuda.device_id();
@@ -3051,7 +3051,7 @@ pub fn frama_cuda_many_series_one_param_dev_py(
         fc: Some(fc),
     };
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaFrama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.ctx();
         let dev_id = cuda.device_id();

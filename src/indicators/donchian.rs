@@ -2291,7 +2291,7 @@ pub fn donchian_py<'py>(
     let input = DonchianInput::from_slices(high_slice, low_slice, params);
 
     let (upper_vec, middle_vec, lower_vec) = py
-        .allow_threads(|| {
+        .detach(|| {
             donchian_with_kernel(&input, kern).map(|o| (o.upperband, o.middleband, o.lowerband))
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2471,7 +2471,7 @@ pub fn donchian_batch_py<'py>(
     let lower_slice = unsafe { lower_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2823,11 +2823,11 @@ impl DeviceArrayF32DonchPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         if copy.as_ref().and_then(|c| c.extract::<bool>(py).ok()) == Some(true) {
             return Err(PyValueError::new_err(
                 "copy=True is not supported for donchian CUDA buffers",
@@ -2879,7 +2879,7 @@ pub fn donchian_cuda_batch_dev_py<'py>(
     let sweep = DonchianBatchRange {
         period: period_range,
     };
-    let (triplet, combos) = py.allow_threads(|| {
+    let (triplet, combos) = py.detach(|| {
         let cuda =
             CudaDonchian::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.donchian_batch_dev(h, l, &sweep)
@@ -2953,7 +2953,7 @@ pub fn donchian_cuda_many_series_one_param_dev_py<'py>(
     let params = DonchianParams {
         period: Some(period),
     };
-    let triplet = py.allow_threads(|| {
+    let triplet = py.detach(|| {
         let cuda =
             CudaDonchian::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.donchian_many_series_one_param_time_major_dev(high_tm, low_tm, cols, rows, &params)

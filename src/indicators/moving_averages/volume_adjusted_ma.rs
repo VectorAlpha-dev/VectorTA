@@ -1717,7 +1717,7 @@ pub fn volume_adjusted_ma_py<'py>(
     let input = VolumeAdjustedMaInput::from_slices(slice_in, volume_in, params);
 
     let result = py
-        .allow_threads(|| VolumeAdjustedMa_with_kernel(&input, kern))
+        .detach(|| VolumeAdjustedMa_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result.values.into_pyarray(py))
@@ -1791,7 +1791,7 @@ pub fn volume_adjusted_ma_batch_py<'py>(
         _ => unreachable!(),
     };
 
-    py.allow_threads(|| VolumeAdjustedMa_batch_inner_into(d, v, &combos, first, simd, &mut buf))
+    py.detach(|| VolumeAdjustedMa_batch_inner_into(d, v, &combos, first, simd, &mut buf))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -1866,7 +1866,7 @@ pub fn volume_adjusted_ma_cuda_batch_dev_py(
         strict,
     };
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaVolumeAdjustedMa::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -1921,7 +1921,7 @@ pub fn volume_adjusted_ma_cuda_many_series_one_param_dev_py(
         sample_period: Some(sample_period),
     };
 
-    let (inner, ctx, dev_id) = py.allow_threads(|| {
+    let (inner, ctx, dev_id) = py.detach(|| {
         let cuda = CudaVolumeAdjustedMa::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();

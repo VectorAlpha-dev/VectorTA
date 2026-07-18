@@ -1239,7 +1239,7 @@ pub fn impulse_macd_py<'py>(
     );
     let kernel = validate_kernel(kernel, false)?;
     let out = py
-        .allow_threads(|| impulse_macd_with_kernel(&input, kernel))
+        .detach(|| impulse_macd_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.impulse_macd.into_pyarray(py),
@@ -1307,7 +1307,7 @@ pub fn impulse_macd_batch_py<'py>(
     let out_signal = unsafe { arr_signal.as_slice_mut()? };
     let kernel = validate_kernel(kernel, true)?;
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let batch_kernel = match kernel {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,

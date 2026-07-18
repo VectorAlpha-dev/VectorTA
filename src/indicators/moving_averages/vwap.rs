@@ -2176,7 +2176,7 @@ pub fn vwap_py<'py>(
     let vwap_in = VwapInput::from_slice(ts_slice, vol_slice, price_slice, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| vwap_with_kernel(&vwap_in, kern).map(|o| o.values))
+        .detach(|| vwap_with_kernel(&vwap_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2239,7 +2239,7 @@ pub fn vwap_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2309,7 +2309,7 @@ pub fn vwap_cuda_batch_dev_py(
     };
 
     let (inner, dev) = py
-        .allow_threads(
+        .detach(
             || -> Result<_, crate::cuda::moving_averages::vwap_wrapper::CudaVwapError> {
                 let cuda = CudaVwap::new(device_id)?;
                 let arr =
@@ -2362,7 +2362,7 @@ pub fn vwap_cuda_many_series_one_param_dev_py(
     let volumes_flat = volumes_tm.as_slice()?;
 
     let (inner, dev) = py
-        .allow_threads(
+        .detach(
             || -> Result<_, crate::cuda::moving_averages::vwap_wrapper::CudaVwapError> {
                 let cuda = CudaVwap::new(device_id)?;
                 let arr = cuda.vwap_many_series_one_param_time_major_dev_retaining_ctx(
@@ -2429,11 +2429,11 @@ impl DeviceArrayF32VwapPy {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {

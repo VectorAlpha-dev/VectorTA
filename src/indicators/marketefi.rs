@@ -1111,7 +1111,7 @@ pub fn marketefi_py<'py>(
     );
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| marketefi_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| marketefi_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1160,11 +1160,11 @@ impl MarketefiDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         self.inner
             .__dlpack__(py, stream, max_version, dl_device, copy)
     }
@@ -1205,7 +1205,7 @@ pub fn marketefi_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
-    py.allow_threads(|| marketefi_batch_inner_into(h, l, v, k, true, out_slice))
+    py.detach(|| marketefi_batch_inner_into(h, l, v, k, true, out_slice))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -1235,7 +1235,7 @@ pub fn marketefi_cuda_batch_dev_py(
             "high, low, volume must have same length",
         ));
     }
-    let (inner, ctx_guard, dev_id) = py.allow_threads(|| -> PyResult<_> {
+    let (inner, ctx_guard, dev_id) = py.detach(|| -> PyResult<_> {
         let cuda =
             CudaMarketefi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
@@ -1277,7 +1277,7 @@ pub fn marketefi_cuda_many_series_one_param_dev_py(
     }
     let rows = shp_h[0];
     let cols = shp_h[1];
-    let (inner, ctx_guard, dev_id) = py.allow_threads(|| -> PyResult<_> {
+    let (inner, ctx_guard, dev_id) = py.detach(|| -> PyResult<_> {
         let cuda =
             CudaMarketefi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();

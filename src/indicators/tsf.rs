@@ -1742,7 +1742,7 @@ pub fn tsf_py<'py>(
     let tsf_in = TsfInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| tsf_with_kernel(&tsf_in, kern).map(|o| o.values))
+        .detach(|| tsf_with_kernel(&tsf_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1803,7 +1803,7 @@ pub fn tsf_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,

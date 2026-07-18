@@ -1133,7 +1133,7 @@ pub fn didi_index_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| didi_index_with_kernel(&input, kern))
+        .detach(|| didi_index_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.short.into_pyarray(py),
@@ -1210,7 +1210,7 @@ pub fn didi_index_batch_py<'py>(
     let crossunder_slice = unsafe { crossunder_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,

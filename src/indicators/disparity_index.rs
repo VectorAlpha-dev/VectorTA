@@ -1088,7 +1088,7 @@ pub fn disparity_index_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| disparity_index_with_kernel(&input, kern))
+        .detach(|| disparity_index_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(out.values.into_pyarray(py))
 }
@@ -1157,7 +1157,7 @@ pub fn disparity_index_batch_py<'py>(
     smoothing_period_range: (usize, usize, usize),
     smoothing_types: Option<Vec<String>>,
     kernel: Option<&str>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let data = data.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
     let sweep = DisparityIndexBatchRange {
@@ -1167,7 +1167,7 @@ pub fn disparity_index_batch_py<'py>(
         smoothing_types: smoothing_types.unwrap_or_else(|| vec!["ema".to_string()]),
     };
     let out = py
-        .allow_threads(|| disparity_index_batch_with_kernel(data, &sweep, kern))
+        .detach(|| disparity_index_batch_with_kernel(data, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let values = out

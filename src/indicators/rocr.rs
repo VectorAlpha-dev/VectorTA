@@ -1088,7 +1088,7 @@ pub fn rocr_py<'py>(
     let input = RocrInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| rocr_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| rocr_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1152,11 +1152,11 @@ impl RocrDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<PyObject>,
-        max_version: Option<PyObject>,
-        dl_device: Option<PyObject>,
-        _copy: Option<PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<Py<PyAny>>,
+        max_version: Option<Py<PyAny>>,
+        dl_device: Option<Py<PyAny>>,
+        _copy: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         if let Some(dev) = dl_device {
             if let Ok((dtype, did)) = dev.extract::<(i32, i32)>(py) {
                 if dtype != 2 || did != self.device_id {
@@ -1265,7 +1265,7 @@ pub fn rocr_batch_py<'py>(
         init_matrix_prefixes(mu, cols, &warms);
     }
 
-    py.allow_threads(|| rocr_batch_inner_into(slice_in, &combos, first, simd, true, slice_out))
+    py.detach(|| rocr_batch_inner_into(slice_in, &combos, first, simd, true, slice_out))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -1302,7 +1302,7 @@ pub fn rocr_cuda_batch_dev_py(
     let sweep = RocrBatchRange {
         period: period_range,
     };
-    let result: PyResult<(DeviceArrayF32, Arc<Context>, u32)> = py.allow_threads(|| {
+    let result: PyResult<(DeviceArrayF32, Arc<Context>, u32)> = py.detach(|| {
         let cuda = CudaRocr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -1334,7 +1334,7 @@ pub fn rocr_cuda_many_series_one_param_dev_py(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice = data_tm_f32.as_slice()?;
-    let result: PyResult<(DeviceArrayF32, Arc<Context>, u32)> = py.allow_threads(|| {
+    let result: PyResult<(DeviceArrayF32, Arc<Context>, u32)> = py.detach(|| {
         let cuda = CudaRocr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();

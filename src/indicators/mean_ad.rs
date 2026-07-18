@@ -1605,7 +1605,7 @@ pub fn mean_ad_py<'py>(
     let input = MeanAdInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| mean_ad_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| mean_ad_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1638,7 +1638,7 @@ pub fn mean_ad_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1683,7 +1683,7 @@ pub fn mean_ad_cuda_batch_dev_py<'py>(
     let sweep = MeanAdBatchRange {
         period: period_range,
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaMeanAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.mean_ad_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -1709,7 +1709,7 @@ pub fn mean_ad_cuda_many_series_one_param_dev_py<'py>(
     let params = MeanAdParams {
         period: Some(period),
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaMeanAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.mean_ad_many_series_one_param_time_major_dev(slice_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))

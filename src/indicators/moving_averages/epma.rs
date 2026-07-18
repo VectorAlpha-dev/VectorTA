@@ -2197,7 +2197,7 @@ pub fn epma_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
-    py.allow_threads(|| epma_into_slice(out_slice, &input, kern))
+    py.detach(|| epma_into_slice(out_slice, &input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(out_arr)
@@ -2230,7 +2230,7 @@ pub fn epma_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos_done = py
-        .allow_threads(|| {
+        .detach(|| {
             let actual = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2286,7 +2286,7 @@ pub fn epma_cuda_batch_dev_py(
     };
     let slice_in = data_f32.as_slice()?;
 
-    let (inner, ctx_guard, dev_id) = py.allow_threads(|| {
+    let (inner, ctx_guard, dev_id) = py.detach(|| {
         let cuda = CudaEpma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let arr = cuda
@@ -2325,7 +2325,7 @@ pub fn epma_cuda_many_series_one_param_dev_py(
         offset: Some(offset),
     };
 
-    let (inner, ctx_guard, dev_id) = py.allow_threads(|| {
+    let (inner, ctx_guard, dev_id) = py.detach(|| {
         let cuda = CudaEpma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let arr = cuda
@@ -2379,11 +2379,11 @@ impl EpmaDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
         let (kdl, alloc_dev) = self.__dlpack_device__();

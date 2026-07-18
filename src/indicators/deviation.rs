@@ -3552,7 +3552,7 @@ pub fn deviation_py<'py>(
     };
     let input = DeviationInput::from_slice(slice_in, params);
     let vec_out: Vec<f64> = py
-        .allow_threads(|| deviation_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| deviation_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(vec_out.into_pyarray(py))
 }
@@ -3613,7 +3613,7 @@ pub fn deviation_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| deviation_batch_inner_into(slice_in, &sweep, kern, true, slice_out))
+        .detach(|| deviation_batch_inner_into(slice_in, &sweep, kern, true, slice_out))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -3655,7 +3655,7 @@ pub fn deviation_cuda_batch_dev_py<'py>(
         period: period_range,
         devtype: devtype_range,
     };
-    let (inner, combos) = py.allow_threads(|| {
+    let (inner, combos) = py.detach(|| {
         let cuda =
             CudaDeviation::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.deviation_batch_dev(slice_in, &sweep)
@@ -3695,7 +3695,7 @@ pub fn deviation_cuda_many_series_one_param_dev_py<'py>(
         period: Some(period),
         devtype: Some(devtype),
     };
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda =
             CudaDeviation::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.deviation_many_series_one_param_time_major_dev(slice_tm, cols, rows, &params)

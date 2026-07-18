@@ -1909,7 +1909,7 @@ pub fn rsi_py<'py>(
     let input = RsiInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| rsi_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| rsi_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -1969,7 +1969,7 @@ pub fn rsi_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2021,7 +2021,7 @@ pub fn rsi_cuda_batch_dev_py<'py>(
         period: period_range,
     };
 
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.rsi_batch_dev(prices, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
@@ -2064,7 +2064,7 @@ pub fn rsi_cuda_many_series_one_param_dev_py(
     let flat = data_tm_f32.as_slice()?;
     let rows = data_tm_f32.shape()[0];
     let cols = data_tm_f32.shape()[1];
-    let inner = py.allow_threads(|| {
+    let inner = py.detach(|| {
         let cuda = CudaRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.rsi_many_series_one_param_time_major_dev(flat, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))

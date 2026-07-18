@@ -2045,11 +2045,11 @@ pub fn macz_py<'py>(
     let result_vec: Vec<f64> = if let Some(vol) = volume {
         let v = vol.as_slice()?;
         let input = MaczInput::from_slice_with_volume(slice_in, v, params);
-        py.allow_threads(|| macz_with_kernel(&input, kern).map(|o| o.values))
+        py.detach(|| macz_with_kernel(&input, kern).map(|o| o.values))
             .map_err(|e| PyValueError::new_err(e.to_string()))?
     } else {
         let input = MaczInput::from_slice(slice_in, params);
-        py.allow_threads(|| macz_with_kernel(&input, kern).map(|o| o.values))
+        py.detach(|| macz_with_kernel(&input, kern).map(|o| o.values))
             .map_err(|e| PyValueError::new_err(e.to_string()))?
     };
 
@@ -2094,7 +2094,7 @@ pub fn macz_cuda_batch_dev_py<'py>(
         b: b_range,
     };
 
-    let ((inner, inner_ctx, inner_dev_id), combos) = py.allow_threads(|| {
+    let ((inner, inner_ctx, inner_dev_id), combos) = py.detach(|| {
         let cuda = CudaMacz::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -2208,7 +2208,7 @@ pub fn macz_cuda_many_series_one_param_dev_py<'py>(
         use_lag: Some(use_lag),
         gamma: Some(gamma),
     };
-    let (inner, inner_ctx, inner_dev_id) = py.allow_threads(|| {
+    let (inner, inner_ctx, inner_dev_id) = py.detach(|| {
         let cuda = CudaMacz::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
@@ -2306,7 +2306,7 @@ pub fn macz_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let k = match kern {
                 Kernel::Auto => Kernel::ScalarBatch,
                 k => k,

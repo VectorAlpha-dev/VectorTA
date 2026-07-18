@@ -1555,7 +1555,7 @@ pub fn grover_llorens_cycle_oscillator_py<'py>(
         },
     );
     let output = py
-        .allow_threads(|| grover_llorens_cycle_oscillator_with_kernel(&input, kern))
+        .detach(|| grover_llorens_cycle_oscillator_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(output.values.into_pyarray(py))
 }
@@ -1643,7 +1643,7 @@ pub fn grover_llorens_cycle_oscillator_batch_py<'py>(
     let values_slice = unsafe { values_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let batch = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,

@@ -1088,7 +1088,7 @@ pub fn sma_py<'py>(
 
     let result_vec: Vec<f64> = if let Ok(data_slice) = data.as_slice() {
         let input = SmaInput::from_slice(data_slice, params);
-        py.allow_threads(|| sma_with_kernel(&input, kern).map(|o| o.values))
+        py.detach(|| sma_with_kernel(&input, kern).map(|o| o.values))
             .map_err(|e| PyValueError::new_err(e.to_string()))?
     } else {
         let owned = data.as_array().to_owned();
@@ -1096,7 +1096,7 @@ pub fn sma_py<'py>(
             .as_slice()
             .expect("owned numpy array should be contiguous");
         let input = SmaInput::from_slice(data_slice, params);
-        py.allow_threads(|| sma_with_kernel(&input, kern).map(|o| o.values))
+        py.detach(|| sma_with_kernel(&input, kern).map(|o| o.values))
             .map_err(|e| PyValueError::new_err(e.to_string()))?
     };
 
@@ -1139,7 +1139,7 @@ pub fn sma_batch_py<'py>(
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1192,7 +1192,7 @@ pub fn sma_cuda_batch_dev_py<'py>(
         period: period_range,
     };
 
-    let (inner, combos, ctx_arc, dev_id) = py.allow_threads(|| {
+    let (inner, combos, ctx_arc, dev_id) = py.detach(|| {
         let cuda = CudaSma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (dev, combos) = cuda
             .sma_batch_dev(slice_in, &sweep)
@@ -1239,7 +1239,7 @@ pub fn sma_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let (inner, ctx_arc, dev_id) = py.allow_threads(|| {
+    let (inner, ctx_arc, dev_id) = py.detach(|| {
         let cuda = CudaSma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev = cuda
             .sma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
@@ -1294,11 +1294,11 @@ impl SmaDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {

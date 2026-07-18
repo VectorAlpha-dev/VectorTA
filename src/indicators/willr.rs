@@ -2572,7 +2572,7 @@ pub fn willr_py<'py>(
     let input = WillrInput::from_slices(high_slice, low_slice, close_slice, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| willr_with_kernel(&input, kern).map(|o| o.values))
+        .detach(|| willr_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2661,11 +2661,11 @@ impl WillrDeviceArrayF32Py {
     fn __dlpack__<'py>(
         &mut self,
         py: Python<'py>,
-        stream: Option<pyo3::PyObject>,
-        max_version: Option<pyo3::PyObject>,
-        dl_device: Option<pyo3::PyObject>,
-        copy: Option<pyo3::PyObject>,
-    ) -> PyResult<pyo3::PyObject> {
+        stream: Option<pyo3::Py<pyo3::PyAny>>,
+        max_version: Option<pyo3::Py<pyo3::PyAny>>,
+        dl_device: Option<pyo3::Py<pyo3::PyAny>>,
+        copy: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> PyResult<pyo3::Py<pyo3::PyAny>> {
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2737,7 +2737,7 @@ pub fn willr_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let kernel = match kern {
                 Kernel::Auto => match detect_best_batch_kernel() {
                     Kernel::Avx512Batch => Kernel::Avx2Batch,
@@ -2809,7 +2809,7 @@ pub fn willr_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let (inner, ctx, dev_id_u32) = py.allow_threads(|| {
+    let (inner, ctx, dev_id_u32) = py.detach(|| {
         let cuda = CudaWillr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context();
         let dev_id_u32 = cuda.device_id();
@@ -2849,7 +2849,7 @@ pub fn willr_cuda_many_series_one_param_dev_py(
     let low_slice = low_tm.as_slice()?;
     let close_slice = close_tm.as_slice()?;
 
-    let (inner, ctx, dev_id_u32) = py.allow_threads(|| {
+    let (inner, ctx, dev_id_u32) = py.detach(|| {
         let cuda = CudaWillr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context();
         let dev_id_u32 = cuda.device_id();

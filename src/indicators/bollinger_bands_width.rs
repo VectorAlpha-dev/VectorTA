@@ -2436,7 +2436,7 @@ pub fn bollinger_bands_width_py<'py>(
     let bbw_in = BollingerBandsWidthInput::from_slice(slice_in, params);
 
     let result_vec: Vec<f64> = py
-        .allow_threads(|| bollinger_bands_width_with_kernel(&bbw_in, kern).map(|o| o.values))
+        .detach(|| bollinger_bands_width_with_kernel(&bbw_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(result_vec.into_pyarray(py))
@@ -2521,7 +2521,7 @@ pub fn bollinger_bands_width_batch_py<'py>(
 
     let kern = validate_kernel(kernel, true)?;
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             let k = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,
@@ -2588,7 +2588,7 @@ pub fn bollinger_bands_width_cuda_batch_dev_py<'py>(
         devdn: devdn_range,
     };
 
-    let (inner, dev_id, combos) = py.allow_threads(|| {
+    let (inner, dev_id, combos) = py.detach(|| {
         let cuda = CudaBbw::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
         let (arr, meta) = cuda
@@ -2628,7 +2628,7 @@ pub fn bollinger_bands_width_cuda_many_series_one_param_dev_py<'py>(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice_in = data_tm_f32.as_slice()?;
-    let (inner, dev_id) = py.allow_threads(|| {
+    let (inner, dev_id) = py.detach(|| {
         let cuda = CudaBbw::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
         let arr = cuda

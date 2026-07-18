@@ -1882,7 +1882,7 @@ pub fn fibonacci_entry_bands_py<'py>(
     );
     let kern = validate_kernel(kernel, false)?;
     let output = py
-        .allow_threads(|| fibonacci_entry_bands_with_kernel(&input, kern))
+        .detach(|| fibonacci_entry_bands_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     output_to_py_dict(py, output)
 }
@@ -1967,7 +1967,7 @@ pub fn fibonacci_entry_bands_batch_py<'py>(
     let short_bounce_slice = unsafe { short_bounce_arr.as_slice_mut()? };
 
     let combos = py
-        .allow_threads(|| {
+        .detach(|| {
             fibonacci_entry_bands_batch_inner_into(
                 open,
                 high,

@@ -1306,7 +1306,7 @@ pub fn historical_volatility_rank_py<'py>(
         },
     );
     let out = py
-        .allow_threads(|| historical_volatility_rank_with_kernel(&input, kern))
+        .detach(|| historical_volatility_rank_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((out.hvr.into_pyarray(py), out.hv.into_pyarray(py)))
 }
@@ -1364,7 +1364,7 @@ pub fn historical_volatility_rank_batch_py<'py>(
     };
 
     let output = py
-        .allow_threads(|| historical_volatility_rank_batch_with_kernel(slice_in, &sweep, kern))
+        .detach(|| historical_volatility_rank_batch_with_kernel(slice_in, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let rows = output.rows;

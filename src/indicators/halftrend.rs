@@ -2939,7 +2939,7 @@ pub fn halftrend_py<'py>(
     let input = HalfTrendInput::from_slices(h, l, c, params);
 
     let out = py
-        .allow_threads(|| halftrend_with_kernel(&input, kern))
+        .detach(|| halftrend_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -2993,7 +2993,7 @@ pub fn halftrend_tuple_py<'py>(
     let input = HalfTrendInput::from_slices(h, l, c, params);
 
     let out = py
-        .allow_threads(|| halftrend_with_kernel(&input, kern))
+        .detach(|| halftrend_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((
         out.halftrend.into_pyarray(py),
@@ -3129,7 +3129,7 @@ pub fn halftrend_batch_py<'py>(
         _ => Kernel::Scalar,
     };
 
-    py.allow_threads(|| {
+    py.detach(|| {
         halftrend_batch_rows_into(
             h, l, c, &range, simd, dst_ht, dst_tr, dst_ah, dst_al, dst_bs, dst_ss,
         )
@@ -3217,7 +3217,7 @@ pub fn halftrend_cuda_batch_dev_py<'py>(
         channel_deviation: channel_deviation_range,
         atr_period: atr_period_range,
     };
-    let (batch, ctx_arc, dev_id) = py.allow_threads(|| {
+    let (batch, ctx_arc, dev_id) = py.detach(|| {
         let cuda =
             CudaHalftrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out = cuda
@@ -3296,7 +3296,7 @@ pub fn halftrend_cuda_many_series_one_param_dev_py<'py>(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
-    let (out, ctx_arc, dev_id) = py.allow_threads(|| {
+    let (out, ctx_arc, dev_id) = py.detach(|| {
         let cuda =
             CudaHalftrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out = cuda

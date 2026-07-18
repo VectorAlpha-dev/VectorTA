@@ -890,7 +890,7 @@ pub fn ehlers_adaptive_cg_py<'py>(
     let kernel = validate_kernel(kernel, false)?;
     let input = EhlersAdaptiveCgInput::from_slice(slice, EhlersAdaptiveCgParams { alpha });
     let out = py
-        .allow_threads(|| ehlers_adaptive_cg_with_kernel(&input, kernel))
+        .detach(|| ehlers_adaptive_cg_with_kernel(&input, kernel))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok((out.cg.into_pyarray(py), out.trigger.into_pyarray(py)))
 }
@@ -932,7 +932,7 @@ pub fn ehlers_adaptive_cg_batch_py<'py>(
     let slice = data.as_slice()?;
     let kernel = validate_kernel(kernel, true)?;
     let out = py
-        .allow_threads(|| {
+        .detach(|| {
             ehlers_adaptive_cg_batch_with_kernel(
                 slice,
                 &EhlersAdaptiveCgBatchRange { alpha: alpha_range },
